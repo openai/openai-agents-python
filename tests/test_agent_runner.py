@@ -7,7 +7,7 @@ import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import ANY, call, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -4733,19 +4733,22 @@ async def test_session_add_items_called_multiple_times_for_multi_turn_completion
                 },
             ]
 
-            # The runner passes the run context wrapper to sessions that accept it, and the
-            # patched mock accepts any kwargs, so expect the wrapper keyword argument too.
-            expected_calls = [
+            # This test verifies add_items is called once per turn with the right items. The
+            # runner forwards the run context wrapper to sessions whose signature accepts it, but
+            # whether a patched mock is detected as accepting it is Python-version dependent, so
+            # assert on the items (the positional argument) rather than on the wrapper kwarg.
+            expected_item_groups = [
                 # First call is the initial input
-                call([expected_items[0]], wrapper=ANY),
+                [expected_items[0]],
                 # Second call is the first tool call and its result
-                call([expected_items[1], expected_items[2]], wrapper=ANY),
+                [expected_items[1], expected_items[2]],
                 # Third call is the second tool call and its result
-                call([expected_items[3], expected_items[4]], wrapper=ANY),
+                [expected_items[3], expected_items[4]],
                 # Fourth call is the final output
-                call([expected_items[5]], wrapper=ANY),
+                [expected_items[5]],
             ]
-            assert mock_add_items.call_args_list == expected_calls
+            actual_item_groups = [c.args[0] for c in mock_add_items.call_args_list]
+            assert actual_item_groups == expected_item_groups
             assert result.final_output == "Summary: Echoed foo and bar"
             assert (await session.get_items()) == expected_items
 
