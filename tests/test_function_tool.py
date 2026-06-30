@@ -156,6 +156,27 @@ async def test_simple_function():
 
 
 @pytest.mark.asyncio
+async def test_on_invoke_tool_rejects_non_tool_context():
+    tool = function_tool(simple_function)
+
+    # A non-ToolContext (most commonly None) should fail fast with a clear TypeError
+    # instead of a cryptic AttributeError raised deep inside the invocation path.
+    with pytest.raises(TypeError, match="on_invoke_tool requires a ToolContext, got NoneType"):
+        await tool.on_invoke_tool(cast(Any, None), '{"a": 1, "b": 2}')
+
+    # The error message names the offending type to help developers spot the mistake.
+    with pytest.raises(TypeError, match="got int"):
+        await tool.on_invoke_tool(cast(Any, 123), '{"a": 1, "b": 2}')
+
+    # A valid ToolContext is unaffected by the guard.
+    result = await tool.on_invoke_tool(
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments='{"a": 1, "b": 2}'),
+        '{"a": 1, "b": 2}',
+    )
+    assert result == 3
+
+
+@pytest.mark.asyncio
 async def test_sync_function_runs_via_to_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"to_thread": 0, "func": 0}
 
