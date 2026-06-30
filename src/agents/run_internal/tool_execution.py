@@ -1586,6 +1586,21 @@ class _FunctionToolBatchExecutor:
                 run_config=self.config,
             )
             agent_hooks = self.public_agent.hooks
+
+            async def _send_progress(data: Any) -> None:
+                await asyncio.gather(
+                    self.hooks.on_tool_progress(tool_context, self.public_agent, func_tool, data),
+                    (
+                        agent_hooks.on_tool_progress(
+                            tool_context, self.public_agent, func_tool, data
+                        )
+                        if agent_hooks
+                        else _coro.noop_coroutine()
+                    ),
+                )
+
+            tool_context.set_progress_fn(_send_progress)
+
             if self.config.trace_include_sensitive_data:
                 span_fn.span_data.input = tool_call.arguments
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, cast
 
@@ -106,10 +107,24 @@ class ToolContext(RunContextWrapper[TContext]):
         # Internal adapter hook used to attach SDK-only custom data to the emitted output item.
         self._custom_data: dict[str, Any] | None = None
 
+    _progress_fn: Callable[[Any], Awaitable[None]] | None = None
+
     @property
     def qualified_tool_name(self) -> str:
         """Return the tool name qualified by namespace when available."""
         return tool_trace_name(self.tool_name, self.tool_namespace) or self.tool_name
+
+    async def send_progress(self, data: Any) -> None:
+        """Emit a progress update, firing ``on_tool_progress`` hooks.
+
+        No-op if no progress handler has been set by the framework.
+        """
+        if self._progress_fn is not None:
+            await self._progress_fn(data)
+
+    def set_progress_fn(self, fn: Callable[[Any], Awaitable[None]]) -> None:
+        """Set the progress handler. Called by the framework during tool invocation."""
+        self._progress_fn = fn
 
     @classmethod
     def from_agent_context(
