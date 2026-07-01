@@ -3651,6 +3651,38 @@ class TestUpdateAgentFunctionality:
         assert mock_model.sent_events == []
 
 
+class TestSessionAccessors:
+    """Tests for the public ``current_agent`` and ``context_wrapper`` accessors."""
+
+    @pytest.mark.asyncio
+    async def test_current_agent_reflects_initial_agent(self, mock_model):
+        agent = RealtimeAgent(name="initial", instructions="initial", tools=[], handoffs=[])
+        session = RealtimeSession(mock_model, agent, None)
+
+        assert session.current_agent is agent
+
+    @pytest.mark.asyncio
+    async def test_current_agent_updates_after_update_agent(self, mock_model):
+        first_agent = RealtimeAgent(name="first", instructions="first", tools=[], handoffs=[])
+        second_agent = RealtimeAgent(name="second", instructions="second", tools=[], handoffs=[])
+        session = RealtimeSession(mock_model, first_agent, None)
+
+        assert session.current_agent is first_agent
+
+        await session.update_agent(second_agent)
+
+        assert session.current_agent is second_agent
+
+    @pytest.mark.asyncio
+    async def test_context_wrapper_returns_backing_wrapper(self, mock_model):
+        context = object()
+        agent = RealtimeAgent(name="agent", instructions="agent", tools=[], handoffs=[])
+        session = RealtimeSession(mock_model, agent, context)
+
+        assert session.context_wrapper is session._context_wrapper
+        assert session.context_wrapper.context is context
+
+
 class TestTranscriptPreservation:
     """Tests ensuring assistant transcripts are preserved across updates."""
 

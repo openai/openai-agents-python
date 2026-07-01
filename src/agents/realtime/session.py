@@ -217,6 +217,27 @@ class RealtimeSession(RealtimeModelListener):
         """Access the underlying model for adding listeners or other direct interaction."""
         return self._model
 
+    @property
+    def current_agent(self) -> RealtimeAgent:
+        """Return the agent that is currently active for this session.
+
+        This reflects the initial agent and is updated whenever the active agent changes,
+        for example after a handoff or a call to `update_agent()`. Use it to read the active
+        agent from code that runs outside the session's event loop, such as telemetry,
+        routing, or background timers.
+        """
+        return self._current_agent
+
+    @property
+    def context_wrapper(self) -> RunContextWrapper[Any]:
+        """Return the run context wrapper backing this session.
+
+        The returned wrapper is the same object the session was constructed with and exposes
+        the caller-provided context along with usage tracking. Use it to reach the run context
+        from code that runs outside the session's event loop.
+        """
+        return self._context_wrapper
+
     async def __aenter__(self) -> RealtimeSession:
         """Start the session by connecting to the model. After this, you will be able to stream
         events from the model and send messages and audio to the model.
