@@ -86,25 +86,42 @@ _DOCKER_EXECUTOR: Final = ThreadPoolExecutor(
 logger = logging.getLogger(__name__)
 
 
-def _measure_stream(stream: io.IOBase) -> tuple[int, io.IOBase]:
-    """Return the remaining byte length of ``stream`` plus a stream to read it.
+# Non-seekable payloads are spooled to measure their length; keep small ones in
+# RAM and spill larger ones to a temp file so a big upload can't OOM the process.
+_STREAM_SPOOL_MAX_SIZE = 16 * 1024 * 1024
 
-    Seekable streams are measured in place (and rewound); non-seekable streams
-    are drained into an in-memory buffer. Used to length-frame exec-stdin writes
-    so the in-container reader does not depend on a stdin half-close (which is
-    unreliable over a TLS ``DOCKER_HOST``).
+
+def _measure_stream(stream: io.IOBase) -> tuple[int, io.IOBase, io.IOBase | None]:
+    """Return ``(length, readable_stream, spool_to_close)`` for a length-framed write.
+
+    Seekable streams are measured in place (and rewound); ``spool_to_close`` is
+    ``None``. Non-seekable streams (e.g. an HTTP response body or pipe) are copied
+    into a ``SpooledTemporaryFile`` — kept in memory up to
+    ``_STREAM_SPOOL_MAX_SIZE``, spilled to disk beyond it — so the byte length can
+    be determined without buffering the whole payload in RAM; the spool is returned
+    so the caller can close it.
+
+    Callers run this on the executor thread, never the event loop.
     """
     try:
         start = stream.tell()
         stream.seek(0, io.SEEK_END)
         end = stream.tell()
         stream.seek(start)
-        return end - start, stream
+        return end - start, stream, None
     except (AttributeError, OSError, ValueError):
-        data = stream.read()
-        if isinstance(data, str):
-            data = data.encode("utf-8")
-        return len(data), io.BytesIO(data)
+        spool: Any = tempfile.SpooledTemporaryFile(max_size=_STREAM_SPOOL_MAX_SIZE)
+        length = 0
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            if isinstance(chunk, str):
+                chunk = chunk.encode("utf-8")
+            length += len(chunk)
+            spool.write(chunk)
+        spool.seek(0)
+        return length, spool, spool
 
 
 _PREPARE_USER_PTY_PID_SCRIPT = (
@@ -593,67 +610,74 @@ class DockerSandboxSession(BaseSandboxSession):
         # the real command through ``head -c <n>`` makes it stop after exactly
         # ``<n>`` bytes, independent of transport, and keeps the deliberate
         # avoidance of ``put_archive()`` (see ``write``) intact.
-        payload_length, stream = _measure_stream(stream)
-        framed_cmd = [
-            "sh",
-            "-c",
-            'n=$1; shift; head -c "$n" | "$@"',
-            "sh",
-            str(payload_length),
-            *cmd,
-        ]
-
         def _write() -> int | None:
             container_client = self._container.client
             assert container_client is not None
             api = container_client.api
-            resp = api.exec_create(
-                self._container.id,
-                framed_cmd,
-                stdin=True,
-                stdout=True,
-                stderr=True,
-                workdir=None,
-                user=self._coerce_exec_user(user) or "",
-            )
-            exec_socket = self._start_exec_socket(api=api, exec_id=cast(str, resp["Id"]))
-            sock = exec_socket.sock
-            raw_sock = exec_socket.raw_sock
+
+            # Measure/spool on this executor thread (never the event loop). A
+            # non-seekable stream is spooled to a SpooledTemporaryFile (bounded
+            # memory, then disk) rather than read whole into RAM.
+            payload_length, read_stream, spool = _measure_stream(stream)
             try:
-                while True:
-                    chunk = stream.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    if isinstance(chunk, str):
-                        chunk = chunk.encode("utf-8")
-                    elif not isinstance(chunk, bytes):
-                        chunk = bytes(chunk)
-                    if hasattr(raw_sock, "sendall"):
-                        raw_sock.sendall(chunk)
-                    else:
-                        cast(Any, sock).write(chunk)
-
+                framed_cmd = [
+                    "sh",
+                    "-c",
+                    'n=$1; shift; head -c "$n" | "$@"',
+                    "sh",
+                    str(payload_length),
+                    *cmd,
+                ]
+                resp = api.exec_create(
+                    self._container.id,
+                    framed_cmd,
+                    stdin=True,
+                    stdout=True,
+                    stderr=True,
+                    workdir=None,
+                    user=self._coerce_exec_user(user) or "",
+                )
+                exec_socket = self._start_exec_socket(api=api, exec_id=cast(str, resp["Id"]))
+                sock = exec_socket.sock
+                raw_sock = exec_socket.raw_sock
                 try:
-                    if hasattr(raw_sock, "shutdown"):
-                        raw_sock.shutdown(socket.SHUT_WR)
-                    else:
-                        cast(Any, sock).flush()
-                except Exception:
-                    pass
+                    while True:
+                        chunk = read_stream.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        if isinstance(chunk, str):
+                            chunk = chunk.encode("utf-8")
+                        elif not isinstance(chunk, bytes):
+                            chunk = bytes(chunk)
+                        if hasattr(raw_sock, "sendall"):
+                            raw_sock.sendall(chunk)
+                        else:
+                            cast(Any, sock).write(chunk)
 
-                try:
-                    if hasattr(raw_sock, "recv"):
-                        while raw_sock.recv(1024 * 1024):
-                            pass
-                    else:
-                        while cast(Any, sock).read(1024 * 1024):
-                            pass
-                except Exception:
-                    pass
+                    try:
+                        if hasattr(raw_sock, "shutdown"):
+                            raw_sock.shutdown(socket.SHUT_WR)
+                        else:
+                            cast(Any, sock).flush()
+                    except Exception:
+                        pass
+
+                    try:
+                        if hasattr(raw_sock, "recv"):
+                            while raw_sock.recv(1024 * 1024):
+                                pass
+                        else:
+                            while cast(Any, sock).read(1024 * 1024):
+                                pass
+                    except Exception:
+                        pass
+                finally:
+                    exec_socket.close()
+
+                return cast(int | None, api.exec_inspect(resp["Id"]).get("ExitCode"))
             finally:
-                exec_socket.close()
-
-            return cast(int | None, api.exec_inspect(resp["Id"]).get("ExitCode"))
+                if spool is not None:
+                    spool.close()
 
         loop = asyncio.get_running_loop()
         try:
