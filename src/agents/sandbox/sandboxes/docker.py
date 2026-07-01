@@ -662,18 +662,38 @@ class DockerSandboxSession(BaseSandboxSession):
                 sock = exec_socket.sock
                 raw_sock = exec_socket.raw_sock
                 try:
-                    while True:
-                        chunk = read_stream.read(1024 * 1024)
+                    # Send exactly ``payload_length`` bytes — the count the exec
+                    # was framed with (``head -c "$n"``). Reading to EOF instead
+                    # would desync if the stream changed after _measure_stream:
+                    # extra bytes would pile up behind a ``head`` that already
+                    # stopped, and a short read would leave ``head`` blocked on a
+                    # TLS stdin that never EOFs (the original hang). If the stream
+                    # ends early we fail loudly rather than truncate silently.
+                    remaining = payload_length
+                    while remaining > 0:
+                        chunk = read_stream.read(min(1024 * 1024, remaining))
                         if not chunk:
-                            break
+                            raise WorkspaceArchiveWriteError(
+                                path=error_path,
+                                context={
+                                    "reason": "stream_shorter_than_measured",
+                                    "expected": str(payload_length),
+                                    "sent": str(payload_length - remaining),
+                                },
+                            )
                         if isinstance(chunk, str):
                             chunk = chunk.encode("utf-8")
                         elif not isinstance(chunk, bytes):
                             chunk = bytes(chunk)
+                        if len(chunk) > remaining:
+                            # Only reachable for multibyte text streams (never the
+                            # byte streams these writes use); cap to the framed count.
+                            chunk = chunk[:remaining]
                         if hasattr(raw_sock, "sendall"):
                             raw_sock.sendall(chunk)
                         else:
                             cast(Any, sock).write(chunk)
+                        remaining -= len(chunk)
 
                     try:
                         if hasattr(raw_sock, "shutdown"):

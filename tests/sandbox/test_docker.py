@@ -837,6 +837,55 @@ async def test_stream_into_exec_frames_non_seekable_stream() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_into_exec_fails_when_stream_ends_before_measured_length() -> None:
+    """If the stream yields fewer bytes than measured (e.g. truncated after
+    _measure_stream), fail loudly and send at most the framed count — never
+    short-feed `head -c` and re-introduce the TLS stdin hang."""
+
+    class _ShrinkingStream(io.RawIOBase):
+        """Reports length 100 via seek/tell but only yields 10 bytes."""
+
+        def __init__(self) -> None:
+            self._pos = 0
+            self._served = False
+
+        def seekable(self) -> bool:
+            return True
+
+        def readable(self) -> bool:
+            return True
+
+        def tell(self) -> int:
+            return self._pos
+
+        def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+            self._pos = 100 if whence == io.SEEK_END else offset
+            return self._pos
+
+        def read(self, _size: int = -1) -> bytes:
+            if self._served:
+                return b""
+            self._served = True
+            return b"x" * 10
+
+    api = _RecordingStreamAPI()
+    session = _make_streaming_session(api)
+
+    with pytest.raises(docker_sandbox.WorkspaceArchiveWriteError):
+        await session._stream_into_exec(
+            cmd=["sh", "-lc", 'cat > "$1"', "sh", "/workspace/f"],
+            stream=cast(io.IOBase, _ShrinkingStream()),
+            error_path=Path("/workspace/f"),
+        )
+
+    # It framed for 100 bytes but sent at most what the stream produced (10) —
+    # never more than the measured count.
+    framed = cast("list[str]", api.exec_create_calls[0]["cmd"])
+    assert framed[4] == "100"
+    assert len(api.sock.sent) == 10
+
+
+@pytest.mark.asyncio
 async def test_docker_persist_workspace_prunes_ephemeral_entries_from_staged_copy(
     tmp_path: Path,
 ) -> None:
