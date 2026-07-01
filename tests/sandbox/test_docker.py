@@ -778,7 +778,7 @@ async def test_stream_into_exec_length_frames_stdin_payload() -> None:
     assert framed == [
         "sh",
         "-c",
-        'n=$1; shift; head -c "$n" | "$@"',
+        docker_sandbox._LENGTH_FRAMED_STDIN_SCRIPT,
         "sh",
         str(len(payload)),
         "tar",
@@ -786,6 +786,10 @@ async def test_stream_into_exec_length_frames_stdin_payload() -> None:
         "-C",
         "/workspace",
     ]
+    # The framing script bounds the read by byte count (`head -c`) and makes a
+    # failed/missing producer fatal instead of silently writing an empty file.
+    assert 'head -c "$n"' in framed[2]
+    assert "exit 98" in framed[2] and "producer_status" in framed[2]
     # Exactly the payload is streamed, and the count matches the head -c bound —
     # so completion never depends on the stdin half-close working.
     assert bytes(api.sock.sent) == payload
@@ -827,6 +831,7 @@ async def test_stream_into_exec_frames_non_seekable_stream() -> None:
     )
 
     framed = cast("list[str]", api.exec_create_calls[0]["cmd"])
+    assert framed[:4] == ["sh", "-c", docker_sandbox._LENGTH_FRAMED_STDIN_SCRIPT, "sh"]
     assert framed[4] == str(len(payload))
     assert bytes(api.sock.sent) == payload
 

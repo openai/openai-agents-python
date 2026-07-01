@@ -124,6 +124,27 @@ def _measure_stream(stream: io.IOBase) -> tuple[int, io.IOBase, io.IOBase | None
         return length, spool, spool
 
 
+# POSIX sh that pipes exactly ``<n>`` bytes into the real command (``"$@"``).
+# ``head -c`` bounds the read so completion never depends on a stdin half-close
+# (unreliable over a TLS DOCKER_HOST). A plain ``head -c "$n" | "$@"`` pipeline
+# reports only the *consumer's* exit status, so a missing/failed ``head`` — e.g. a
+# custom image without coreutils/busybox ``head`` — would be masked: the consumer
+# (``cat``/``tar``) sees an empty pipe, exits 0, and the write "succeeds" while
+# creating an empty file. Capture the producer's status via a temp file and fail
+# the exec (exit 98) if it is non-zero, so such writes surface as errors instead
+# of silent data loss. ``pipefail`` is avoided because it is not POSIX (dash).
+_LENGTH_FRAMED_STDIN_SCRIPT = (
+    "n=$1; shift; "
+    'status_file="${TMPDIR:-/tmp}/.agents-sandbox-framed.$$"; '
+    '{ head -c "$n"; echo "$?" >"$status_file"; } | "$@"; '
+    "consumer_status=$?; "
+    'producer_status="$(cat "$status_file" 2>/dev/null)"; '
+    'rm -f "$status_file"; '
+    '[ "$producer_status" = 0 ] || exit 98; '
+    'exit "$consumer_status"'
+)
+
+
 _PREPARE_USER_PTY_PID_SCRIPT = (
     'pid_path="$1"\n'
     'pid_user="$2"\n'
@@ -623,7 +644,7 @@ class DockerSandboxSession(BaseSandboxSession):
                 framed_cmd = [
                     "sh",
                     "-c",
-                    'n=$1; shift; head -c "$n" | "$@"',
+                    _LENGTH_FRAMED_STDIN_SCRIPT,
                     "sh",
                     str(payload_length),
                     *cmd,
