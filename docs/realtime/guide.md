@@ -129,6 +129,19 @@ If you need lower-level control, you can also send raw client events such as `in
 
 `session.send_message()` sends user input using the high-level path and starts a response for you. Raw audio buffering does **not** automatically do the same in every configuration.
 
+Use [`session.create_response()`][agents.realtime.session.RealtimeSession.create_response] to trigger a model response without adding a new user message, for example after committing audio manually or when you want the model to respond on demand:
+
+```python
+await session.create_response()
+
+await session.create_response(
+    instructions="Reply in one short sentence.",
+    metadata={"turn": "greeting"},
+)
+```
+
+`instructions` and `metadata` are per-response overrides that apply to this response only. They do not mutate the agent's instructions or the session configuration. Both are optional, and when omitted the model responds using the current session configuration.
+
 At the Realtime API level, manual turn control means clearing `turn_detection` with a raw `session.update`, then sending `input_audio_buffer.commit` and `response.create` yourself.
 
 If you are managing turns manually, you can send raw client events through the model transport:
