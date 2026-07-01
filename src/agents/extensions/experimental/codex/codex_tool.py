@@ -532,7 +532,7 @@ def _validate_default_run_context_thread_id_suffix(value: str) -> str:
 def _parse_tool_input(parameters_model: type[BaseModel], input_json: str) -> BaseModel:
     try:
         json_data = json.loads(input_json) if input_json else {}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug("Invalid JSON input for codex tool")
         else:
@@ -933,7 +933,7 @@ def _store_thread_id_in_run_context(
 
     try:
         setattr(context, key, thread_id)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise UserError(
             f'Unable to store Codex thread_id in run context field "{key}". '
             "Use a mutable dict context or set a writable attribute."
@@ -965,7 +965,7 @@ def _set_pydantic_context_value(context: BaseModel, key: str, value: str) -> boo
     if key in model_fields:
         try:
             setattr(context, key, value)
-        except Exception:  # noqa: BLE001
+        except Exception:
             return False
         return True
 
@@ -974,7 +974,7 @@ def _set_pydantic_context_value(context: BaseModel, key: str, value: str) -> boo
         return True
     except ValueError:
         pass
-    except Exception:  # noqa: BLE001
+    except Exception:
         return False
 
     state = getattr(context, "__dict__", None)

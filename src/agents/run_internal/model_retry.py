@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import random
-import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
-from email.utils import parsedate_to_datetime
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from inspect import isawaitable
 from typing import Any
 
 import httpx
-from openai import APIConnectionError, APIStatusError, APITimeoutError, BadRequestError
+from openai import APIConnectionError, APITimeoutError, BadRequestError
 
 from ..items import ModelResponse, TResponseStreamEvent
 from ..logger import logger
 from ..models._retry_runtime import (
+    get_error_code as _get_error_code,
+    get_request_id as _get_request_id,
+    get_retry_after as _get_retry_after,
+    get_status_code as _get_status_code,
+    iter_error_chain as _iter_error_chain,
     provider_managed_retries_disabled,
     websocket_pre_event_retries_disabled,
 )
@@ -44,118 +47,10 @@ COMPATIBILITY_CONVERSATION_LOCKED_RETRIES = 3
 _RETRY_SAFE_STREAM_EVENT_TYPES = frozenset({"response.created", "response.in_progress"})
 
 
-def _iter_error_chain(error: Exception) -> Iterator[Exception]:
-    current: Exception | None = error
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        yield current
-        next_error = current.__cause__ or current.__context__
-        current = next_error if isinstance(next_error, Exception) else None
-
-
 def _is_conversation_locked_error(error: Exception) -> bool:
     return (
         isinstance(error, BadRequestError) and getattr(error, "code", "") == "conversation_locked"
     )
-
-
-def _get_header_value(headers: Any, key: str) -> str | None:
-    normalized_key = key.lower()
-    if isinstance(headers, httpx.Headers):
-        value = headers.get(key)
-        return value if isinstance(value, str) else None
-    if isinstance(headers, Mapping):
-        for header_name, header_value in headers.items():
-            if str(header_name).lower() == normalized_key and isinstance(header_value, str):
-                return header_value
-    return None
-
-
-def _extract_headers(error: Exception) -> httpx.Headers | Mapping[str, str] | None:
-    for candidate in _iter_error_chain(error):
-        response = getattr(candidate, "response", None)
-        if isinstance(response, httpx.Response):
-            return response.headers
-
-        for attr_name in ("headers", "response_headers"):
-            headers = getattr(candidate, attr_name, None)
-            if isinstance(headers, httpx.Headers | Mapping):
-                return headers
-
-    return None
-
-
-def _parse_retry_after(headers: httpx.Headers | Mapping[str, str] | None) -> float | None:
-    if headers is None:
-        return None
-
-    retry_after_ms = _get_header_value(headers, "retry-after-ms")
-    if retry_after_ms is not None:
-        try:
-            parsed_ms = float(retry_after_ms) / 1000.0
-        except ValueError:
-            parsed_ms = None
-        if parsed_ms is not None and parsed_ms >= 0:
-            return parsed_ms
-
-    retry_after = _get_header_value(headers, "retry-after")
-    if retry_after is None:
-        return None
-
-    try:
-        parsed_seconds = float(retry_after)
-    except ValueError:
-        parsed_seconds = None
-    if parsed_seconds is not None:
-        return parsed_seconds if parsed_seconds >= 0 else None
-
-    try:
-        retry_datetime = parsedate_to_datetime(retry_after)
-    except (TypeError, ValueError, IndexError):
-        return None
-
-    return max(retry_datetime.timestamp() - time.time(), 0.0)
-
-
-def _get_status_code(error: Exception) -> int | None:
-    for candidate in _iter_error_chain(error):
-        if isinstance(candidate, APIStatusError):
-            return candidate.status_code
-
-        for attr_name in ("status_code", "status"):
-            value = getattr(candidate, attr_name, None)
-            if isinstance(value, int):
-                return value
-
-    return None
-
-
-def _get_error_code(error: Exception) -> str | None:
-    for candidate in _iter_error_chain(error):
-        error_code = getattr(candidate, "code", None)
-        if isinstance(error_code, str):
-            return error_code
-
-        body = getattr(candidate, "body", None)
-        if isinstance(body, Mapping):
-            nested_error = body.get("error")
-            if isinstance(nested_error, Mapping):
-                nested_code = nested_error.get("code")
-                if isinstance(nested_code, str):
-                    return nested_code
-            body_code = body.get("code")
-            if isinstance(body_code, str):
-                return body_code
-    return None
-
-
-def _get_request_id(error: Exception) -> str | None:
-    for candidate in _iter_error_chain(error):
-        request_id = getattr(candidate, "request_id", None)
-        if isinstance(request_id, str):
-            return request_id
-    return None
 
 
 def _is_abort_like_error(error: Exception) -> bool:
@@ -211,7 +106,7 @@ def _normalize_retry_error(
         error_code=_get_error_code(error),
         message=str(error),
         request_id=_get_request_id(error),
-        retry_after=_parse_retry_after(_extract_headers(error)),
+        retry_after=_get_retry_after(error),
         is_abort=_is_abort_like_error(error),
         is_network_error=_is_network_like_error(error),
         is_timeout=any(

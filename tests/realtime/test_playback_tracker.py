@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -134,6 +134,16 @@ class TestPlaybackTracker:
         # Should accumulate: 8 bytes -> 4 samples -> (4 / 24000) * 1000 ≈ 0.167ms
         expected_length = (8 / (24_000 * 2)) * 1000
         assert state.audio_length_ms == pytest.approx(expected_length, rel=0, abs=1e-6)
+
+    def test_audio_state_uses_monotonic_timestamp(self):
+        tracker = ModelAudioTracker()
+
+        with patch("agents.realtime._default_tracker.time.monotonic", return_value=42.5):
+            tracker.on_audio_delta("item_1", 0, b"test")
+
+        state = tracker.get_state("item_1", 0)
+        assert state is not None
+        assert state.initial_received_time == 42.5
 
     def test_state_cleanup_on_interruption(self):
         """Test both trackers properly reset state on interruption."""

@@ -380,15 +380,6 @@ async def _sandbox_write_file(
     )
 
 
-async def _sandbox_remove_file(
-    sandbox: object,
-    path: str,
-    *,
-    request_timeout: float | None = None,
-) -> object:
-    return await _as_sandbox_api(sandbox).files.remove(path, request_timeout=request_timeout)
-
-
 async def _sandbox_make_dir(
     sandbox: object,
     path: str,

@@ -322,12 +322,69 @@ async def test_on_guardrail_task_done_emits_error_event():
 
     session._on_guardrail_task_done(task)
 
-    # Allow event task to enqueue
-    await asyncio.sleep(0.01)
-
     # Should have a RealtimeError queued
     err = await session._event_queue.get()
     assert isinstance(err, RealtimeError)
+
+
+@pytest.mark.asyncio
+async def test_close_awaits_task_finalizers_without_recancelling():
+    session = RealtimeSession(_DummyModel(), RealtimeAgent(name="agent"), None)
+    finalizer_started = asyncio.Event()
+    release_finalizer = asyncio.Event()
+    finalizer_finished = asyncio.Event()
+
+    async def background_task() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            finalizer_started.set()
+            await release_finalizer.wait()
+            finalizer_finished.set()
+
+    task = asyncio.create_task(background_task())
+    session._guardrail_tasks.add(task)
+    await asyncio.sleep(0)
+
+    close_task = asyncio.create_task(session.close())
+    await finalizer_started.wait()
+    await asyncio.sleep(0)
+    assert not close_task.done()
+
+    release_finalizer.set()
+    await close_task
+
+    assert finalizer_finished.is_set()
+    assert session._guardrail_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_close_rescans_for_tasks_created_during_unwind():
+    session = RealtimeSession(_DummyModel(), RealtimeAgent(name="agent"), None)
+    spawned_task_finished = asyncio.Event()
+
+    async def spawned_task() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            spawned_task_finished.set()
+
+    async def original_task() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            task = asyncio.create_task(spawned_task())
+            session._tool_call_tasks.add(task)
+            await asyncio.sleep(0)
+
+    task = asyncio.create_task(original_task())
+    session._tool_call_tasks.add(task)
+    await asyncio.sleep(0)
+
+    await session.close()
+
+    assert spawned_task_finished.is_set()
+    assert session._tool_call_tasks == set()
 
 
 @pytest.mark.asyncio

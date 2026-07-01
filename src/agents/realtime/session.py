@@ -499,6 +499,10 @@ class RealtimeSession(RealtimeModelListener):
         """Put an event into the queue."""
         await self._event_queue.put(event)
 
+    def _put_event_nowait(self, event: RealtimeSessionEvent) -> None:
+        """Put an event into the unbounded queue from a synchronous callback."""
+        self._event_queue.put_nowait(event)
+
     async def _function_needs_approval(
         self, function_tool: FunctionTool, tool_call: RealtimeModelToolCallEvent
     ) -> bool:
@@ -1282,20 +1286,23 @@ class RealtimeSession(RealtimeModelListener):
             exception = task.exception()
             if exception:
                 # Create an exception event instead of raising
-                asyncio.create_task(
-                    self._put_event(
-                        RealtimeError(
-                            info=self._event_info,
-                            error={"message": f"Guardrail task failed: {str(exception)}"},
-                        )
+                self._put_event_nowait(
+                    RealtimeError(
+                        info=self._event_info,
+                        error={"message": f"Guardrail task failed: {str(exception)}"},
                     )
                 )
 
-    def _cleanup_guardrail_tasks(self) -> None:
-        for task in self._guardrail_tasks:
-            if not task.done():
-                task.cancel()
-        self._guardrail_tasks.clear()
+    @staticmethod
+    async def _cancel_and_wait_for_tasks(tasks: set[asyncio.Task[Any]]) -> None:
+        observed: set[asyncio.Task[Any]] = set()
+        while new_tasks := tuple(task for task in tasks if task not in observed):
+            observed.update(new_tasks)
+            for task in new_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*new_tasks, return_exceptions=True)
+        tasks.difference_update(observed)
 
     def _enqueue_tool_call_task(
         self,
@@ -1335,17 +1342,14 @@ class RealtimeSession(RealtimeModelListener):
                 exception.call_id,
                 exc_info=exception,
             )
-            asyncio.create_task(
-                self._put_event(
-                    RealtimeError(
-                        info=self._event_info,
-                        error={
-                            "message": (
-                                "Tool output send failed; cached output will be retried: "
-                                f"{exception}"
-                            )
-                        },
-                    )
+            self._put_event_nowait(
+                RealtimeError(
+                    info=self._event_info,
+                    error={
+                        "message": (
+                            f"Tool output send failed; cached output will be retried: {exception}"
+                        )
+                    },
                 )
             )
             return
@@ -1355,20 +1359,12 @@ class RealtimeSession(RealtimeModelListener):
         if self._stored_exception is None:
             self._stored_exception = exception
 
-        asyncio.create_task(
-            self._put_event(
-                RealtimeError(
-                    info=self._event_info,
-                    error={"message": f"Tool call task failed: {exception}"},
-                )
+        self._put_event_nowait(
+            RealtimeError(
+                info=self._event_info,
+                error={"message": f"Tool call task failed: {exception}"},
             )
         )
-
-    def _cleanup_tool_call_tasks(self) -> None:
-        for task in self._tool_call_tasks:
-            if not task.done():
-                task.cancel()
-        self._tool_call_tasks.clear()
 
     def _wake_event_iterators(self) -> None:
         for _ in range(self._event_iterator_waiters):
@@ -1380,9 +1376,10 @@ class RealtimeSession(RealtimeModelListener):
             self._wake_event_iterators()
             return
 
-        # Cancel and cleanup guardrail tasks
-        self._cleanup_guardrail_tasks()
-        self._cleanup_tool_call_tasks()
+        # Cancel each observed task once, await its finalizer, then rescan for tasks
+        # created while the observed batch was unwinding.
+        await self._cancel_and_wait_for_tasks(self._guardrail_tasks)
+        await self._cancel_and_wait_for_tasks(self._tool_call_tasks)
 
         # Remove ourselves as a listener
         self._model.remove_listener(self)

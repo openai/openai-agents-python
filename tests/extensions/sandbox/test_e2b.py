@@ -16,12 +16,14 @@ import pytest
 from pydantic import Field, PrivateAttr
 
 import agents.extensions.sandbox.e2b.sandbox as e2b_module
+from agents.extensions.sandbox._rclone import (
+    ensure_rclone as _ensure_rclone,
+    rclone_pattern_for_session as _rclone_pattern_for_session,
+)
 from agents.extensions.sandbox.e2b.mounts import (
     E2BCloudBucketMountStrategy,
     _assert_e2b_session,
     _ensure_fuse_support,
-    _ensure_rclone,
-    _rclone_pattern_for_session,
 )
 from agents.extensions.sandbox.e2b.sandbox import (
     E2BSandboxClient,

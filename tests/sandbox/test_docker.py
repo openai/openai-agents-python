@@ -677,9 +677,10 @@ async def test_docker_persist_workspace_defers_stage_cleanup_until_archive_close
     assert session.stage_cleanup_calls == []
 
     _ = archive.read()
-    await asyncio.sleep(0)
+    await session._wait_for_cleanup_tasks()
 
     assert session.stage_cleanup_calls == [session.last_staging_parent]
+    assert session._cleanup_tasks == set()
 
 
 def test_docker_start_exec_socket_closes_underlying_http_response() -> None:
