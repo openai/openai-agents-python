@@ -10,7 +10,7 @@ from typing_extensions import NotRequired, TypedDict
 
 from agents.prompts import Prompt
 
-from ..guardrail import OutputGuardrail
+from ..guardrail import InputGuardrail, OutputGuardrail
 from ..handoffs import Handoff
 from ..model_settings import ToolChoice
 from ..run_config import ToolErrorFormatter
@@ -278,6 +278,9 @@ class RealtimeRunConfig(TypedDict):
 
     tool_error_formatter: NotRequired[ToolErrorFormatter]
     """Optional callback that formats tool error messages returned to the model."""
+
+    input_guardrails: NotRequired[list[InputGuardrail[Any]]]
+    """List of input guardrails to run on the user's transcribed input."""
 
     # TODO (rm) Add history audio storage config
 

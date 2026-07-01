@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
-from ..guardrail import OutputGuardrailResult
+from ..guardrail import InputGuardrailResult, OutputGuardrailResult
 from ..run_context import RunContextWrapper
 from ..tool import Tool
 from .agent import RealtimeAgent
@@ -244,6 +244,24 @@ class RealtimeGuardrailTripped:
 
 
 @dataclass
+class RealtimeInputGuardrailTripped:
+    """An input guardrail has been tripped on the user's transcribed input, and the in-progress
+    response has been interrupted.
+    """
+
+    guardrail_results: list[InputGuardrailResult]
+    """The results from all triggered input guardrails."""
+
+    message: str
+    """The user transcript that triggered the guardrail."""
+
+    info: RealtimeEventInfo
+    """Common info for all events, such as the context."""
+
+    type: Literal["input_guardrail_tripped"] = "input_guardrail_tripped"
+
+
+@dataclass
 class RealtimeInputAudioTimeoutTriggered:
     """Called when the model detects a period of inactivity/silence from the user."""
 
@@ -268,6 +286,7 @@ RealtimeSessionEvent: TypeAlias = (
     | RealtimeHistoryUpdated
     | RealtimeHistoryAdded
     | RealtimeGuardrailTripped
+    | RealtimeInputGuardrailTripped
     | RealtimeInputAudioTimeoutTriggered
 )
 """An event emitted by the realtime session."""

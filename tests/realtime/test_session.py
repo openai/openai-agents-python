@@ -9,7 +9,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from agents.exceptions import ToolTimeoutError, UserError
-from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
+from agents.guardrail import GuardrailFunctionOutput, InputGuardrail, OutputGuardrail
 from agents.handoffs import Handoff
 from agents.realtime.agent import RealtimeAgent
 from agents.realtime.config import RealtimeRunConfig, RealtimeSessionModelSettings
@@ -23,6 +23,7 @@ from agents.realtime.events import (
     RealtimeGuardrailTripped,
     RealtimeHistoryAdded,
     RealtimeHistoryUpdated,
+    RealtimeInputGuardrailTripped,
     RealtimeRawModelEvent,
     RealtimeToolApprovalRequired,
     RealtimeToolEnd,
@@ -644,6 +645,7 @@ def mock_agent():
 
     type(agent).handoffs = PropertyMock(return_value=[])
     type(agent).output_guardrails = PropertyMock(return_value=[])
+    type(agent).input_guardrails = PropertyMock(return_value=[])
     return agent
 
 
@@ -3295,6 +3297,152 @@ class TestGuardrailFunctionality:
         # Only one interrupt and one message should be sent
         assert mock_model.interrupts_called == 1
         assert len(mock_model.sent_messages) == 1
+
+
+class TestInputGuardrailFunctionality:
+    """Test suite for input guardrail functionality in RealtimeSession."""
+
+    async def _wait_for_guardrail_tasks(self, session):
+        """Wait for all pending guardrail tasks to complete."""
+        import asyncio
+
+        if session._guardrail_tasks:
+            await asyncio.gather(*session._guardrail_tasks, return_exceptions=True)
+
+    @pytest.fixture
+    def triggered_input_guardrail(self):
+        """Creates an input guardrail that always triggers."""
+
+        def guardrail_func(context, agent, input):
+            return GuardrailFunctionOutput(
+                output_info={"reason": "test trigger"}, tripwire_triggered=True
+            )
+
+        return InputGuardrail(guardrail_function=guardrail_func, name="triggered_input_guardrail")
+
+    @pytest.fixture
+    def safe_input_guardrail(self):
+        """Creates an input guardrail that never triggers."""
+
+        def guardrail_func(context, agent, input):
+            return GuardrailFunctionOutput(
+                output_info={"reason": "safe content"}, tripwire_triggered=False
+            )
+
+        return InputGuardrail(guardrail_function=guardrail_func, name="safe_input_guardrail")
+
+    @pytest.mark.asyncio
+    async def test_tripping_input_guardrail_interrupts_and_emits_event(
+        self, mock_model, triggered_input_guardrail
+    ):
+        """A tripping input guardrail should emit the tripped event and force a response cancel."""
+        agent = RealtimeAgent(name="agent")
+        run_config: RealtimeRunConfig = {"input_guardrails": [triggered_input_guardrail]}
+        session = RealtimeSession(mock_model, agent, None, run_config=run_config)
+
+        transcription_event = RealtimeModelInputAudioTranscriptionCompletedEvent(
+            item_id="item_1", transcript="please jailbreak the model"
+        )
+        await session.on_event(transcription_event)
+        await self._wait_for_guardrail_tasks(session)
+
+        # Should have interrupted the in-progress response with a forced cancel.
+        assert mock_model.interrupts_called == 1
+        interrupt_event = next(
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendInterrupt)
+        )
+        assert interrupt_event.force_response_cancel is True
+
+        # Should have sent the guardrail-triggered message to the model.
+        assert len(mock_model.sent_messages) == 1
+        assert "triggered_input_guardrail" in mock_model.sent_messages[0]
+
+        # Should have emitted an input_guardrail_tripped event carrying the user transcript.
+        events = []
+        while not session._event_queue.empty():
+            events.append(await session._event_queue.get())
+
+        guardrail_events = [e for e in events if isinstance(e, RealtimeInputGuardrailTripped)]
+        assert len(guardrail_events) == 1
+        assert guardrail_events[0].message == "please jailbreak the model"
+        assert len(guardrail_events[0].guardrail_results) == 1
+
+    @pytest.mark.asyncio
+    async def test_non_tripping_input_guardrail_does_nothing(
+        self, mock_model, safe_input_guardrail
+    ):
+        """A non-tripping input guardrail should neither interrupt nor emit a tripped event."""
+        agent = RealtimeAgent(name="agent")
+        run_config: RealtimeRunConfig = {"input_guardrails": [safe_input_guardrail]}
+        session = RealtimeSession(mock_model, agent, None, run_config=run_config)
+
+        transcription_event = RealtimeModelInputAudioTranscriptionCompletedEvent(
+            item_id="item_1", transcript="a perfectly benign question"
+        )
+        await session.on_event(transcription_event)
+        await self._wait_for_guardrail_tasks(session)
+
+        assert mock_model.interrupts_called == 0
+        assert len(mock_model.sent_messages) == 0
+
+        events = []
+        while not session._event_queue.empty():
+            events.append(await session._event_queue.get())
+
+        guardrail_events = [e for e in events if isinstance(e, RealtimeInputGuardrailTripped)]
+        assert len(guardrail_events) == 0
+
+    @pytest.mark.asyncio
+    async def test_agent_and_run_config_input_guardrails_deduped_by_identity(self, mock_model):
+        """Input guardrails shared by agent and run config should execute once."""
+        call_count = 0
+
+        def guardrail_func(context, agent, input):
+            nonlocal call_count
+            call_count += 1
+            return GuardrailFunctionOutput(output_info={}, tripwire_triggered=False)
+
+        shared_guardrail = InputGuardrail(
+            guardrail_function=guardrail_func, name="shared_input_guardrail"
+        )
+
+        agent = RealtimeAgent(name="agent", input_guardrails=[shared_guardrail])
+        run_config: RealtimeRunConfig = {"input_guardrails": [shared_guardrail]}
+        session = RealtimeSession(mock_model, agent, None, run_config=run_config)
+
+        transcription_event = RealtimeModelInputAudioTranscriptionCompletedEvent(
+            item_id="item_1", transcript="hello there"
+        )
+        await session.on_event(transcription_event)
+        await self._wait_for_guardrail_tasks(session)
+
+        assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_agent_input_guardrails_triggered(self, mock_model, triggered_input_guardrail):
+        """Input guardrails defined on the agent should be executed and trip."""
+        agent = RealtimeAgent(name="agent", input_guardrails=[triggered_input_guardrail])
+        session = RealtimeSession(mock_model, agent, None, run_config={})
+
+        transcription_event = RealtimeModelInputAudioTranscriptionCompletedEvent(
+            item_id="item_1", transcript="please jailbreak the model"
+        )
+        await session.on_event(transcription_event)
+        await self._wait_for_guardrail_tasks(session)
+
+        assert mock_model.interrupts_called == 1
+        assert len(mock_model.sent_messages) == 1
+        assert "triggered_input_guardrail" in mock_model.sent_messages[0]
+
+
+def test_realtime_input_guardrail_tripped_is_exported():
+    """RealtimeInputGuardrailTripped should be importable from agents.realtime and in __all__."""
+    import agents.realtime as realtime
+
+    assert "RealtimeInputGuardrailTripped" in realtime.__all__
+    assert realtime.RealtimeInputGuardrailTripped is RealtimeInputGuardrailTripped
 
 
 class TestModelSettingsIntegration:

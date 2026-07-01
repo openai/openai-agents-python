@@ -194,6 +194,10 @@ class RealtimeWebSocketManager:
             base_event["guardrail_results"] = [
                 {"name": result.guardrail.name} for result in event.guardrail_results
             ]
+        elif event.type == "input_guardrail_tripped":
+            base_event["guardrail_results"] = [
+                {"name": result.guardrail.name} for result in event.guardrail_results
+            ]
         elif event.type == "raw_model_event":
             base_event["raw_model_event"] = {
                 "type": event.data.type,

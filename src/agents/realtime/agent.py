@@ -9,7 +9,7 @@ from typing import Any, Generic, cast
 from agents.prompts import Prompt
 
 from ..agent import AgentBase
-from ..guardrail import OutputGuardrail
+from ..guardrail import InputGuardrail, OutputGuardrail
 from ..handoffs import Handoff
 from ..lifecycle import AgentHooksBase, RunHooksBase
 from ..logger import logger
@@ -77,6 +77,11 @@ class RealtimeAgent(AgentBase, Generic[TContext]):
 
     hooks: RealtimeAgentHooks | None = None
     """A class that receives callbacks on various lifecycle events for this agent.
+    """
+
+    input_guardrails: list[InputGuardrail[TContext]] = field(default_factory=list)
+    """A list of checks that run on the user's transcribed input, before or as the agent
+    responds. Runs on the completed user transcript and can interrupt the in-progress response.
     """
 
     def __post_init__(self) -> None:
