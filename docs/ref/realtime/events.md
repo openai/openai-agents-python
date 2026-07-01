@@ -24,6 +24,7 @@
 
 ### Guardrail Events
 ::: agents.realtime.events.RealtimeGuardrailTripped
+::: agents.realtime.events.RealtimeInputGuardrailTripped
 
 ### History Events
 ::: agents.realtime.events.RealtimeHistoryAdded

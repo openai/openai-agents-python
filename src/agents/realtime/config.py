@@ -280,7 +280,7 @@ class RealtimeRunConfig(TypedDict):
     """Optional callback that formats tool error messages returned to the model."""
 
     input_guardrails: NotRequired[list[InputGuardrail[Any]]]
-    """List of input guardrails to run on the user's transcribed input."""
+    """List of input guardrails to run on the user's transcribed audio input."""
 
     # TODO (rm) Add history audio storage config
 

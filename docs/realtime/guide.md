@@ -244,7 +244,11 @@ Bare `RealtimeAgent` handoffs are auto-wrapped, and `realtime_handoff(...)` lets
 
 ### Guardrails
 
-Realtime agents support output guardrails on agent responses and input guardrails on function-tool calls. Output guardrails run on debounced transcript accumulation rather than on every partial token, and they emit `guardrail_tripped` instead of raising an exception.
+Realtime agents support output guardrails on agent responses and input guardrails on the user's
+transcribed audio. (Function-tool calls have their own, separate tool input guardrails, which are a
+distinct feature from the transcript input guardrails described here.) Output guardrails run on
+debounced transcript accumulation rather than on every partial token, and they emit
+`guardrail_tripped` instead of raising an exception.
 
 ```python
 from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
@@ -269,6 +273,36 @@ When a realtime output guardrail trips, the session interrupts the active respon
 triggered guardrail so the model can produce a replacement response. Your audio player should still
 listen for `audio_interrupted` and stop local playback immediately, because guardrails run on
 debounced transcript text and some audio may already be buffered when the tripwire fires.
+
+Realtime agents also support **input guardrails** that run on the user's transcribed audio. Configure
+them via `RealtimeAgent.input_guardrails` or `RealtimeRunConfig["input_guardrails"]`; the two lists
+are combined and de-duplicated per turn. They run once on the completed user transcript (the
+`input_audio_transcription_completed` event), and when one trips the session emits an
+`input_guardrail_tripped` event, forces `response.cancel`, and sends a follow-up user message that
+names the triggered guardrail.
+
+```python
+from agents.guardrail import GuardrailFunctionOutput, InputGuardrail
+
+
+def no_jailbreak(context, agent, user_input):
+    return GuardrailFunctionOutput(
+        tripwire_triggered="jailbreak" in user_input.lower(),
+        output_info=None,
+    )
+
+
+agent = RealtimeAgent(
+    name="Assistant",
+    instructions="...",
+    input_guardrails=[InputGuardrail(guardrail_function=no_jailbreak)],
+)
+```
+
+Two limitations are worth noting. Input guardrails only run on transcribed audio, so text sent
+through `session.send_message()` is not checked. And because guardrails run in a background task,
+the forced cancel reliably interrupts a response that is already in flight, but a response created
+in the narrow window after the guardrail resolves may not be cancelled.
 
 ## SIP and telephony
 

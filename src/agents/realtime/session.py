@@ -1353,8 +1353,13 @@ class RealtimeSession(RealtimeModelListener):
         task.add_done_callback(self._on_guardrail_task_done)
 
     def _enqueue_input_guardrail_task(self, text: str, item_id: str) -> None:
-        # Runs the input guardrails in a separate task to avoid blocking the main loop.
+        # Skip creating a no-op task when no input guardrails are configured.
+        if not self._current_agent.input_guardrails and not self._run_config.get(
+            "input_guardrails"
+        ):
+            return
 
+        # Runs the input guardrails in a separate task to avoid blocking the main loop.
         task = asyncio.create_task(self._run_input_guardrails(text, item_id))
         # Reuse the shared guardrail task set + done callback so completed tasks are removed,
         # exceptions surface as events, and close() cancels any still-running task.

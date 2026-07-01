@@ -3436,6 +3436,101 @@ class TestInputGuardrailFunctionality:
         assert len(mock_model.sent_messages) == 1
         assert "triggered_input_guardrail" in mock_model.sent_messages[0]
 
+    @pytest.mark.asyncio
+    async def test_raising_input_guardrail_is_skipped_and_does_not_crash(self, mock_model):
+        """An input guardrail that raises should be logged and skipped without crashing."""
+
+        def guardrail_func(context, agent, input):
+            raise RuntimeError("boom")
+
+        raising_guardrail = InputGuardrail(
+            guardrail_function=guardrail_func, name="raising_input_guardrail"
+        )
+        agent = RealtimeAgent(name="agent", input_guardrails=[raising_guardrail])
+        session = RealtimeSession(mock_model, agent, None, run_config={})
+
+        transcription_event = RealtimeModelInputAudioTranscriptionCompletedEvent(
+            item_id="item_1", transcript="please jailbreak the model"
+        )
+        await session.on_event(transcription_event)
+        await self._wait_for_guardrail_tasks(session)
+
+        # The raising guardrail is skipped, so nothing is tripped or interrupted.
+        assert mock_model.interrupts_called == 0
+        assert len(mock_model.sent_messages) == 0
+
+        events = []
+        while not session._event_queue.empty():
+            events.append(await session._event_queue.get())
+
+        # The exception is swallowed inside the guardrail loop, so no tripped or error event fires.
+        assert not [e for e in events if isinstance(e, RealtimeInputGuardrailTripped)]
+        assert not [e for e in events if isinstance(e, RealtimeError)]
+
+    @pytest.mark.asyncio
+    async def test_raising_input_guardrail_does_not_block_other_guardrails(
+        self, mock_model, triggered_input_guardrail
+    ):
+        """A raising guardrail should not prevent other input guardrails from tripping."""
+
+        def guardrail_func(context, agent, input):
+            raise RuntimeError("boom")
+
+        raising_guardrail = InputGuardrail(
+            guardrail_function=guardrail_func, name="raising_input_guardrail"
+        )
+        agent = RealtimeAgent(
+            name="agent", input_guardrails=[raising_guardrail, triggered_input_guardrail]
+        )
+        session = RealtimeSession(mock_model, agent, None, run_config={})
+
+        transcription_event = RealtimeModelInputAudioTranscriptionCompletedEvent(
+            item_id="item_1", transcript="please jailbreak the model"
+        )
+        await session.on_event(transcription_event)
+        await self._wait_for_guardrail_tasks(session)
+
+        assert mock_model.interrupts_called == 1
+        assert len(mock_model.sent_messages) == 1
+        assert "triggered_input_guardrail" in mock_model.sent_messages[0]
+
+    @pytest.mark.asyncio
+    async def test_second_transcription_for_tripped_item_is_skipped(
+        self, mock_model, triggered_input_guardrail
+    ):
+        """A second transcription for an already-tripped user item should be skipped."""
+        agent = RealtimeAgent(name="agent", input_guardrails=[triggered_input_guardrail])
+        session = RealtimeSession(mock_model, agent, None, run_config={})
+
+        transcription_event = RealtimeModelInputAudioTranscriptionCompletedEvent(
+            item_id="item_1", transcript="please jailbreak the model"
+        )
+        await session.on_event(transcription_event)
+        await self._wait_for_guardrail_tasks(session)
+
+        assert mock_model.interrupts_called == 1
+        assert len(mock_model.sent_messages) == 1
+
+        # A second transcription for the same (already-tripped) item does not interrupt again.
+        await session.on_event(transcription_event)
+        await self._wait_for_guardrail_tasks(session)
+
+        assert mock_model.interrupts_called == 1
+        assert len(mock_model.sent_messages) == 1
+
+    @pytest.mark.asyncio
+    async def test_no_guardrail_task_created_without_input_guardrails(self, mock_model):
+        """No guardrail task should be enqueued when no input guardrails are configured."""
+        agent = RealtimeAgent(name="agent")
+        session = RealtimeSession(mock_model, agent, None, run_config={})
+
+        transcription_event = RealtimeModelInputAudioTranscriptionCompletedEvent(
+            item_id="item_1", transcript="a perfectly benign question"
+        )
+        await session.on_event(transcription_event)
+
+        assert len(session._guardrail_tasks) == 0
+
 
 def test_realtime_input_guardrail_tripped_is_exported():
     """RealtimeInputGuardrailTripped should be importable from agents.realtime and in __all__."""
