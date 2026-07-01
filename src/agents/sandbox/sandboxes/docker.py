@@ -85,6 +85,28 @@ _DOCKER_EXECUTOR: Final = ThreadPoolExecutor(
 
 logger = logging.getLogger(__name__)
 
+
+def _measure_stream(stream: io.IOBase) -> tuple[int, io.IOBase]:
+    """Return the remaining byte length of ``stream`` plus a stream to read it.
+
+    Seekable streams are measured in place (and rewound); non-seekable streams
+    are drained into an in-memory buffer. Used to length-frame exec-stdin writes
+    so the in-container reader does not depend on a stdin half-close (which is
+    unreliable over a TLS ``DOCKER_HOST``).
+    """
+    try:
+        start = stream.tell()
+        stream.seek(0, io.SEEK_END)
+        end = stream.tell()
+        stream.seek(start)
+        return end - start, stream
+    except (AttributeError, OSError, ValueError):
+        data = stream.read()
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        return len(data), io.BytesIO(data)
+
+
 _PREPARE_USER_PTY_PID_SCRIPT = (
     'pid_path="$1"\n'
     'pid_user="$2"\n'
@@ -562,13 +584,32 @@ class DockerSandboxSession(BaseSandboxSession):
         error_path: Path,
         user: str | User | None = None,
     ) -> None:
+        # Frame the payload by length so the in-container reader terminates on a
+        # byte count rather than a stdin half-close. Docker's exec-attach stream
+        # does not carry a reliable stdin EOF over a TLS DOCKER_HOST: the
+        # ``shutdown(SHUT_WR)`` below is silently swallowed, so ``tar -x`` / ``cat``
+        # would block forever waiting for input that never ends (observed against
+        # Docker-in-Docker sidecars and remote daemons reached over TLS). Piping
+        # the real command through ``head -c <n>`` makes it stop after exactly
+        # ``<n>`` bytes, independent of transport, and keeps the deliberate
+        # avoidance of ``put_archive()`` (see ``write``) intact.
+        payload_length, stream = _measure_stream(stream)
+        framed_cmd = [
+            "sh",
+            "-c",
+            'n=$1; shift; head -c "$n" | "$@"',
+            "sh",
+            str(payload_length),
+            *cmd,
+        ]
+
         def _write() -> int | None:
             container_client = self._container.client
             assert container_client is not None
             api = container_client.api
             resp = api.exec_create(
                 self._container.id,
-                cmd,
+                framed_cmd,
                 stdin=True,
                 stdout=True,
                 stderr=True,
