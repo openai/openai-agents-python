@@ -56,6 +56,7 @@ from agents.realtime.model_events import (
 from agents.realtime.model_inputs import (
     RealtimeModelSendAudio,
     RealtimeModelSendInterrupt,
+    RealtimeModelSendResponseCreate,
     RealtimeModelSendSessionUpdate,
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
@@ -162,6 +163,28 @@ async def test_property_and_send_helpers_and_enter_alias():
         assert any(isinstance(e, RealtimeModelSendUserInput) for e in model.events)
         assert any(isinstance(e, RealtimeModelSendAudio) and e.commit for e in model.events)
         assert any(isinstance(e, RealtimeModelSendInterrupt) for e in model.events)
+
+
+@pytest.mark.asyncio
+async def test_create_response_sends_typed_event():
+    model = _DummyModel()
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None)
+
+    async with await session.enter():
+        # No arguments should send an empty typed response.create input.
+        await session.create_response()
+        # Explicit instructions and metadata should be forwarded unchanged.
+        await session.create_response(instructions="be brief", metadata={"turn": "1"})
+
+    response_events = [e for e in model.events if isinstance(e, RealtimeModelSendResponseCreate)]
+    assert len(response_events) == 2
+
+    assert response_events[0].instructions is None
+    assert response_events[0].metadata is None
+
+    assert response_events[1].instructions == "be brief"
+    assert response_events[1].metadata == {"turn": "1"}
 
 
 @pytest.mark.asyncio

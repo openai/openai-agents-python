@@ -69,6 +69,7 @@ from .model_events import (
 from .model_inputs import (
     RealtimeModelSendAudio,
     RealtimeModelSendInterrupt,
+    RealtimeModelSendResponseCreate,
     RealtimeModelSendSessionUpdate,
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
@@ -299,6 +300,22 @@ class RealtimeSession(RealtimeModelListener):
     async def interrupt(self) -> None:
         """Interrupt the model."""
         await self._model.send_event(RealtimeModelSendInterrupt())
+
+    async def create_response(
+        self,
+        *,
+        instructions: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Trigger a new model response with optional per-response instructions and metadata.
+
+        The provided ``instructions`` and ``metadata`` override the session configuration for this
+        response only and do not mutate the agent instructions. Both arguments are optional; when
+        omitted, the model creates a response using the current session configuration.
+        """
+        await self._model.send_event(
+            RealtimeModelSendResponseCreate(instructions=instructions, metadata=metadata)
+        )
 
     async def update_agent(self, agent: RealtimeAgent) -> None:
         """Update the active agent for this session and apply its settings to the model."""

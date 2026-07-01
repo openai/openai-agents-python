@@ -14,6 +14,7 @@ from agents.handoffs import handoff
 from agents.realtime.config import RealtimeModelTracingConfig
 from agents.realtime.model_inputs import (
     RealtimeModelSendRawMessage,
+    RealtimeModelSendResponseCreate,
     RealtimeModelSendUserInput,
     RealtimeModelUserInputMessage,
 )
@@ -230,3 +231,24 @@ def test_tools_to_session_tools_rejects_deferred_function_tools():
 
     with pytest.raises(UserError, match="defer_loading=True"):
         m._tools_to_session_tools([tool], [])
+
+
+def test_convert_response_create_includes_only_provided_fields():
+    empty = _ConversionHelper.convert_response_create(RealtimeModelSendResponseCreate())
+    assert empty.type == "response.create"
+    assert empty.response is None
+
+    populated = _ConversionHelper.convert_response_create(
+        RealtimeModelSendResponseCreate(instructions="be brief", metadata={"turn": "1"})
+    )
+    assert populated.response is not None
+    assert populated.response.instructions == "be brief"
+    assert populated.response.metadata == {"turn": "1"}
+
+
+def test_realtime_model_send_response_create_is_exported():
+    import agents.realtime as realtime_pkg
+    from agents.realtime import RealtimeModelSendResponseCreate as ExportedResponseCreate
+
+    assert ExportedResponseCreate is RealtimeModelSendResponseCreate
+    assert "RealtimeModelSendResponseCreate" in realtime_pkg.__all__

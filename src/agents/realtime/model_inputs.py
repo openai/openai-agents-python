@@ -107,6 +107,17 @@ class RealtimeModelSendSessionUpdate:
     """The updated session settings to send."""
 
 
+@dataclass
+class RealtimeModelSendResponseCreate:
+    """Trigger a new model response via a `response.create` event."""
+
+    instructions: str | None = None
+    """Optional instructions that override the session instructions for this response only."""
+
+    metadata: dict[str, Any] | None = None
+    """Optional metadata to attach to this response."""
+
+
 RealtimeModelSendEvent: TypeAlias = (
     RealtimeModelSendRawMessage
     | RealtimeModelSendUserInput
@@ -114,4 +125,5 @@ RealtimeModelSendEvent: TypeAlias = (
     | RealtimeModelSendToolOutput
     | RealtimeModelSendInterrupt
     | RealtimeModelSendSessionUpdate
+    | RealtimeModelSendResponseCreate
 )

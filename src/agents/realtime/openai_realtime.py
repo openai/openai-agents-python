@@ -57,6 +57,9 @@ from openai.types.realtime.realtime_conversation_item_user_message import (
 from openai.types.realtime.realtime_function_tool import (
     RealtimeFunctionTool as OpenAISessionFunction,
 )
+from openai.types.realtime.realtime_response_create_params import (
+    RealtimeResponseCreateParams as OpenAIRealtimeResponseCreateParams,
+)
 from openai.types.realtime.realtime_server_event import (
     RealtimeServerEvent as OpenAIRealtimeServerEvent,
 )
@@ -140,6 +143,7 @@ from .model_inputs import (
     RealtimeModelSendEvent,
     RealtimeModelSendInterrupt,
     RealtimeModelSendRawMessage,
+    RealtimeModelSendResponseCreate,
     RealtimeModelSendSessionUpdate,
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
@@ -726,6 +730,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             await self._send_interrupt(event)
         elif isinstance(event, RealtimeModelSendSessionUpdate):
             await self._send_session_update(event)
+        elif isinstance(event, RealtimeModelSendResponseCreate):
+            await self._send_response_create(event)
         else:
             assert_never(event)
             raise ValueError(f"Unknown event type: {type(event)}")
@@ -976,6 +982,16 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
     async def _send_session_update(self, event: RealtimeModelSendSessionUpdate) -> None:
         """Send a session update to the model."""
         await self._update_session_config(event.session_settings)
+
+    async def _send_response_create(self, event: RealtimeModelSendResponseCreate) -> None:
+        """Send a response.create through the sequencer so it cannot collide with an active one."""
+        converted = _ConversionHelper.convert_response_create(event)
+        request_version = await self._reserve_response_create_request(manual=True)
+        self._start_response_create(
+            request_version,
+            response_create=converted,
+            manual=True,
+        )
 
     async def _handle_audio_delta(self, parsed: ResponseAudioDeltaEvent) -> None:
         """Handle audio delta events and update audio tracking state."""
@@ -1704,6 +1720,20 @@ class _ConversionHelper:
             return TypeAdapter(OpenAIRealtimeClientEvent).validate_python(data)
         except Exception:
             return None
+
+    @classmethod
+    def convert_response_create(
+        cls, event: RealtimeModelSendResponseCreate
+    ) -> OpenAIResponseCreateEvent:
+        response_params: dict[str, Any] = {}
+        if event.instructions is not None:
+            response_params["instructions"] = event.instructions
+        if event.metadata is not None:
+            response_params["metadata"] = event.metadata
+        response = (
+            OpenAIRealtimeResponseCreateParams(**response_params) if response_params else None
+        )
+        return OpenAIResponseCreateEvent(type="response.create", response=response)
 
     @classmethod
     def convert_tracing_config(

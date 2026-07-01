@@ -22,6 +22,7 @@ from agents.realtime.model_inputs import (
     RealtimeModelSendAudio,
     RealtimeModelSendInterrupt,
     RealtimeModelSendRawMessage,
+    RealtimeModelSendResponseCreate,
     RealtimeModelSendSessionUpdate,
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
@@ -956,6 +957,92 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert send_raw.call_args_list[0].args[0].type == "conversation.item.truncate"
         assert all(call.args[0].type != "response.cancel" for call in send_raw.call_args_list)
         assert model._ongoing_response is True
+
+    @pytest.mark.asyncio
+    async def test_create_response_without_args_emits_minimal_response_create(
+        self, model, monkeypatch
+    ):
+        """create_response with no fields should emit a response.create with no response object."""
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+
+        await model.send_event(RealtimeModelSendResponseCreate())
+        await asyncio.sleep(0)
+
+        assert [e.type for e in sent_events] == ["response.create"]
+        # No fields were provided, so the response object is omitted entirely.
+        assert sent_events[0].response is None
+        # The request was routed through the sequencer rather than sent directly.
+        assert model._response_control == "create_requested"
+
+    @pytest.mark.asyncio
+    async def test_create_response_includes_only_provided_fields(self, model, monkeypatch):
+        """create_response should forward instructions/metadata and omit unset fields."""
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+
+        await model.send_event(
+            RealtimeModelSendResponseCreate(instructions="be brief", metadata={"turn": "1"})
+        )
+        await asyncio.sleep(0)
+
+        assert [e.type for e in sent_events] == ["response.create"]
+        response = sent_events[0].response
+        assert response is not None
+        assert response.instructions == "be brief"
+        assert response.metadata == {"turn": "1"}
+
+        dumped = json.loads(sent_events[0].model_dump_json(exclude_unset=True))
+        assert dumped["type"] == "response.create"
+        assert dumped["response"] == {"instructions": "be brief", "metadata": {"turn": "1"}}
+
+    @pytest.mark.asyncio
+    async def test_create_response_with_only_instructions_omits_metadata(self, model, monkeypatch):
+        """Unset fields should not appear in the serialized response.create payload."""
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+
+        await model.send_event(RealtimeModelSendResponseCreate(instructions="hello"))
+        await asyncio.sleep(0)
+
+        dumped = json.loads(sent_events[0].model_dump_json(exclude_unset=True))
+        assert dumped["response"] == {"instructions": "hello"}
+
+    @pytest.mark.asyncio
+    async def test_create_response_defers_while_response_active(self, model, monkeypatch):
+        """create_response should wait for an in-flight response instead of colliding with it."""
+        payload_types: list[str] = []
+
+        async def fake_send_raw(event):
+            payload_types.append(event.type)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        await model._mark_response_created()
+
+        await model.send_event(RealtimeModelSendResponseCreate())
+        await asyncio.sleep(0)
+
+        # A response is already active, so the new response.create is deferred.
+        assert payload_types == []
+        assert model._ongoing_response is True
+
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        # Once the active response completes, the queued response.create is sent.
+        assert payload_types == ["response.create"]
 
     @pytest.mark.asyncio
     async def test_send_user_input_defers_response_create_without_blocking_caller(
