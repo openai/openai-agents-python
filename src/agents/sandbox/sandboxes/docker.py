@@ -108,7 +108,10 @@ def _measure_stream(stream: io.IOBase) -> tuple[int, io.IOBase, io.IOBase | None
         stream.seek(0, io.SEEK_END)
         end = stream.tell()
         stream.seek(start)
-        return end - start, stream, None
+        # Clamp to 0: a stream positioned past its end has no readable bytes, and
+        # a negative count would become `head -c -N` ("all but the last N bytes"),
+        # which reads to EOF and re-hangs over a TLS stdin.
+        return max(0, end - start), stream, None
     except (AttributeError, OSError, ValueError):
         spool: Any = tempfile.SpooledTemporaryFile(max_size=_STREAM_SPOOL_MAX_SIZE)
         length = 0

@@ -886,6 +886,26 @@ async def test_stream_into_exec_fails_when_stream_ends_before_measured_length() 
 
 
 @pytest.mark.asyncio
+async def test_stream_into_exec_clamps_length_when_position_past_end() -> None:
+    """A stream positioned past its end measures to a negative delta; clamp to 0
+    so it never becomes `head -c -N` (which reads to EOF and re-hangs over TLS)."""
+    api = _RecordingStreamAPI()
+    session = _make_streaming_session(api)
+    stream = io.BytesIO(b"abc")
+    stream.seek(10)  # past EOF -> end - start would be negative
+
+    await session._stream_into_exec(
+        cmd=["tar", "-x", "-C", "/workspace"],
+        stream=stream,
+        error_path=Path("/workspace"),
+    )
+
+    framed = cast("list[str]", api.exec_create_calls[0]["cmd"])
+    assert framed[4] == "0"  # not "-7"
+    assert api.sock.sent == bytearray()  # nothing sent; no unbounded read
+
+
+@pytest.mark.asyncio
 async def test_docker_persist_workspace_prunes_ephemeral_entries_from_staged_copy(
     tmp_path: Path,
 ) -> None:
