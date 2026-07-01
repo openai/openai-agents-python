@@ -1730,9 +1730,13 @@ class _ConversionHelper:
             response_params["instructions"] = event.instructions
         if event.metadata is not None:
             response_params["metadata"] = event.metadata
-        response = (
-            OpenAIRealtimeResponseCreateParams(**response_params) if response_params else None
-        )
+        # Omit the response field entirely when no params are provided. Passing response=None
+        # explicitly marks the field as set, so model_dump_json(exclude_unset=True) would emit
+        # {"response": null} instead of a bare {"type": "response.create"}, which the Realtime
+        # schema can reject.
+        if not response_params:
+            return OpenAIResponseCreateEvent(type="response.create")
+        response = OpenAIRealtimeResponseCreateParams(**response_params)
         return OpenAIResponseCreateEvent(type="response.create", response=response)
 
     @classmethod

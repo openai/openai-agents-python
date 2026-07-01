@@ -974,8 +974,12 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         await asyncio.sleep(0)
 
         assert [e.type for e in sent_events] == ["response.create"]
-        # No fields were provided, so the response object is omitted entirely.
+        # No fields were provided, so the response object is omitted entirely (unset, not null),
+        # and the serialized payload is a bare response.create.
         assert sent_events[0].response is None
+        assert "response" not in sent_events[0].model_fields_set
+        dumped = json.loads(sent_events[0].model_dump_json(exclude_unset=True))
+        assert "response" not in dumped
         # The request was routed through the sequencer rather than sent directly.
         assert model._response_control == "create_requested"
 

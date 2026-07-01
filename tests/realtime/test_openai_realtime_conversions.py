@@ -237,6 +237,8 @@ def test_convert_response_create_includes_only_provided_fields():
     empty = _ConversionHelper.convert_response_create(RealtimeModelSendResponseCreate())
     assert empty.type == "response.create"
     assert empty.response is None
+    # The response field must be unset (not explicitly None) so it is omitted from the payload.
+    assert "response" not in empty.model_fields_set
 
     populated = _ConversionHelper.convert_response_create(
         RealtimeModelSendResponseCreate(instructions="be brief", metadata={"turn": "1"})
