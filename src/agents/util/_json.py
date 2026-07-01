@@ -13,12 +13,16 @@ from ._error_tracing import attach_error_to_current_span
 T = TypeVar("T")
 
 
-def validate_json(json_str: str, type_adapter: TypeAdapter[T], partial: bool) -> T:
+def validate_json(
+    json_str: str, type_adapter: TypeAdapter[T], partial: bool, strict: bool = False
+) -> T:
     partial_setting: bool | Literal["off", "on", "trailing-strings"] = (
         "trailing-strings" if partial else False
     )
     try:
-        validated = type_adapter.validate_json(json_str, experimental_allow_partial=partial_setting)
+        validated = type_adapter.validate_json(
+            json_str, experimental_allow_partial=partial_setting, strict=strict
+        )
         return validated
     except ValidationError as e:
         attach_error_to_current_span(
