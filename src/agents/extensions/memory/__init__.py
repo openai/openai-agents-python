@@ -16,6 +16,7 @@ from ._optional_imports import raise_optional_dependency_error
 if TYPE_CHECKING:
     from .advanced_sqlite_session import AdvancedSQLiteSession
     from .async_sqlite_session import AsyncSQLiteSession
+    from .dakera_session import DakeraSession
     from .dapr_session import (
         DAPR_CONSISTENCY_EVENTUAL,
         DAPR_CONSISTENCY_STRONG,
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
 __all__: list[str] = [
     "AdvancedSQLiteSession",
     "AsyncSQLiteSession",
+    "DakeraSession",
     "DAPR_CONSISTENCY_EVENTUAL",
     "DAPR_CONSISTENCY_STRONG",
     "DaprSession",
@@ -44,6 +46,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, tuple[str, str] | None]] = {
     "SQLAlchemySession": (".sqlalchemy_session", ("sqlalchemy", "sqlalchemy")),
     "AdvancedSQLiteSession": (".advanced_sqlite_session", None),
     "AsyncSQLiteSession": (".async_sqlite_session", None),
+    "DakeraSession": (".dakera_session", ("dakera", "dakera")),
     "DaprSession": (".dapr_session", ("dapr", "dapr")),
     "DAPR_CONSISTENCY_EVENTUAL": (".dapr_session", ("dapr", "dapr")),
     "DAPR_CONSISTENCY_STRONG": (".dapr_session", ("dapr", "dapr")),

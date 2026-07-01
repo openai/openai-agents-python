@@ -208,6 +208,7 @@ Use this table to pick a starting point before reading the detailed examples bel
 | `SQLAlchemySession` | Production apps with existing databases | Works with SQLAlchemy-supported databases |
 | `MongoDBSession` | Apps already using MongoDB or needing multi-process storage | Async pymongo; atomic sequence counter for ordering |
 | `DaprSession` | Cloud-native deployments with Dapr sidecars | Supports multiple state stores plus TTL and consistency controls |
+| `DakeraSession` | Self-hosted persistent memory across sessions and workers | Backed by a [Dakera](https://github.com/dakera-ai/dakera-deploy) server over REST |
 | `OpenAIConversationsSession` | Server-managed storage in OpenAI | OpenAI Conversations API-backed history |
 | `OpenAIResponsesCompactionSession` | Long conversations with automatic compaction | Wrapper around another session backend |
 | `AdvancedSQLiteSession` | SQLite plus branching/analytics | Heavier feature set; see dedicated page |
@@ -448,6 +449,37 @@ Notes:
 -   Connect to [MongoDB Atlas](https://www.mongodb.com/products/platform) by passing an `mongodb+srv://user:password@cluster.example.mongodb.net` URI to `from_uri(...)` with no other changes.
 -   Two collections are used and both names are configurable via `sessions_collection=` (default `agent_sessions`) and `messages_collection=` (default `agent_messages`). Indexes are created automatically on first use. Each message document carries a monotonically increasing `seq` counter that preserves ordering across concurrent writers and processes.
 -   Use `await session.ping()` to verify connectivity before your first run.
+
+### Dakera sessions
+
+Use `DakeraSession` to persist conversation history on a self-hosted [Dakera](https://github.com/dakera-ai/dakera-deploy) memory server, so history survives process restarts and can be shared across workers that point at the same server.
+
+```bash
+pip install openai-agents[dakera]
+```
+
+```python
+from agents import Agent, Runner
+from agents.extensions.memory import DakeraSession
+
+agent = Agent(name="Assistant")
+
+# from_url creates and owns the AsyncDakeraClient; close() releases it.
+session = DakeraSession.from_url(
+    session_id="user-123",
+    base_url="http://localhost:3000",
+    api_key="dk-...",
+)
+result = await Runner.run(agent, "Hello", session=session)
+print(result.final_output)
+await session.close()
+```
+
+Notes:
+
+-   `from_url(...)` creates and owns the `AsyncDakeraClient` and closes it on `session.close()`. If your application already manages a client, construct `DakeraSession(session_id, client=...)` directly; in that case `session.close()` is a no-op and lifecycle stays with the caller.
+-   Each conversation is isolated in its own Dakera namespace derived from `session_id` (`"{key_prefix}:{session_id}"`, `key_prefix` defaults to `agents:session`). The same `session_id` always resolves to the same history, so `get_items`/`pop_item`/`clear_session` are restart-safe. Every item carries a monotonically increasing `seq` in its metadata that preserves ordering across writers.
+-   Run a local server with the `dakera-ai/dakera-deploy` docker-compose stack (Dakera server + MinIO); it listens on port 3000 by default.
 
 ### Advanced SQLite sessions
 

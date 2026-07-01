@@ -22,6 +22,13 @@ _PACKAGE_EXPORTS: tuple[tuple[str, str, str, str, str], ...] = (
         "sqlalchemy",
         "sqlalchemy",
     ),
+    (
+        "DakeraSession",
+        "agents.extensions.memory.dakera_session",
+        "dakera",
+        "dakera",
+        "dakera",
+    ),
     ("DaprSession", "agents.extensions.memory.dapr_session", "dapr.aio.clients", "dapr", "dapr"),
     (
         "DAPR_CONSISTENCY_EVENTUAL",
@@ -48,6 +55,7 @@ _PACKAGE_EXPORTS: tuple[tuple[str, str, str, str, str], ...] = (
 
 _DIRECT_MODULE_IMPORTS: tuple[tuple[str, str, str, str], ...] = (
     ("agents.extensions.memory.redis_session", "redis.asyncio", "redis", "redis"),
+    ("agents.extensions.memory.dakera_session", "dakera", "dakera", "dakera"),
     ("agents.extensions.memory.dapr_session", "dapr.aio.clients", "dapr", "dapr"),
     (
         "agents.extensions.memory.mongodb_session",
@@ -88,6 +96,9 @@ def _reset_package_imports(
 
 def _reset_loaded_module(monkeypatch: pytest.MonkeyPatch, module_name: str) -> None:
     monkeypatch.delitem(sys.modules, module_name, raising=False)
+    if "." not in module_name:
+        # Top-level module (e.g. ``dakera``) has no parent package to reset.
+        return
     parent_name, short_name = module_name.rsplit(".", 1)
     parent_module = sys.modules.get(parent_name)
     if parent_module is not None:

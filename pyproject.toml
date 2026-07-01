@@ -44,6 +44,7 @@ encrypt = ["cryptography>=45.0, <46"]
 redis = ["redis>=7"]
 dapr = ["dapr>=1.16.0", "grpcio>=1.60.0"]
 mongodb = ["pymongo>=4.14"]
+dakera = ["dakera>=0.12.6"]
 docker = ["docker>=6.1"]
 blaxel = ["blaxel>=0.2.50", "aiohttp>=3.12,<4"]
 daytona = ["daytona>=0.155.0"]
@@ -91,6 +92,7 @@ dev = [
   "testcontainers==4.12.0",       # pinned to 4.12.0 because 4.13.0 has a warning bug in wait_for_logs, see https://github.com/testcontainers/testcontainers-python/issues/874
   "pyright==1.1.408",
   "pymongo>=4.14",
+  "dakera>=0.12.6",
 ]
 
 [tool.uv.workspace]
