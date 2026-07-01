@@ -512,7 +512,7 @@ async def test_handoff_lenient_json_allows_type_coercion():
 
     # age is a string "25" — lenient mode should coerce it to int 25
     malformed_json = '{"name": "Alice", "age": "25"}'
-    result = validate_json(malformed_json, type_adapter, partial=False, strict=False)
+    result = validate_json(malformed_json, type_adapter, partial=False)
     assert result.name == "Alice"
     assert result.age == 25
     assert isinstance(result.age, int)
