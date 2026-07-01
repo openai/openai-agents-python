@@ -135,7 +135,7 @@ def test_runloop_session_guard_accepts_correct_type() -> None:
 
 @pytest.mark.asyncio
 async def test_runloop_ensure_rclone_installs_with_root_apt() -> None:
-    from agents.extensions.sandbox.runloop.mounts import _ensure_rclone
+    from agents.extensions.sandbox._rclone import ensure_rclone
 
     session = _FakeRunloopMountSession(
         [
@@ -147,7 +147,7 @@ async def test_runloop_ensure_rclone_installs_with_root_apt() -> None:
         ]
     )
 
-    await _ensure_rclone(session)
+    await ensure_rclone(session)
 
     assert session.exec_calls[:2] == [
         "sh -lc command -v rclone >/dev/null 2>&1 || test -x /usr/local/bin/rclone",
@@ -215,10 +215,10 @@ async def test_runloop_ensure_fuse_installs_missing_fusermount() -> None:
 
 @pytest.mark.asyncio
 async def test_runloop_rclone_pattern_adds_fuse_access_args() -> None:
-    from agents.extensions.sandbox.runloop.mounts import _rclone_pattern_for_session
+    from agents.extensions.sandbox._rclone import rclone_pattern_for_session
 
     session = _FakeRunloopMountSession([_exec_ok(stdout=b"1000\n1000\n")])
 
-    pattern = await _rclone_pattern_for_session(session, RcloneMountPattern(mode="fuse"))
+    pattern = await rclone_pattern_for_session(session, RcloneMountPattern(mode="fuse"))
 
     assert pattern.extra_args == ["--allow-other", "--uid", "1000", "--gid", "1000"]

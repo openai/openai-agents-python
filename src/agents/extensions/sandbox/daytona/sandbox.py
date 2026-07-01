@@ -43,6 +43,7 @@ from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
+from ....sandbox.session.pty_output import collect_pty_output
 from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -51,7 +52,6 @@ from ....sandbox.session.pty_types import (
     clamp_pty_yield_time_ms,
     process_id_to_prune_from_meta,
     resolve_pty_write_yield_time_ms,
-    truncate_text_by_tokens,
 )
 from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
 from ....sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
@@ -388,6 +388,7 @@ class _DaytonaPtySessionEntry:
     last_used: float = field(default_factory=time.monotonic)
     done: bool = False
     exit_code: int | None = None
+    worker_task: asyncio.Task[None] | None = None
 
 
 class DaytonaSandboxSession(BaseSandboxSession):
@@ -672,7 +673,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
                     timeout=exec_timeout,
                 )
                 entry.pty_handle = pty_handle
-                asyncio.create_task(self._run_pty_waiter(entry))
+                entry.worker_task = asyncio.create_task(self._run_pty_waiter(entry))
                 await asyncio.wait_for(pty_handle.wait_for_connection(), timeout=exec_timeout)
                 await asyncio.wait_for(
                     pty_handle.send_input(cmd_str + "\n"),
@@ -699,7 +700,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
                     timeout=exec_timeout,
                 )
                 entry.cmd_id = resp.cmd_id
-                asyncio.create_task(
+                entry.worker_task = asyncio.create_task(
                     self._run_session_reader(
                         entry,
                         daytona_session_id,
@@ -885,36 +886,14 @@ class DaytonaSandboxSession(BaseSandboxSession):
         yield_time_ms: int,
         max_output_tokens: int | None,
     ) -> tuple[bytes, int | None]:
-        deadline = time.monotonic() + (yield_time_ms / 1000)
-        output = bytearray()
-
-        while True:
-            async with entry.output_lock:
-                while entry.output_chunks:
-                    output.extend(entry.output_chunks.popleft())
-
-            if time.monotonic() >= deadline:
-                break
-
-            if entry.done:
-                async with entry.output_lock:
-                    while entry.output_chunks:
-                        output.extend(entry.output_chunks.popleft())
-                break
-
-            remaining_s = deadline - time.monotonic()
-            if remaining_s <= 0:
-                break
-
-            try:
-                await asyncio.wait_for(entry.output_notify.wait(), timeout=remaining_s)
-            except asyncio.TimeoutError:
-                break
-            entry.output_notify.clear()
-
-        text = output.decode("utf-8", errors="replace")
-        truncated, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
-        return truncated.encode("utf-8", errors="replace"), original_token_count
+        return await collect_pty_output(
+            output_chunks=entry.output_chunks,
+            output_lock=entry.output_lock,
+            output_notify=entry.output_notify,
+            is_done=lambda: entry.done,
+            yield_time_ms=yield_time_ms,
+            max_output_tokens=max_output_tokens,
+        )
 
     def _prune_pty_sessions_if_needed(self) -> _DaytonaPtySessionEntry | None:
         if len(self._pty_sessions) < PTY_PROCESSES_MAX:
@@ -936,6 +915,13 @@ class DaytonaSandboxSession(BaseSandboxSession):
                 await self._sandbox.process.delete_session(entry.daytona_session_id)
         except Exception:
             pass
+
+        worker_task = entry.worker_task
+        entry.worker_task = None
+        if worker_task is not None and worker_task is not asyncio.current_task():
+            if not worker_task.done():
+                worker_task.cancel()
+            await asyncio.gather(worker_task, return_exceptions=True)
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
         error_path = posix_path_as_path(coerce_posix_path(path))
