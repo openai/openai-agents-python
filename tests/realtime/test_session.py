@@ -286,6 +286,59 @@ async def test_cleanup_bounds_wait_for_cancellation_resistant_tasks(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_cleanup_retains_timed_out_tasks_when_model_close_fails(monkeypatch):
+    monkeypatch.setattr(session_module, "_BACKGROUND_TASK_CLEANUP_TIMEOUT", 0.01, raising=False)
+
+    class _FailOnceCloseModel(_DummyModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_calls = 0
+
+        async def close(self):
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise RuntimeError("model close failed")
+
+    model = _FailOnceCloseModel()
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None)
+    started = asyncio.Event()
+    cancel_seen = asyncio.Event()
+    release = asyncio.Event()
+
+    async def cancellation_resistant_task() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancel_seen.set()
+            await release.wait()
+
+    task = asyncio.create_task(cancellation_resistant_task())
+    session._guardrail_tasks.add(task)
+    await started.wait()
+
+    try:
+        with pytest.raises(RuntimeError, match="model close failed"):
+            await asyncio.wait_for(session._cleanup(), timeout=1)
+
+        assert cancel_seen.is_set()
+        assert session._closed is False
+        assert task in session._guardrail_tasks
+
+        await asyncio.wait_for(session._cleanup(), timeout=1)
+
+        assert session._closed is True
+        assert task.done()
+        assert task not in session._guardrail_tasks
+        assert model.close_calls == 2
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_tracked_task_can_close_session_without_awaiting_itself():
     class _CloseCountingModel(_DummyModel):
         def __init__(self) -> None:
@@ -316,6 +369,39 @@ async def test_tracked_task_can_close_session_without_awaiting_itself():
     assert session._closed is True
     assert model.close_count == 1
     assert task not in session._tool_call_tasks
+
+
+@pytest.mark.asyncio
+async def test_concurrent_close_waits_for_in_flight_cleanup_failure():
+    class _BlockingFailCloseModel(_DummyModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_entered = asyncio.Event()
+            self.release_close = asyncio.Event()
+
+        async def close(self):
+            self.close_entered.set()
+            await self.release_close.wait()
+            raise RuntimeError("model close failed")
+
+    model = _BlockingFailCloseModel()
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None)
+
+    first_close = asyncio.create_task(session.close())
+    await model.close_entered.wait()
+
+    second_close = asyncio.create_task(session.close())
+    await asyncio.sleep(0)
+
+    assert not second_close.done()
+
+    model.release_close.set()
+    results = await asyncio.gather(first_close, second_close, return_exceptions=True)
+
+    assert [type(result) for result in results] == [RuntimeError, RuntimeError]
+    assert [str(result) for result in results] == ["model close failed", "model close failed"]
+    assert session._closed is False
 
 
 @pytest.mark.asyncio

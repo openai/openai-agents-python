@@ -193,6 +193,7 @@ class RealtimeSession(RealtimeModelListener):
             asyncio.Queue()
         )
         self._event_iterator_waiters = 0
+        self._cleanup_future: asyncio.Future[None] | None = None
         self._closing = False
         self._closed = False
         self._stored_exception: BaseException | None = None
@@ -1300,8 +1301,12 @@ class RealtimeSession(RealtimeModelListener):
                     )
                 )
 
-    async def _cleanup_guardrail_tasks(self, caller_task: asyncio.Task[Any] | None) -> None:
-        await self._cancel_and_wait_for_tasks(self._guardrail_tasks, "guardrail", caller_task)
+    async def _cleanup_guardrail_tasks(
+        self, caller_task: asyncio.Task[Any] | None
+    ) -> set[asyncio.Task[Any]]:
+        return await self._cancel_and_wait_for_tasks(
+            self._guardrail_tasks, "guardrail", caller_task
+        )
 
     def _enqueue_tool_call_task(
         self,
@@ -1378,15 +1383,19 @@ class RealtimeSession(RealtimeModelListener):
             )
         )
 
-    async def _cleanup_tool_call_tasks(self, caller_task: asyncio.Task[Any] | None) -> None:
-        await self._cancel_and_wait_for_tasks(self._tool_call_tasks, "tool call", caller_task)
+    async def _cleanup_tool_call_tasks(
+        self, caller_task: asyncio.Task[Any] | None
+    ) -> set[asyncio.Task[Any]]:
+        return await self._cancel_and_wait_for_tasks(
+            self._tool_call_tasks, "tool call", caller_task
+        )
 
     async def _cancel_and_wait_for_tasks(
         self,
         tasks: set[asyncio.Task[Any]],
         label: str,
         caller_task: asyncio.Task[Any] | None,
-    ) -> None:
+    ) -> set[asyncio.Task[Any]]:
         tasks_to_wait: list[asyncio.Task[Any]] = []
 
         for task in list(tasks):
@@ -1409,7 +1418,10 @@ class RealtimeSession(RealtimeModelListener):
                     label,
                 )
 
-        tasks.difference_update(tasks_to_wait)
+            tasks.difference_update(_done)
+            return pending
+
+        return set()
 
     def _wake_event_iterators(self) -> None:
         for _ in range(self._event_iterator_waiters):
@@ -1420,10 +1432,14 @@ class RealtimeSession(RealtimeModelListener):
         if self._closed:
             self._wake_event_iterators()
             return
-        if self._closing:
-            self._wake_event_iterators()
+
+        cleanup_future = self._cleanup_future
+        if cleanup_future is not None:
+            await asyncio.shield(cleanup_future)
             return
 
+        cleanup_future = asyncio.get_running_loop().create_future()
+        self._cleanup_future = cleanup_future
         self._closing = True
         caller_task = asyncio.current_task()
 
@@ -1443,15 +1459,25 @@ class RealtimeSession(RealtimeModelListener):
             # Clear pending approval tracking
             self._pending_tool_calls.clear()
             self._pending_tool_outputs.clear()
+            self._guardrail_tasks.clear()
+            self._tool_call_tasks.clear()
 
             # Mark as closed
             self._closed = True
-        except BaseException:
+        except BaseException as exc:
             self._closing = False
+            if not cleanup_future.done():
+                cleanup_future.set_exception(exc)
+                cleanup_future.exception()
             raise
         else:
             self._closing = False
+            if not cleanup_future.done():
+                cleanup_future.set_result(None)
             self._wake_event_iterators()
+        finally:
+            if self._cleanup_future is cleanup_future:
+                self._cleanup_future = None
 
     def _dispatch_snapshot_from_settings(
         self,
