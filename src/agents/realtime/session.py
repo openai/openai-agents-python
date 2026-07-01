@@ -17,6 +17,7 @@ from .._tool_identity import (
 )
 from ..agent import Agent
 from ..exceptions import ToolInputGuardrailTripwireTriggered, UserError
+from ..guardrail import InputGuardrail, InputGuardrailResult
 from ..handoffs import Handoff
 from ..items import ToolApprovalItem
 from ..logger import logger
@@ -43,6 +44,7 @@ from .events import (
     RealtimeHistoryAdded,
     RealtimeHistoryUpdated,
     RealtimeInputAudioTimeoutTriggered,
+    RealtimeInputGuardrailTripped,
     RealtimeRawModelEvent,
     RealtimeSessionEvent,
     RealtimeToolApprovalRequired,
@@ -202,6 +204,8 @@ class RealtimeSession(RealtimeModelListener):
 
         # Guardrails state tracking
         self._interrupted_response_ids: set[str] = set()
+        # User item_ids for which an input guardrail has already interrupted the response.
+        self._interrupted_input_item_ids: set[str] = set()
         self._item_transcripts: dict[str, str] = {}  # item_id -> accumulated transcript
         self._item_guardrail_run_counts: dict[str, int] = {}  # item_id -> run count
         self._debounce_text_length = self._run_config.get("guardrails_settings", {}).get(
@@ -365,6 +369,10 @@ class RealtimeSession(RealtimeModelListener):
                 await self._put_event(
                     RealtimeHistoryUpdated(info=self._event_info, history=self._history)
                 )
+            # Run input guardrails on the finalized user transcript. The transcription completes
+            # around the time the server begins generating a response, so we mirror the
+            # output-guardrail trip behavior and force a response cancel when a guardrail trips.
+            self._enqueue_input_guardrail_task(event.transcript, event.item_id)
         elif event.type == "input_audio_timeout_triggered":
             await self._put_event(
                 RealtimeInputAudioTimeoutTriggered(
@@ -1263,6 +1271,81 @@ class RealtimeSession(RealtimeModelListener):
 
         return False
 
+    async def _run_input_guardrails(
+        self,
+        text: str,
+        item_id: str,
+        agent: RealtimeAgent,
+        input_guardrails: list[InputGuardrail[Any]],
+    ) -> bool:
+        """Run input guardrails on the user's transcribed input. Returns True if any guardrail was
+        triggered.
+
+        ``agent`` and ``input_guardrails`` are snapshotted when the transcription event is handled
+        so that a concurrent ``update_agent()`` or handoff cannot swap in a different agent's
+        guardrails before this background task runs.
+        """
+        # If we've already interrupted the response for this user item, skip.
+        if not input_guardrails or item_id in self._interrupted_input_item_ids:
+            return False
+
+        async def _run_one(guardrail: InputGuardrail[Any]) -> InputGuardrailResult | None:
+            try:
+                return await guardrail.run(
+                    # TODO (rm) Remove this cast, it's wrong
+                    cast(Agent[Any], agent),
+                    text,
+                    self._context_wrapper,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Input guardrail %r raised %s: %s; skipping it.",
+                    guardrail.get_name(),
+                    type(exc).__name__,
+                    exc,
+                )
+                logger.debug("Input guardrail failure details.", exc_info=True)
+                return None
+
+        # Run the guardrails concurrently so a slow guardrail cannot delay the forced cancel behind
+        # unrelated guardrails, which would let the unsafe turn keep generating.
+        results = await asyncio.gather(*(_run_one(guardrail) for guardrail in input_guardrails))
+        triggered_results = [
+            result for result in results if result is not None and result.output.tripwire_triggered
+        ]
+
+        if triggered_results:
+            # Double-check: bail if already interrupted for this user item.
+            if item_id in self._interrupted_input_item_ids:
+                return False
+
+            # Mark as interrupted immediately (before any awaits) to minimize the race window.
+            self._interrupted_input_item_ids.add(item_id)
+
+            # Emit input guardrail tripped event.
+            await self._put_event(
+                RealtimeInputGuardrailTripped(
+                    guardrail_results=triggered_results,
+                    message=text,
+                    info=self._event_info,
+                )
+            )
+
+            # Interrupt the model, forcing a cancel of any in-progress response.
+            await self._model.send_event(RealtimeModelSendInterrupt(force_response_cancel=True))
+
+            # Send guardrail triggered message.
+            guardrail_names = [result.guardrail.get_name() for result in triggered_results]
+            await self._model.send_event(
+                RealtimeModelSendUserInput(
+                    user_input=f"input guardrail triggered: {', '.join(guardrail_names)}"
+                )
+            )
+
+            return True
+
+        return False
+
     def _enqueue_guardrail_task(self, text: str, response_id: str) -> None:
         # Runs the guardrails in a separate task to avoid blocking the main loop
 
@@ -1270,6 +1353,33 @@ class RealtimeSession(RealtimeModelListener):
         self._guardrail_tasks.add(task)
 
         # Add callback to remove completed tasks and handle exceptions
+        task.add_done_callback(self._on_guardrail_task_done)
+
+    def _enqueue_input_guardrail_task(self, text: str, item_id: str) -> None:
+        # Snapshot the active agent and its guardrails now; a later update_agent()/handoff must not
+        # change which guardrails run against this transcript.
+        agent = self._current_agent
+        combined_guardrails = agent.input_guardrails + self._run_config.get("input_guardrails", [])
+
+        seen_ids: set[int] = set()
+        input_guardrails: list[InputGuardrail[Any]] = []
+        for guardrail in combined_guardrails:
+            guardrail_id = id(guardrail)
+            if guardrail_id not in seen_ids:
+                input_guardrails.append(guardrail)
+                seen_ids.add(guardrail_id)
+
+        # Skip creating a no-op task when no input guardrails are configured.
+        if not input_guardrails:
+            return
+
+        # Runs the input guardrails in a separate task to avoid blocking the main loop.
+        task = asyncio.create_task(
+            self._run_input_guardrails(text, item_id, agent, input_guardrails)
+        )
+        # Reuse the shared guardrail task set + done callback so completed tasks are removed,
+        # exceptions surface as events, and close() cancels any still-running task.
+        self._guardrail_tasks.add(task)
         task.add_done_callback(self._on_guardrail_task_done)
 
     def _on_guardrail_task_done(self, task: asyncio.Task[Any]) -> None:
