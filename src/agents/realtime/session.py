@@ -224,7 +224,9 @@ class RealtimeSession(RealtimeModelListener):
         This reflects the initial agent and is updated whenever the active agent changes,
         for example after a handoff or a call to `update_agent()`. Use it to read the active
         agent from code that runs outside the session's event loop, such as telemetry,
-        routing, or background timers.
+        routing, or background timers. This returns a live, unsynchronized snapshot, so a
+        background reader can observe the agent mid-handoff because it is reassigned in
+        `update_agent()` and after a handoff without any locking.
         """
         return self._current_agent
 
@@ -234,7 +236,9 @@ class RealtimeSession(RealtimeModelListener):
 
         The returned wrapper is the same object the session was constructed with and exposes
         the caller-provided context along with usage tracking. Use it to reach the run context
-        from code that runs outside the session's event loop.
+        from code that runs outside the session's event loop. This returns a live,
+        unsynchronized reference whose usage counters are mutated by the session's event loop,
+        so a background reader can observe values updated without any locking.
         """
         return self._context_wrapper
 
