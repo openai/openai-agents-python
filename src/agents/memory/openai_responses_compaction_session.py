@@ -8,6 +8,7 @@ from openai import AsyncOpenAI
 
 from ..items import TResponseInputItem
 from ..models._openai_shared import get_default_openai_client
+from ..run_context import RunContextWrapper
 from ..run_internal.items import normalize_input_items_for_api
 from .openai_conversations_session import OpenAIConversationsSession
 from .session import (
@@ -233,7 +234,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             f"candidates={len(self._compaction_candidate_items)})"
         )
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
+        # This decorator rewrites history via clear_session + add_items during compaction,
+        # which cannot be scoped consistently through a wrapper under the get_items/add_items
+        # contract, so it does not forward the run context to the underlying session.
         return await self.underlying_session.get_items(limit)
 
     async def _get_all_underlying_session_items(self) -> list[TResponseInputItem]:
@@ -331,7 +340,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     def _clear_deferred_compaction(self) -> None:
         self._deferred_response_id = None
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
+        # See get_items: this decorator does not forward the run context to the underlying
+        # session, so history rewrites during compaction stay internally consistent.
         await self.underlying_session.add_items(items)
         if self._compaction_candidate_items is not None:
             new_items = _normalize_compaction_session_items(items)

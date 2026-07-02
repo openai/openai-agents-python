@@ -680,6 +680,54 @@ result = await Runner.run(
 )
 ```
 
+### Accessing the run context in custom sessions
+
+Custom sessions can opt into receiving the current run's [`RunContextWrapper`][agents.run_context.RunContextWrapper] by accepting a keyword-only `wrapper` parameter on `get_items` and `add_items`. The runner passes the wrapper only when the session's signature accepts it, so existing session implementations keep working unchanged:
+
+```python
+from typing import Any
+
+from agents.memory.session import SessionABC
+from agents.items import TResponseInputItem
+from agents.run_context import RunContextWrapper
+
+class ContextAwareSession(SessionABC):
+    """Session that scopes storage by data from the run context."""
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
+        # Use wrapper.context (e.g. a user ID) to scope retrieval.
+        user_id = wrapper.context.user_id if wrapper is not None else None
+        return await self._load_items(user_id, limit)
+
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
+        # Persist items together with data from the run context.
+        user_id = wrapper.context.user_id if wrapper is not None else None
+        await self._store_items(user_id, items)
+
+    async def pop_item(self) -> TResponseInputItem | None:
+        ...
+
+    async def clear_session(self) -> None:
+        ...
+```
+
+The `wrapper` parameter may be `None`, for example when session methods are called directly rather than through the runner, so implementations should always handle that case. Sessions that accept `**kwargs` on these methods also receive the wrapper through them.
+
+The wrapper is forwarded only on the standard history read/write paths. Operations that rely on `pop_item` or `clear_session` — the conversation-retry rewind and the `OpenAIResponsesCompactionSession` decorator (which clears and replaces history during compaction) — are outside the `get_items`/`add_items` wrapper contract and would be inconsistent if only partially scoped, so they operate on the session's default scope and do not forward the wrapper. If you scope storage by `wrapper.context`, treat retry rewind and compaction as running against that default scope. Transparent wrappers such as `EncryptedSession` do forward the wrapper to underlying sessions that opt in.
+
 ## Community session implementations
 
 The community has developed additional session implementations:

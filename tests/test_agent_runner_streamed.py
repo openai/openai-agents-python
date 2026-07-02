@@ -1263,7 +1263,12 @@ async def test_stream_input_persistence_strips_ids_for_openai_conversation_sessi
         async def _get_session_id(self) -> str:
             return "conv_test"
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(
+            self,
+            items: list[TResponseInputItem],
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> None:
             for item in items:
                 if isinstance(item, dict):
                     assert "id" not in item, "IDs should be stripped before saving"
@@ -1272,7 +1277,12 @@ async def test_stream_input_persistence_strips_ids_for_openai_conversation_sessi
                     )
             self.saved.append(items)
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self,
+            limit: int | None = None,
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> list[TResponseInputItem]:
             return []
 
         async def pop_item(self) -> TResponseInputItem | None:
@@ -1916,6 +1926,7 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
         response_id: str | None,
         reasoning_item_id_policy: str | None = None,
         store: bool | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
     ) -> int:
         observed_counts.append(persisted_count)
         result = await real_save_resumed(
@@ -1925,6 +1936,7 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
             response_id=response_id,
             reasoning_item_id_policy=reasoning_item_id_policy,
             store=store,
+            wrapper=wrapper,
         )
         return int(result)
 

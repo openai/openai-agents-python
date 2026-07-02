@@ -15,6 +15,7 @@ from ..._tool_identity import is_reserved_synthetic_tool_namespace, tool_qualifi
 from ...items import TResponseInputItem
 from ...memory import SQLiteSession
 from ...memory.session_settings import SessionSettings, resolve_session_limit
+from ...run_context import RunContextWrapper
 
 
 class AdvancedSQLiteSession(SQLiteSession):
@@ -121,7 +122,12 @@ class AdvancedSQLiteSession(SQLiteSession):
 
             conn.commit()
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Add items to the session.
 
         Args:
@@ -149,6 +155,8 @@ class AdvancedSQLiteSession(SQLiteSession):
         self,
         limit: int | None = None,
         branch_id: str | None = None,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
     ) -> list[TResponseInputItem]:
         """Get items from current or specified branch.
 
