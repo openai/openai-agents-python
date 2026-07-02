@@ -137,7 +137,12 @@ class AgentOutputSchema(AgentOutputSchemaBase):
         """Validate a JSON string against the output type. Returns the validated object, or raises
         a `ModelBehaviorError` if the JSON is invalid.
         """
-        validated = _json.validate_json(json_str, self._type_adapter, partial=False)
+        validated = _json.validate_json(
+            json_str,
+            self._type_adapter,
+            partial=False,
+            strict=True if self._strict_json_schema else None,
+        )
         if self._is_wrapped:
             if not isinstance(validated, dict):
                 _error_tracing.attach_error_to_current_span(

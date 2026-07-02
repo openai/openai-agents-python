@@ -195,3 +195,40 @@ def test_custom_output_schema():
     json_str = json.dumps({"foo": "bar"})
     validated = output_schema.validate_json(json_str)
     assert validated == ["some", "output"]
+
+
+class StrictOutput(BaseModel):
+    name: str
+    age: int
+
+
+def test_agent_output_schema_strict_rejects_type_coercion():
+    """With strict_json_schema=True (default), string input for an int field must raise
+    ModelBehaviorError instead of being silently coerced."""
+    schema = AgentOutputSchema(output_type=StrictOutput, strict_json_schema=True)
+    assert schema.is_strict_json_schema()
+
+    # age is a string "25" — strict mode should reject this
+    malformed_json = '{"name": "Alice", "age": "25"}'
+    with pytest.raises(ModelBehaviorError, match="Invalid JSON"):
+        schema.validate_json(malformed_json)
+
+    # Correctly typed input should still be accepted
+    valid_json = '{"name": "Alice", "age": 25}'
+    result = schema.validate_json(valid_json)
+    assert result.name == "Alice"
+    assert result.age == 25
+
+
+def test_agent_output_schema_lenient_allows_type_coercion():
+    """With strict_json_schema=False, Pydantic's default lenient mode silently coerces
+    string input for an int field — verifying backward compatibility."""
+    schema = AgentOutputSchema(output_type=StrictOutput, strict_json_schema=False)
+    assert not schema.is_strict_json_schema()
+
+    # age is a string "25" — lenient mode should coerce it to int 25
+    coerced_json = '{"name": "Alice", "age": "25"}'
+    result = schema.validate_json(coerced_json)
+    assert result.name == "Alice"
+    assert result.age == 25
+    assert isinstance(result.age, int)
