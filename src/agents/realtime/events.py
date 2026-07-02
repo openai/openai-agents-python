@@ -245,8 +245,12 @@ class RealtimeGuardrailTripped:
 
 @dataclass
 class RealtimeInputGuardrailTripped:
-    """An input guardrail has been tripped on the user's transcribed input, and the in-progress
-    response has been interrupted.
+    """An input guardrail has been tripped on the user's transcribed input.
+
+    When a guardrail trips, the session forces a cancel of the in-progress response. This
+    reliably interrupts a response that is already in flight. Because guardrails run in a
+    background task, a response that is created in the narrow window after the guardrail
+    resolves but before the cancel can take effect may not be interrupted.
     """
 
     guardrail_results: list[InputGuardrailResult]

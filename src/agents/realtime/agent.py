@@ -80,8 +80,10 @@ class RealtimeAgent(AgentBase, Generic[TContext]):
     """
 
     input_guardrails: list[InputGuardrail[TContext]] = field(default_factory=list)
-    """A list of checks that run on the user's transcribed input, before or as the agent
-    responds. Runs on the completed user transcript and can interrupt the in-progress response.
+    """A list of checks that run on the user's transcribed audio input. They run once on the
+    completed user transcript and, when tripped, force a cancel of the in-progress response. This
+    reliably interrupts a response that is already in flight, but a response created after the
+    guardrail resolves may not be interrupted. Text input sent via `send_message` is not checked.
     """
 
     def __post_init__(self) -> None:
