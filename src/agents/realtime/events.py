@@ -254,7 +254,8 @@ class RealtimeInputGuardrailTripped:
     """
 
     guardrail_results: list[InputGuardrailResult]
-    """The results from all triggered input guardrails."""
+    """The tripped input guardrail result(s). The session cancels on the first tripwire, so this
+    normally contains a single result."""
 
     message: str
     """The user transcript that triggered the guardrail."""

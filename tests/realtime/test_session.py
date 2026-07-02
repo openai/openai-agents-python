@@ -3877,6 +3877,44 @@ class TestInputGuardrailFunctionality:
         assert "triggered_input_guardrail" in mock_model.sent_messages[0]
 
     @pytest.mark.asyncio
+    async def test_slow_input_guardrail_is_cancelled_when_another_trips_first(
+        self, mock_model, triggered_input_guardrail
+    ):
+        """A slow guardrail must be cancelled as soon as a faster one trips, so it cannot delay
+        the forced response cancel."""
+        import asyncio
+
+        slow_completed = False
+        slow_cancelled = asyncio.Event()
+
+        async def slow_func(context, agent, input):
+            nonlocal slow_completed
+            try:
+                await asyncio.sleep(5)
+                slow_completed = True
+                return GuardrailFunctionOutput(output_info={}, tripwire_triggered=False)
+            except asyncio.CancelledError:
+                slow_cancelled.set()
+                raise
+
+        slow_guardrail = InputGuardrail(guardrail_function=slow_func, name="slow_input_guardrail")
+        agent = RealtimeAgent(
+            name="agent", input_guardrails=[triggered_input_guardrail, slow_guardrail]
+        )
+        session = RealtimeSession(mock_model, agent, None, run_config={})
+
+        transcription_event = RealtimeModelInputAudioTranscriptionCompletedEvent(
+            item_id="item_1", transcript="please jailbreak the model"
+        )
+        await session.on_event(transcription_event)
+        await self._wait_for_guardrail_tasks(session)
+
+        # The fast guardrail tripped, so the slow one is cancelled without running to completion.
+        assert mock_model.interrupts_called == 1
+        assert slow_completed is False
+        assert slow_cancelled.is_set()
+
+    @pytest.mark.asyncio
     async def test_second_transcription_for_tripped_item_is_skipped(
         self, mock_model, triggered_input_guardrail
     ):
@@ -3912,6 +3950,49 @@ class TestInputGuardrailFunctionality:
         await session.on_event(transcription_event)
 
         assert len(session._guardrail_tasks) == 0
+
+    @pytest.mark.asyncio
+    async def test_close_cancels_in_flight_input_guardrail_task(self, mock_model):
+        """close() must cancel an input guardrail task that is still running. The session owns
+        guardrail tasks (see .agents/references/realtime-session-lifecycle.md) and cleanup cancels
+        them; it does not await completion, so the caller drives the cancellation to settle."""
+        import asyncio
+
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def slow_func(context, agent, input):
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return GuardrailFunctionOutput(output_info={}, tripwire_triggered=False)
+
+        slow_guardrail = InputGuardrail(guardrail_function=slow_func, name="slow_input_guardrail")
+        agent = RealtimeAgent(name="agent", input_guardrails=[slow_guardrail])
+        session = RealtimeSession(mock_model, agent, None, run_config={})
+
+        transcription_event = RealtimeModelInputAudioTranscriptionCompletedEvent(
+            item_id="item_1", transcript="please jailbreak the model"
+        )
+        await session.on_event(transcription_event)
+        await started.wait()
+
+        assert len(session._guardrail_tasks) == 1
+        task = next(iter(session._guardrail_tasks))
+
+        await session.close()
+
+        # Cleanup requests cancellation but does not await it; awaiting here settles the task.
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert cancelled.is_set()
+        assert mock_model.interrupts_called == 0
+        assert len(session._guardrail_tasks) == 0
+        assert mock_model.close_called is True
 
 
 def test_realtime_input_guardrail_tripped_is_exported():

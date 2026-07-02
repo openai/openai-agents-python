@@ -1398,12 +1398,25 @@ class RealtimeSession(RealtimeModelListener):
                 logger.debug("Input guardrail failure details.", exc_info=True)
                 return None
 
-        # Run the guardrails concurrently so a slow guardrail cannot delay the forced cancel behind
-        # unrelated guardrails, which would let the unsafe turn keep generating.
-        results = await asyncio.gather(*(_run_one(guardrail) for guardrail in input_guardrails))
-        triggered_results = [
-            result for result in results if result is not None and result.output.tripwire_triggered
+        # Run the guardrails concurrently and act on the first tripwire as soon as it is available,
+        # cancelling the rest. This mirrors the streamed input-guardrail path: a slow guardrail
+        # cannot delay the forced cancel behind unrelated guardrails, so the unsafe turn is
+        # interrupted as early as possible instead of waiting for every guardrail to finish.
+        guardrail_tasks = [
+            asyncio.create_task(_run_one(guardrail)) for guardrail in input_guardrails
         ]
+        triggered_results: list[InputGuardrailResult] = []
+        try:
+            for completed in asyncio.as_completed(guardrail_tasks):
+                result = await completed
+                if result is not None and result.output.tripwire_triggered:
+                    triggered_results.append(result)
+                    break
+        finally:
+            for task in guardrail_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*guardrail_tasks, return_exceptions=True)
 
         if triggered_results:
             # Double-check: bail if already interrupted for this user item.
