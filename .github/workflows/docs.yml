@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
       - name: Determine docs-only push
         id: docs-only
         run: |
@@ -36,7 +36,7 @@ jobs:
           fi
       - name: Setup uv
         if: steps.docs-only.outputs.skip != 'true'
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # setup-uv v8.1.0; uv 0.11.14
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # setup-uv v8.1.0; uv 0.11.14
         with:
           version: "0.11.14"
           enable-cache: true
