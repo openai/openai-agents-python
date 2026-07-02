@@ -137,16 +137,17 @@ def _measure_stream(stream: io.IOBase) -> tuple[int, io.IOBase, io.IOBase | None
 # POSIX sh that pipes exactly ``<n>`` bytes into the real command (``"$@"``).
 # ``head -c`` bounds the read so completion never depends on a stdin half-close
 # (unreliable over a TLS DOCKER_HOST). A bare ``head -c "$n" | "$@"`` pipeline
-# reports only the *consumer's* exit status, so a missing ``head`` — e.g. a custom
-# image without coreutils/busybox ``head`` — would be masked: the consumer
-# (``cat``/``tar``) sees an empty pipe, exits 0, and the write "succeeds" while
-# creating an empty file. Verify ``head`` exists up front and exit non-zero (98)
-# if not, so such writes surface as errors instead of silent data loss. This uses
-# only the ``command -v`` shell builtin — no status file in world-writable /tmp
-# (a predictable name there is a symlink-attack target for untrusted container
-# code, followed by the root exec) and no ``pipefail`` (not POSIX; dash lacks it).
+# reports only the *consumer's* status, so if ``head`` can't produce the bytes —
+# missing entirely, or a POSIX-only ``head`` that rejects ``-c`` (POSIX specifies
+# only ``-n``) — the consumer (``cat``/``tar``) would see an empty pipe, exit 0,
+# and the write would "succeed" after creating/truncating an empty file. Preflight
+# ``head -c`` on known input and bail out (exit 98) unless it yields the expected
+# byte, so such writes surface as errors instead of silent data loss. The check
+# needs no writable path (avoiding a predictable /tmp status file that untrusted
+# container code could pre-seed as a symlink for the root exec to follow) and no
+# ``pipefail`` (not POSIX; dash lacks it).
 _LENGTH_FRAMED_STDIN_SCRIPT = (
-    'n=$1; shift; command -v head >/dev/null 2>&1 || exit 98; head -c "$n" | "$@"'
+    'n=$1; shift; [ "$(printf ab | head -c 1 2>/dev/null)" = a ] || exit 98; head -c "$n" | "$@"'
 )
 
 
