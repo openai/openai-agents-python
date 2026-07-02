@@ -114,17 +114,24 @@ def _measure_stream(stream: io.IOBase) -> tuple[int, io.IOBase, io.IOBase | None
         return max(0, end - start), stream, None
     except (AttributeError, OSError, ValueError):
         spool: Any = tempfile.SpooledTemporaryFile(max_size=_STREAM_SPOOL_MAX_SIZE)
-        length = 0
-        while True:
-            chunk = stream.read(1024 * 1024)
-            if not chunk:
-                break
-            if isinstance(chunk, str):
-                chunk = chunk.encode("utf-8")
-            length += len(chunk)
-            spool.write(chunk)
-        spool.seek(0)
-        return length, spool, spool
+        try:
+            length = 0
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                if isinstance(chunk, str):
+                    chunk = chunk.encode("utf-8")
+                length += len(chunk)
+                spool.write(chunk)
+            spool.seek(0)
+            return length, spool, spool
+        except BaseException:
+            # The caller only closes the spool once it is returned; on any error
+            # here it never receives it, so close it now to avoid a leaked temp
+            # file / buffer.
+            spool.close()
+            raise
 
 
 # POSIX sh that pipes exactly ``<n>`` bytes into the real command (``"$@"``).

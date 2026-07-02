@@ -747,14 +747,21 @@ class _RecordingStreamAPI:
 
 
 def _make_streaming_session(api: _RecordingStreamAPI) -> DockerSandboxSession:
+    class _Client:
+        def __init__(self) -> None:
+            self.api = api
+
     class _Container:
         def __init__(self) -> None:
-            self.client = cast("object", type("_C", (), {"api": api})())
+            self.client = _Client()
             self.id = "container"
 
-    session = cast(DockerSandboxSession, object.__new__(DockerSandboxSession))
-    session._container = cast("object", _Container())  # type: ignore[attr-defined]
-    session._coerce_exec_user = lambda user=None: ""  # type: ignore[attr-defined]
+    def _coerce(user: object = None) -> str:
+        return ""
+
+    session = object.__new__(DockerSandboxSession)
+    session._container = _Container()
+    session._coerce_exec_user = _coerce  # type: ignore[method-assign]
     return session
 
 
@@ -871,7 +878,7 @@ async def test_stream_into_exec_fails_when_stream_ends_before_measured_length() 
     api = _RecordingStreamAPI()
     session = _make_streaming_session(api)
 
-    with pytest.raises(docker_sandbox.WorkspaceArchiveWriteError):
+    with pytest.raises(WorkspaceArchiveWriteError):
         await session._stream_into_exec(
             cmd=["sh", "-lc", 'cat > "$1"', "sh", "/workspace/f"],
             stream=cast(io.IOBase, _ShrinkingStream()),
@@ -903,6 +910,51 @@ async def test_stream_into_exec_clamps_length_when_position_past_end() -> None:
     framed = cast("list[str]", api.exec_create_calls[0]["cmd"])
     assert framed[4] == "0"  # not "-7"
     assert api.sock.sent == bytearray()  # nothing sent; no unbounded read
+
+
+def test_measure_stream_closes_spool_when_copy_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If reading a non-seekable stream into the spool raises, _measure_stream
+    must close the spool itself — the caller never receives it to close."""
+    created: list[object] = []
+
+    class _RecordingSpool:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.closed = False
+
+        def write(self, _data: bytes) -> int:
+            return 0
+
+        def seek(self, *_a: object, **_k: object) -> int:
+            return 0
+
+        def close(self) -> None:
+            self.closed = True
+
+    def _factory(*_a: object, **_k: object) -> _RecordingSpool:
+        spool = _RecordingSpool()
+        created.append(spool)
+        return spool
+
+    monkeypatch.setattr("tempfile.SpooledTemporaryFile", _factory)
+
+    class _ExplodingNonSeekable(io.RawIOBase):
+        def seekable(self) -> bool:
+            return False
+
+        def readable(self) -> bool:
+            return True
+
+        def seek(self, *_a: object, **_k: object) -> int:
+            raise OSError("not seekable")  # forces the spool branch
+
+        def read(self, *_a: object, **_k: object) -> bytes:
+            raise RuntimeError("read boom")
+
+    with pytest.raises(RuntimeError, match="read boom"):
+        docker_sandbox._measure_stream(cast(io.IOBase, _ExplodingNonSeekable()))
+
+    assert created, "expected a spool to be created"
+    assert cast("_RecordingSpool", created[0]).closed, "spool was leaked (not closed)"
 
 
 @pytest.mark.asyncio
