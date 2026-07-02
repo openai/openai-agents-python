@@ -8,7 +8,7 @@ import inspect
 import json
 import math
 import weakref
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from types import UnionType
@@ -705,6 +705,9 @@ class WebSearchTool:
     When omitted, the API default is used. Set to `False` to request cached or
     indexed-only behavior where supported.
     """
+
+    search_content_types: Sequence[Literal["text", "image"]] | None = None
+    """The content types to include in the search results. Omitting this uses the API default."""
 
     @property
     def name(self):
