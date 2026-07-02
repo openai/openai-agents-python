@@ -794,9 +794,10 @@ async def test_stream_into_exec_length_frames_stdin_payload() -> None:
         "/workspace",
     ]
     # The framing script bounds the read by byte count (`head -c`) and makes a
-    # failed/missing producer fatal instead of silently writing an empty file.
+    # missing producer fatal (exit 98) instead of silently writing an empty file —
+    # via a `command -v` builtin check, with no status file in world-writable /tmp.
     assert 'head -c "$n"' in framed[2]
-    assert "exit 98" in framed[2] and "producer_status" in framed[2]
+    assert "command -v head" in framed[2] and "exit 98" in framed[2]
     # Exactly the payload is streamed, and the count matches the head -c bound —
     # so completion never depends on the stdin half-close working.
     assert bytes(api.sock.sent) == payload
