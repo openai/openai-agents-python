@@ -3236,6 +3236,45 @@ async def test_websocket_model_get_response_uses_client_default_timeout_when_ove
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_websocket_model_prepare_websocket_request_includes_client_auth_headers():
+    client = AsyncOpenAI(api_key="test-key")
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)
+
+    _frame, _ws_url, headers = await model._prepare_websocket_request(
+        {
+            "model": "gpt-4",
+            "input": "hi",
+            "stream": True,
+        }
+    )
+
+    assert "Authorization" not in client.default_headers
+    assert headers["Authorization"] == "Bearer test-key"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_websocket_model_prepare_websocket_request_preserves_client_header_overrides():
+    client = AsyncOpenAI(
+        api_key="test-key",
+        default_headers={"authorization": "Bearer proxy-key"},
+    )
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)
+
+    _frame, _ws_url, headers = await model._prepare_websocket_request(
+        {
+            "model": "gpt-4",
+            "input": "hi",
+            "stream": True,
+        }
+    )
+
+    assert headers["authorization"] == "Bearer proxy-key"
+    assert "Authorization" not in headers
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_websocket_model_prepare_websocket_request_omit_removes_inherited_header():
     client = DummyWSClient()
     model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]

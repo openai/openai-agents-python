@@ -1384,10 +1384,15 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
 
     def _merge_websocket_headers(self, extra_headers: Mapping[str, Any]) -> dict[str, str]:
         headers: dict[str, str] = {}
-        for key, value in self._client.default_headers.items():
-            if _is_openai_omitted_value(value):
-                continue
-            headers[key] = str(value)
+        auth_headers = getattr(self._client, "auth_headers", {})
+        for source in (auth_headers, self._client.default_headers):
+            for key, value in source.items():
+                header_key = str(key)
+                for existing_key in list(headers):
+                    if existing_key.lower() == header_key.lower():
+                        del headers[existing_key]
+                if not _is_openai_omitted_value(value):
+                    headers[header_key] = str(value)
 
         for key, value in extra_headers.items():
             if isinstance(value, NotGiven):
