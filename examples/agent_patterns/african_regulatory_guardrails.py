@@ -70,9 +70,9 @@ class ComplianceOutput(BaseModel):
 
 @dataclass
 class AgentContext:
-    jurisdiction: str        # "NG" | "KE" | "GH" | "ZA"
-    kyc_tier: int            # 1 | 2 | 3  (CBN tiered KYC — Nigeria only)
-    consent_documented: bool # cross-border transfer consent on file
+    jurisdiction: str  # "NG" | "KE" | "GH" | "ZA"
+    kyc_tier: int  # 1 | 2 | 3  (CBN tiered KYC — Nigeria only)
+    consent_documented: bool  # cross-border transfer consent on file
 
 
 # ── Nigeria: CBN NIP Framework ────────────────────────────────────────────────
@@ -210,9 +210,7 @@ def _check_ghana(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
 # s.19       — SA ID Number: YYMMDD (date of birth) + 7 digits = 13 digits total
 # Enforcing authority: Information Regulator (South Africa)
 
-_ZA_ID_RE = re.compile(
-    r"\b[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])[0-9]{7}\b"
-)
+_ZA_ID_RE = re.compile(r"\b[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])[0-9]{7}\b")
 _ZA_BIOMETRIC_RE = re.compile(
     r"(?i)(fingerprint|facial\s+recognition|retina|iris\s+scan|"
     r"voice\s+print|biometric\s+(?:template|hash|data|record))"
@@ -283,10 +281,7 @@ async def african_regulatory_guardrail(
     text = (
         input
         if isinstance(input, str)
-        else " ".join(
-            item["content"] if isinstance(item, dict) else str(item)
-            for item in input
-        )
+        else " ".join(item["content"] if isinstance(item, dict) else str(item) for item in input)
     )
 
     checker = _CHECKERS.get(ctx.jurisdiction)
@@ -314,9 +309,7 @@ agent = Agent[AgentContext](
 # ── Demo runner ───────────────────────────────────────────────────────────────
 
 
-async def run_scenario(
-    label: str, user_input: str, ctx: AgentContext
-) -> None:
+async def run_scenario(label: str, user_input: str, ctx: AgentContext) -> None:
     print(f"\n{'─' * 62}")
     print(f"Scenario : {label}")
     print(f"Input    : {user_input}")
@@ -366,7 +359,9 @@ async def main() -> None:
             print(f"[auto-input] -> {user_input}")
             await run_scenario(label, user_input, ctx)
         else:
-            override = input_with_fallback(f"Enter message (or press enter for: '{user_input}'): ", user_input)
+            override = input_with_fallback(
+                f"Enter message (or press enter for: '{user_input}'): ", user_input
+            )
             await run_scenario(label, override, ctx)
 
 
