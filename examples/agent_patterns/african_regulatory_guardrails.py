@@ -263,7 +263,7 @@ _CHECKERS = {
 }
 
 
-@input_guardrail
+@input_guardrail(run_in_parallel=False)
 async def african_regulatory_guardrail(
     context: RunContextWrapper[AgentContext],
     agent: Agent,
