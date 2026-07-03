@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -80,11 +81,22 @@ class AgentContext:
 # CBN NIP (NIBSS Instant Payment) Framework — ₦10,000,000 per-transaction cap
 # NDPA 2023 Schedule 1 / CBN BVN Policy Framework — BVN as biometric data
 
-# Matches both prefix (₦15M / NGN 15M / naira 15M) and suffix (15M NGN) forms.
-_NGN_PREFIX_RE = re.compile(r"(?:₦|NGN|naira)\s*([\d,]+(?:\.\d{1,2})?)", re.IGNORECASE)
-_NGN_SUFFIX_RE = re.compile(r"\b([\d,]+(?:\.\d{1,2})?)\s*NGN\b", re.IGNORECASE)
+# K/M/B magnitude multipliers for shorthand amounts (e.g. ₦15M, 15M NGN).
+_MULTIPLIERS: dict[str, int] = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}
+
+# Prefix: ₦15M / NGN 15M / naira 15M / ₦15,000,000 — group 1 = digits, group 2 = optional K/M/B
+_NGN_PREFIX_RE = re.compile(r"(?:₦|NGN|naira)\s*([\d,]+(?:\.\d{1,2})?)([KMBkmb])?\b", re.IGNORECASE)
+# Suffix: 15M NGN / 15,000,001 NGN — group 1 = digits, group 2 = optional K/M/B
+_NGN_SUFFIX_RE = re.compile(r"\b([\d,]+(?:\.\d{1,2})?)([KMBkmb])?\s*(?:NGN|naira)\b", re.IGNORECASE)
 _NGN_BVN_RE = re.compile(r"(?i)(bvn|bank\s+verification).{0,20}\b[0-9]{11}\b")
 _CBN_NIP_CAP = 10_000_000
+
+
+def _parse_ngn_amount(digits: str, mag: str | None) -> float:
+    amount = float(digits.replace(",", ""))
+    if mag:
+        amount *= _MULTIPLIERS.get(mag.lower(), 1)
+    return amount
 
 
 def _check_nigeria(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
@@ -94,7 +106,7 @@ def _check_nigeria(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
     for pattern in (_NGN_PREFIX_RE, _NGN_SUFFIX_RE):
         for match in pattern.finditer(text):
             try:
-                amount = float(match.group(1).replace(",", ""))
+                amount = _parse_ngn_amount(match.group(1), match.group(2))
             except ValueError:
                 continue
             if amount <= _CBN_NIP_CAP or amount in seen_amounts:
@@ -223,6 +235,22 @@ _ZA_BIOMETRIC_RE = re.compile(
 )
 
 
+def _za_id_date_valid(id_str: str) -> bool:
+    """Return True only if the YYMMDD prefix of a candidate SA ID is a real calendar date.
+
+    SA IDs can be born in either century; we accept the match if EITHER interpretation
+    is a valid date (e.g. YMMDD=000229 is valid in 2000 (leap year) but not in 1900).
+    """
+    yy, mm, dd = int(id_str[0:2]), int(id_str[2:4]), int(id_str[4:6])
+    for century in (1900, 2000):
+        try:
+            datetime.date(century + yy, mm, dd)
+            return True
+        except ValueError:
+            pass
+    return False
+
+
 def _check_south_africa(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
     violations: list[ComplianceViolation] = []
 
@@ -241,7 +269,9 @@ def _check_south_africa(text: str, ctx: AgentContext) -> list[ComplianceViolatio
             )
         )
 
-    if _ZA_ID_RE.search(text):
+    for match in _ZA_ID_RE.finditer(text):
+        if not _za_id_date_valid(match.group(0)):
+            continue  # impossible calendar date — not a real SA ID
         violations.append(
             ComplianceViolation(
                 jurisdiction="ZA",
@@ -255,6 +285,7 @@ def _check_south_africa(text: str, ctx: AgentContext) -> list[ComplianceViolatio
                 ),
             )
         )
+        break  # one match is sufficient to trip the guardrail
 
     return violations
 
