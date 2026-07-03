@@ -89,6 +89,11 @@ _NGN_PREFIX_RE = re.compile(r"(?:₦|NGN|naira)\s*([\d,]+(?:\.\d{1,2})?)([KMBkmb
 # Suffix: 15M NGN / 15,000,001 NGN — group 1 = digits, group 2 = optional K/M/B
 _NGN_SUFFIX_RE = re.compile(r"\b([\d,]+(?:\.\d{1,2})?)([KMBkmb])?\s*(?:NGN|naira)\b", re.IGNORECASE)
 _NGN_BVN_RE = re.compile(r"(?i)(bvn|bank\s+verification).{0,20}\b[0-9]{11}\b")
+# Gate the NIP cap on transfer/payment intent so that balance inquiries or quotes
+# mentioning large NGN amounts (e.g. "my balance is NGN 15M") are not blocked.
+_NGN_TRANSFER_INTENT_RE = re.compile(
+    r"(?i)\b(transfer|send|pay|wire|remit|move|disburse|credit)\b"
+)
 _CBN_NIP_CAP = 10_000_000
 
 
@@ -102,6 +107,7 @@ def _parse_ngn_amount(digits: str, mag: str | None) -> float:
 def _check_nigeria(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
     violations: list[ComplianceViolation] = []
 
+    has_transfer_intent = bool(_NGN_TRANSFER_INTENT_RE.search(text))
     seen_amounts: set[float] = set()
     for pattern in (_NGN_PREFIX_RE, _NGN_SUFFIX_RE):
         for match in pattern.finditer(text):
@@ -109,7 +115,7 @@ def _check_nigeria(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
                 amount = _parse_ngn_amount(match.group(1), match.group(2))
             except ValueError:
                 continue
-            if amount <= _CBN_NIP_CAP or amount in seen_amounts:
+            if amount <= _CBN_NIP_CAP or amount in seen_amounts or not has_transfer_intent:
                 continue
             seen_amounts.add(amount)
             violations.append(
@@ -148,16 +154,25 @@ def _check_nigeria(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
 # s.49 — Cross-border transfer requires documented consent or ODPC adequacy
 # Enforcing authority: Office of the Data Protection Commissioner (ODPC)
 
-_KE_CROSS_BORDER_RE = re.compile(
-    r"(?i)(send|transfer|export|upload|forward).{0,60}"
-    r"(outside\s+kenya|cross.?border|international\s+transfer|offshore|us-east|eu-west)"
+# KDPA s.49 covers personal data, not financial payments. Two patterns distinguish:
+#   1. Unambiguous data-export verbs (export/upload/forward) + cross-border destination
+#   2. Ambiguous verbs (send/transfer) ONLY when a data-object keyword is also present,
+#      e.g. "send customer records outside Kenya" vs "transfer KES 1000 internationally"
+_KE_DATA_EXPORT_RE = re.compile(
+    r"(?i)(?:export|upload|forward).{0,60}"
+    r"(?:outside\s+kenya|cross.?border|international\s+transfer|offshore|us-east|eu-west)"
+)
+_KE_DATA_TRANSFER_RE = re.compile(
+    r"(?i)(?:send|transfer).{0,80}"
+    r"(?:records?|personal\s+data|customer\s+data|user\s+data|files?|information|database|pii|documents?).{0,40}"
+    r"(?:outside\s+kenya|cross.?border|international\s+transfer|offshore|us-east|eu-west)"
 )
 
 
 def _check_kenya(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
     violations: list[ComplianceViolation] = []
 
-    if _KE_CROSS_BORDER_RE.search(text) and not ctx.consent_documented:
+    if (_KE_DATA_EXPORT_RE.search(text) or _KE_DATA_TRANSFER_RE.search(text)) and not ctx.consent_documented:
         violations.append(
             ComplianceViolation(
                 jurisdiction="KE",
@@ -180,11 +195,18 @@ def _check_kenya(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
 # NIA Act 707 — Ghana Card national ID format: GHA-XXXXXXXXX-X
 # Enforcing authority: Data Protection Commission (DPC)
 
-_GH_CROSS_BORDER_RE = re.compile(
-    r"(?i)(send|transfer|export|upload|forward).{0,60}"
-    r"(outside\s+ghana|cross.?border|international\s+transfer|offshore|foreign\s+server)"
+# Same data/financial distinction as Kenya — export/upload/forward are unambiguous;
+# send/transfer require a data-object keyword to avoid blocking financial payments.
+_GH_DATA_EXPORT_RE = re.compile(
+    r"(?i)(?:export|upload|forward).{0,60}"
+    r"(?:outside\s+ghana|cross.?border|international\s+transfer|offshore|foreign\s+server)"
 )
-_GH_CARD_RE = re.compile(r"GHA-[0-9]{9}-[0-9]\b")
+_GH_DATA_TRANSFER_RE = re.compile(
+    r"(?i)(?:send|transfer).{0,80}"
+    r"(?:records?|personal\s+data|customer\s+data|user\s+data|files?|information|database|pii|documents?).{0,40}"
+    r"(?:outside\s+ghana|cross.?border|international\s+transfer|offshore|foreign\s+server)"
+)
+_GH_CARD_RE = re.compile(r"GHA-[0-9]{9}-[0-9]\b", re.IGNORECASE)
 
 
 def _check_ghana(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
@@ -205,7 +227,7 @@ def _check_ghana(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
             )
         )
 
-    if _GH_CROSS_BORDER_RE.search(text) and not ctx.consent_documented:
+    if (_GH_DATA_EXPORT_RE.search(text) or _GH_DATA_TRANSFER_RE.search(text)) and not ctx.consent_documented:
         violations.append(
             ComplianceViolation(
                 jurisdiction="GH",
