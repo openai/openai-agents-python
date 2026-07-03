@@ -1,27 +1,5 @@
-from __future__ import annotations
-
-import asyncio
-import datetime
-import re
-from dataclasses import dataclass
-from typing import Literal
-
-from pydantic import BaseModel
-
-from agents import (
-    Agent,
-    GuardrailFunctionOutput,
-    InputGuardrailTripwireTriggered,
-    RunContextWrapper,
-    Runner,
-    TResponseInputItem,
-    input_guardrail,
-)
-from examples.auto_mode import input_with_fallback, is_auto_mode
-
 """
-This example shows how to implement jurisdiction-aware compliance guardrails
-for AI agents operating in African financial markets.
+Jurisdiction-aware compliance guardrails for AI agents in African financial markets.
 
 Four jurisdictions are covered using only stdlib Python — no external packages:
 
@@ -47,6 +25,27 @@ The guardrail reads `context.jurisdiction` from the AgentContext to apply the
 correct jurisdiction's rules, then trips the guardrail with a structured
 ComplianceOutput describing the violation.
 """
+
+from __future__ import annotations
+
+import asyncio
+import datetime
+import re
+from dataclasses import dataclass
+from typing import Literal
+
+from pydantic import BaseModel
+
+from agents import (
+    Agent,
+    GuardrailFunctionOutput,
+    InputGuardrailTripwireTriggered,
+    RunContextWrapper,
+    Runner,
+    TResponseInputItem,
+    input_guardrail,
+)
+from examples.auto_mode import input_with_fallback, is_auto_mode
 
 
 # ── Compliance models ─────────────────────────────────────────────────────────
@@ -89,10 +88,14 @@ _NGN_PREFIX_RE = re.compile(r"(?:₦|NGN|naira)\s*([\d,]+(?:\.\d{1,2})?)([KMBkmb
 # Suffix: 15M NGN / 15,000,001 NGN — group 1 = digits, group 2 = optional K/M/B
 _NGN_SUFFIX_RE = re.compile(r"\b([\d,]+(?:\.\d{1,2})?)([KMBkmb])?\s*(?:NGN|naira)\b", re.IGNORECASE)
 _NGN_BVN_RE = re.compile(r"(?i)(bvn|bank\s+verification).{0,20}\b[0-9]{11}\b")
-# Gate the NIP cap on transfer/payment intent so that balance inquiries or quotes
-# mentioning large NGN amounts (e.g. "my balance is NGN 15M") are not blocked.
-_NGN_TRANSFER_INTENT_RE = re.compile(
-    r"(?i)\b(transfer|send|pay|wire|remit|move|disburse|credit)\b"
+# Transfer/payment verbs — checked within 80 chars of the matched amount so that
+# "account balance: ₦15M" is not blocked. The negative lookahead on 'transfer'
+# excludes noun phrases ("transfer limit", "transfer fee") where transfer is a
+# modifier, not an action verb.
+_NGN_TRANSFER_VERB_RE = re.compile(
+    r"\b(?:send|pay|wire|remit|move|disburse)\b"
+    r"|\btransfer(?!\s+(?:limit|fee|history|rate|request|cap|ceiling|charge|tax))\b",
+    re.IGNORECASE,
 )
 _CBN_NIP_CAP = 10_000_000
 
@@ -107,7 +110,6 @@ def _parse_ngn_amount(digits: str, mag: str | None) -> float:
 def _check_nigeria(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
     violations: list[ComplianceViolation] = []
 
-    has_transfer_intent = bool(_NGN_TRANSFER_INTENT_RE.search(text))
     seen_amounts: set[float] = set()
     for pattern in (_NGN_PREFIX_RE, _NGN_SUFFIX_RE):
         for match in pattern.finditer(text):
@@ -115,7 +117,13 @@ def _check_nigeria(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
                 amount = _parse_ngn_amount(match.group(1), match.group(2))
             except ValueError:
                 continue
-            if amount <= _CBN_NIP_CAP or amount in seen_amounts or not has_transfer_intent:
+            if amount <= _CBN_NIP_CAP or amount in seen_amounts:
+                continue
+            # Require a transfer verb within 80 chars of the amount so that
+            # "transfer limit: ₦15M" or "balance: ₦15M" don't trip the cap.
+            window_start = max(0, match.start() - 80)
+            window_end = min(len(text), match.end() + 80)
+            if not _NGN_TRANSFER_VERB_RE.search(text[window_start:window_end]):
                 continue
             seen_amounts.add(amount)
             violations.append(
@@ -163,8 +171,8 @@ _KE_DATA_EXPORT_RE = re.compile(
     r"(?:outside\s+kenya|cross.?border|international\s+transfer|offshore|us-east|eu-west)"
 )
 _KE_DATA_TRANSFER_RE = re.compile(
-    r"(?i)(?:send|transfer).{0,80}"
-    r"(?:records?|personal\s+data|customer\s+data|user\s+data|files?|information|database|pii|documents?).{0,40}"
+    r"(?i)(?:send|transfer)[^.!?]{0,80}"
+    r"(?:records?|personal\s+data|customer\s+data|user\s+data|files?|information|database|pii|documents?)[^.!?]{0,40}"
     r"(?:outside\s+kenya|cross.?border|international\s+transfer|offshore|us-east|eu-west)"
 )
 
@@ -202,8 +210,8 @@ _GH_DATA_EXPORT_RE = re.compile(
     r"(?:outside\s+ghana|cross.?border|international\s+transfer|offshore|foreign\s+server)"
 )
 _GH_DATA_TRANSFER_RE = re.compile(
-    r"(?i)(?:send|transfer).{0,80}"
-    r"(?:records?|personal\s+data|customer\s+data|user\s+data|files?|information|database|pii|documents?).{0,40}"
+    r"(?i)(?:send|transfer)[^.!?]{0,80}"
+    r"(?:records?|personal\s+data|customer\s+data|user\s+data|files?|information|database|pii|documents?)[^.!?]{0,40}"
     r"(?:outside\s+ghana|cross.?border|international\s+transfer|offshore|foreign\s+server)"
 )
 _GH_CARD_RE = re.compile(r"GHA-[0-9]{9}-[0-9]\b", re.IGNORECASE)
