@@ -289,9 +289,10 @@ async def african_regulatory_guardrail(
             if isinstance(content, str):
                 parts.append(content)
             elif isinstance(content, list):
-                # Assistant messages can carry content as a list of content parts.
+                # Content can be a list of content parts. The SDK uses "input_text"
+                # for user message parts and "text" for assistant/output parts.
                 for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text":
+                    if isinstance(part, dict) and part.get("type") in ("text", "input_text"):
                         parts.append(part.get("text", ""))
                     elif isinstance(part, str):
                         parts.append(part)
