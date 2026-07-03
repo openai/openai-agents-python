@@ -80,7 +80,9 @@ class AgentContext:
 # CBN NIP (NIBSS Instant Payment) Framework — ₦10,000,000 per-transaction cap
 # NDPA 2023 Schedule 1 / CBN BVN Policy Framework — BVN as biometric data
 
-_NGN_AMOUNT_RE = re.compile(r"(?:₦|NGN)\s*([\d,]+(?:\.\d{1,2})?)", re.IGNORECASE)
+# Matches both prefix (₦15M / NGN 15M / naira 15M) and suffix (15M NGN) forms.
+_NGN_PREFIX_RE = re.compile(r"(?:₦|NGN|naira)\s*([\d,]+(?:\.\d{1,2})?)", re.IGNORECASE)
+_NGN_SUFFIX_RE = re.compile(r"\b([\d,]+(?:\.\d{1,2})?)\s*NGN\b", re.IGNORECASE)
 _NGN_BVN_RE = re.compile(r"(?i)(bvn|bank\s+verification).{0,20}\b[0-9]{11}\b")
 _CBN_NIP_CAP = 10_000_000
 
@@ -88,12 +90,16 @@ _CBN_NIP_CAP = 10_000_000
 def _check_nigeria(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
     violations: list[ComplianceViolation] = []
 
-    for match in _NGN_AMOUNT_RE.finditer(text):
-        try:
-            amount = float(match.group(1).replace(",", ""))
-        except ValueError:
-            continue
-        if amount > _CBN_NIP_CAP:
+    seen_amounts: set[float] = set()
+    for pattern in (_NGN_PREFIX_RE, _NGN_SUFFIX_RE):
+        for match in pattern.finditer(text):
+            try:
+                amount = float(match.group(1).replace(",", ""))
+            except ValueError:
+                continue
+            if amount <= _CBN_NIP_CAP or amount in seen_amounts:
+                continue
+            seen_amounts.add(amount)
             violations.append(
                 ComplianceViolation(
                     jurisdiction="NG",
@@ -132,7 +138,7 @@ def _check_nigeria(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
 
 _KE_CROSS_BORDER_RE = re.compile(
     r"(?i)(send|transfer|export|upload|forward).{0,60}"
-    r"(outside\s+kenya|cross.?border|international|offshore|us-east|eu-west)"
+    r"(outside\s+kenya|cross.?border|international\s+transfer|offshore|us-east|eu-west)"
 )
 
 
@@ -164,7 +170,7 @@ def _check_kenya(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
 
 _GH_CROSS_BORDER_RE = re.compile(
     r"(?i)(send|transfer|export|upload|forward).{0,60}"
-    r"(outside\s+ghana|cross.?border|international|offshore)"
+    r"(outside\s+ghana|cross.?border|international\s+transfer|offshore|foreign\s+server)"
 )
 _GH_CARD_RE = re.compile(r"GHA-[0-9]{9}-[0-9]\b")
 
