@@ -93,8 +93,8 @@ _NGN_BVN_RE = re.compile(r"(?i)(bvn|bank\s+verification).{0,20}\b[0-9]{11}\b")
 # excludes noun phrases ("transfer limit", "transfer fee") where transfer is a
 # modifier, not an action verb.
 _NGN_TRANSFER_VERB_RE = re.compile(
-    r"\b(?:send|pay|wire|remit|move|disburse)\b"
-    r"|\btransfer(?!\s+(?:limit|fee|history|rate|request|cap|ceiling|charge|tax))\b",
+    r"\b(?:send|pay|wire|remit|move|disburse|submit|create|process|initiate)\b"
+    r"|\btransfer(?!\s+(?:limit|fee|history|rate|cap|ceiling|charge|tax))\b",
     re.IGNORECASE,
 )
 _CBN_NIP_CAP = 10_000_000
