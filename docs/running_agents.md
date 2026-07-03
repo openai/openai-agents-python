@@ -465,7 +465,7 @@ Set the hook per run via `run_config` to redact sensitive data, trim long histor
 
 ### Error handlers
 
-All `Runner` entry points accept `error_handlers`, a dict keyed by error kind. The supported keys are `"max_turns"` and `"model_refusal"`. Use them when you want to return a controlled final output instead of raising `MaxTurnsExceeded` or `ModelRefusalError`.
+All `Runner` entry points accept `error_handlers`, a dict keyed by error kind. The supported keys are `"max_turns"`, `"model_refusal"`, and `"invalid_final_output"`. Use them when you want to return a controlled final output instead of raising `MaxTurnsExceeded`, `ModelRefusalError`, or `ModelBehaviorError`.
 
 ```python
 from agents import (
@@ -524,6 +524,38 @@ result = Runner.run_sync(
     agent,
     "Make me something unsafe.",
     error_handlers={"model_refusal": on_model_refusal},
+)
+print(result.final_output)
+```
+
+Use `"invalid_final_output"` when the model's final message does not validate against the agent's `output_type` and you want a fallback instead of ending the run with `ModelBehaviorError`. The handler only fires for final output validation failures; other `ModelBehaviorError` cases, such as calls to nonexistent tools, are not affected.
+
+```python
+from pydantic import BaseModel
+
+from agents import Agent, ModelBehaviorError, RunErrorHandlerInput, Runner
+
+
+class Recipe(BaseModel):
+    ingredients: list[str]
+    parse_error: str | None = None
+
+
+def on_invalid_final_output(data: RunErrorHandlerInput[None]) -> Recipe:
+    assert isinstance(data.error, ModelBehaviorError)
+    return Recipe(ingredients=[], parse_error=data.error.message)
+
+
+agent = Agent(
+    name="Recipe assistant",
+    instructions="Return a structured recipe.",
+    output_type=Recipe,
+)
+
+result = Runner.run_sync(
+    agent,
+    "Plan tonight's dinner.",
+    error_handlers={"invalid_final_output": on_invalid_final_output},
 )
 print(result.final_output)
 ```

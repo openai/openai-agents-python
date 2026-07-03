@@ -128,7 +128,7 @@ def create_message_output_item(agent: Agent[Any], output_text: str) -> MessageOu
 async def resolve_run_error_handler_result(
     *,
     error_handlers: RunErrorHandlers[TContext] | None,
-    error: MaxTurnsExceeded | ModelRefusalError,
+    error: MaxTurnsExceeded | ModelRefusalError | ModelBehaviorError,
     context_wrapper: RunContextWrapper[TContext],
     run_data: RunErrorData,
 ) -> RunErrorHandlerResult | None:
@@ -136,6 +136,8 @@ async def resolve_run_error_handler_result(
         return None
     if isinstance(error, ModelRefusalError):
         handler = error_handlers.get("model_refusal")
+    elif isinstance(error, ModelBehaviorError):
+        handler = error_handlers.get("invalid_final_output")
     else:
         handler = error_handlers.get("max_turns")
     if handler is None:

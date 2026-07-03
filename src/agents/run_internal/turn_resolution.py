@@ -807,7 +807,30 @@ async def execute_tools_and_side_effects(
                     tool_output_guardrail_results=tool_output_guardrail_results,
                 )
             if output_schema and not output_schema.is_plain_text() and potential_final_output_text:
-                final_output = output_schema.validate_json(potential_final_output_text)
+                try:
+                    final_output = output_schema.validate_json(potential_final_output_text)
+                except ModelBehaviorError as invalid_output_error:
+                    run_error_data = build_run_error_data(
+                        input=original_input,
+                        new_items=pre_step_items + new_step_items,
+                        raw_responses=[new_response],
+                        last_agent=public_agent,
+                    )
+                    handler_result = await resolve_run_error_handler_result(
+                        error_handlers=error_handlers,
+                        error=invalid_output_error,
+                        context_wrapper=context_wrapper,
+                        run_data=run_error_data,
+                    )
+                    if handler_result is None:
+                        raise
+
+                    final_output = validate_handler_final_output(
+                        public_agent, handler_result.final_output
+                    )
+                    if handler_result.include_in_history:
+                        output_text = format_final_output_text(public_agent, final_output)
+                        new_step_items.append(create_message_output_item(public_agent, output_text))
                 return await execute_final_output_call(
                     public_agent=public_agent,
                     original_input=original_input,

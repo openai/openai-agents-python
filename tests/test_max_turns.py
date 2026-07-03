@@ -11,6 +11,7 @@ from agents import (
     ItemHelpers,
     MaxTurnsExceeded,
     MessageOutputItem,
+    ModelBehaviorError,
     ModelRefusalError,
     RunErrorHandlerResult,
     Runner,
@@ -230,6 +231,84 @@ async def test_streamed_refusal_handler_returns_output():
         event.name == "message_output_created"
         and isinstance(event.item, MessageOutputItem)
         and ItemHelpers.text_message_output(event.item) == "safe fallback"
+        for event in run_item_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_streamed_invalid_final_output_raises_without_handler():
+    model = FakeModel(initial_output=[get_text_message("not valid json")])
+    agent = Agent(name="test_1", model=model, output_type=FooModel)
+
+    with pytest.raises(ModelBehaviorError):
+        await Runner.run(agent, input="user_message", max_turns=3)
+
+
+@pytest.mark.asyncio
+async def test_non_streamed_invalid_final_output_handler_returns_structured_output():
+    model = FakeModel(initial_output=[get_text_message("not valid json")])
+    agent = Agent(name="test_1", model=model, output_type=FooModel)
+
+    def handler(data):
+        assert isinstance(data.error, ModelBehaviorError)
+        assert data.run_data.raw_responses
+        return FooModel(summary="safe fallback")
+
+    result = await Runner.run(
+        agent,
+        input="user_message",
+        max_turns=3,
+        error_handlers={"invalid_final_output": handler},
+    )
+
+    assert isinstance(result.final_output, FooModel)
+    assert result.final_output.summary == "safe fallback"
+    assert ItemHelpers.text_message_outputs(result.new_items).endswith(
+        '{"summary":"safe fallback"}'
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_streamed_invalid_final_output_handler_can_skip_history():
+    model = FakeModel(initial_output=[get_text_message("not valid json")])
+    agent = Agent(name="test_1", model=model, output_type=FooModel)
+
+    result = await Runner.run(
+        agent,
+        input="user_message",
+        error_handlers={
+            "invalid_final_output": lambda data: RunErrorHandlerResult(
+                final_output=FooModel(summary="safe fallback"),
+                include_in_history=False,
+            ),
+        },
+    )
+
+    assert result.final_output.summary == "safe fallback"
+    # The model's own invalid message is still part of the turn's items; only the
+    # handler's fallback is skipped, so no extra synthetic message is appended for it.
+    assert ItemHelpers.text_message_outputs(result.new_items) == "not valid json"
+
+
+@pytest.mark.asyncio
+async def test_streamed_invalid_final_output_handler_returns_output():
+    model = FakeModel(initial_output=[get_text_message("not valid json")])
+    agent = Agent(name="test_1", model=model, output_type=FooModel)
+
+    result = Runner.run_streamed(
+        agent,
+        input="user_message",
+        error_handlers={
+            "invalid_final_output": lambda data: FooModel(summary="safe fallback"),
+        },
+    )
+
+    events = [event async for event in result.stream_events()]
+
+    assert result.final_output.summary == "safe fallback"
+    run_item_events = [event for event in events if isinstance(event, RunItemStreamEvent)]
+    assert any(
+        event.name == "message_output_created" and isinstance(event.item, MessageOutputItem)
         for event in run_item_events
     )
 
