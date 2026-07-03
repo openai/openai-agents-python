@@ -281,10 +281,16 @@ async def african_regulatory_guardrail(
     if isinstance(input, str):
         text = input
     else:
+        # Only inspect the most-recent user message. Concatenating the full
+        # history would cause stale assistant text (e.g. a prior refusal
+        # quoting a blocked phrase) to trip the guardrail on later unrelated
+        # turns.
+        user_items = [
+            item for item in input if isinstance(item, dict) and item.get("role") == "user"
+        ]
+        target = user_items[-1:] if user_items else []
         parts: list[str] = []
-        for item in input:
-            if not isinstance(item, dict):
-                continue
+        for item in target:
             content = item.get("content")
             if isinstance(content, str):
                 parts.append(content)
@@ -296,7 +302,6 @@ async def african_regulatory_guardrail(
                         parts.append(part.get("text", ""))
                     elif isinstance(part, str):
                         parts.append(part)
-            # Items with no "content" key (e.g. tool calls) are skipped.
         text = " ".join(parts)
 
     checker = _CHECKERS.get(ctx.jurisdiction)
