@@ -80,7 +80,7 @@ class AgentContext:
 # CBN NIP (NIBSS Instant Payment) Framework — ₦10,000,000 per-transaction cap
 # NDPA 2023 Schedule 1 / CBN BVN Policy Framework — BVN as biometric data
 
-_NGN_AMOUNT_RE = re.compile(r"(?:₦|NGN)\s*([\d,]+(?:\.\d{1,2})?)")
+_NGN_AMOUNT_RE = re.compile(r"(?:₦|NGN)\s*([\d,]+(?:\.\d{1,2})?)", re.IGNORECASE)
 _NGN_BVN_RE = re.compile(r"(?i)(bvn|bank\s+verification).{0,20}\b[0-9]{11}\b")
 _CBN_NIP_CAP = 10_000_000
 
@@ -117,7 +117,7 @@ def _check_nigeria(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
                 authority="Nigeria Data Protection Commission (NDPC)",
                 decision="deny",
                 message=(
-                    "BVN Protection: BVN value detected in agent output — blocked "
+                    "BVN Protection: BVN value detected in request — blocked "
                     "(NDPA 2023 Schedule 1 classifies BVN as biometric personal data)"
                 ),
             )
@@ -166,7 +166,7 @@ _GH_CROSS_BORDER_RE = re.compile(
     r"(?i)(send|transfer|export|upload|forward).{0,60}"
     r"(outside\s+ghana|cross.?border|international|offshore)"
 )
-_GH_CARD_RE = re.compile(r"GHA-[0-9]{9}-[0-9]")
+_GH_CARD_RE = re.compile(r"GHA-[0-9]{9}-[0-9]\b")
 
 
 def _check_ghana(text: str, ctx: AgentContext) -> list[ComplianceViolation]:
