@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from uuid import uuid4
 
 import agents.tracing.traces as trace_module
@@ -78,6 +79,24 @@ def test_create_trace_for_run_does_not_reattach_after_trace_state_reload() -> No
     created = create_trace_for_run(
         workflow_name="workflow",
         trace_id=trace_state.trace_id,
+        group_id=trace_state.group_id,
+        metadata=dict(trace_state.metadata or {}),
+        tracing=None,
+        disabled=False,
+        trace_state=trace_state,
+        reattach_resumed_trace=True,
+    )
+
+    assert isinstance(created, TraceImpl)
+    assert not isinstance(created, ReattachedTrace)
+
+
+def test_create_trace_for_run_does_not_reattach_when_trace_id_differs() -> None:
+    trace_state = _mark_trace_as_started()
+
+    created = create_trace_for_run(
+        workflow_name="workflow",
+        trace_id=_new_trace_id(),
         group_id=trace_state.group_id,
         metadata=dict(trace_state.metadata or {}),
         tracing=None,
@@ -214,6 +233,21 @@ def test_create_trace_for_run_uses_existing_current_trace() -> None:
         )
 
         assert created is None
+
+
+def test_trace_logs_warning_when_current_trace_exists(
+    caplog,
+) -> None:
+    Scope.set_current_trace(None)
+    outer_trace = trace(workflow_name="outer", trace_id=_new_trace_id())
+    assert isinstance(outer_trace, TraceImpl)
+
+    with outer_trace:
+        with caplog.at_level(logging.WARNING, logger="openai.agents"):
+            inner_trace = trace(workflow_name="inner", trace_id=_new_trace_id())
+
+    assert isinstance(inner_trace, TraceImpl)
+    assert "Trace already exists" in caplog.text
 
 
 def test_started_trace_id_cache_is_bounded(monkeypatch) -> None:

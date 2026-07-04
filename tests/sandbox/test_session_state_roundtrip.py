@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import uuid
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 
 import pytest
 from pydantic import ValidationError
@@ -150,6 +150,13 @@ class TestSandboxSessionStateRoundTrip:
     def test_subclass_registration_skips_non_literal_or_empty_type_defaults(self) -> None:
         assert "plain-type" not in SandboxSessionState._subclass_registry
         assert "" not in SandboxSessionState._subclass_registry
+
+    def test_subclass_registration_skips_missing_type_field(self) -> None:
+        class _NoTypeFieldSessionState(SandboxSessionState):
+            type: ClassVar[str] = "no-type-field"  # type: ignore[misc]
+
+        assert "no-type-field" not in SandboxSessionState._subclass_registry
+        assert "type" not in _NoTypeFieldSessionState.model_fields
 
     @pytest.mark.parametrize(
         ("raw_ports", "expected"),

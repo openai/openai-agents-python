@@ -398,6 +398,28 @@ def test_render_memory_prompts_include_extra_prompt_section() -> None:
     assert "Focus on user preferences." in consolidation_prompt
 
 
+def test_render_memory_consolidation_prompt_lists_removed_rollouts() -> None:
+    selection = PhaseTwoInputSelection(
+        selected=[],
+        retained_rollout_ids=set(),
+        removed=[
+            PhaseTwoSelectionItem(
+                rollout_id="old-rollout",
+                updated_at="",
+                rollout_path="sessions/old-rollout.jsonl",
+                rollout_summary_file="memories/rollout_summaries/old.md",
+                terminal_state="completed",
+            )
+        ],
+    )
+
+    prompt = render_memory_consolidation_prompt(memory_root="memory", selection=selection)
+
+    assert "- removed from the last successful Phase 2 run: 1" in prompt
+    assert "rollout_id=old-rollout" in prompt
+    assert "updated_at=unknown" in prompt
+
+
 def test_updated_at_sort_key_places_unknown_timestamps_last() -> None:
     assert _updated_at_sort_key("updated_at: 2025-03-01T00:00:00Z\n") > _updated_at_sort_key(
         "updated_at: unknown\n"
@@ -610,6 +632,14 @@ def test_memory_capability_rejects_invalid_sessions_dir(
 def test_memory_capability_requires_read_or_generate() -> None:
     with pytest.raises(ValueError, match="Memory requires at least one of `read` or `generate`"):
         Memory(read=None, generate=None)
+
+
+@pytest.mark.asyncio
+async def test_memory_capability_instructions_requires_bound_session() -> None:
+    capability = Memory(generate=None)
+
+    with pytest.raises(ValueError, match="Memory capability is not bound to a SandboxSession"):
+        await capability.instructions(Manifest())
 
 
 def test_memory_generate_config_rejects_non_positive_recent_rollout_limit() -> None:

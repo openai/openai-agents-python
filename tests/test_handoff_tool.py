@@ -470,6 +470,40 @@ async def test_handoff_is_enabled_filtering_integration():
     assert "agent_2" not in agent_names
 
 
+@pytest.mark.asyncio
+async def test_handoff_is_enabled_sync_callable_false_filters_handoff():
+    target_agent = Agent(name="target")
+    main_agent = Agent(
+        name="main",
+        handoffs=[handoff(target_agent, is_enabled=lambda ctx, agent: False)],
+    )
+
+    filtered_handoffs = await get_handoffs(main_agent, RunContextWrapper(main_agent))
+
+    assert filtered_handoffs == []
+
+
+@pytest.mark.asyncio
+async def test_handoff_direct_sync_is_enabled_callable_filters_handoff():
+    async def invoke_handoff(ctx: RunContextWrapper[Any], input_json: str) -> Agent[Any]:
+        _ = (ctx, input_json)
+        return Agent(name="target")
+
+    handoff_obj = Handoff(
+        tool_name="transfer_to_target",
+        tool_description="Transfer to target.",
+        input_json_schema={},
+        on_invoke_handoff=invoke_handoff,
+        agent_name="target",
+        is_enabled=lambda ctx, agent: False,
+    )
+    main_agent = Agent(name="main", handoffs=[handoff_obj])
+
+    filtered_handoffs = await get_handoffs(main_agent, RunContextWrapper(main_agent))
+
+    assert filtered_handoffs == []
+
+
 class StrictInput(BaseModel):
     name: str
     age: int

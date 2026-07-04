@@ -287,6 +287,32 @@ def test_drop_orphan_function_calls_does_not_pair_named_tool_search_with_anonymo
     assert [cast(dict[str, Any], item)["type"] for item in filtered] == ["tool_search_output"]
 
 
+def test_drop_orphan_function_calls_keeps_reasoning_chain_before_non_dropped_item() -> None:
+    payload: list[Any] = [
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_1", "summary": []}),
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_2", "summary": []}),
+        cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": []}),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "function_call",
+                "call_id": "orphan_call",
+                "name": "orphan",
+                "arguments": "{}",
+            },
+        ),
+    ]
+
+    filtered = run_items.drop_orphan_function_calls(cast(list[TResponseInputItem], payload))
+
+    assert [cast(dict[str, Any], item)["id"] for item in filtered[:2]] == ["rs_1", "rs_2"]
+    assert [cast(dict[str, Any], item)["type"] for item in filtered] == [
+        "reasoning",
+        "reasoning",
+        "message",
+    ]
+
+
 def test_normalize_and_ensure_input_item_format_keep_non_dict_entries() -> None:
     item = cast(TResponseInputItem, "raw-item")
     assert run_items.ensure_input_item_format(item) == item
@@ -325,6 +351,28 @@ def test_fingerprint_input_item_handles_edge_cases(monkeypatch: pytest.MonkeyPat
     opaque_fingerprint = run_items.fingerprint_input_item(_Opaque(), ignore_ids_for_matching=True)
     assert opaque_fingerprint is not None
     assert '"id"' not in opaque_fingerprint
+
+
+def test_fingerprint_input_item_returns_none_when_serialization_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise_json_error(*_args: Any, **_kwargs: Any) -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cast(Any, run_items).json, "dumps", _raise_json_error)
+
+    assert run_items.fingerprint_input_item({"type": "message", "role": "user"}) is None
+
+
+def test_strip_metadata_and_reasoning_id_helpers_keep_non_matching_items() -> None:
+    raw = cast(TResponseInputItem, "raw-item")
+    non_reasoning = cast(TResponseInputItem, {"type": "message", "id": "msg_1"})
+    reasoning_without_id = cast(TResponseInputItem, {"type": "reasoning", "summary": []})
+
+    assert run_items.strip_internal_input_item_metadata(raw) == raw
+    assert run_items._without_reasoning_item_id(raw) == raw
+    assert run_items._without_reasoning_item_id(non_reasoning) == non_reasoning
+    assert run_items._without_reasoning_item_id(reasoning_without_id) == reasoning_without_id
 
 
 def test_deduplicate_input_items_handles_fake_ids_and_approval_request_ids() -> None:

@@ -15,6 +15,7 @@ from agents.sandbox.capabilities.tools import (
     WriteStdinArgs,
     WriteStdinTool,
 )
+from agents.sandbox.capabilities.tools.shell_tool import _resolve_shell
 from agents.sandbox.errors import ExecTimeoutError, ExecTransportError, PtySessionNotFoundError
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.session.pty_types import PtyExecUpdate
@@ -197,6 +198,19 @@ class _PtyNoStdinShellSession(_PtyShellSession):
         raise RuntimeError("stdin is not available for this process")
 
 
+class _PtyUnexpectedStdinErrorShellSession(_PtyShellSession):
+    async def pty_write_stdin(
+        self,
+        *,
+        session_id: int,
+        chars: str,
+        yield_time_s: float | None = None,
+        max_output_tokens: int | None = None,
+    ) -> PtyExecUpdate:
+        _ = (session_id, chars, yield_time_s, max_output_tokens)
+        raise RuntimeError("unexpected stdin failure")
+
+
 class _PtyTransportFailingShellSession(_OutputShellSession):
     def __init__(
         self,
@@ -261,6 +275,9 @@ def _patch_shell_tool_clock(
 
 
 class TestShellCapability:
+    def test_resolve_shell_uses_plain_sh_when_login_is_false(self) -> None:
+        assert _resolve_shell(None, login=False) == ["sh", "-c"]
+
     def test_tools_requires_bound_session(self) -> None:
         capability = Shell()
 
@@ -860,3 +877,15 @@ class TestShellCapability:
             "stdin is not available for this process. Start the command with `tty=true` in "
             "`exec_command` before using `write_stdin`."
         )
+
+    @pytest.mark.asyncio
+    async def test_write_stdin_tool_reraises_unexpected_runtime_error(self) -> None:
+        tool = WriteStdinTool(
+            session=_PtyUnexpectedStdinErrorShellSession(Manifest(root="/workspace"))
+        )
+
+        with pytest.raises(RuntimeError, match="unexpected stdin failure"):
+            await tool.on_invoke_tool(
+                cast(ToolContext[object], None),
+                WriteStdinArgs(session_id=1337).model_dump_json(),
+            )

@@ -29,12 +29,21 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputRefusal,
     ResponseOutputText,
+    ResponseReasoningItem,
 )
 
 from agents import Agent, Runner, function_tool
 from agents.exceptions import ModelBehaviorError, UserError
 from agents.model_settings import ModelSettings
-from agents.models.chatcmpl_stream_handler import ChatCmplStreamHandler
+from agents.models.chatcmpl_stream_handler import (
+    ChatCmplStreamHandler,
+    Part,
+    SequenceNumber,
+    StreamingState,
+    _BufferedToolCall,
+    _merge_buffered_metadata,
+    _StreamOutputLayout,
+)
 from agents.models.interface import ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_provider import OpenAIProvider
@@ -58,6 +67,36 @@ def _empty_response() -> Response:
         tools=[],
         parallel_tool_calls=False,
     )
+
+
+async def _completion_stream(
+    *chunks: ChatCompletionChunk,
+) -> AsyncIterator[ChatCompletionChunk]:
+    for chunk in chunks:
+        yield chunk
+
+
+async def _collect_handler_events(
+    *chunks: ChatCompletionChunk,
+    model: str | None = None,
+) -> list[Any]:
+    return [
+        event
+        async for event in ChatCmplStreamHandler.handle_stream(
+            _empty_response(), cast(Any, _completion_stream(*chunks)), model=model
+        )
+    ]
+
+
+async def _collect_buffered_tool_call_chunks(
+    *chunks: ChatCompletionChunk,
+) -> list[ChatCompletionChunk]:
+    return [
+        chunk
+        async for chunk in ChatCmplStreamHandler.buffer_tool_call_stream(
+            _completion_stream(*chunks)
+        )
+    ]
 
 
 @pytest.mark.allow_call_model_methods
@@ -294,6 +333,415 @@ async def test_stream_handler_rejects_nonzero_choice_index_in_strict_mode() -> N
             _empty_response(), cast(Any, fake_stream()), strict_feature_validation=True
         ):
             pass
+
+
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_merges_provider_metadata() -> None:
+    tool_call_delta1 = ChoiceDeltaToolCall(
+        index=0,
+        id="tool-id",
+        function=ChoiceDeltaToolCallFunction(name="my_func", arguments='{"a":'),
+        type="function",
+    )
+    tool_call_delta1_any = cast(Any, tool_call_delta1)
+    tool_call_delta1_any.provider_specific_fields = {
+        "nested": {"keep": "provider", "stable": {"value": 1}},
+        "replace": "old",
+    }
+    tool_call_delta1_any.extra_content = {
+        "google": {"thought_signature": "sig-1", "stable": {"value": "kept"}}
+    }
+    tool_call_delta2 = ChoiceDeltaToolCall(
+        index=0,
+        id=None,
+        function=ChoiceDeltaToolCallFunction(name=None, arguments="1}"),
+        type="function",
+    )
+    tool_call_delta2_any = cast(Any, tool_call_delta2)
+    tool_call_delta2_any.provider_specific_fields = {
+        "nested": {"stable": {}, "new": "provider"},
+        "replace": "new",
+    }
+    tool_call_delta2_any.extra_content = {"google": {"stable": {}, "new": "extra"}}
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call_delta1]))],
+    )
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call_delta2]))],
+    )
+
+    buffered_chunks = await _collect_buffered_tool_call_chunks(chunk1, chunk2)
+
+    assert len(buffered_chunks) == 1
+    buffered_delta = buffered_chunks[0].choices[0].delta
+    assert buffered_delta.tool_calls
+    buffered_tool_call = buffered_delta.tool_calls[0]
+    assert buffered_tool_call.function
+    assert buffered_tool_call.function.arguments == '{"a":1}'
+    assert cast(Any, buffered_tool_call).provider_specific_fields == {
+        "nested": {"keep": "provider", "stable": {"value": 1}, "new": "provider"},
+        "replace": "new",
+    }
+    assert cast(Any, buffered_tool_call).extra_content == {
+        "google": {"thought_signature": "sig-1", "stable": {"value": "kept"}, "new": "extra"}
+    }
+
+
+def test_stream_handler_internal_part_stores_text_and_type() -> None:
+    part = Part(text="hello", type="output_text")
+
+    assert part.text == "hello"
+    assert part.type == "output_text"
+
+
+def test_merge_buffered_metadata_keeps_existing_scalar_when_empty_dict_arrives() -> None:
+    merged = _merge_buffered_metadata(
+        {"stable": "keep-me"},
+        {"stable": {}, "new": {}},
+    )
+
+    assert merged == {"stable": "keep-me", "new": {}}
+
+
+def test_stream_output_layout_rejects_unknown_function_call_index() -> None:
+    layout = _StreamOutputLayout()
+
+    with pytest.raises(KeyError, match="Function call index 9 has not been tracked"):
+        layout.function_call_output_index(StreamingState(), 9)
+
+
+@pytest.mark.parametrize(
+    ("buffered_call", "message"),
+    [
+        (
+            _BufferedToolCall(index=0, name="my_func"),
+            "without a tool call id",
+        ),
+        (
+            _BufferedToolCall(index=0, call_id="tool-id"),
+            "without a function name",
+        ),
+    ],
+)
+def test_buffered_tool_call_delta_requires_id_and_name(
+    buffered_call: _BufferedToolCall,
+    message: str,
+) -> None:
+    with pytest.raises(ModelBehaviorError, match=message):
+        ChatCmplStreamHandler._buffered_tool_call_delta(buffered_call)
+
+
+def test_function_call_item_omits_provider_data_when_absent() -> None:
+    function_call = ResponseFunctionToolCall(
+        id="fake-id",
+        call_id="call-id",
+        arguments="",
+        name="my_func",
+        type="function_call",
+    )
+
+    item = ChatCmplStreamHandler._function_call_item(
+        StreamingState(),
+        function_call,
+        arguments="{}",
+    )
+
+    assert item.arguments == "{}"
+    assert "provider_data" not in item.model_dump()
+
+
+def test_finish_reasoning_summary_part_clears_invalid_active_index() -> None:
+    reasoning_item = ResponseReasoningItem(id="fake-id", summary=[], type="reasoning")
+    state = StreamingState(
+        reasoning_content_index_and_output=(0, reasoning_item),
+        active_reasoning_summary_index=0,
+    )
+
+    events = list(ChatCmplStreamHandler._finish_reasoning_summary_part(state, SequenceNumber()))
+
+    assert events == []
+    assert state.active_reasoning_summary_index is None
+
+
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_preserves_empty_choice_chunks() -> None:
+    chunk = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[],
+    )
+
+    buffered_chunks = await _collect_buffered_tool_call_chunks(chunk)
+
+    assert buffered_chunks == [chunk]
+
+
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_keeps_passthrough_index_passthrough() -> None:
+    custom_tool_call_delta = ChoiceDeltaToolCall.model_construct(
+        index=0,
+        id="custom-id",
+        type="custom",
+    )
+    function_tool_call_delta = ChoiceDeltaToolCall(
+        index=0,
+        id="function-id",
+        function=ChoiceDeltaToolCallFunction(name="my_func", arguments="{}"),
+        type="function",
+    )
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[custom_tool_call_delta]))],
+    )
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[function_tool_call_delta]))],
+    )
+
+    buffered_chunks = await _collect_buffered_tool_call_chunks(chunk1, chunk2)
+
+    assert len(buffered_chunks) == 2
+    assert buffered_chunks[0].choices[0].delta.tool_calls == [custom_tool_call_delta]
+    assert buffered_chunks[1].choices[0].delta.tool_calls == [function_tool_call_delta]
+
+
+@pytest.mark.parametrize(
+    ("delta", "expected"),
+    [
+        (None, False),
+        (ChoiceDelta(), False),
+        (ChoiceDelta(content="text"), True),
+        (ChoiceDelta.model_construct(refusal="blocked"), True),
+        (ChoiceDelta.model_construct(reasoning_content="summary"), True),
+        (ChoiceDelta.model_construct(reasoning="scratchpad"), True),
+        (ChoiceDelta.model_construct(thinking_blocks=[{"thinking": "hidden"}]), True),
+    ],
+)
+def test_stream_handler_detects_passthrough_delta_shapes(
+    delta: ChoiceDelta | None,
+    expected: bool,
+) -> None:
+    assert ChatCmplStreamHandler._delta_has_passthrough_output(delta) is expected
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_ignores_choice_without_delta() -> None:
+    chunk = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice.model_construct(index=0, delta=None)],
+    )
+
+    events = await _collect_handler_events(chunk)
+
+    assert [event.type for event in events] == ["response.created", "response.completed"]
+    completed_event = events[-1]
+    assert isinstance(completed_event, ResponseCompletedEvent)
+    assert completed_event.response.output == []
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_converts_third_party_reasoning_text() -> None:
+    reasoning_delta1 = ChoiceDelta.model_construct(reasoning="think ")
+    reasoning_delta2 = ChoiceDelta.model_construct(reasoning="hard")
+    chunks = [
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=reasoning_delta1)],
+        ),
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=reasoning_delta2)],
+        ),
+    ]
+
+    events = await _collect_handler_events(*chunks, model="third-party")
+
+    reasoning_delta_events = [
+        event for event in events if event.type == "response.reasoning_text.delta"
+    ]
+    assert [event.delta for event in reasoning_delta_events] == ["think ", "hard"]
+
+    reasoning_done_event = next(
+        event
+        for event in events
+        if event.type == "response.output_item.done"
+        and isinstance(event.item, ResponseReasoningItem)
+    )
+    reasoning_done_item = cast(ResponseReasoningItem, reasoning_done_event.item)
+    assert reasoning_done_item.content
+    assert cast(Any, reasoning_done_item.content[0]).text == "think hard"
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    assert isinstance(completed_event, ResponseCompletedEvent)
+    completed_reasoning_item = completed_event.response.output[0]
+    assert isinstance(completed_reasoning_item, ResponseReasoningItem)
+    assert completed_reasoning_item.content
+    assert cast(Any, completed_reasoning_item.content[0]).text == "think hard"
+    assert completed_reasoning_item.model_dump().get("provider_data") == {
+        "model": "third-party",
+        "response_id": "chunk-id",
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_preserves_thinking_blocks_with_reasoning_summary() -> None:
+    delta = ChoiceDelta.model_construct(
+        reasoning_content="summary",
+        thinking_blocks=[
+            {"thinking": "hidden one ", "signature": "sig-1"},
+            {"thinking": "hidden two", "signature": "sig-2"},
+        ],
+    )
+    chunk = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=delta)],
+    )
+
+    events = await _collect_handler_events(chunk)
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    reasoning_item = completed_event.response.output[0]
+    assert isinstance(reasoning_item, ResponseReasoningItem)
+    assert reasoning_item.summary[0].text == "summary"
+    assert reasoning_item.content
+    assert cast(Any, reasoning_item.content[0]).text == "hidden one hidden two"
+    assert reasoning_item.encrypted_content == "sig-2"
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_adds_third_party_reasoning_text_to_summary_item() -> None:
+    chunks = [
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[
+                Choice(index=0, delta=ChoiceDelta.model_construct(reasoning_content="summary"))
+            ],
+        ),
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta.model_construct(reasoning="details"))],
+        ),
+    ]
+
+    events = await _collect_handler_events(*chunks)
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    reasoning_item = completed_event.response.output[0]
+    assert isinstance(reasoning_item, ResponseReasoningItem)
+    assert reasoning_item.summary[0].text == "summary"
+    assert reasoning_item.content
+    assert cast(Any, reasoning_item.content[0]).text == "details"
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_orders_refusal_after_reasoning_and_text() -> None:
+    chunks = [
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[
+                Choice(index=0, delta=ChoiceDelta.model_construct(reasoning_content="summary"))
+            ],
+        ),
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta(content="partial"))],
+        ),
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta.model_construct(refusal="blocked"))],
+        ),
+    ]
+
+    events = await _collect_handler_events(*chunks)
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    assistant_item = completed_event.response.output[1]
+    assert isinstance(assistant_item, ResponseOutputMessage)
+    assert isinstance(assistant_item.content[0], ResponseOutputText)
+    assert isinstance(assistant_item.content[1], ResponseOutputRefusal)
+    assert assistant_item.content[0].text == "partial"
+    assert assistant_item.content[1].refusal == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_places_text_after_existing_refusal_part() -> None:
+    chunks = [
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta.model_construct(refusal="blocked"))],
+        ),
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta(content="partial"))],
+        ),
+    ]
+
+    events = await _collect_handler_events(*chunks)
+
+    text_part_added = next(
+        event
+        for event in events
+        if event.type == "response.content_part.added"
+        and isinstance(event.part, ResponseOutputText)
+    )
+    assert text_part_added.content_index == 1
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    assistant_item = completed_event.response.output[0]
+    assert isinstance(assistant_item, ResponseOutputMessage)
+    assert isinstance(assistant_item.content[0], ResponseOutputText)
+    assert isinstance(assistant_item.content[1], ResponseOutputRefusal)
+    assert assistant_item.content[0].text == "partial"
+    assert assistant_item.content[1].refusal == "blocked"
 
 
 @pytest.mark.allow_call_model_methods

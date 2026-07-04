@@ -145,6 +145,20 @@ def test_draw_graph(mock_agent):
     _assert_mcp_nodes(graph.source)
 
 
+def test_draw_graph_renders_filename(monkeypatch, mock_agent):
+    render_calls: list[tuple[str, str, bool]] = []
+
+    def fake_render(self, filename: str, *, format: str, cleanup: bool):
+        render_calls.append((filename, format, cleanup))
+
+    monkeypatch.setattr(graphviz.Source, "render", fake_render)
+
+    graph = draw_graph(mock_agent, filename="agent_graph")
+
+    assert isinstance(graph, graphviz.Source)
+    assert render_calls == [("agent_graph", "png", True)]
+
+
 def _assert_mcp_nodes(source: str):
     assert (
         '"MCPServer1" [label="MCPServer1", shape=box, style=filled, '

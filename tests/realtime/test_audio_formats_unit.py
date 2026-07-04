@@ -29,6 +29,10 @@ def test_to_realtime_audio_format_none():
 
 
 def test_to_realtime_audio_format_from_mapping():
+    pcm_exact_rate = to_realtime_audio_format({"type": "audio/pcm", "rate": 24000})
+    assert isinstance(pcm_exact_rate, AudioPCM)
+    assert pcm_exact_rate.rate == 24000
+
     pcm = to_realtime_audio_format({"type": "audio/pcm", "rate": 16000})
     assert isinstance(pcm, AudioPCM)
     assert pcm.type == "audio/pcm"

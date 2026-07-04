@@ -1,5 +1,9 @@
 """Verify that all public exception classes are re-exported from the top-level agents package."""
 
+from typing import Any, cast
+
+import pytest
+
 import agents
 from agents import exceptions as exceptions_module
 
@@ -28,3 +32,22 @@ def test_all_public_exception_classes_are_reexported() -> None:
     for name in public_exception_names:
         assert hasattr(agents, name), f"agents.{name} is not re-exported from agents package"
         assert name in agents.__all__, f"{name} is missing from agents.__all__"
+
+
+def test_run_error_details_str_uses_pretty_printer(monkeypatch: pytest.MonkeyPatch) -> None:
+    details = exceptions_module.RunErrorDetails(
+        input="hello",
+        new_items=[],
+        raw_responses=[],
+        last_agent=cast(Any, object()),
+        context_wrapper=cast(Any, object()),
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+    )
+    monkeypatch.setattr(
+        exceptions_module,
+        "pretty_print_run_error_details",
+        lambda value: "formatted details" if value is details else "unexpected",
+    )
+
+    assert str(details) == "formatted details"

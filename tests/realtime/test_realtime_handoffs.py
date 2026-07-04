@@ -248,6 +248,21 @@ def test_realtime_handoff_on_handoff_without_input_runs() -> None:
     assert called == [True]
 
 
+@pytest.mark.asyncio
+async def test_realtime_handoff_async_on_handoff_without_input_runs() -> None:
+    rt = RealtimeAgent(name="async_no_input")
+    called: list[bool] = []
+
+    async def on_handoff(ctx: RunContextWrapper[Any]) -> None:
+        called.append(True)
+
+    handoff_obj = realtime_handoff(rt, on_handoff=on_handoff)
+    result = await handoff_obj.on_invoke_handoff(RunContextWrapper(None), "")
+
+    assert result is rt
+    assert called == [True]
+
+
 class StrictInput(BaseModel):
     name: str
     age: int

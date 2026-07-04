@@ -10,7 +10,11 @@ import pytest
 
 from agents.sandbox import SandboxArchiveLimits
 from agents.sandbox.entries import GCSMount, InContainerMountStrategy, MountpointMountPattern
-from agents.sandbox.errors import InvalidManifestPathError, WorkspaceArchiveWriteError
+from agents.sandbox.errors import (
+    InvalidCompressionSchemeError,
+    InvalidManifestPathError,
+    WorkspaceArchiveWriteError,
+)
 from agents.sandbox.files import EntryKind, FileEntry
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.sandboxes.unix_local import (
@@ -18,6 +22,7 @@ from agents.sandbox.sandboxes.unix_local import (
     UnixLocalSandboxSessionState,
 )
 from agents.sandbox.session.archive_extraction import zipfile_compatible_stream
+from agents.sandbox.session.archive_ops import extract_archive
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, Permissions
@@ -216,6 +221,17 @@ def test_sandbox_archive_limits_defaults_enable_sdk_thresholds() -> None:
     assert limits.max_input_bytes == 1024 * 1024 * 1024
     assert limits.max_extracted_bytes == 4 * 1024 * 1024 * 1024
     assert limits.max_members == 100_000
+
+
+@pytest.mark.asyncio
+async def test_extract_archive_rejects_missing_compression_scheme(tmp_path: Path) -> None:
+    session = _CountingExtractSession(tmp_path / "workspace")
+
+    with pytest.raises(InvalidCompressionSchemeError) as exc_info:
+        await extract_archive(session, "bundle", io.BytesIO(b"not an archive"))
+
+    assert exc_info.value.context["path"] == "bundle"
+    assert exc_info.value.context["scheme"] is None
 
 
 @pytest.mark.parametrize(

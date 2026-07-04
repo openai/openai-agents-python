@@ -10,6 +10,7 @@ from agents.lifecycle import AgentHooks, RunHooks
 from agents.models.interface import Model
 from agents.run import Runner
 from agents.run_context import AgentHookContext, RunContextWrapper, TContext
+from agents.run_internal.run_loop import validate_run_hooks
 from agents.tool import Tool, function_tool
 from agents.tool_context import ToolContext
 from tests.test_agent_llm_hooks import AgentHooksForTests
@@ -220,6 +221,11 @@ def test_runner_run_streamed_rejects_agent_hooks():
 
     with pytest.raises(TypeError, match="Run hooks must be instances of RunHooks"):
         Runner.run_streamed(agent, input="hello", hooks=hooks)
+
+
+def test_validate_run_hooks_rejects_non_hook_objects() -> None:
+    with pytest.raises(TypeError, match="Received object"):
+        validate_run_hooks(object())
 
 
 class BoomModel(Model):
