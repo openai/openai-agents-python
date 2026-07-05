@@ -17,6 +17,20 @@ from ...memory import SQLiteSession
 from ...memory.session_settings import SessionSettings, resolve_session_limit
 
 
+def _content_preview(content: Any, max_length: int | None = None) -> str:
+    """Return a string preview of a stored user-message ``content``.
+
+    User-message ``content`` may be a plain string or a list of structured parts
+    (for example multimodal ``input_text``/``input_image`` items). Both shapes are
+    coerced to a string so callers always receive the documented preview type, then
+    truncated to ``max_length`` characters when a limit is provided.
+    """
+    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    if max_length is not None and len(text) > max_length:
+        return text[:max_length] + "..."
+    return text
+
+
 class AdvancedSQLiteSession(SQLiteSession):
     """Enhanced SQLite session with conversation branching and usage analytics."""
 
@@ -956,9 +970,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                             turns.append(
                                 {
                                     "turn": turn_num,
-                                    "content": (
-                                        content[:100] + "..." if len(content) > 100 else content
-                                    ),
+                                    "content": _content_preview(content, 100),
                                     "full_content": content,
                                     "timestamp": created_at,
                                     "can_branch": True,
@@ -1014,7 +1026,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                             matches.append(
                                 {
                                     "turn": turn_num,
-                                    "content": content,
+                                    "content": _content_preview(content),
                                     "full_content": content,
                                     "timestamp": created_at,
                                     "can_branch": True,

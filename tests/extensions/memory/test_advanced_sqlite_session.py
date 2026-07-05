@@ -856,6 +856,58 @@ async def test_find_turns_by_content():
     session.close()
 
 
+async def test_get_conversation_turns_with_list_content():
+    """List (multimodal) content is previewed as a string instead of crashing or leaking a list."""
+    session_id = "conversation_turns_list_content_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    # A short list content must be previewed as a string, not returned as the raw list.
+    short_items: list[TResponseInputItem] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+    ]
+    await session.add_items(short_items)
+
+    # A long list content must not raise when the preview is built.
+    long_items: list[TResponseInputItem] = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": str(i)} for i in range(101)],
+        },
+    ]
+    await session.add_items(long_items)
+
+    turns = await session.get_conversation_turns()
+    assert len(turns) == 2
+
+    # 'content' is the documented truncated preview string, while 'full_content' keeps the list.
+    assert isinstance(turns[0]["content"], str)
+    assert isinstance(turns[0]["full_content"], list)
+
+    assert isinstance(turns[1]["content"], str)
+    assert turns[1]["content"].endswith("...")
+    assert isinstance(turns[1]["full_content"], list)
+
+    session.close()
+
+
+async def test_find_turns_by_content_with_list_content():
+    """find_turns_by_content returns a string preview for list (multimodal) content."""
+    session_id = "find_turns_list_content_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "hello world"}]},
+    ]
+    await session.add_items(items)
+
+    matches = await session.find_turns_by_content("hello")
+    assert len(matches) == 1
+    assert isinstance(matches[0]["content"], str)
+    assert isinstance(matches[0]["full_content"], list)
+
+    session.close()
+
+
 async def test_create_branch_from_content():
     """Test create_branch_from_content functionality."""
     session_id = "branch_from_content_test"
