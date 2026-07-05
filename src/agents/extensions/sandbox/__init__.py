@@ -109,6 +109,19 @@ try:
 except Exception:  # pragma: no cover
     _HAS_VERCEL = False
 
+try:
+    from .aliyun import (
+        DEFAULT_ALIYUN_WORKSPACE_ROOT as DEFAULT_ALIYUN_WORKSPACE_ROOT,
+        AliyunSandboxClient as AliyunSandboxClient,
+        AliyunSandboxClientOptions as AliyunSandboxClientOptions,
+        AliyunSandboxSession as AliyunSandboxSession,
+        AliyunSandboxSessionState as AliyunSandboxSessionState,
+    )
+
+    _HAS_ALIYUN = True
+except Exception:  # pragma: no cover
+    _HAS_ALIYUN = False
+
 __all__: list[str] = []
 
 if _HAS_E2B:
@@ -205,5 +218,16 @@ if _HAS_RUNLOOP:
             "RunloopTimeouts",
             "RunloopTunnelConfig",
             "RunloopUserParameters",
+        ]
+    )
+
+if _HAS_ALIYUN:
+    __all__.extend(
+        [
+            "DEFAULT_ALIYUN_WORKSPACE_ROOT",
+            "AliyunSandboxClient",
+            "AliyunSandboxClientOptions",
+            "AliyunSandboxSession",
+            "AliyunSandboxSessionState",
         ]
     )
