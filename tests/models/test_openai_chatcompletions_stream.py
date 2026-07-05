@@ -1108,6 +1108,82 @@ async def test_stream_response_includes_logprobs(monkeypatch) -> None:
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_stream_response_accumulates_logprobs_across_many_deltas(monkeypatch) -> None:
+    # Each content delta carries its own logprobs, and the streamed output text part must
+    # accumulate all of them in order across the whole stream.
+    tokens = ["a", "b", "c", "d", "e"]
+
+    def make_chunk(token: str) -> ChatCompletionChunk:
+        return ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[
+                Choice(
+                    index=0,
+                    delta=ChoiceDelta(content=token),
+                    logprobs=ChoiceLogprobs(
+                        content=[
+                            ChatCompletionTokenLogprob(
+                                token=token,
+                                logprob=-0.5,
+                                bytes=[1],
+                                top_logprobs=[TopLogprob(token=token, logprob=-0.5, bytes=[1])],
+                            )
+                        ]
+                    ),
+                )
+            ],
+        )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for token in tokens:
+            yield make_chunk(token)
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    output_events = []
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    ):
+        output_events.append(event)
+
+    completed_event = next(event for event in output_events if event.type == "response.completed")
+    assert isinstance(completed_event, ResponseCompletedEvent)
+    completed_resp = completed_event.response
+    assert isinstance(completed_resp.output[0], ResponseOutputMessage)
+    text_part = completed_resp.output[0].content[0]
+    assert isinstance(text_part, ResponseOutputText)
+    assert text_part.text == "".join(tokens)
+    assert text_part.logprobs is not None
+    assert [lp.token for lp in text_part.logprobs] == tokens
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_stream_response_yields_events_for_refusal_content(monkeypatch) -> None:
     """
     Validate that when the model streams a refusal string instead of normal content,

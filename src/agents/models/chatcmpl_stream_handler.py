@@ -746,10 +746,13 @@ class ChatCmplStreamHandler:
                 # Accumulate the text into the response part
                 state.text_content_index_and_output[1].text += delta.content
                 if output_logprobs:
-                    existing_logprobs = state.text_content_index_and_output[1].logprobs or []
-                    state.text_content_index_and_output[1].logprobs = (
-                        existing_logprobs + output_logprobs
-                    )
+                    existing_logprobs = state.text_content_index_and_output[1].logprobs
+                    if existing_logprobs is None:
+                        state.text_content_index_and_output[1].logprobs = output_logprobs
+                    else:
+                        # Extend in place to avoid rebuilding the full accumulated list on
+                        # every content delta, which would be O(n^2) over a long stream.
+                        existing_logprobs.extend(output_logprobs)
 
             # Handle refusals (model declines to answer)
             # This is always set by the OpenAI API, but not by others e.g. LiteLLM
