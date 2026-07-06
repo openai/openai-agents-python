@@ -92,6 +92,7 @@ async def test_resolve_run_error_handler_result_covers_async_and_validation_path
 
     no_handler = await run_error_handlers.resolve_run_error_handler_result(
         error_handlers={},
+        error_kind="max_turns",
         error=error,
         context_wrapper=context_wrapper,
         run_data=run_data,
@@ -103,6 +104,7 @@ async def test_resolve_run_error_handler_result_covers_async_and_validation_path
 
     async_none = await run_error_handlers.resolve_run_error_handler_result(
         error_handlers={"max_turns": async_handler},
+        error_kind="max_turns",
         error=error,
         context_wrapper=context_wrapper,
         run_data=run_data,
@@ -114,6 +116,7 @@ async def test_resolve_run_error_handler_result_covers_async_and_validation_path
             error_handlers={
                 "max_turns": lambda _handler_input: {"final_output": "x", "extra": "y"}
             },
+            error_kind="max_turns",
             error=error,
             context_wrapper=context_wrapper,
             run_data=run_data,

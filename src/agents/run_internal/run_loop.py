@@ -901,6 +901,7 @@ async def start_streaming(
                 )
                 handler_result = await resolve_run_error_handler_result(
                     error_handlers=error_handlers,
+                    error_kind="max_turns",
                     error=max_turns_error,
                     context_wrapper=context_wrapper,
                     run_data=run_error_data,
