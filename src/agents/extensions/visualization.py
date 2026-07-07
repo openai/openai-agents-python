@@ -97,7 +97,7 @@ def get_all_nodes(
             name = _escape_label(handoff.agent_name)
             parts.append(
                 f'"{name}" [label="{name}", '
-                f"shape=box, style=filled, style=rounded, "
+                f'shape=box, style="filled,rounded", '
                 f"fillcolor=lightyellow, width=1.5, height=0.8];"
             )
         if isinstance(handoff, Agent):
@@ -105,7 +105,7 @@ def get_all_nodes(
                 name = _escape_label(handoff.name)
                 parts.append(
                     f'"{name}" [label="{name}", '
-                    f"shape=box, style=filled, style=rounded, "
+                    f'shape=box, style="filled,rounded", '
                     f"fillcolor=lightyellow, width=1.5, height=0.8];"
                 )
             parts.append(get_all_nodes(handoff, agent, visited))
