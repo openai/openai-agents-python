@@ -45,14 +45,14 @@ Realtime エージェントは Realtime API への長寿命の接続を開いた
 -   voice は設定できますが、セッションがすでに発話音声を生成した後は変更できません。
 -   instructions、関数ツール、ハンドオフ、フック、出力ガードレールはすべて引き続き機能します。
 
-`RealtimeSessionModelSettings` は、新しいネストされた `audio` 設定と、古いフラットなエイリアスの両方をサポートします。新しいコードではネストされた形式を推奨し、新しい realtime エージェントでは `gpt-realtime-2` から始めてください。
+`RealtimeSessionModelSettings` は、新しいネストされた `audio` 設定と、古いフラットなエイリアスの両方をサポートします。新しいコードではネストされた形式を推奨し、新しい realtime エージェントでは `gpt-realtime-2.1` から始めてください。
 
 ```python
 runner = RealtimeRunner(
     starting_agent=agent,
     config={
         "model_settings": {
-            "model_name": "gpt-realtime-2",
+            "model_name": "gpt-realtime-2.1",
             "audio": {
                 "input": {
                     "format": "pcm16",

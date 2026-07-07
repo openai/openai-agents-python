@@ -31,7 +31,7 @@ SDK の主な機能は次のとおりです:
 -   **セッション**: エージェントループ内で作業コンテキストを維持するための永続的なメモリレイヤーです。
 -   **ヒューマンインザループ**: エージェント実行の各所に人間を関与させるための組み込みの仕組みです。
 -   **トレーシング**: ワークフローを可視化、デバッグ、監視するための組み込みのトレーシングで、OpenAI の評価、ファインチューニング、蒸留ツール群をサポートします。
--   **Realtime エージェント**: `gpt-realtime-2` を使い、自動割り込み検出、コンテキスト管理、ガードレールなどを備えた強力な音声エージェントを構築します。
+-   **Realtime エージェント**: `gpt-realtime-2.1` を使い、自動割り込み検出、コンテキスト管理、ガードレールなどを備えた強力な音声エージェントを構築します。
 
 ## Agents SDK と Responses API の選択
 
@@ -97,5 +97,5 @@ export OPENAI_API_KEY=sk-...
 | ターン間でメモリを保持する | [エージェントの実行](running_agents.md#choose-a-memory-strategy) and [セッション](sessions/index.md) |
 | OpenAI モデル、WebSocket トランスポート、または OpenAI 以外のプロバイダーを使用する | [モデル](models/index.md) |
 | 出力、実行アイテム、割り込み、再開状態を確認する | [実行結果](results.md) |
-| `gpt-realtime-2` を使って低レイテンシの音声エージェントを構築する | [Realtime エージェントのクイックスタート](realtime/quickstart.md) and [Realtime トランスポート](realtime/transport.md) |
+| `gpt-realtime-2.1` を使って低レイテンシの音声エージェントを構築する | [Realtime エージェントのクイックスタート](realtime/quickstart.md) and [Realtime トランスポート](realtime/transport.md) |
 | 音声認識 / エージェント / 音声合成のパイプラインを構築する | [音声パイプラインのクイックスタート](voice/quickstart.md) |

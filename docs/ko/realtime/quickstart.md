@@ -45,14 +45,14 @@ agent = RealtimeAgent(
 
 ### 3. 러너 구성
 
-새 코드에서는 중첩된 `audio.input` / `audio.output` 세션 설정 구조를 사용하는 것을 권장합니다. 새 실시간 에이전트에는 `gpt-realtime-2`로 시작하세요.
+새 코드에서는 중첩된 `audio.input` / `audio.output` 세션 설정 구조를 사용하는 것을 권장합니다. 새 실시간 에이전트에는 `gpt-realtime-2.1`로 시작하세요.
 
 ```python
 runner = RealtimeRunner(
     starting_agent=agent,
     config={
         "model_settings": {
-            "model_name": "gpt-realtime-2",
+            "model_name": "gpt-realtime-2.1",
             "audio": {
                 "input": {
                     "format": "pcm16",

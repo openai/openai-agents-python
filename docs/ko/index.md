@@ -31,7 +31,7 @@ SDK의 주요 기능은 다음과 같습니다.
 -   **세션**: 에이전트 루프 내에서 작업 컨텍스트를 유지하기 위한 영속 메모리 계층
 -   **휴먼인더루프 (HITL)**: 에이전트 실행 전반에 사람을 참여시키기 위한 내장 메커니즘
 -   **트레이싱**: OpenAI의 평가, 파인튜닝, 증류 도구 모음 지원과 함께 워크플로를 시각화, 디버깅, 모니터링하기 위한 내장 트레이싱
--   **실시간 에이전트**: `gpt-realtime-2`, 자동 인터럽션(중단 처리) 감지, 컨텍스트 관리, 가드레일 등을 활용해 강력한 음성 에이전트 구축
+-   **실시간 에이전트**: `gpt-realtime-2.1`, 자동 인터럽션(중단 처리) 감지, 컨텍스트 관리, 가드레일 등을 활용해 강력한 음성 에이전트 구축
 
 ## Agents SDK 또는 Responses API
 
@@ -97,5 +97,5 @@ export OPENAI_API_KEY=sk-...
 | 턴 간 메모리 유지 | [에이전트 실행](running_agents.md#choose-a-memory-strategy) 및 [세션](sessions/index.md) |
 | OpenAI 모델, 웹소켓 전송 또는 비 OpenAI 제공자 사용 | [모델](models/index.md) |
 | 출력, 실행 항목, 인터럽션(중단 처리), 재개 상태 검토 | [결과](results.md) |
-| `gpt-realtime-2`로 지연 시간이 낮은 음성 에이전트 구축 | [실시간 에이전트 빠른 시작](realtime/quickstart.md) 및 [실시간 전송](realtime/transport.md) |
+| `gpt-realtime-2.1`로 지연 시간이 낮은 음성 에이전트 구축 | [실시간 에이전트 빠른 시작](realtime/quickstart.md) 및 [실시간 전송](realtime/transport.md) |
 | 음성-텍스트 변환 / 에이전트 / 텍스트-음성 변환 파이프라인 구축 | [음성 파이프라인 빠른 시작](voice/quickstart.md) |

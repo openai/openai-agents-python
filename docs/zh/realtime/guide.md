@@ -45,14 +45,14 @@ search:
 -   可以配置音色，但在会话已经生成过语音音频后就不能再更改。
 -   instructions、工具调用、任务转移、钩子和输出安全防护措施仍然都可用。
 
-`RealtimeSessionModelSettings` 同时支持较新的嵌套式 `audio` 配置和较旧的扁平别名。新代码建议优先使用嵌套形式，并为新的实时智能体从 `gpt-realtime-2` 开始：
+`RealtimeSessionModelSettings` 同时支持较新的嵌套式 `audio` 配置和较旧的扁平别名。新代码建议优先使用嵌套形式，并为新的实时智能体从 `gpt-realtime-2.1` 开始：
 
 ```python
 runner = RealtimeRunner(
     starting_agent=agent,
     config={
         "model_settings": {
-            "model_name": "gpt-realtime-2",
+            "model_name": "gpt-realtime-2.1",
             "audio": {
                 "input": {
                     "format": "pcm16",

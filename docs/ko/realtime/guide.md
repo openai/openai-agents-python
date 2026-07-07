@@ -45,14 +45,14 @@ search:
 -   음성은 구성할 수 있지만, 세션이 이미 음성 오디오를 생성한 후에는 변경할 수 없습니다.
 -   지침, 함수 도구, 핸드오프, 훅, 출력 가드레일은 모두 계속 작동합니다.
 
-`RealtimeSessionModelSettings`는 새로운 중첩형 `audio` 구성과 이전의 평면형 별칭을 모두 지원합니다. 새 코드에는 중첩 구조를 권장하며, 새 실시간 에이전트는 `gpt-realtime-2`로 시작하세요.
+`RealtimeSessionModelSettings`는 새로운 중첩형 `audio` 구성과 이전의 평면형 별칭을 모두 지원합니다. 새 코드에는 중첩 구조를 권장하며, 새 실시간 에이전트는 `gpt-realtime-2.1`로 시작하세요.
 
 ```python
 runner = RealtimeRunner(
     starting_agent=agent,
     config={
         "model_settings": {
-            "model_name": "gpt-realtime-2",
+            "model_name": "gpt-realtime-2.1",
             "audio": {
                 "input": {
                     "format": "pcm16",
