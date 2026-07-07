@@ -64,7 +64,7 @@ def test_get_main_graph(mock_agent):
         "fillcolor=lightgreen, width=0.5, height=0.3];" in result
     )
     assert (
-        '"Handoff1" [label="Handoff1", shape=box, style=filled, style=rounded, '
+        '"Handoff1" [label="Handoff1", shape=box, style="filled,rounded", '
         "fillcolor=lightyellow, width=1.5, height=0.8];" in result
     )
     _assert_mcp_nodes(result)
@@ -93,7 +93,7 @@ def test_get_all_nodes(mock_agent):
         "fillcolor=lightgreen, width=0.5, height=0.3];" in result
     )
     assert (
-        '"Handoff1" [label="Handoff1", shape=box, style=filled, style=rounded, '
+        '"Handoff1" [label="Handoff1", shape=box, style="filled,rounded", '
         "fillcolor=lightyellow, width=1.5, height=0.8];" in result
     )
     _assert_mcp_nodes(result)
@@ -139,7 +139,7 @@ def test_draw_graph(mock_agent):
         "fillcolor=lightgreen, width=0.5, height=0.3];" in graph.source
     )
     assert (
-        '"Handoff1" [label="Handoff1", shape=box, style=filled, style=rounded, '
+        '"Handoff1" [label="Handoff1", shape=box, style="filled,rounded", '
         "fillcolor=lightyellow, width=1.5, height=0.8];" in graph.source
     )
     _assert_mcp_nodes(graph.source)
@@ -270,7 +270,7 @@ def test_draw_graph_with_real_handoff_object():
     assert '"ParentAgent"' in graph.source
     # Node uses agent_name from the Handoff object
     assert (
-        '"ChildAgent" [label="ChildAgent", shape=box, style=filled, style=rounded, '
+        '"ChildAgent" [label="ChildAgent", shape=box, style="filled,rounded", '
         "fillcolor=lightyellow, width=1.5, height=0.8];" in graph.source
     )
     # Edge points from parent to handoff agent_name
