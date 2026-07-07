@@ -4200,9 +4200,9 @@ class TestRunStateSerializationEdgeCases:
             pending = peek_agent_tool_run_result(restored_tool_call)
             assert pending is not None
             assert pending.interruptions
-            inner_names_by_arguments[restored_tool_call.arguments] = pending.interruptions[
-                0
-            ].raw_item.name
+            interruption_raw_item = pending.interruptions[0].raw_item
+            assert isinstance(interruption_raw_item, ResponseFunctionToolCall)
+            inner_names_by_arguments[restored_tool_call.arguments] = interruption_raw_item.name
 
         assert inner_names_by_arguments == {
             '{"which": "a"}': "inner_a",
