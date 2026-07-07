@@ -1648,6 +1648,26 @@ def _build_handoffs_map(current_agent: Agent[Any]) -> dict[str, Handoff[Any, Age
     return handoffs_map
 
 
+def _serialized_tool_call_signature(tool_call_data: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Rebuild the ephemeral cache's tool-call signature from serialized tool-call data.
+
+    The signature must mirror the field order used by the agent-tool-state cache
+    (``call_id``, ``name``, ``arguments``, ``type``, ``id``, ``status``) so a serialized
+    entry can be bound to the deserialized run that carries the same call.
+    """
+    call_id = tool_call_data.get("call_id")
+    if call_id is None:
+        call_id = tool_call_data.get("callId")
+    return (
+        call_id,
+        tool_call_data.get("name"),
+        tool_call_data.get("arguments"),
+        tool_call_data.get("type"),
+        tool_call_data.get("id"),
+        tool_call_data.get("status"),
+    )
+
+
 async def _restore_pending_nested_agent_tool_runs(
     *,
     current_agent: Agent[Any],
@@ -1663,15 +1683,52 @@ async def _restore_pending_nested_agent_tool_runs(
 
     from .agent_tool_state import drop_agent_tool_run_result, record_agent_tool_run_result
 
-    # Match serialized entries to deserialized runs by call_id rather than by
-    # position: deserialization drops entries whose tool no longer resolves (or
-    # whose tool call fails to parse), so a positional zip would bind a pending
-    # nested run to the wrong tool call whenever an earlier entry was dropped.
-    runs_by_call_id: dict[str, Any] = {}
+    # Match serialized entries to deserialized runs by the full tool-call signature the
+    # ephemeral cache keys on, not just call_id. Deserialization drops entries whose tool no
+    # longer resolves (or whose tool call fails to parse), so a positional zip would bind a
+    # pending nested run to the wrong tool call whenever an earlier entry was dropped. Keying
+    # only on call_id has the opposite failure: two surviving agent-as-tool calls can share a
+    # call_id but differ in arguments, and collapsing them would record a pending nested run
+    # against the first tool call, so the intended call loses its interruption on resume.
+    # Prefer the exact signature and fall back to a per-call_id FIFO queue for drop tolerance.
+    runs_by_signature: dict[tuple[Any, ...], deque[Any]] = {}
+    runs_by_call_id: dict[str, deque[Any]] = {}
     for function_run in function_runs:
         run_tool_call = getattr(function_run, "tool_call", None)
         if isinstance(run_tool_call, ResponseFunctionToolCall):
-            runs_by_call_id.setdefault(run_tool_call.call_id, function_run)
+            signature = (
+                run_tool_call.call_id,
+                run_tool_call.name,
+                run_tool_call.arguments,
+                run_tool_call.type,
+                run_tool_call.id,
+                run_tool_call.status,
+            )
+            runs_by_signature.setdefault(signature, deque()).append(function_run)
+            runs_by_call_id.setdefault(run_tool_call.call_id, deque()).append(function_run)
+
+    consumed_run_ids: set[int] = set()
+
+    def _take_matching_run(tool_call_data: Any, call_id: str | None) -> Any:
+        # Pop the next unconsumed run from a queue, keeping the signature and call_id queues
+        # consistent by skipping runs already claimed via the other queue.
+        def _pop(queue: deque[Any] | None) -> Any:
+            while queue:
+                candidate = queue.popleft()
+                if id(candidate) not in consumed_run_ids:
+                    consumed_run_ids.add(id(candidate))
+                    return candidate
+            return None
+
+        signature = (
+            _serialized_tool_call_signature(tool_call_data)
+            if isinstance(tool_call_data, Mapping)
+            else None
+        )
+        run = _pop(runs_by_signature.get(signature)) if signature is not None else None
+        if run is None and call_id is not None:
+            run = _pop(runs_by_call_id.get(call_id))
+        return run
 
     for entry in function_entries:
         if not isinstance(entry, Mapping):
@@ -1686,7 +1743,7 @@ async def _restore_pending_nested_agent_tool_runs(
             raw_call_id = tool_call_data.get("call_id") or tool_call_data.get("callId")
             if isinstance(raw_call_id, str):
                 call_id = raw_call_id
-        function_run = runs_by_call_id.get(call_id) if call_id else None
+        function_run = _take_matching_run(tool_call_data, call_id)
         if function_run is None:
             continue
         tool_call = function_run.tool_call

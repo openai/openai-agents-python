@@ -4117,6 +4117,98 @@ class TestRunStateSerializationEdgeCases:
         assert pending is not None
         assert pending.interruptions
 
+    async def test_restore_pending_nested_runs_disambiguates_duplicate_call_ids(self):
+        """Two surviving agent-as-tool calls that share a call_id but differ in arguments
+        each keep their own pending nested interruption on resume, instead of both
+        collapsing onto the first tool call."""
+        from agents.agent_tool_state import peek_agent_tool_run_result
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        async def tool_func(context: ToolContext[Any], arguments: str) -> str:
+            return "result"
+
+        nested_tool = FunctionTool(
+            on_invoke_tool=tool_func,
+            name="nested_agent_tool",
+            description="Nested agent as tool",
+            params_json_schema={"type": "object", "properties": {}},
+        )
+        agent.tools = [nested_tool]
+
+        def make_pending_state_json(inner_name: str) -> Any:
+            raw_item = ResponseFunctionToolCall(
+                type="function_call",
+                name=inner_name,
+                call_id=f"{inner_name}_call",
+                status="completed",
+                arguments="{}",
+            )
+            approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+            state = make_state_with_interruptions(agent, [approval_item], original_input="x")
+            return state.to_json()
+
+        # Both outer calls share call_id "call_dup" but carry distinct arguments and
+        # distinct nested pending interruptions.
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [],
+            "functions": [
+                {
+                    "tool_call": {
+                        "type": "function_call",
+                        "name": "nested_agent_tool",
+                        "call_id": "call_dup",
+                        "status": "completed",
+                        "arguments": '{"which": "a"}',
+                    },
+                    "tool": {"name": "nested_agent_tool"},
+                    "agent_run_state": make_pending_state_json("inner_a"),
+                },
+                {
+                    "tool_call": {
+                        "type": "function_call",
+                        "name": "nested_agent_tool",
+                        "call_id": "call_dup",
+                        "status": "completed",
+                        "arguments": '{"which": "b"}',
+                    },
+                    "tool": {"name": "nested_agent_tool"},
+                    "agent_run_state": make_pending_state_json("inner_b"),
+                },
+            ],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}
+        )
+
+        assert len(result.functions) == 2
+
+        # Each restored tool call must keep the nested interruption that belongs to its own
+        # arguments, proving the pending state did not collapse onto the first call.
+        inner_names_by_arguments: dict[str, str] = {}
+        for function_run in result.functions:
+            restored_tool_call = function_run.tool_call
+            assert restored_tool_call.call_id == "call_dup"
+            pending = peek_agent_tool_run_result(restored_tool_call)
+            assert pending is not None
+            assert pending.interruptions
+            inner_names_by_arguments[restored_tool_call.arguments] = pending.interruptions[
+                0
+            ].raw_item.name
+
+        assert inner_names_by_arguments == {
+            '{"which": "a"}': "inner_a",
+            '{"which": "b"}': "inner_b",
+        }
+
     async def test_deserialize_processed_response_rejects_qualified_name_collision(self):
         """Reject dotted top-level names that collide with namespace-wrapped functions."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
