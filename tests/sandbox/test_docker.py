@@ -704,6 +704,260 @@ def test_docker_start_exec_socket_closes_underlying_http_response() -> None:
     assert api.response.close_calls == 1
 
 
+class _RecordingStreamSocket:
+    """Exec socket that records stdin bytes and returns EOF immediately, as a
+    real daemon does once the (length-bounded) in-container command exits."""
+
+    def __init__(self) -> None:
+        self.sent = bytearray()
+        self.shutdown_calls: list[int] = []
+        self.closed = False
+
+    @property
+    def _sock(self) -> _RecordingStreamSocket:
+        return self
+
+    def sendall(self, data: bytes) -> None:
+        self.sent.extend(data)
+
+    def shutdown(self, how: int) -> None:
+        self.shutdown_calls.append(how)
+
+    def recv(self, _n: int) -> bytes:
+        return b""
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _RecordingStreamAPI:
+    def __init__(self) -> None:
+        self.exec_create_calls: list[dict[str, object]] = []
+        self.sock = _RecordingStreamSocket()
+
+    def exec_create(self, container_id: str, cmd: list[str], **kwargs: object) -> dict[str, str]:
+        self.exec_create_calls.append({"container_id": container_id, "cmd": cmd, **kwargs})
+        return {"Id": "exec-stream"}
+
+    def exec_start(self, exec_id: str, *, socket: bool = False, tty: bool = False) -> object:
+        return self.sock
+
+    def exec_inspect(self, exec_id: str) -> dict[str, int]:
+        return {"ExitCode": 0}
+
+
+def _make_streaming_session(api: _RecordingStreamAPI) -> DockerSandboxSession:
+    class _Client:
+        def __init__(self) -> None:
+            self.api = api
+
+    class _Container:
+        def __init__(self) -> None:
+            self.client = _Client()
+            self.id = "container"
+
+    def _coerce(user: object = None) -> str:
+        return ""
+
+    session = object.__new__(DockerSandboxSession)
+    session._container = _Container()
+    session._coerce_exec_user = _coerce  # type: ignore[method-assign]
+    return session
+
+
+@pytest.mark.asyncio
+async def test_stream_into_exec_length_frames_stdin_payload() -> None:
+    """The in-container command is wrapped in ``head -c <n>`` so it terminates on
+    a byte count rather than a stdin half-close (which is unreliable over a TLS
+    DOCKER_HOST — see the DinD hang this guards against). Regression test."""
+    api = _RecordingStreamAPI()
+    session = _make_streaming_session(api)
+    payload = b"hello-\x00\xff-world" * 500  # includes NULs / non-utf8 bytes
+
+    await session._stream_into_exec(
+        cmd=["tar", "-x", "-C", "/workspace"],
+        stream=io.BytesIO(payload),
+        error_path=Path("/workspace"),
+    )
+
+    assert len(api.exec_create_calls) == 1
+    framed = cast("list[str]", api.exec_create_calls[0]["cmd"])
+    assert framed == [
+        "sh",
+        "-c",
+        docker_sandbox._LENGTH_FRAMED_STDIN_SCRIPT,
+        "sh",
+        str(len(payload)),
+        "tar",
+        "-x",
+        "-C",
+        "/workspace",
+    ]
+    # The framing script bounds the read by byte count (`head -c`) and preflights
+    # `head -c` so a missing head OR a POSIX-only head that rejects `-c` is fatal
+    # (exit 98) instead of silently writing an empty file — no temp file involved.
+    assert 'head -c "$n"' in framed[2]
+    assert "head -c 1" in framed[2] and "exit 98" in framed[2]
+    # Exactly the payload is streamed, and the count matches the head -c bound —
+    # so completion never depends on the stdin half-close working.
+    assert bytes(api.sock.sent) == payload
+    assert framed[4] == str(len(api.sock.sent))
+
+
+@pytest.mark.asyncio
+async def test_stream_into_exec_frames_non_seekable_stream() -> None:
+    """A non-seekable stream is buffered so the byte count is still correct."""
+
+    class _NonSeekable(io.RawIOBase):
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+            self._read = False
+
+        def readable(self) -> bool:
+            return True
+
+        def seekable(self) -> bool:
+            return False
+
+        def seek(self, *_a: object, **_k: object) -> int:
+            raise OSError("not seekable")
+
+        def read(self, _size: int = -1) -> bytes:
+            if self._read:
+                return b""
+            self._read = True
+            return self._data
+
+    api = _RecordingStreamAPI()
+    session = _make_streaming_session(api)
+    payload = b"x" * 1234
+
+    await session._stream_into_exec(
+        cmd=["sh", "-lc", 'cat > "$1"', "sh", "/workspace/f"],
+        stream=cast(io.IOBase, _NonSeekable(payload)),
+        error_path=Path("/workspace/f"),
+    )
+
+    framed = cast("list[str]", api.exec_create_calls[0]["cmd"])
+    assert framed[:4] == ["sh", "-c", docker_sandbox._LENGTH_FRAMED_STDIN_SCRIPT, "sh"]
+    assert framed[4] == str(len(payload))
+    assert bytes(api.sock.sent) == payload
+
+
+@pytest.mark.asyncio
+async def test_stream_into_exec_fails_when_stream_ends_before_measured_length() -> None:
+    """If the stream yields fewer bytes than measured (e.g. truncated after
+    _measure_stream), fail loudly and send at most the framed count — never
+    short-feed `head -c` and re-introduce the TLS stdin hang."""
+
+    class _ShrinkingStream(io.RawIOBase):
+        """Reports length 100 via seek/tell but only yields 10 bytes."""
+
+        def __init__(self) -> None:
+            self._pos = 0
+            self._served = False
+
+        def seekable(self) -> bool:
+            return True
+
+        def readable(self) -> bool:
+            return True
+
+        def tell(self) -> int:
+            return self._pos
+
+        def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+            self._pos = 100 if whence == io.SEEK_END else offset
+            return self._pos
+
+        def read(self, _size: int = -1) -> bytes:
+            if self._served:
+                return b""
+            self._served = True
+            return b"x" * 10
+
+    api = _RecordingStreamAPI()
+    session = _make_streaming_session(api)
+
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await session._stream_into_exec(
+            cmd=["sh", "-lc", 'cat > "$1"', "sh", "/workspace/f"],
+            stream=cast(io.IOBase, _ShrinkingStream()),
+            error_path=Path("/workspace/f"),
+        )
+
+    # It framed for 100 bytes but sent at most what the stream produced (10) —
+    # never more than the measured count.
+    framed = cast("list[str]", api.exec_create_calls[0]["cmd"])
+    assert framed[4] == "100"
+    assert len(api.sock.sent) == 10
+
+
+@pytest.mark.asyncio
+async def test_stream_into_exec_clamps_length_when_position_past_end() -> None:
+    """A stream positioned past its end measures to a negative delta; clamp to 0
+    so it never becomes `head -c -N` (which reads to EOF and re-hangs over TLS)."""
+    api = _RecordingStreamAPI()
+    session = _make_streaming_session(api)
+    stream = io.BytesIO(b"abc")
+    stream.seek(10)  # past EOF -> end - start would be negative
+
+    await session._stream_into_exec(
+        cmd=["tar", "-x", "-C", "/workspace"],
+        stream=stream,
+        error_path=Path("/workspace"),
+    )
+
+    framed = cast("list[str]", api.exec_create_calls[0]["cmd"])
+    assert framed[4] == "0"  # not "-7"
+    assert api.sock.sent == bytearray()  # nothing sent; no unbounded read
+
+
+def test_measure_stream_closes_spool_when_copy_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If reading a non-seekable stream into the spool raises, _measure_stream
+    must close the spool itself — the caller never receives it to close."""
+    created: list[object] = []
+
+    class _RecordingSpool:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.closed = False
+
+        def write(self, _data: bytes) -> int:
+            return 0
+
+        def seek(self, *_a: object, **_k: object) -> int:
+            return 0
+
+        def close(self) -> None:
+            self.closed = True
+
+    def _factory(*_a: object, **_k: object) -> _RecordingSpool:
+        spool = _RecordingSpool()
+        created.append(spool)
+        return spool
+
+    monkeypatch.setattr("tempfile.SpooledTemporaryFile", _factory)
+
+    class _ExplodingNonSeekable(io.RawIOBase):
+        def seekable(self) -> bool:
+            return False
+
+        def readable(self) -> bool:
+            return True
+
+        def seek(self, *_a: object, **_k: object) -> int:
+            raise OSError("not seekable")  # forces the spool branch
+
+        def read(self, *_a: object, **_k: object) -> bytes:
+            raise RuntimeError("read boom")
+
+    with pytest.raises(RuntimeError, match="read boom"):
+        docker_sandbox._measure_stream(cast(io.IOBase, _ExplodingNonSeekable()))
+
+    assert created, "expected a spool to be created"
+    assert cast("_RecordingSpool", created[0]).closed, "spool was leaked (not closed)"
+
+
 @pytest.mark.asyncio
 async def test_docker_persist_workspace_prunes_ephemeral_entries_from_staged_copy(
     tmp_path: Path,

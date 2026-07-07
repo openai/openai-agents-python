@@ -60,11 +60,7 @@ from agents.sandbox.sandboxes import UnixLocalSandboxClient
 agent = SandboxAgent(
     name="Workspace Assistant",
     instructions="Inspect the sandbox workspace before answering.",
-    default_manifest=Manifest(
-        entries={
-            "repo": GitRepo(repo="openai/openai-agents-python", ref="main"),
-        }
-    ),
+    default_manifest=Manifest(entries={"repo": GitRepo(repo="openai/openai-agents-python", ref="main")}),
 )
 
 result = Runner.run_sync(
@@ -75,10 +71,27 @@ result = Runner.run_sync(
 )
 print(result.final_output)
 
-# This project provides a Python SDK for building multi-agent workflows.
+# Output: "This project provides a Python SDK for building multi-agent workflows."
 ```
 
 (_If running this, ensure you set the `OPENAI_API_KEY` environment variable_)
+
+## Run an agent without a sandbox
+
+You can still use a regular `Agent` when your workflow does not need a filesystem workspace or sandbox lifecycle.
+
+```python
+from agents import Agent, Runner
+
+agent = Agent(name="Assistant", instructions="You are a helpful assistant")
+
+result = Runner.run_sync(agent, "Write a haiku about recursion in programming.")
+print(result.final_output)
+
+# Code within the code,
+# Functions calling themselves,
+# Infinite loop's dance.
+```
 
 (_For Jupyter notebook users, see [hello_world_jupyter.ipynb](https://github.com/openai/openai-agents-python/blob/main/examples/basic/hello_world_jupyter.ipynb)_)
 

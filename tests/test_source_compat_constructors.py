@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, cast
 
+import pytest
+
 from agents import (
     Agent,
     AgentHookContext,
@@ -172,6 +174,14 @@ def test_tool_execution_config_pre_approval_append_preserves_max_concurrency() -
 
     assert config.max_function_tool_concurrency == 2
     assert config.pre_approval_tool_input_guardrails is True
+
+
+def test_tool_execution_config_rejects_non_bool_pre_approval_guardrails() -> None:
+    with pytest.raises(
+        ValueError,
+        match="tool_execution.pre_approval_tool_input_guardrails must be a bool",
+    ):
+        ToolExecutionConfig(pre_approval_tool_input_guardrails=cast(Any, "true"))
 
 
 def test_model_settings_context_management_append_preserves_retry_position() -> None:

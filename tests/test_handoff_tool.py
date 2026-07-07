@@ -468,3 +468,85 @@ async def test_handoff_is_enabled_filtering_integration():
     agent_names = {h.agent_name for h in filtered_handoffs}
     assert agent_names == {"agent_1", "agent_3"}
     assert "agent_2" not in agent_names
+
+
+@pytest.mark.asyncio
+async def test_handoff_is_enabled_sync_callable_false_filters_handoff():
+    target_agent = Agent(name="target")
+    main_agent = Agent(
+        name="main",
+        handoffs=[handoff(target_agent, is_enabled=lambda ctx, agent: False)],
+    )
+
+    filtered_handoffs = await get_handoffs(main_agent, RunContextWrapper(main_agent))
+
+    assert filtered_handoffs == []
+
+
+@pytest.mark.asyncio
+async def test_handoff_direct_sync_is_enabled_callable_filters_handoff():
+    async def invoke_handoff(ctx: RunContextWrapper[Any], input_json: str) -> Agent[Any]:
+        _ = (ctx, input_json)
+        return Agent(name="target")
+
+    handoff_obj = Handoff(
+        tool_name="transfer_to_target",
+        tool_description="Transfer to target.",
+        input_json_schema={},
+        on_invoke_handoff=invoke_handoff,
+        agent_name="target",
+        is_enabled=lambda ctx, agent: False,
+    )
+    main_agent = Agent(name="main", handoffs=[handoff_obj])
+
+    filtered_handoffs = await get_handoffs(main_agent, RunContextWrapper(main_agent))
+
+    assert filtered_handoffs == []
+
+
+class StrictInput(BaseModel):
+    name: str
+    age: int
+
+
+@pytest.mark.asyncio
+async def test_handoff_strict_json_rejects_type_coercion():
+    """With strict_json_schema=True (default), string input for an int field must raise
+    ModelBehaviorError instead of being silently coerced."""
+
+    async def _on_handoff(ctx: RunContextWrapper[Any], input: StrictInput):
+        pass  # pragma: no cover
+
+    agent = Agent(name="test")
+    obj = handoff(agent, input_type=StrictInput, on_handoff=_on_handoff)
+
+    # strict_json_schema defaults to True
+    assert obj.strict_json_schema is True
+
+    # age is a string "25" — strict mode should reject this
+    malformed_json = '{"name": "Alice", "age": "25"}'
+    with pytest.raises(ModelBehaviorError, match="Invalid JSON"):
+        await obj.on_invoke_handoff(RunContextWrapper(agent), malformed_json)
+
+    # Correctly typed input should still be accepted
+    valid_json = '{"name": "Alice", "age": 25}'
+    result = await obj.on_invoke_handoff(RunContextWrapper(agent), valid_json)
+    assert result == agent
+
+
+@pytest.mark.asyncio
+async def test_handoff_lenient_json_allows_type_coercion():
+    """Without strict validation, Pydantic's default lenient mode silently coerces
+    string input for an int field — verifying backward compatibility."""
+    from pydantic import TypeAdapter
+
+    from agents.util._json import validate_json
+
+    type_adapter = TypeAdapter(StrictInput)
+
+    # age is a string "25" — lenient mode should coerce it to int 25
+    malformed_json = '{"name": "Alice", "age": "25"}'
+    result = validate_json(malformed_json, type_adapter, partial=False)
+    assert result.name == "Alice"
+    assert result.age == 25
+    assert isinstance(result.age, int)

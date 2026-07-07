@@ -9,7 +9,6 @@ Use the smallest correct fix, then run this exact verification command from the 
 
 `sh tests/test_credit_note.sh`
 
-If you use `apply_patch`, the patch paths must still be relative to the sandbox workspace root.
-That means the file paths should be `repo/credit_note.sh` and `repo/tests/test_credit_note.sh`.
+If you use `apply_patch`, the patch paths must still be relative to the sandbox workspace root. That means the file paths should be `repo/credit_note.sh` and `repo/tests/test_credit_note.sh`.
 
 Do not change the test expectations.

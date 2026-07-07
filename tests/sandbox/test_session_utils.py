@@ -13,7 +13,7 @@ from agents.sandbox.files import EntryKind, FileEntry
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.session import SandboxSessionStartEvent
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
-from agents.sandbox.session.events import SandboxSessionFinishEvent
+from agents.sandbox.session.events import SandboxSessionFinishEvent, validate_sandbox_session_event
 from agents.sandbox.session.utils import (
     _best_effort_stream_len,
     _safe_decode,
@@ -113,6 +113,21 @@ def test_event_to_json_line_is_single_line() -> None:
     line = event_to_json_line(event)
     assert line.endswith("\n")
     assert "\n" not in line[:-1]
+
+
+def test_validate_sandbox_session_event_uses_phase_discriminator() -> None:
+    event = SandboxSessionStartEvent(
+        session_id=uuid.uuid4(),
+        seq=1,
+        op="read",
+        span_id="span_read",
+    )
+
+    restored = validate_sandbox_session_event(event.model_dump(mode="json"))
+
+    assert isinstance(restored, SandboxSessionStartEvent)
+    assert restored.phase == "start"
+    assert restored.op == "read"
 
 
 def test_sandbox_session_finish_event_excludes_raw_bytes_from_json_dump() -> None:

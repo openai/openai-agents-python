@@ -31,7 +31,7 @@ SDK 有两个核心设计原则：
 -   **会话**：用于在智能体循环中维护工作上下文的持久记忆层。
 -   **人在回路**：内置机制，用于在智能体运行过程中引入人工参与。
 -   **追踪**：内置追踪，用于可视化、调试和监控工作流，并支持 OpenAI 的评估、微调和蒸馏工具套件。
--   **实时智能体**：使用 `gpt-realtime-2`、自动中断检测、上下文管理、安全防护措施等构建强大的语音智能体。
+-   **实时智能体**：使用 `gpt-realtime-2.1`、自动中断检测、上下文管理、安全防护措施等构建强大的语音智能体。
 
 ## Agents SDK 与 Responses API 的选择
 
@@ -97,5 +97,5 @@ export OPENAI_API_KEY=sk-...
 | 在多个轮次之间保留记忆 | [运行智能体](running_agents.md#choose-a-memory-strategy)和[会话](sessions/index.md) |
 | 使用 OpenAI模型、websocket 传输或非 OpenAI提供商 | [模型](models/index.md) |
 | 查看输出、运行项、中断和恢复状态 | [结果](results.md) |
-| 使用 `gpt-realtime-2` 构建低延迟语音智能体 | [实时智能体快速入门](realtime/quickstart.md)和[实时传输](realtime/transport.md) |
+| 使用 `gpt-realtime-2.1` 构建低延迟语音智能体 | [实时智能体快速入门](realtime/quickstart.md)和[实时传输](realtime/transport.md) |
 | 构建语音转文本 / 智能体 / 文本转语音流水线 | [语音流水线快速入门](voice/quickstart.md) |

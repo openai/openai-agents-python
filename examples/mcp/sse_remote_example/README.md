@@ -1,8 +1,6 @@
 # MCP SSE Remote Example
 
-Python port of the JS `examples/mcp/sse-example.ts`. By default it starts the
-bundled local SSE MCP server and lets the agent use those tools. Set
-`MCP_SSE_REMOTE_URL` to try a compatible remote SSE server instead.
+Python port of the JS `examples/mcp/sse-example.ts`. By default it starts the bundled local SSE MCP server and lets the agent use those tools. Set `MCP_SSE_REMOTE_URL` to try a compatible remote SSE server instead.
 
 Run it with:
 

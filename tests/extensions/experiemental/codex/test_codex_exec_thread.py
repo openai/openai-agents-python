@@ -200,6 +200,11 @@ def test_coerce_thread_options_rejects_unknown_fields() -> None:
         coerce_thread_options({"unknown": "value"})
 
 
+def test_coerce_thread_options_rejects_non_mapping() -> None:
+    with pytest.raises(UserError, match="ThreadOptions must be a ThreadOptions or a mapping"):
+        coerce_thread_options(cast(Any, ["model", "gpt"]))
+
+
 def test_codex_start_and_resume_thread() -> None:
     codex = Codex(CodexOptions(codex_path_override="/bin/codex"))
     thread = codex.start_thread({"model": "gpt"})
@@ -717,3 +722,36 @@ async def test_thread_run_streamed_idle_timeout_sets_signal(
             pass
 
     assert signal.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_thread_run_streamed_idle_timeout_creates_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = [
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        }
+    ]
+    fake_exec = FakeExec(events, delay=0.2)
+    thread = Thread(
+        exec_client=cast(CodexExec, fake_exec),
+        options=CodexOptions(),
+        thread_options=ThreadOptions(),
+    )
+
+    def fake_create_output_schema_file(schema: dict[str, Any] | None) -> OutputSchemaFile:
+        return OutputSchemaFile(schema_path=None, cleanup=lambda: None)
+
+    monkeypatch.setattr(thread_module, "create_output_schema_file", fake_create_output_schema_file)
+
+    with pytest.raises(RuntimeError, match="Codex stream idle for"):
+        async for _ in thread._run_streamed_internal(
+            "hello", TurnOptions(idle_timeout_seconds=0.01)
+        ):
+            pass
+
+    assert fake_exec.last_args is not None
+    assert fake_exec.last_args.signal is not None
+    assert fake_exec.last_args.signal.is_set() is True

@@ -210,6 +210,7 @@ def test_stream_step_items_to_queue_emits_helper_events_and_skips_approvals(
             agent=agent,
             raw_item=_make_hosted_mcp_list_tools("test-mcp-server", "search_docs"),
         ),
+        ReasoningItem(agent=agent, raw_item=get_reasoning_item()),
         ToolApprovalItem(
             agent=agent,
             raw_item={"type": "function_call", "call_id": "call-1", "name": "tool"},
@@ -231,6 +232,7 @@ def test_stream_step_items_to_queue_emits_helper_events_and_skips_approvals(
         "mcp_approval_requested",
         "mcp_approval_response",
         "mcp_list_tools",
+        "reasoning_item_created",
     ]
     assert "Unexpected item type" in caplog.text
 

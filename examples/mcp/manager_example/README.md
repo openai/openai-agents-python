@@ -1,8 +1,6 @@
 # MCP Manager Example (FastAPI)
 
-This example shows how to use `MCPServerManager` to keep MCP server lifecycle
-management in a single task inside a FastAPI app with the Streamable HTTP
-transport.
+This example shows how to use `MCPServerManager` to keep MCP server lifecycle management in a single task inside a FastAPI app with the Streamable HTTP transport.
 
 ## Run the MCP server (Streamable HTTP)
 
@@ -19,8 +17,7 @@ export STREAMABLE_HTTP_HOST=127.0.0.1
 export STREAMABLE_HTTP_PORT=8000
 ```
 
-This example also configures an inactive MCP server at
-`http://localhost:8001/mcp` to demonstrate how the manager drops failed
+This example also configures an inactive MCP server at `http://localhost:8001/mcp` to demonstrate how the manager drops failed
 servers. You can override it with:
 
 ```
@@ -43,8 +40,7 @@ To verify the MCP manager and app integration without calling a model:
 uv run python -m examples.mcp.manager_example.smoke_test
 ```
 
-The smoke test starts the local MCP server on a temporary port, points both app
-MCP server settings at that server, and checks `/health`, `/tools`, and `/add`.
+The smoke test starts the local MCP server on a temporary port, points both app MCP server settings at that server, and checks `/health`, `/tools`, and `/add`.
 
 ## Toggle MCP manager usage
 

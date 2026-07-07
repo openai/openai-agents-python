@@ -12,6 +12,7 @@ from agents.models.multi_provider import MultiProvider
 from agents.models.openai_agent_registration import (
     OPENAI_HARNESS_ID_TRACE_METADATA_KEY,
     resolve_openai_agent_registration_config,
+    resolve_openai_harness_id_for_model_provider,
 )
 from agents.models.openai_provider import OpenAIProvider
 from agents.run_internal.agent_runner_helpers import resolve_trace_settings
@@ -88,6 +89,13 @@ def test_agent_registration_provider_constructor_config() -> None:
     assert openai_provider.agent_registration.harness_id == "provider-harness"
     assert multi_provider.openai_provider.agent_registration is not None
     assert multi_provider.openai_provider.agent_registration.harness_id == "provider-harness"
+
+
+def test_harness_id_resolves_private_agent_registration() -> None:
+    class Provider:
+        _agent_registration = OpenAIAgentRegistrationConfig(harness_id="private-harness")
+
+    assert resolve_openai_harness_id_for_model_provider(Provider()) == "private-harness"
 
 
 def test_harness_id_is_added_to_trace_metadata() -> None:

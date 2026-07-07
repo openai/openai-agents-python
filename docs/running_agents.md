@@ -409,9 +409,7 @@ async def main():
         print(f"Assistant: {result.final_output}")
 ```
 
-If a run pauses for approval and you resume from a [`RunState`][agents.run_state.RunState], the
-SDK keeps the saved `conversation_id` / `previous_response_id` / `auto_previous_response_id`
-settings so the resumed turn continues in the same server-managed conversation.
+If a run pauses for approval and you resume from a [`RunState`][agents.run_state.RunState], the SDK keeps the saved `conversation_id` / `previous_response_id` / `auto_previous_response_id` settings so the resumed turn continues in the same server-managed conversation.
 
 `conversation_id` and `previous_response_id` are mutually exclusive. Use `conversation_id` when you want a named conversation resource that can be shared across systems. Use `previous_response_id` when you want the lightest Responses API continuation primitive from one turn to the next.
 
@@ -465,7 +463,7 @@ Set the hook per run via `run_config` to redact sensitive data, trim long histor
 
 ### Error handlers
 
-All `Runner` entry points accept `error_handlers`, a dict keyed by error kind. The supported keys are `"max_turns"` and `"model_refusal"`. Use them when you want to return a controlled final output instead of raising `MaxTurnsExceeded` or `ModelRefusalError`.
+All `Runner` entry points accept `error_handlers`, a dict keyed by error kind. The supported keys are `"max_turns"`, `"model_refusal"`, and `"invalid_final_output"`. Use them when you want to return a controlled final output instead of ending the run with the corresponding error.
 
 ```python
 from agents import (
@@ -490,6 +488,38 @@ result = Runner.run_sync(
     "Analyze this long transcript",
     max_turns=3,
     error_handlers={"max_turns": on_max_turns},
+)
+print(result.final_output)
+```
+
+Use `"invalid_final_output"` when a model message does not validate against the agent's structured `output_type`, or when the model returns no structured final message. The handler can return an application-specific fallback, which the SDK validates against the same `output_type`. It does not retry the model call or replay any tool side effects. Returning `None` declines recovery. Without a fallback, non-empty validation failures continue to raise `ModelBehaviorError`, and empty structured responses retain the existing next-turn behavior.
+
+```python
+from pydantic import BaseModel
+
+from agents import Agent, ModelBehaviorError, RunErrorHandlerInput, Runner
+
+
+class Recipe(BaseModel):
+    ingredients: list[str]
+    recovered_from_invalid_output: bool = False
+
+
+def on_invalid_final_output(data: RunErrorHandlerInput[None]) -> Recipe:
+    assert isinstance(data.error, ModelBehaviorError)
+    return Recipe(ingredients=[], recovered_from_invalid_output=True)
+
+
+agent = Agent(
+    name="Recipe assistant",
+    instructions="Return a structured recipe.",
+    output_type=Recipe,
+)
+
+result = Runner.run_sync(
+    agent,
+    "Plan tonight's dinner.",
+    error_handlers={"invalid_final_output": on_invalid_final_output},
 )
 print(result.final_output)
 ```
@@ -530,8 +560,7 @@ print(result.final_output)
 
 ## Durable execution integrations and human-in-the-loop
 
-For tool approval pause/resume patterns, start with the dedicated [Human-in-the-loop guide](human_in_the_loop.md).
-The integrations below are for durable orchestration when runs may span long waits, retries, or process restarts.
+For tool approval pause/resume patterns, start with the dedicated [Human-in-the-loop guide](human_in_the_loop.md). The integrations below are for durable orchestration when runs may span long waits, retries, or process restarts.
 
 ### Dapr
 
@@ -543,8 +572,7 @@ You can use the Agents SDK [Temporal](https://temporal.io/) integration to run d
 
 ### Restate
 
-You can use the Agents SDK [Restate](https://restate.dev/) integration for lightweight, durable agents, including human approval, handoffs, and session management. The integration requires Restate's single-binary runtime as a dependency, and supports running agents as processes/containers or serverless functions.
-Read the [overview](https://www.restate.dev/blog/durable-orchestration-for-ai-agents-with-restate-and-openai-sdk) or view the [docs](https://docs.restate.dev/ai) for more details.
+You can use the Agents SDK [Restate](https://restate.dev/) integration for lightweight, durable agents, including human approval, handoffs, and session management. The integration requires Restate's single-binary runtime as a dependency, and supports running agents as processes/containers or serverless functions. Read the [overview](https://www.restate.dev/blog/durable-orchestration-for-ai-agents-with-restate-and-openai-sdk) or view the [docs](https://docs.restate.dev/ai) for more details.
 
 ### DBOS
 

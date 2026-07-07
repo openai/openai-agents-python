@@ -41,14 +41,14 @@ By default, `RealtimeRunner` uses `OpenAIRealtimeWebSocketModel`, so the default
 -   Voice can be configured, but it cannot change after the session has already produced spoken audio.
 -   Instructions, function tools, handoffs, hooks, and output guardrails all still work.
 
-`RealtimeSessionModelSettings` supports both a newer nested `audio` config and older flat aliases. Prefer the nested shape for new code, and start with `gpt-realtime-2` for new realtime agents:
+`RealtimeSessionModelSettings` supports both a newer nested `audio` config and older flat aliases. Prefer the nested shape for new code, and start with `gpt-realtime-2.1` for new realtime agents:
 
 ```python
 runner = RealtimeRunner(
     starting_agent=agent,
     config={
         "model_settings": {
-            "model_name": "gpt-realtime-2",
+            "model_name": "gpt-realtime-2.1",
             "audio": {
                 "input": {
                     "format": "pcm16",
@@ -264,11 +264,7 @@ agent = RealtimeAgent(
 )
 ```
 
-When a realtime output guardrail trips, the session interrupts the active response, forces
-`response.cancel`, emits `guardrail_tripped`, and sends a follow-up user message that names the
-triggered guardrail so the model can produce a replacement response. Your audio player should still
-listen for `audio_interrupted` and stop local playback immediately, because guardrails run on
-debounced transcript text and some audio may already be buffered when the tripwire fires.
+When a realtime output guardrail trips, the session interrupts the active response, forces `response.cancel`, emits `guardrail_tripped`, and sends a follow-up user message that names the triggered guardrail so the model can produce a replacement response. Your audio player should still listen for `audio_interrupted` and stop local playback immediately, because guardrails run on debounced transcript text and some audio may already be buffered when the tripwire fires.
 
 ## SIP and telephony
 

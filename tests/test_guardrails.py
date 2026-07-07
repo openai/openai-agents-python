@@ -22,7 +22,7 @@ from agents import (
 )
 from agents.guardrail import input_guardrail, output_guardrail
 from agents.result import RunResultStreaming
-from agents.run_internal.guardrails import run_input_guardrails_with_queue
+from agents.run_internal.guardrails import run_input_guardrails, run_input_guardrails_with_queue
 
 from .fake_model import FakeModel
 from .test_responses import get_function_tool_call, get_text_message
@@ -42,6 +42,18 @@ def get_sync_guardrail(triggers: bool, output_info: Any | None = None):
         )
 
     return sync_guardrail
+
+
+@pytest.mark.asyncio
+async def test_run_input_guardrails_returns_empty_for_no_guardrails() -> None:
+    result = await run_input_guardrails(
+        agent=Agent(name="test"),
+        guardrails=[],
+        input="test",
+        context=RunContextWrapper(context=None),
+    )
+
+    assert result == []
 
 
 @pytest.mark.asyncio

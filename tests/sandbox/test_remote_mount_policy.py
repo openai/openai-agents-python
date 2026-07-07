@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from agents.sandbox.entries import BaseEntry, DockerVolumeMountStrategy, S3Mount
+from agents.sandbox.entries import BaseEntry, Dir, DockerVolumeMountStrategy, S3Mount
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.remote_mount_policy import build_remote_mount_policy_instructions
 
@@ -55,3 +55,9 @@ def test_remote_mount_policy_handles_mixed_read_only_and_read_write_mounts() -> 
     assert "Do not edit paths marked read-only in place" in policy
     assert "including with `apply_patch`" in policy
     assert "do not write edited files back" in policy
+
+
+def test_remote_mount_policy_returns_none_without_remote_mounts() -> None:
+    policy = build_remote_mount_policy_instructions(Manifest(entries={"local": Dir()}))
+
+    assert policy is None

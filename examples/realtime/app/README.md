@@ -42,10 +42,7 @@ To use the same UI with your own agents, edit `agent.py` and ensure get_starting
 
 -   **Backend**: FastAPI server with WebSocket connections for real-time communication
 -   **Session Management**: Each connection gets a unique session with the OpenAI Realtime API
--   **Image Inputs**: The UI uploads images and the server forwards a
-    `conversation.item.create` event with `input_image` (plus optional `input_text`),
-    followed by `response.create` to start the model response. The messages pane
-    renders image bubbles for `input_image` content.
+- **Image Inputs**: The UI uploads images and the server forwards a `conversation.item.create` event with `input_image` (plus optional `input_text`), followed by `response.create` to start the model response. The messages pane renders image bubbles for `input_image` content.
 -   **Audio Processing**: 24kHz mono audio capture and playback
 -   **Event Handling**: Full event stream processing with transcript generation
 -   **Frontend**: Vanilla JavaScript with clean, responsive CSS

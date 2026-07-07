@@ -468,6 +468,41 @@ The SDK uses the Responses API by default, but many other LLM providers still do
 1. Call [`set_default_openai_api("chat_completions")`][agents.set_default_openai_api]. This works if you are setting `OPENAI_API_KEY` and `OPENAI_BASE_URL` via environment vars.
 2. Use [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel]. There are examples [here](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/).
 
+### Chat Completions compatibility options
+
+When you route through Chat Completions, the SDK preserves compatibility by silently dropping Responses-only fields that Chat Completions cannot send, such as `previous_response_id`, `conversation_id`, prompts, or non-text-only tool outputs. If you want those mismatches to fail fast during development, enable strict feature validation on the OpenAI provider:
+
+```python
+from agents import Agent, OpenAIProvider, RunConfig, Runner
+
+provider = OpenAIProvider(
+    use_responses=False,
+    strict_feature_validation=True,
+)
+
+agent = Agent(name="Assistant")
+result = await Runner.run(
+    agent,
+    "Hello",
+    run_config=RunConfig(model_provider=provider),
+)
+```
+
+If you use [`MultiProvider`][agents.MultiProvider], pass `openai_strict_feature_validation=True` instead.
+
+Some OpenAI-compatible Chat Completions providers stream tool-call deltas in chunks that are not reliable enough for incremental SDK processing. In that case, enable streamed tool-call buffering so the SDK emits tool calls only after the provider stream finishes:
+
+```python
+from agents import OpenAIProvider
+
+provider = OpenAIProvider(
+    use_responses=False,
+    buffer_streamed_tool_calls=True,
+)
+```
+
+For [`MultiProvider`][agents.MultiProvider], use `openai_buffer_streamed_tool_calls=True`.
+
 ### Structured outputs support
 
 Some model providers don't have support for [structured outputs](https://platform.openai.com/docs/guides/structured-outputs). This sometimes results in an error that looks something like this:

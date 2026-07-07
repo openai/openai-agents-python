@@ -1,12 +1,8 @@
 # Sandbox examples
 
-These examples show how to run agents with an isolated workspace. Start with the
-small API examples when you want the smallest surface area, or use the tutorial
-scaffold when you want the shared layout for guided sandbox tutorials.
+These examples show how to run agents with an isolated workspace. Start with the small API examples when you want the smallest surface area, or use the tutorial scaffold when you want the shared layout for guided sandbox tutorials.
 
-Most examples call a model through `Runner`, so set `OPENAI_API_KEY` in the
-repository-root `.env` file, in the example's `.env` file when it has one, or
-in your shell environment.
+Most examples call a model through `Runner`, so set `OPENAI_API_KEY` in the repository-root `.env` file, in the example's `.env` file when it has one, or in your shell environment.
 
 ## Small API examples
 
@@ -26,15 +22,11 @@ in your shell environment.
 
 ## Cloud backend examples
 
-Cloud-provider examples live under [`extensions/`](./extensions/). They cover
-E2B, Modal, and Daytona sandbox backends and require provider-specific
-credentials in addition to `OPENAI_API_KEY`.
+Cloud-provider examples live under [`extensions/`](./extensions/). They cover E2B, Modal, and Daytona sandbox backends and require provider-specific credentials in addition to `OPENAI_API_KEY`.
 
 ## Tutorial scaffold
 
-[`tutorials/`](./tutorials/) contains the shared helper code, Docker image, and folder
-conventions for guided sandbox tutorials. Tutorial folders are added in separate
-focused changes.
+[`tutorials/`](./tutorials/) contains the shared helper code, Docker image, and folder conventions for guided sandbox tutorials. Tutorial folders are added in separate focused changes.
 
 ## Tutorials
 
@@ -55,5 +47,4 @@ focused changes.
 ## Shared files
 
 - [`docker/`](./docker/) contains Docker-specific helper examples.
-- [`misc/`](./misc/) contains reusable support code and tiny reference tools
-  used by several sandbox examples.
+- [`misc/`](./misc/) contains reusable support code and tiny reference tools used by several sandbox examples.

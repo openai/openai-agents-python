@@ -5,8 +5,7 @@ description: Build a concise prior authorization packet from local case files an
 
 # Prior Auth Packet Builder
 
-Use this skill when a case requires prior authorization review, referral validation, imaging review,
-or payer-specific policy checks.
+Use this skill when a case requires prior authorization review, referral validation, imaging review, or payer-specific policy checks.
 
 ## Workflow
 

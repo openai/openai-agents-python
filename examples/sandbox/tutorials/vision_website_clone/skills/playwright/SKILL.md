@@ -5,8 +5,7 @@ description: "Use when the task requires capturing or automating a real browser 
 
 # Playwright
 
-Use Playwright to capture the static site directly. Do not start a server for
-this example.
+Use Playwright to capture the static site directly. Do not start a server for this example.
 
 ```sh
 mkdir -p output/screenshots output/playwright/.tmp

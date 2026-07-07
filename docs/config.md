@@ -47,6 +47,38 @@ from agents import set_default_openai_api
 set_default_openai_api("chat_completions")
 ```
 
+## OpenAI provider defaults
+
+OpenAI-backed providers also read SDK-wide defaults when they resolve model names. Use [`set_default_openai_responses_transport()`][agents.set_default_openai_responses_transport] to make OpenAI Responses models use websocket transport by default:
+
+```python
+from agents import set_default_openai_responses_transport
+
+set_default_openai_responses_transport("websocket")
+```
+
+This affects OpenAI Responses models resolved by the default OpenAI provider. For provider-level setup, connection reuse, keepalive options, and custom websocket endpoints, see [Responses WebSocket transport](models/index.md#responses-websocket-transport).
+
+If your OpenAI setup expects provider-level agent registration metadata, configure a default harness ID once at startup:
+
+```python
+from agents import set_default_openai_harness
+
+set_default_openai_harness("your-harness-id")
+```
+
+You can also pass the full registration object:
+
+```python
+from agents import OpenAIAgentRegistrationConfig, set_default_openai_agent_registration
+
+set_default_openai_agent_registration(
+    OpenAIAgentRegistrationConfig(harness_id="your-harness-id")
+)
+```
+
+If no SDK default is set, OpenAI-backed providers fall back to the `OPENAI_AGENT_HARNESS_ID` environment variable. When a harness ID is configured, the SDK adds it to trace metadata as `agent_harness_id` unless that key is already present in `RunConfig.trace_metadata`.
+
 ## Tracing
 
 Tracing is enabled by default. By default it uses the same OpenAI API key as your model requests from the section above (that is, the environment variable or the default key you set). You can specifically set the API key used for tracing by using the [`set_tracing_export_api_key`][agents.set_tracing_export_api_key] function.

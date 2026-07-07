@@ -186,19 +186,11 @@ Useful serialization options:
 
 -   `context_serializer`: Customize how non-mapping context objects are serialized.
 -   `context_deserializer`: Rebuild non-mapping context objects when loading state with `RunState.from_json(...)` or `RunState.from_string(...)`.
--   `strict_context=True`: Fail serialization or deserialization unless the context is already a
-    mapping or you provide the appropriate serializer/deserializer.
--   `context_override`: Replace the serialized context when loading state. This is useful when you
-    do not want to restore the original context object, but it does not remove that context from an
-    already serialized payload.
--   `include_tracing_api_key=True`: Include the tracing API key in the serialized trace payload
-    when you need resumed work to keep exporting traces with the same credentials.
+- `strict_context=True`: Fail serialization or deserialization unless the context is already a mapping or you provide the appropriate serializer/deserializer.
+- `context_override`: Replace the serialized context when loading state. This is useful when you do not want to restore the original context object, but it does not remove that context from an already serialized payload.
+- `include_tracing_api_key=True`: Include the tracing API key in the serialized trace payload when you need resumed work to keep exporting traces with the same credentials.
 
-Serialized run state includes your app context plus SDK-managed runtime metadata such as approvals,
-usage, serialized `tool_input`, nested agent-as-tool resumptions, trace metadata, and server-managed
-conversation settings. If you plan to store or transmit serialized state, treat
-`RunContextWrapper.context` as persisted data and avoid placing secrets there unless you
-intentionally want them to travel with the state.
+Serialized run state includes your app context plus SDK-managed runtime metadata such as approvals, usage, serialized `tool_input`, nested agent-as-tool resumptions, trace metadata, and server-managed conversation settings. If you plan to store or transmit serialized state, treat `RunContextWrapper.context` as persisted data and avoid placing secrets there unless you intentionally want them to travel with the state.
 
 ## Versioning pending tasks
 

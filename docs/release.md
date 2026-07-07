@@ -19,6 +19,14 @@ We will increment `Z` for non-breaking changes:
 
 ## Breaking change changelog
 
+### 0.18.0
+
+This minor release does **not** introduce a breaking change. The minor version bump is for the Realtime agents default model update only.
+
+Highlights:
+
+-   Realtime agents now use `gpt-realtime-2.1` as the default model, so new Realtime setups use the latest recommended model without extra configuration.
+
 ### 0.17.0
 
 In this version, sandbox local source materialization keeps `LocalFile.src` and `LocalDir.src` within the materialization `base_dir` unless the source path is covered by `Manifest.extra_path_grants`. The `base_dir` is the SDK process current working directory when the manifest is applied; relative local sources are resolved from that directory, while absolute local sources must already be inside it or under an explicit grant. This closes a local artifact boundary issue, but it can affect applications that intentionally copy trusted host files or directories from outside that base directory into a sandbox workspace.

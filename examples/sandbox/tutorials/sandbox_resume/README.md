@@ -1,17 +1,13 @@
 # Sandbox resume
 
-This example shows a small sandbox resume flow with `AGENTS.md`
-mounted in the sandbox and loaded into the agent instructions. It runs in two
+This example shows a small sandbox resume flow with `AGENTS.md` mounted in the sandbox and loaded into the agent instructions. It runs in two
 steps: first it builds the app and smoke tests it, then it serializes the
 sandbox session state, resumes the sandbox, and adds pytest coverage.
 
-By default the agent builds a tiny warehouse-robot status API, smoke-tests it,
-then resumes the same sandbox to add tests. The sandbox workspace starts with
+By default the agent builds a tiny warehouse-robot status API, smoke-tests it, then resumes the same sandbox to add tests. The sandbox workspace starts with
 one instruction file:
 
-- `AGENTS.md` with instructions to build FastAPI apps, use type hints and
-  Pydantic, install dependencies with `uv`, run Python commands through
-  `uv run python`, and test locally before finishing.
+- `AGENTS.md` with instructions to build FastAPI apps, use type hints and Pydantic, install dependencies with `uv`, run Python commands through `uv run python`, and test locally before finishing.
 
 Run the example from the repository root:
 
@@ -19,8 +15,7 @@ Run the example from the repository root:
 uv run python examples/sandbox/tutorials/sandbox_resume/main.py
 ```
 
-This demo exits after the scripted resume flow so the serialized session state
-and resume step stay easy to follow.
+This demo exits after the scripted resume flow so the serialized session state and resume step stay easy to follow.
 
 You can override the model or prompt:
 

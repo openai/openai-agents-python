@@ -45,14 +45,14 @@ agent = RealtimeAgent(
 
 ### 3. runner 配置
 
-对于新代码，优先使用嵌套的 `audio.input` / `audio.output` 会话设置结构。对于新的实时智能体，请从 `gpt-realtime-2` 开始。
+对于新代码，优先使用嵌套的 `audio.input` / `audio.output` 会话设置结构。对于新的实时智能体，请从 `gpt-realtime-2.1` 开始。
 
 ```python
 runner = RealtimeRunner(
     starting_agent=agent,
     config={
         "model_settings": {
-            "model_name": "gpt-realtime-2",
+            "model_name": "gpt-realtime-2.1",
             "audio": {
                 "input": {
                     "format": "pcm16",

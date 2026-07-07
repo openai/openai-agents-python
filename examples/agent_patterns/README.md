@@ -18,8 +18,7 @@ See the [`deterministic.py`](./deterministic.py) file for an example of this.
 
 In many situations, you have specialized sub-agents that handle specific tasks. You can use handoffs to route the task to the right agent.
 
-For example, you might have a frontline agent that receives a request, and then hands off to a specialized agent based on the language of the request.
-See the [`routing.py`](./routing.py) file for an example of this.
+For example, you might have a frontline agent that receives a request, and then hands off to a specialized agent based on the language of the request. See the [`routing.py`](./routing.py) file for an example of this.
 
 ## Agents as tools
 
@@ -27,9 +26,7 @@ The mental model for handoffs is that the new agent "takes over". It sees the pr
 
 For example, you could model the translation task above as tool calls instead: rather than handing over to the language-specific agent, you could call the agent as a tool, and then use the result in the next step. This enables things like translating multiple languages at once.
 
-See the [`agents_as_tools.py`](./agents_as_tools.py) file for an example of this.
-See the [`agents_as_tools_streaming.py`](./agents_as_tools_streaming.py) file for a streaming variant that taps into nested agent events via `on_stream`.
-See the [`agents_as_tools_structured.py`](./agents_as_tools_structured.py) file for a structured-input variant using `Agent.as_tool()` parameters.
+See the [`agents_as_tools.py`](./agents_as_tools.py) file for an example of this. See the [`agents_as_tools_streaming.py`](./agents_as_tools_streaming.py) file for a streaming variant that taps into nested agent events via `on_stream`. See the [`agents_as_tools_structured.py`](./agents_as_tools_structured.py) file for a structured-input variant using `Agent.as_tool()` parameters.
 
 ## LLM-as-a-judge
 

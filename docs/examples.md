@@ -4,8 +4,7 @@ Check out a variety of sample implementations of the SDK in the examples section
 
 ## Categories
 
--   **[agent_patterns](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns):**
-    Examples in this category illustrate common agent design patterns, such as
+- **[agent_patterns](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns):** Examples in this category illustrate common agent design patterns, such as
 
     -   Deterministic workflows
     -   Agents as tools
@@ -22,8 +21,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Human-in-the-loop with streaming (`examples/agent_patterns/human_in_the_loop_stream.py`)
     -   Custom rejection messages for approval flows (`examples/agent_patterns/human_in_the_loop_custom_rejection.py`)
 
--   **[basic](https://github.com/openai/openai-agents-python/tree/main/examples/basic):**
-    These examples showcase foundational capabilities of the SDK, such as
+- **[basic](https://github.com/openai/openai-agents-python/tree/main/examples/basic):** These examples showcase foundational capabilities of the SDK, such as
 
     -   Hello world examples (Default model, GPT-5, open-weight model)
     -   Agent lifecycle management
@@ -42,28 +40,23 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Non-strict output types
     -   Previous response ID usage
 
--   **[customer_service](https://github.com/openai/openai-agents-python/tree/main/examples/customer_service):**
-    Example customer service system for an airline.
+- **[customer_service](https://github.com/openai/openai-agents-python/tree/main/examples/customer_service):** Example customer service system for an airline.
 
--   **[financial_research_agent](https://github.com/openai/openai-agents-python/tree/main/examples/financial_research_agent):**
-    A financial research agent that demonstrates structured research workflows with agents and tools for financial data analysis.
+- **[financial_research_agent](https://github.com/openai/openai-agents-python/tree/main/examples/financial_research_agent):** A financial research agent that demonstrates structured research workflows with agents and tools for financial data analysis.
 
--   **[handoffs](https://github.com/openai/openai-agents-python/tree/main/examples/handoffs):**
-    Practical examples of agent handoffs with message filtering, including:
+- **[handoffs](https://github.com/openai/openai-agents-python/tree/main/examples/handoffs):** Practical examples of agent handoffs with message filtering, including:
 
     -   Message filter example (`examples/handoffs/message_filter.py`)
     -   Message filter with streaming (`examples/handoffs/message_filter_streaming.py`)
 
--   **[hosted_mcp](https://github.com/openai/openai-agents-python/tree/main/examples/hosted_mcp):**
-    Examples demonstrating how to use hosted MCP (Model Context Protocol) with the OpenAI Responses API, including:
+- **[hosted_mcp](https://github.com/openai/openai-agents-python/tree/main/examples/hosted_mcp):** Examples demonstrating how to use hosted MCP (Model Context Protocol) with the OpenAI Responses API, including:
 
     -   Simple hosted MCP without approval (`examples/hosted_mcp/simple.py`)
     -   MCP connectors such as Google Calendar (`examples/hosted_mcp/connectors.py`)
     -   Human-in-the-loop with interruption-based approvals (`examples/hosted_mcp/human_in_the_loop.py`)
     -   On-approval callback for MCP tool calls (`examples/hosted_mcp/on_approval.py`)
 
--   **[mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp):**
-    Learn how to build agents with MCP (Model Context Protocol), including:
+- **[mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp):** Learn how to build agents with MCP (Model Context Protocol), including:
 
     -   Filesystem examples
     -   Git examples
@@ -77,8 +70,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   MCPServerManager with FastAPI (`examples/mcp/manager_example`)
     -   MCP tool filtering (`examples/mcp/tool_filter_example`)
 
--   **[memory](https://github.com/openai/openai-agents-python/tree/main/examples/memory):**
-    Examples of different memory implementations for agents, including:
+- **[memory](https://github.com/openai/openai-agents-python/tree/main/examples/memory):** Examples of different memory implementations for agents, including:
 
     -   SQLite session storage
     -   Advanced SQLite session storage
@@ -95,29 +87,32 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   OpenAI Conversations session with human-in-the-loop (`examples/memory/openai_session_hitl_example.py`)
     -   HITL approval/rejection scenario across sessions (`examples/memory/hitl_session_scenario.py`)
 
--   **[model_providers](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers):**
-    Explore how to use non-OpenAI models with the SDK, including custom providers and third-party adapters.
+- **[model_providers](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers):** Explore how to use non-OpenAI models with the SDK, including custom providers and third-party adapters.
 
--   **[realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime):**
-    Examples showing how to build real-time experiences using the SDK, including:
+- **[realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime):** Examples showing how to build real-time experiences using the SDK, including:
 
     -   Web application patterns with structured text and image messages
     -   Command-line audio loops and playback handling
     -   Twilio Media Streams integration over WebSocket
     -   Twilio SIP integration using Realtime Calls API attach flows
 
--   **[reasoning_content](https://github.com/openai/openai-agents-python/tree/main/examples/reasoning_content):**
-    Examples demonstrating how to work with reasoning content, including:
+- **[reasoning_content](https://github.com/openai/openai-agents-python/tree/main/examples/reasoning_content):** Examples demonstrating how to work with reasoning content, including:
 
     -   Reasoning content with the Runner API, streaming and non-streaming (`examples/reasoning_content/runner_example.py`)
     -   Reasoning content with OSS models via OpenRouter (`examples/reasoning_content/gpt_oss_stream.py`)
     -   Basic reasoning content example (`examples/reasoning_content/main.py`)
 
--   **[research_bot](https://github.com/openai/openai-agents-python/tree/main/examples/research_bot):**
-    Simple deep research clone that demonstrates complex multi-agent research workflows.
+- **[research_bot](https://github.com/openai/openai-agents-python/tree/main/examples/research_bot):** Simple deep research clone that demonstrates complex multi-agent research workflows.
 
--   **[tools](https://github.com/openai/openai-agents-python/tree/main/examples/tools):**
-    Learn how to implement OAI hosted tools and experimental Codex tooling such as:
+- **[sandbox](https://github.com/openai/openai-agents-python/tree/main/examples/sandbox):** Examples for running agents in isolated workspaces, including:
+
+    -   Basic sandbox agent setup (`examples/sandbox/basic.py`)
+    -   Unix-local and Docker sandbox lifecycle examples
+    -   Sandbox-backed handoffs (`examples/sandbox/handoffs.py`)
+    -   Sandbox memory and snapshot resume (`examples/sandbox/memory.py`)
+    -   Sandbox agents exposed as tools (`examples/sandbox/sandbox_agents_as_tools.py`)
+
+- **[tools](https://github.com/openai/openai-agents-python/tree/main/examples/tools):** Learn how to implement OAI hosted tools and experimental Codex tooling such as:
 
     -   Web search and web search with filters
     -   File search
@@ -134,5 +129,4 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Experimental Codex tool workflows (`examples/tools/codex.py`)
     -   Experimental Codex same-thread workflows (`examples/tools/codex_same_thread.py`)
 
--   **[voice](https://github.com/openai/openai-agents-python/tree/main/examples/voice):**
-    See examples of voice agents, using our TTS and STT models, including streamed voice examples.
+- **[voice](https://github.com/openai/openai-agents-python/tree/main/examples/voice):** See examples of voice agents, using our TTS and STT models, including streamed voice examples.

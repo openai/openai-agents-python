@@ -7,13 +7,11 @@ context to language models. From the official documentation:
 > applications. Just as USB-C provides a standardized way to connect your devices to various peripherals and accessories, MCP
 > provides a standardized way to connect AI models to different data sources and tools.
 
-The Agents Python SDK understands multiple MCP transports. This lets you reuse existing MCP servers or build your own to expose
-filesystem, HTTP, or connector backed tools to an agent.
+The Agents Python SDK understands multiple MCP transports. This lets you reuse existing MCP servers or build your own to expose filesystem, HTTP, or connector backed tools to an agent.
 
 ## Choosing an MCP integration
 
-Before wiring an MCP server into an agent decide where the tool calls should execute and which transports you can reach. The
-matrix below summarises the options that the Python SDK supports.
+Before wiring an MCP server into an agent decide where the tool calls should execute and which transports you can reach. The matrix below summarises the options that the Python SDK supports.
 
 | What you need                                                                        | Recommended option                                    |
 | ------------------------------------------------------------------------------------ | ----------------------------------------------------- |
@@ -67,10 +65,7 @@ For local MCP servers (`MCPServerStdio`, `MCPServerSse`, `MCPServerStreamableHtt
 
 ## 1. Hosted MCP server tools
 
-Hosted tools push the entire tool round-trip into OpenAI's infrastructure. Instead of your code listing and calling tools, the
-[`HostedMCPTool`][agents.tool.HostedMCPTool] forwards a server label (and optional connector metadata) to the Responses API. The
-model lists the remote server's tools and invokes them without an extra callback to your Python process. Hosted tools currently
-work with OpenAI models that support the Responses API's hosted MCP integration.
+Hosted tools push the entire tool round-trip into OpenAI's infrastructure. Instead of your code listing and calling tools, the [`HostedMCPTool`][agents.tool.HostedMCPTool] forwards a server label (and optional connector metadata) to the Responses API. The model lists the remote server's tools and invokes them without an extra callback to your Python process. Hosted tools currently work with OpenAI models that support the Responses API's hosted MCP integration.
 
 ### Basic hosted MCP tool
 
@@ -126,9 +121,7 @@ print(result.final_output)
 
 ### Optional approval flows
 
-If a server can perform sensitive operations you can require human or programmatic approval before each tool execution. Configure
-`require_approval` in the `tool_config` with either a single policy (`"always"`, `"never"`) or a dict mapping tool names to
-policies. To make the decision inside Python, provide an `on_approval_request` callback.
+If a server can perform sensitive operations you can require human or programmatic approval before each tool execution. Configure `require_approval` in the `tool_config` with either a single policy (`"always"`, `"never"`) or a dict mapping tool names to policies. To make the decision inside Python, provide an `on_approval_request` callback.
 
 ```python
 from agents import MCPToolApprovalFunctionResult, MCPToolApprovalRequest
@@ -160,8 +153,7 @@ The callback can be synchronous or asynchronous and is invoked whenever the mode
 
 ### Connector-backed hosted servers
 
-Hosted MCP also supports OpenAI connectors. Instead of specifying a `server_url`, supply a `connector_id` and an access token. The
-Responses API handles authentication and the hosted server exposes the connector's tools.
+Hosted MCP also supports OpenAI connectors. Instead of specifying a `server_url`, supply a `connector_id` and an access token. The Responses API handles authentication and the hosted server exposes the connector's tools.
 
 ```python
 import os
@@ -177,14 +169,11 @@ HostedMCPTool(
 )
 ```
 
-Fully working hosted tool samples—including streaming, approvals, and connectors—live in
-[`examples/hosted_mcp`](https://github.com/openai/openai-agents-python/tree/main/examples/hosted_mcp).
+Fully working hosted tool samples—including streaming, approvals, and connectors—live in [`examples/hosted_mcp`](https://github.com/openai/openai-agents-python/tree/main/examples/hosted_mcp).
 
 ## 2. Streamable HTTP MCP servers
 
-When you want to manage the network connection yourself, use
-[`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp]. Streamable HTTP servers are ideal when you control the
-transport or want to run the server inside your own infrastructure while keeping latency low.
+When you want to manage the network connection yourself, use [`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp]. Streamable HTTP servers are ideal when you control the transport or want to run the server inside your own infrastructure while keeping latency low.
 
 ```python
 import asyncio
@@ -238,8 +227,7 @@ Supported forms:
 - `"always"` or `"never"` for all tools.
 - `True` / `False` (equivalent to always/never).
 - A per-tool map, for example `{"delete_file": "always", "read_file": "never"}`.
-- A grouped object:
-  `{"always": {"tool_names": [...]}, "never": {"tool_names": [...]}}`.
+- A grouped object: `{"always": {"tool_names": [...]}, "never": {"tool_names": [...]}}`.
 
 ```python
 async with MCPServerStreamableHttp(
@@ -287,8 +275,7 @@ When an MCP tool returns image content, the SDK maps it to image tool output ent
 
     The MCP project has deprecated the Server-Sent Events transport. Prefer Streamable HTTP or stdio for new integrations and keep SSE only for legacy servers.
 
-If the MCP server implements the HTTP with SSE transport, instantiate
-[`MCPServerSse`][agents.mcp.server.MCPServerSse]. Apart from the transport, the API is identical to the Streamable HTTP server.
+If the MCP server implements the HTTP with SSE transport, instantiate [`MCPServerSse`][agents.mcp.server.MCPServerSse]. Apart from the transport, the API is identical to the Streamable HTTP server.
 
 ```python
 
@@ -317,9 +304,7 @@ async with MCPServerSse(
 
 ## 4. stdio MCP servers
 
-For MCP servers that run as local subprocesses, use [`MCPServerStdio`][agents.mcp.server.MCPServerStdio]. The SDK spawns the
-process, keeps the pipes open, and closes them automatically when the context manager exits. This option is helpful for quick
-proofs of concept or when the server only exposes a command line entry point.
+For MCP servers that run as local subprocesses, use [`MCPServerStdio`][agents.mcp.server.MCPServerStdio]. The SDK spawns the process, keeps the pipes open, and closes them automatically when the context manager exits. This option is helpful for quick proofs of concept or when the server only exposes a command line entry point.
 
 ```python
 from pathlib import Path
@@ -347,8 +332,7 @@ async with MCPServerStdio(
 
 ## 5. MCP server manager
 
-When you have multiple MCP servers, use `MCPServerManager` to connect them up front and expose the connected subset to your agents.
-See the [MCPServerManager API reference](ref/mcp/manager.md) for constructor options and reconnect behavior.
+When you have multiple MCP servers, use `MCPServerManager` to connect them up front and expose the connected subset to your agents. See the [MCPServerManager API reference](ref/mcp/manager.md) for constructor options and reconnect behavior.
 
 ```python
 from agents import Agent, Runner
@@ -383,8 +367,7 @@ The sections below apply across MCP server transports (with the exact API surfac
 
 ## Tool filtering
 
-Each MCP server supports tool filters so that you can expose only the functions that your agent needs. Filtering can happen at
-construction time or dynamically per run.
+Each MCP server supports tool filters so that you can expose only the functions that your agent needs. Filtering can happen at construction time or dynamically per run.
 
 ### Static tool filtering
 
@@ -406,13 +389,11 @@ filesystem_server = MCPServerStdio(
 )
 ```
 
-When both `allowed_tool_names` and `blocked_tool_names` are supplied the SDK applies the allow-list first and then removes any
-blocked tools from the remaining set.
+When both `allowed_tool_names` and `blocked_tool_names` are supplied the SDK applies the allow-list first and then removes any blocked tools from the remaining set.
 
 ### Dynamic tool filtering
 
-For more elaborate logic pass a callable that receives a [`ToolFilterContext`][agents.mcp.ToolFilterContext]. The callable can be
-synchronous or asynchronous and returns `True` when the tool should be exposed.
+For more elaborate logic pass a callable that receives a [`ToolFilterContext`][agents.mcp.ToolFilterContext]. The callable can be synchronous or asynchronous and returns `True` when the tool should be exposed.
 
 ```python
 from pathlib import Path
@@ -464,9 +445,7 @@ agent = Agent(
 
 ## Caching
 
-Every agent run calls `list_tools()` on each MCP server. Remote servers can introduce noticeable latency, so all of the MCP
-server classes expose a `cache_tools_list` option. Set it to `True` only if you are confident that the tool definitions do not
-change frequently. To force a fresh list later, call `invalidate_tools_cache()` on the server instance.
+Every agent run calls `list_tools()` on each MCP server. Remote servers can introduce noticeable latency, so all of the MCP server classes expose a `cache_tools_list` option. Set it to `True` only if you are confident that the tool definitions do not change frequently. To force a fresh list later, call `invalidate_tools_cache()` on the server instance.
 
 ## Tracing
 

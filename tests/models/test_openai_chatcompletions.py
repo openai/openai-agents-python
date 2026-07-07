@@ -913,6 +913,16 @@ def test_store_param():
     )
 
 
+def test_clean_gemini_tool_call_id_removes_thought_suffix() -> None:
+    assert (
+        ChatCmplHelpers.clean_gemini_tool_call_id(
+            "call_123__thought__signature",
+            model="gemini-2.5-pro",
+        )
+        == "call_123"
+    )
+
+
 def test_get_retry_advice_uses_openai_headers() -> None:
     request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
     response = httpx.Response(

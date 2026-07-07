@@ -46,15 +46,9 @@ In addition, you can set up [custom trace processors](#custom-tracing-processors
 
 ## Long-running workers and immediate exports
 
-The default [`BatchTraceProcessor`][agents.tracing.processors.BatchTraceProcessor] exports traces
-in the background every few seconds, or sooner when the in-memory queue reaches its size trigger,
-and also performs a final flush when the process exits. In long-running workers such as Celery,
-RQ, Dramatiq, or FastAPI background tasks, this means traces are usually exported automatically
-without any extra code, but they may not appear in the Traces dashboard immediately after each job
-finishes.
+The default [`BatchTraceProcessor`][agents.tracing.processors.BatchTraceProcessor] exports traces in the background every few seconds, or sooner when the in-memory queue reaches its size trigger, and also performs a final flush when the process exits. In long-running workers such as Celery, RQ, Dramatiq, or FastAPI background tasks, this means traces are usually exported automatically without any extra code, but they may not appear in the Traces dashboard immediately after each job finishes.
 
-If you need an immediate delivery guarantee at the end of a unit of work, call
-[`flush_traces()`][agents.tracing.flush_traces] after the trace context exits.
+If you need an immediate delivery guarantee at the end of a unit of work, call [`flush_traces()`][agents.tracing.flush_traces] after the trace context exits.
 
 ```python
 from agents import Runner, flush_traces, trace
@@ -91,9 +85,7 @@ async def run(prompt: str, background_tasks: BackgroundTasks):
     return {"status": "queued"}
 ```
 
-[`flush_traces()`][agents.tracing.flush_traces] blocks until currently buffered traces and spans are
-exported, so call it after `trace()` closes to avoid flushing a partially built trace. You can skip
-this call when the default export latency is acceptable.
+[`flush_traces()`][agents.tracing.flush_traces] blocks until currently buffered traces and spans are exported, so call it after `trace()` closes to avoid flushing a partially built trace. You can skip this call when the default export latency is acceptable.
 
 ## Higher level traces
 
@@ -224,3 +216,4 @@ The following community and vendor integrations support the OpenAI Agents SDK tr
 -   [Asqav](https://www.asqav.com/docs/integrations#openai-agents)
 -   [Datadog](https://docs.datadoghq.com/llm_observability/instrumentation/auto_instrumentation/?tab=python#openai-agents)
 -   [Latitude](https://docs.latitude.so/telemetry/frameworks/openai-agents)
+-   [DProvenanceKit](https://dprovenance.dev/openai-agents/)

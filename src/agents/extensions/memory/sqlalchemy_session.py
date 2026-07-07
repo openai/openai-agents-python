@@ -136,6 +136,7 @@ class SQLAlchemySession(SessionABC):
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
         session_settings: SessionSettings | None = None,
+        ensure_ascii: bool = True,
     ):
         """Initializes a new SQLAlchemySession.
 
@@ -150,10 +151,13 @@ class SQLAlchemySession(SessionABC):
             sessions_table (str, optional): Override the default table name for sessions if needed.
             messages_table (str, optional): Override the default table name for messages if needed.
             session_settings (SessionSettings | None, optional): Session configuration settings
+            ensure_ascii (bool, optional): Whether to escape non-ASCII characters when serializing
+                session items to JSON. Defaults to True to preserve the historical storage format.
         """
         self.session_id = session_id
         self.session_settings = session_settings or SessionSettings()
         self._engine = engine
+        self._ensure_ascii = ensure_ascii
         self._configure_sqlite_engine(engine)
         self._init_lock = (
             self._get_table_init_lock(engine, sessions_table, messages_table)
@@ -245,7 +249,7 @@ class SQLAlchemySession(SessionABC):
 
     async def _serialize_item(self, item: TResponseInputItem) -> str:
         """Serialize an item to JSON string. Can be overridden by subclasses."""
-        return json.dumps(item, separators=(",", ":"))
+        return json.dumps(item, ensure_ascii=self._ensure_ascii, separators=(",", ":"))
 
     async def _deserialize_item(self, item: str) -> TResponseInputItem:
         """Deserialize a JSON string to an item. Can be overridden by subclasses."""

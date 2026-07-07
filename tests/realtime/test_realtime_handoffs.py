@@ -7,6 +7,7 @@ from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
+from pydantic import BaseModel
 
 from agents import Agent
 from agents.exceptions import ModelBehaviorError, UserError
@@ -245,3 +246,45 @@ def test_realtime_handoff_on_handoff_without_input_runs() -> None:
 
     assert result is rt
     assert called == [True]
+
+
+@pytest.mark.asyncio
+async def test_realtime_handoff_async_on_handoff_without_input_runs() -> None:
+    rt = RealtimeAgent(name="async_no_input")
+    called: list[bool] = []
+
+    async def on_handoff(ctx: RunContextWrapper[Any]) -> None:
+        called.append(True)
+
+    handoff_obj = realtime_handoff(rt, on_handoff=on_handoff)
+    result = await handoff_obj.on_invoke_handoff(RunContextWrapper(None), "")
+
+    assert result is rt
+    assert called == [True]
+
+
+class StrictInput(BaseModel):
+    name: str
+    age: int
+
+
+@pytest.mark.asyncio
+async def test_realtime_handoff_strict_json_rejects_type_coercion():
+    """With strict_json_schema=True (always on for realtime handoffs), string input for an
+    int field must raise ModelBehaviorError instead of being silently coerced."""
+    rt = RealtimeAgent(name="strict_test")
+
+    async def _on_handoff(ctx: RunContextWrapper[Any], data: StrictInput) -> None:
+        pass  # pragma: no cover
+
+    handoff_obj = realtime_handoff(rt, on_handoff=_on_handoff, input_type=StrictInput)
+
+    # age is a string "25" — strict mode should reject this
+    malformed_json = '{"name": "Alice", "age": "25"}'
+    with pytest.raises(ModelBehaviorError, match="Invalid JSON"):
+        await handoff_obj.on_invoke_handoff(RunContextWrapper(None), malformed_json)
+
+    # Correctly typed input should still be accepted
+    valid_json = '{"name": "Alice", "age": 25}'
+    result = await handoff_obj.on_invoke_handoff(RunContextWrapper(None), valid_json)
+    assert result is rt

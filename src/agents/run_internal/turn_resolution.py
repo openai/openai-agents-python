@@ -368,6 +368,44 @@ async def execute_final_output(
     )
 
 
+async def _resolve_invalid_final_output(
+    *,
+    error_handlers: RunErrorHandlers[TContext] | None,
+    error: ModelBehaviorError,
+    public_agent: Agent[TContext],
+    original_input: str | list[TResponseInputItem],
+    new_response: ModelResponse,
+    new_items: list[RunItem],
+    context_wrapper: RunContextWrapper[TContext],
+) -> tuple[Any, MessageOutputItem | None] | None:
+    run_error_data = build_run_error_data(
+        input=original_input,
+        new_items=new_items,
+        raw_responses=[new_response],
+        last_agent=public_agent,
+    )
+    handler_result = await resolve_run_error_handler_result(
+        error_handlers=error_handlers,
+        error_kind="invalid_final_output",
+        error=error,
+        context_wrapper=context_wrapper,
+        run_data=run_error_data,
+    )
+    if handler_result is None:
+        return None
+
+    final_output = validate_handler_final_output(public_agent, handler_result.final_output)
+    message_item = (
+        create_message_output_item(
+            public_agent,
+            format_final_output_text(public_agent, final_output),
+        )
+        if handler_result.include_in_history
+        else None
+    )
+    return final_output, message_item
+
+
 def _resolve_server_managed_handoff_behavior(
     *,
     handoff: Handoff[Any, Agent[Any]],
@@ -781,6 +819,7 @@ async def execute_tools_and_side_effects(
                 )
                 handler_result = await resolve_run_error_handler_result(
                     error_handlers=error_handlers,
+                    error_kind="model_refusal",
                     error=refusal_error,
                     context_wrapper=context_wrapper,
                     run_data=run_error_data,
@@ -806,8 +845,51 @@ async def execute_tools_and_side_effects(
                     tool_input_guardrail_results=tool_input_guardrail_results,
                     tool_output_guardrail_results=tool_output_guardrail_results,
                 )
-            if output_schema and not output_schema.is_plain_text() and potential_final_output_text:
-                final_output = output_schema.validate_json(potential_final_output_text)
+            if output_schema and not output_schema.is_plain_text():
+                if potential_final_output_text:
+                    try:
+                        final_output = output_schema.validate_json(potential_final_output_text)
+                    except ModelBehaviorError as error:
+                        resolved_handler_output = await _resolve_invalid_final_output(
+                            error_handlers=error_handlers,
+                            error=error,
+                            public_agent=public_agent,
+                            original_input=original_input,
+                            new_response=new_response,
+                            new_items=pre_step_items + new_step_items,
+                            context_wrapper=context_wrapper,
+                        )
+                        if resolved_handler_output is None:
+                            raise
+                        final_output, message_item = resolved_handler_output
+                        if message_item is not None:
+                            new_step_items.append(message_item)
+                else:
+                    resolved_handler_output = await _resolve_invalid_final_output(
+                        error_handlers=error_handlers,
+                        error=ModelBehaviorError(
+                            "Model returned no final output for the structured output type."
+                        ),
+                        public_agent=public_agent,
+                        original_input=original_input,
+                        new_response=new_response,
+                        new_items=pre_step_items + new_step_items,
+                        context_wrapper=context_wrapper,
+                    )
+                    if resolved_handler_output is None:
+                        return SingleStepResult(
+                            original_input=original_input,
+                            model_response=new_response,
+                            pre_step_items=pre_step_items,
+                            new_step_items=new_step_items,
+                            next_step=NextStepRunAgain(),
+                            tool_input_guardrail_results=tool_input_guardrail_results,
+                            tool_output_guardrail_results=tool_output_guardrail_results,
+                        )
+                    final_output, message_item = resolved_handler_output
+                    if message_item is not None:
+                        new_step_items.append(message_item)
+
                 return await execute_final_output_call(
                     public_agent=public_agent,
                     original_input=original_input,

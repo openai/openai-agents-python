@@ -68,7 +68,7 @@ async def test_build_model_settings_from_agent_merges_agent_fields(monkeypatch: 
 
     monkeypatch.setattr(agent, "get_all_tools", AsyncMock(return_value=[helper]))
     agent.handoffs = [RealtimeAgent(name="handoff-child")]
-    base_settings: RealtimeSessionModelSettings = {"model_name": "gpt-realtime-2"}
+    base_settings: RealtimeSessionModelSettings = {"model_name": "gpt-realtime-2.1"}
     starting_settings: RealtimeSessionModelSettings = {"voice": "verse"}
     run_config: RealtimeRunConfig = {"tracing_disabled": True}
 
@@ -85,9 +85,9 @@ async def test_build_model_settings_from_agent_merges_agent_fields(monkeypatch: 
     assert merged["tools"][0].name == helper.name
     assert merged["handoffs"][0].agent_name == "handoff-child"
     assert merged["voice"] == "verse"
-    assert merged["model_name"] == "gpt-realtime-2"
+    assert merged["model_name"] == "gpt-realtime-2.1"
     assert merged["tracing"] is None
-    assert base_settings == {"model_name": "gpt-realtime-2"}
+    assert base_settings == {"model_name": "gpt-realtime-2.1"}
 
 
 @pytest.mark.asyncio

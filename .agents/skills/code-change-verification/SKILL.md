@@ -19,9 +19,15 @@ Ensure work is only marked complete after formatting, linting, type checking, an
 6. If any command fails, fix the issue, rerun the script, and report the failing output.
 7. Confirm completion only when all commands succeed with no remaining issues.
 
+## Environment setup
+
+The verification scripts assume repository dependencies are already installed. Do not run `make sync` as part of every verification pass; use it for a fresh checkout, after dependency files change, or when dependency resolution fails before the checks start.
+
+On Linux, some Python packages with native extensions may require system packages such as `libffi-dev`, Python development headers, or build tools. If verification cannot start because one of these packages is missing, treat it as a local environment setup issue. Install the missing dependency when possible, or report the failing command and missing dependency in the PR test plan before rerunning verification in a prepared environment.
+
 ## Manual workflow
 
-- If dependencies are not installed or have changed, run `make sync` first to install dev requirements via `uv`.
+- For a fresh checkout, or if dependencies are not installed or have changed, run `make sync` first to install dev requirements via `uv`.
 - Run from the repository root with `make format` first, then `make lint`, `make typecheck`, and `make tests`.
 - Do not skip steps; stop and fix issues immediately when a command fails.
 - If you run the steps manually, you may parallelize `make lint`, `make typecheck`, and `make tests` after `make format` completes, but you must stop the remaining steps as soon as one fails.

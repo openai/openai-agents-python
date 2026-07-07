@@ -116,8 +116,8 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
         assert model.model == "gpt-4o-realtime-preview"
 
     @pytest.mark.asyncio
-    async def test_connect_defaults_to_gpt_realtime_2(self, model, mock_websocket):
-        """Test that connect() uses gpt-realtime-2 when no model is provided."""
+    async def test_connect_defaults_to_gpt_realtime_2_1(self, model, mock_websocket):
+        """Test that connect() uses gpt-realtime-2.1 when no model is provided."""
         config = {
             "api_key": "test-api-key-123",
             "initial_model_settings": {},
@@ -140,8 +140,8 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
 
                 mock_connect.assert_called_once()
                 call_args = mock_connect.call_args
-                assert call_args[0][0] == "wss://api.openai.com/v1/realtime?model=gpt-realtime-2"
-                assert model.model == "gpt-realtime-2"
+                assert call_args[0][0] == "wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1"
+                assert model.model == "gpt-realtime-2.1"
 
         assert model._websocket_task is not None
 
@@ -442,6 +442,36 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         await model._handle_ws_event(invalid_event)
 
         # Should emit raw server event and error event to listeners
+        assert mock_listener.on_event.call_count == 2
+        error_event = mock_listener.on_event.call_args_list[1][0][0]
+        assert error_event.type == "error"
+
+    @pytest.mark.asyncio
+    async def test_handle_invalid_event_schema_redacts_payload_from_logs(self, model, monkeypatch):
+        """Test that invalid event logs omit payload data when model data logging is disabled."""
+        mock_listener = AsyncMock()
+        model.add_listener(mock_listener)
+        monkeypatch.setattr(
+            "agents.realtime.openai_realtime._debug.DONT_LOG_MODEL_DATA",
+            True,
+        )
+
+        invalid_event = {
+            "type": "response.output_audio.delta",
+            "event_id": "evt_123",
+            "delta": "secret transcript",
+        }
+
+        with patch("agents.realtime.openai_realtime.logger") as mock_logger:
+            await model._handle_ws_event(invalid_event)
+
+        mock_logger.error.assert_called_once()
+        logged_call = str(mock_logger.error.call_args)
+        assert "secret transcript" not in logged_call
+        assert "response.output_audio.delta" in logged_call
+        assert "evt_123" in logged_call
+        assert mock_logger.error.call_args.kwargs.get("exc_info") is not True
+
         assert mock_listener.on_event.call_count == 2
         error_event = mock_listener.on_event.call_args_list[1][0][0]
         assert error_event.type == "error"
@@ -1642,7 +1672,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
     def test_session_config_defaults_audio_formats_when_not_call(self, model):
         settings: dict[str, Any] = {}
         cfg = model._get_session_config(settings)
-        assert cfg.model == "gpt-realtime-2"
+        assert cfg.model == "gpt-realtime-2.1"
         assert cfg.audio is not None
         assert cfg.audio.input is not None
         assert cfg.audio.input.format is not None
@@ -1659,7 +1689,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         cfg = model._get_session_config(settings)
         payload = cfg.model_dump(exclude_unset=True)
 
-        assert payload["model"] == "gpt-realtime-2"
+        assert payload["model"] == "gpt-realtime-2.1"
         assert payload["parallel_tool_calls"] is False
         assert payload["reasoning"] == {"effort": "low"}
 

@@ -165,7 +165,7 @@ async def test_property_and_send_helpers_and_enter_alias():
 
 
 @pytest.mark.asyncio
-async def test_aiter_cancel_breaks_loop_gracefully():
+async def test_aiter_cancel_propagates_cancelled_error():
     model = _DummyModel()
     agent = RealtimeAgent(name="agent")
     session = RealtimeSession(model, agent, None)
@@ -177,8 +177,11 @@ async def test_aiter_cancel_breaks_loop_gracefully():
     consumer = asyncio.create_task(consume())
     await asyncio.sleep(0.01)
     consumer.cancel()
-    # The iterator swallows CancelledError internally and exits cleanly
-    await consumer
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    assert session._event_iterator_waiters == 0
 
 
 @pytest.mark.asyncio

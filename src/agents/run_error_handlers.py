@@ -7,7 +7,7 @@ from typing import Any, Generic
 from typing_extensions import TypedDict
 
 from .agent import Agent
-from .exceptions import MaxTurnsExceeded, ModelRefusalError
+from .exceptions import MaxTurnsExceeded, ModelBehaviorError, ModelRefusalError
 from .items import ModelResponse, RunItem, TResponseInputItem
 from .run_context import RunContextWrapper, TContext
 from .util._types import MaybeAwaitable
@@ -27,7 +27,7 @@ class RunErrorData:
 
 @dataclass
 class RunErrorHandlerInput(Generic[TContext]):
-    error: MaxTurnsExceeded | ModelRefusalError
+    error: MaxTurnsExceeded | ModelRefusalError | ModelBehaviorError
     context: RunContextWrapper[TContext]
     run_data: RunErrorData
 
@@ -52,6 +52,7 @@ class RunErrorHandlers(TypedDict, Generic[TContext], total=False):
 
     max_turns: RunErrorHandler[TContext]
     model_refusal: RunErrorHandler[TContext]
+    invalid_final_output: RunErrorHandler[TContext]
 
 
 __all__ = [

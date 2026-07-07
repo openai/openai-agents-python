@@ -269,23 +269,20 @@ class RealtimeSession(RealtimeModelListener):
             if self._closed and self._event_queue.empty():
                 return
 
-            try:
-                # Check if there's a stored exception to raise
-                if self._stored_exception is not None:
-                    # Clean up resources before raising
-                    await self._cleanup()
-                    raise self._stored_exception
+            # Check if there's a stored exception to raise
+            if self._stored_exception is not None:
+                # Clean up resources before raising
+                await self._cleanup()
+                raise self._stored_exception
 
-                self._event_iterator_waiters += 1
-                try:
-                    event = await self._event_queue.get()
-                finally:
-                    self._event_iterator_waiters -= 1
-                if event is _REALTIME_SESSION_CLOSED_SENTINEL:
-                    return
-                yield cast(RealtimeSessionEvent, event)
-            except asyncio.CancelledError:
-                break
+            self._event_iterator_waiters += 1
+            try:
+                event = await self._event_queue.get()
+            finally:
+                self._event_iterator_waiters -= 1
+            if event is _REALTIME_SESSION_CLOSED_SENTINEL:
+                return
+            yield cast(RealtimeSessionEvent, event)
 
     async def close(self) -> None:
         """Close the session."""

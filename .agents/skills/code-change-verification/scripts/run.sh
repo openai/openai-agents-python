@@ -286,13 +286,21 @@ check_for_missing_reporters() {
     log_file="${STEP_LOGS[$idx]}"
     start_time="${STEP_STARTS[$idx]}"
     now=$(date +%s)
-    wait "${pid}" 2>/dev/null || true
+    set +e
+    wait "${pid}" 2>/dev/null
+    step_status=$?
+    set -e
+
+    if [ "${step_status}" -eq 0 ]; then
+      finish_step "${name}" 0
+      return 0
+    fi
 
     echo "code-change-verification: make ${name} exited before reporting completion status after $((now - start_time))s." >&2
     echo "--- ${name} log (last 80 lines) ---" >&2
     tail -n 80 "${log_file}" >&2 || true
     stop_running_steps
-    return 1
+    return "${step_status}"
   done
 
   return 0

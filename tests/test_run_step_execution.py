@@ -2934,6 +2934,14 @@ def make_processed_response(
     )
 
 
+def test_processed_response_reports_interruptions() -> None:
+    processed_response = make_processed_response(
+        interruptions=[cast(ToolApprovalItem, object())],
+    )
+
+    assert processed_response.has_interruptions() is True
+
+
 async def get_execute_result(
     agent: Agent[Any],
     response: ModelResponse,

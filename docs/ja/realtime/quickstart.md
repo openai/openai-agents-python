@@ -45,14 +45,14 @@ agent = RealtimeAgent(
 
 ### 3. ランナーの設定
 
-新しいコードでは、ネストされた `audio.input` / `audio.output` のセッション設定形式を推奨します。新しいリアルタイムエージェントでは、`gpt-realtime-2` から始めてください。
+新しいコードでは、ネストされた `audio.input` / `audio.output` のセッション設定形式を推奨します。新しいリアルタイムエージェントでは、`gpt-realtime-2.1` から始めてください。
 
 ```python
 runner = RealtimeRunner(
     starting_agent=agent,
     config={
         "model_settings": {
-            "model_name": "gpt-realtime-2",
+            "model_name": "gpt-realtime-2.1",
             "audio": {
                 "input": {
                     "format": "pcm16",

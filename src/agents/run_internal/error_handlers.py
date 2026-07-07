@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from typing import Any
+from typing import Any, Literal
 
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
@@ -26,6 +26,8 @@ from ..run_error_handlers import (
 )
 from .items import ReasoningItemIdPolicy, run_item_to_input_item
 from .turn_preparation import get_output_schema
+
+RunErrorHandlerKind = Literal["max_turns", "model_refusal", "invalid_final_output"]
 
 
 def build_run_error_data(
@@ -128,16 +130,14 @@ def create_message_output_item(agent: Agent[Any], output_text: str) -> MessageOu
 async def resolve_run_error_handler_result(
     *,
     error_handlers: RunErrorHandlers[TContext] | None,
-    error: MaxTurnsExceeded | ModelRefusalError,
+    error_kind: RunErrorHandlerKind,
+    error: MaxTurnsExceeded | ModelRefusalError | ModelBehaviorError,
     context_wrapper: RunContextWrapper[TContext],
     run_data: RunErrorData,
 ) -> RunErrorHandlerResult | None:
     if not error_handlers:
         return None
-    if isinstance(error, ModelRefusalError):
-        handler = error_handlers.get("model_refusal")
-    else:
-        handler = error_handlers.get("max_turns")
+    handler = error_handlers.get(error_kind)
     if handler is None:
         return None
     handler_input = RunErrorHandlerInput(

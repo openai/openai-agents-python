@@ -1,37 +1,23 @@
 # NASA Spending Text-to-SQL Agent
 
-Multi-turn conversational agent that translates natural-language questions about NASA federal
-spending into SQL queries, executes them against a local SQLite database, and returns structured
-tabular results.
+Multi-turn conversational agent that translates natural-language questions about NASA federal spending into SQL queries, executes them against a local SQLite database, and returns structured tabular results.
 
 ## How it works
 
-1. **Schema knowledge**: The agent receives a compact schema summary in its system prompt and can
-   read detailed per-table documentation from workspace files on demand.
-2. **SQL execution**: A custom `SqlCapability` provides a `run_sql` tool with guardrails — read-only
-   mode, statement validation, row limits, and query timeouts. The agent is instructed to use
-   `run_sql` for all queries; the tool enforces read-only access at the SQLite level.
-3. **Multi-turn conversation**: The agent retains context across turns, so you can ask follow-up
-   questions like "break that down by year" or "just the top 5".
-4. **Compaction**: Uses the `Compaction` capability to automatically summarize older conversation
-   context, keeping long sessions within the model's context window.
-5. **Pause/resume**: Type `exit` to pause the sandbox and quit. Run the script again to reconnect
-   to the same paused sandbox — no re-download needed. If the sandbox can't be reconnected (e.g.
-   it was deleted or expired), a fresh one is created and the database is rebuilt automatically.
-6. **Memory**: Uses the `Memory` capability to extract learnings from each conversation and
-   consolidate them into structured files. On subsequent sessions, the agent starts with context
-   from previous conversations (useful query patterns, data caveats, etc.).
+1. **Schema knowledge**: The agent receives a compact schema summary in its system prompt and can read detailed per-table documentation from workspace files on demand.
+2. **SQL execution**: A custom `SqlCapability` provides a `run_sql` tool with guardrails — read-only mode, statement validation, row limits, and query timeouts. The agent is instructed to use `run_sql` for all queries; the tool enforces read-only access at the SQLite level.
+3. **Multi-turn conversation**: The agent retains context across turns, so you can ask follow-up questions like "break that down by year" or "just the top 5".
+4. **Compaction**: Uses the `Compaction` capability to automatically summarize older conversation context, keeping long sessions within the model's context window.
+5. **Pause/resume**: Type `exit` to pause the sandbox and quit. Run the script again to reconnect to the same paused sandbox — no re-download needed. If the sandbox can't be reconnected (e.g. it was deleted or expired), a fresh one is created and the database is rebuilt automatically.
+6. **Memory**: Uses the `Memory` capability to extract learnings from each conversation and consolidate them into structured files. On subsequent sessions, the agent starts with context from previous conversations (useful query patterns, data caveats, etc.).
 
 ## Data
 
-The database contains NASA federal spending data from [USAspending.gov](https://usaspending.gov),
-defaulting to FY2021-FY2025 (configurable via `--start-fy`/`--end-fy` flags on `setup_db.py`).
+The database contains NASA federal spending data from [USAspending.gov](https://usaspending.gov), defaulting to FY2021-FY2025 (configurable via `--start-fy`/`--end-fy` flags on `setup_db.py`).
 
-It uses a single `spending` table where each row is one transaction (obligation, modification,
-or de-obligation) on a federal award. The agent aggregates as needed via SQL.
+It uses a single `spending` table where each row is one transaction (obligation, modification, or de-obligation) on a federal award. The agent aggregates as needed via SQL.
 
-The database is built automatically on first run (requires internet access in the sandbox).
-Subsequent runs reuse the existing database.
+The database is built automatically on first run (requires internet access in the sandbox). Subsequent runs reuse the existing database.
 
 ## Prerequisites
 
@@ -86,12 +72,8 @@ daytona/usaspending_text2sql/
 
 ### Audit log
 
-All sandbox operations (exec calls, start/stop, SQL queries and their results) are logged to
-`.audit_log.jsonl` as structured JSONL events via the SDK's `Instrumentation` and `JsonlOutboxSink`.
-This is useful for debugging, replaying sessions, or inspecting exactly what SQL the agent ran.
+All sandbox operations (exec calls, start/stop, SQL queries and their results) are logged to `.audit_log.jsonl` as structured JSONL events via the SDK's `Instrumentation` and `JsonlOutboxSink`. This is useful for debugging, replaying sessions, or inspecting exactly what SQL the agent ran.
 
 ### Sandbox
 
-This example uses Daytona as its sandbox backend. The agent and capability definitions are
-backend-agnostic, but the entrypoint (`agent.py`) hardcodes `DaytonaSandboxClient` and
-Daytona-specific features like pause/resume.
+This example uses Daytona as its sandbox backend. The agent and capability definitions are backend-agnostic, but the entrypoint (`agent.py`) hardcodes `DaytonaSandboxClient` and Daytona-specific features like pause/resume.

@@ -163,6 +163,7 @@ def realtime_handoff(
                 json_str=input_json,
                 type_adapter=type_adapter,
                 partial=False,
+                strict=True,
             )
             input_func = cast(OnHandoffWithInput[THandoffInput], on_handoff)
             if inspect.iscoroutinefunction(input_func):

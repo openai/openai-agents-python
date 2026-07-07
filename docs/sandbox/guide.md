@@ -113,17 +113,10 @@ A practical design order is:
 
 At run time, the runner turns that definition into a concrete sandbox-backed run:
 
-1. It resolves the sandbox session from `SandboxRunConfig`.
-   If you pass `session=...`, it reuses that live sandbox session.
-   Otherwise it uses `client=...` to create or resume one.
-2. It determines the effective workspace inputs for the run.
-   If the run injects or resumes a sandbox session, that existing sandbox state wins.
-   Otherwise the runner starts from a one-off manifest override or `agent.default_manifest`.
-   This is why `Manifest` alone does not define the final live workspace for every run.
-3. It lets capabilities process the resulting manifest.
-   This is how capabilities can add files, mounts, or other workspace-scoped behavior before the final agent is prepared.
-4. It builds the final instructions in a fixed order:
-   the SDK's default sandbox prompt, or `base_instructions` if you explicitly override it, then `instructions`, then capability instruction fragments, then any remote-mount policy text, then a rendered filesystem tree.
+1. It resolves the sandbox session from `SandboxRunConfig`. If you pass `session=...`, it reuses that live sandbox session. Otherwise it uses `client=...` to create or resume one.
+2. It determines the effective workspace inputs for the run. If the run injects or resumes a sandbox session, that existing sandbox state wins. Otherwise the runner starts from a one-off manifest override or `agent.default_manifest`. This is why `Manifest` alone does not define the final live workspace for every run.
+3. It lets capabilities process the resulting manifest. This is how capabilities can add files, mounts, or other workspace-scoped behavior before the final agent is prepared.
+4. It builds the final instructions in a fixed order: the SDK's default sandbox prompt, or `base_instructions` if you explicitly override it, then `instructions`, then capability instruction fragments, then any remote-mount policy text, then a rendered filesystem tree.
 5. It binds capability tools to the live sandbox session and runs the prepared agent through the normal `Runner` APIs.
 
 Sandboxing does not change what a turn means. A turn is still a model step, not a single shell command or sandbox action. There is no fixed 1:1 mapping between sandbox-side operations and turns: some work may stay inside the sandbox execution layer, while other actions return tool results, approvals, or other state that requires another model step. As a practical rule, another turn is consumed only when the agent runtime needs another model response after sandbox work has happened.

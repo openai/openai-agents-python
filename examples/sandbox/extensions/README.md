@@ -1,7 +1,6 @@
 # Cloud Sandbox Extension Examples
 
-These examples are for manual verification of the cloud sandbox backends that
-live under `agents.extensions.sandbox`.
+These examples are for manual verification of the cloud sandbox backends that live under `agents.extensions.sandbox`.
 
 They intentionally keep the flow simple:
 
@@ -9,8 +8,7 @@ They intentionally keep the flow simple:
 2. Create a `SandboxAgent` that inspects that workspace through one shell tool.
 3. Run the agent against E2B, Modal, Daytona, Cloudflare, Runloop, Blaxel, or Vercel.
 
-All of these examples require `OPENAI_API_KEY`, because they call the model through the normal
-`Runner` path. Each cloud backend also needs its own provider credentials.
+All of these examples require `OPENAI_API_KEY`, because they call the model through the normal `Runner` path. Each cloud backend also needs its own provider credentials.
 
 ## E2B
 
@@ -48,13 +46,11 @@ Useful flags:
 - `--timeout 300`
 - `--pause-on-exit`
 
-The example defaults to `e2b`, which provides a bash-style interface.
-Use `e2b_code_interpreter` for a Jupyter-style interface.
+The example defaults to `e2b`, which provides a bash-style interface. Use `e2b_code_interpreter` for a Jupyter-style interface.
 
 ## Modal
 
-If you want the same explicit session lifecycle shown in
-`examples/sandbox/basic.py`, that example now accepts
+If you want the same explicit session lifecycle shown in `examples/sandbox/basic.py`, that example now accepts
 `--backend modal` and reuses the same streamed tool-output flow:
 
 ```bash
@@ -109,16 +105,11 @@ Useful flags:
 - `--sandbox-create-timeout-s 60`
 - `--native-cloud-bucket-secret-name my-modal-secret`
 
-`app_name` is required by `ModalSandboxClientOptions`, so the example makes it
-an explicit CLI flag instead of hiding it.
+`app_name` is required by `ModalSandboxClientOptions`, so the example makes it an explicit CLI flag instead of hiding it.
 
-Modal sandboxes also support native cloud bucket mounts through
-`ModalCloudBucketMountStrategy` on `S3Mount`, `R2Mount`, and HMAC-authenticated
-`GCSMount`.
+Modal sandboxes also support native cloud bucket mounts through `ModalCloudBucketMountStrategy` on `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`.
 
-For native cloud bucket testing, you can either export raw credential
-environment variables or pass `--native-cloud-bucket-secret-name` to reuse an
-existing named Modal Secret instead.
+For native cloud bucket testing, you can either export raw credential environment variables or pass `--native-cloud-bucket-secret-name` to reuse an existing named Modal Secret instead.
 
 ## Cloudflare
 
@@ -159,9 +150,7 @@ Useful flags:
 - `--api-key <key>` -- bearer token for the worker (or set `CLOUDFLARE_SANDBOX_API_KEY`).
 
 
-Cloudflare sandboxes support native cloud bucket mounts through
-`CloudflareBucketMountStrategy` on `S3Mount`, `R2Mount`, and HMAC-authenticated
-`GCSMount`.
+Cloudflare sandboxes support native cloud bucket mounts through `CloudflareBucketMountStrategy` on `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`.
 
 ## What to expect
 
@@ -173,9 +162,7 @@ successful run should:
 3. Call the shell tool at least once.
 4. Print either streamed text or a final short answer about the workspace.
 
-These examples are not live-validated in CI because they depend on external
-cloud credentials, but they are shaped so contributors can verify backend
-behavior locally with one command per provider.
+These examples are not live-validated in CI because they depend on external cloud credentials, but they are shaped so contributors can verify backend behavior locally with one command per provider.
 
 ## Vercel
 
@@ -216,9 +203,7 @@ Useful flags:
 - `--runtime node22`
 - `--timeout-ms 120000`
 
-The Vercel example stays on the non-PTY path on purpose. It covers command
-execution, workspace materialization, and persistence verification without
-depending on interactive websocket support.
+The Vercel example stays on the non-PTY path on purpose. It covers command execution, workspace materialization, and persistence verification without depending on interactive websocket support.
 
 ## Daytona
 
@@ -318,16 +303,9 @@ public_blueprints = await client.platform.blueprints.list_public()
 public_benchmarks = await client.platform.benchmarks.list_public()
 ```
 
-`managed_secrets` are stored as Runloop account secrets and only secret references
-are persisted in session state. The platform facade also exposes Runloop-native
-helpers for blueprints, benchmarks, secrets, network policies, and axons.
+`managed_secrets` are stored as Runloop account secrets and only secret references are persisted in session state. The platform facade also exposes Runloop-native helpers for blueprints, benchmarks, secrets, network policies, and axons.
 
-If you enable `--root`, Runloop launches the devbox with
-`launch_parameters.user_parameters={"username":"root","uid":0}`. In that mode,
-the default home and working directory become `/root`, so the example also uses
-`/root` as its manifest workspace root. If you configure root launch in your
-own code, either rely on that root-mode default or explicitly choose a
-`manifest.root` under `/root`.
+If you enable `--root`, Runloop launches the devbox with `launch_parameters.user_parameters={"username":"root","uid":0}`. In that mode, the default home and working directory become `/root`, so the example also uses `/root` as its manifest workspace root. If you configure root launch in your own code, either rely on that root-mode default or explicitly choose a `manifest.root` under `/root`.
 ## Blaxel
 
 ### Setup
@@ -372,7 +350,4 @@ The runner also includes standalone demos for individual features. Pass
 - `pty` -- agent-driven interactive Python session via PTY
 - `drive` -- [Blaxel Drive mount](https://docs.blaxel.ai/Agent-drive/Overview) (persistent storage, requires `--drive-name`)
 
-Blaxel sandboxes support cloud bucket mounts (S3, R2, GCS) through
-`BlaxelCloudBucketMountStrategy` and persistent drive mounts through
-`BlaxelDriveMountStrategy`. See the
-[Blaxel Drive docs](https://docs.blaxel.ai/Agent-drive/Overview) for details.
+Blaxel sandboxes support cloud bucket mounts (S3, R2, GCS) through `BlaxelCloudBucketMountStrategy` and persistent drive mounts through `BlaxelDriveMountStrategy`. See the [Blaxel Drive docs](https://docs.blaxel.ai/Agent-drive/Overview) for details.

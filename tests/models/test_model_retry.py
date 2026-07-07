@@ -17,6 +17,7 @@ from agents.models._retry_runtime import (
 )
 from agents.retry import (
     ModelRetryAdvice,
+    ModelRetryAdviceRequest,
     ModelRetryBackoffSettings,
     ModelRetryNormalizedError,
     ModelRetrySettings,
@@ -106,6 +107,18 @@ def _status_error_without_code(status_code: int, body_code: str = "server_error"
         response=response,
         body={"error": {"code": body_code, "message": body_code}},
     )
+
+
+def test_get_openai_retry_advice_returns_none_for_non_retryable_status() -> None:
+    advice = get_openai_retry_advice(
+        ModelRetryAdviceRequest(
+            error=_status_error(400, code="invalid_request_error"),
+            attempt=1,
+            stream=False,
+        )
+    )
+
+    assert advice is None
 
 
 class _AcloseTrackingStream:
