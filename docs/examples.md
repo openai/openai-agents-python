@@ -111,6 +111,9 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Sandbox-backed handoffs (`examples/sandbox/handoffs.py`)
     -   Sandbox memory and snapshot resume (`examples/sandbox/memory.py`)
     -   Sandbox agents exposed as tools (`examples/sandbox/sandbox_agents_as_tools.py`)
+    -   Third-party sandbox provider runners for Daytona (`examples/sandbox/extensions/daytona/daytona_runner.py`), E2B (`examples/sandbox/extensions/e2b_runner.py`), Modal (`examples/sandbox/extensions/modal_runner.py`), Vercel (`examples/sandbox/extensions/vercel_runner.py`), Cloudflare (`examples/sandbox/extensions/cloudflare_runner.py`), Blaxel (`examples/sandbox/extensions/blaxel_runner.py`), and Runloop (`examples/sandbox/extensions/runloop/runner.py`)
+    -   Durable Temporal sandbox workflows (`examples/sandbox/extensions/temporal/temporal_sandbox_agent.py`)
+    -   Tutorials: dataroom Q&A (`examples/sandbox/tutorials/dataroom_qa/main.py`), structured financial metric extraction from a 10-K dataroom (`examples/sandbox/tutorials/dataroom_metric_extract/main.py`), repository code review with generated findings (`examples/sandbox/tutorials/repo_code_review/main.py`), sandbox resume with workspace build instructions (`examples/sandbox/tutorials/sandbox_resume/main.py`), and vision-based website cloning from a screenshot (`examples/sandbox/tutorials/vision_website_clone/main.py`)
 
 - **[tools](https://github.com/openai/openai-agents-python/tree/main/examples/tools):** Learn how to implement OAI hosted tools and experimental Codex tooling such as:
 
