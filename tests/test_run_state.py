@@ -4041,6 +4041,82 @@ class TestRunStateSerializationEdgeCases:
         assert len(result.functions) == 1
         assert result.functions[0].function_tool is billing_namespace[0]
 
+    async def test_restore_pending_nested_run_when_earlier_entry_dropped(self):
+        """Pending nested agent-as-tool state binds to its own call_id even when
+        an earlier serialized function entry is dropped during deserialization
+        (e.g. because its tool is no longer on the agent)."""
+        from agents.agent_tool_state import peek_agent_tool_run_result
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        async def tool_func(context: ToolContext[Any], arguments: str) -> str:
+            return "result"
+
+        nested_tool = FunctionTool(
+            on_invoke_tool=tool_func,
+            name="nested_agent_tool",
+            description="Nested agent as tool",
+            params_json_schema={"type": "object", "properties": {}},
+        )
+        agent.tools = [nested_tool]
+
+        # A real nested run state carrying a pending approval interruption.
+        raw_item = ResponseFunctionToolCall(
+            type="function_call",
+            name="inner_tool",
+            call_id="inner_call",
+            status="completed",
+            arguments="{}",
+        )
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+        nested_state = make_state_with_interruptions(agent, [approval_item], original_input="x")
+
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [],
+            "functions": [
+                {
+                    # Dropped by _deserialize_actions: tool not on the agent.
+                    "tool_call": {
+                        "type": "function_call",
+                        "name": "removed_tool",
+                        "call_id": "call_removed",
+                        "status": "completed",
+                        "arguments": "{}",
+                    },
+                    "tool": {"name": "removed_tool"},
+                },
+                {
+                    "tool_call": {
+                        "type": "function_call",
+                        "name": "nested_agent_tool",
+                        "call_id": "call_nested",
+                        "status": "completed",
+                        "arguments": "{}",
+                    },
+                    "tool": {"name": "nested_agent_tool"},
+                    "agent_run_state": nested_state.to_json(),
+                },
+            ],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}
+        )
+
+        assert len(result.functions) == 1
+        restored_tool_call = result.functions[0].tool_call
+        assert restored_tool_call.call_id == "call_nested"
+        pending = peek_agent_tool_run_result(restored_tool_call)
+        assert pending is not None
+        assert pending.interruptions
+
     async def test_deserialize_processed_response_rejects_qualified_name_collision(self):
         """Reject dotted top-level names that collide with namespace-wrapped functions."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})

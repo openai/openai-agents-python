@@ -1663,16 +1663,33 @@ async def _restore_pending_nested_agent_tool_runs(
 
     from .agent_tool_state import drop_agent_tool_run_result, record_agent_tool_run_result
 
-    for entry, function_run in zip(function_entries, function_runs, strict=False):
+    # Match serialized entries to deserialized runs by call_id rather than by
+    # position: deserialization drops entries whose tool no longer resolves (or
+    # whose tool call fails to parse), so a positional zip would bind a pending
+    # nested run to the wrong tool call whenever an earlier entry was dropped.
+    runs_by_call_id: dict[str, Any] = {}
+    for function_run in function_runs:
+        run_tool_call = getattr(function_run, "tool_call", None)
+        if isinstance(run_tool_call, ResponseFunctionToolCall):
+            runs_by_call_id.setdefault(run_tool_call.call_id, function_run)
+
+    for entry in function_entries:
         if not isinstance(entry, Mapping):
             continue
         nested_state_data = entry.get("agent_run_state")
         if not isinstance(nested_state_data, Mapping):
             continue
 
-        tool_call = getattr(function_run, "tool_call", None)
-        if not isinstance(tool_call, ResponseFunctionToolCall):
+        tool_call_data = entry.get("tool_call")
+        call_id = None
+        if isinstance(tool_call_data, Mapping):
+            raw_call_id = tool_call_data.get("call_id") or tool_call_data.get("callId")
+            if isinstance(raw_call_id, str):
+                call_id = raw_call_id
+        function_run = runs_by_call_id.get(call_id) if call_id else None
+        if function_run is None:
             continue
+        tool_call = function_run.tool_call
 
         try:
             nested_state = await _build_run_state_from_json(
