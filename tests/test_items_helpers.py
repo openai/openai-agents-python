@@ -84,6 +84,21 @@ def test_extract_last_content_of_refusal_message() -> None:
     assert ItemHelpers.extract_last_content(message) == "I cannot do that"
 
 
+def test_extract_last_content_of_refusal_message_with_null_refusal() -> None:
+    # Provider gateways (e.g. LiteLLM) and ``model_construct`` streaming paths can surface a
+    # ``None`` refusal even though the schema types it as ``str``. Since ``extract_last_content``
+    # is annotated ``-> str``, it must coerce ``None`` to "" rather than return ``None``.
+    refusal = ResponseOutputRefusal.model_construct(refusal=None, type="refusal")
+    message = ResponseOutputMessage.model_construct(
+        id="msg123",
+        content=[refusal],
+        role="assistant",
+        status="completed",
+        type="message",
+    )
+    assert ItemHelpers.extract_last_content(message) == ""
+
+
 def test_extract_last_content_non_message_returns_empty() -> None:
     # Construct some other type of output item, e.g. a tool call, to verify non-message returns "".
     tool_call = ResponseFunctionToolCall(
