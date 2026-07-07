@@ -5,6 +5,7 @@ import json
 import weakref
 from typing import Any, cast
 
+import pytest
 from openai.types.responses.computer_action import Click as BatchedClick, Type as BatchedType
 from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
@@ -32,7 +33,7 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from openai.types.responses.response_reasoning_item_param import ResponseReasoningItemParam
 from openai.types.responses.response_tool_search_call import ResponseToolSearchCall
 from openai.types.responses.response_tool_search_output_item import ResponseToolSearchOutputItem
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from agents import (
     Agent,
@@ -82,6 +83,11 @@ def test_extract_last_content_of_refusal_message() -> None:
     message = make_message([content1, refusal])
     # Helpers should extract the refusal string when last content is a refusal.
     assert ItemHelpers.extract_last_content(message) == "I cannot do that"
+
+
+def test_none_refusal_is_rejected_before_extract_last_content() -> None:
+    with pytest.raises(ValidationError, match="refusal"):
+        ResponseOutputRefusal.model_validate({"refusal": None, "type": "refusal"})
 
 
 def test_extract_last_content_non_message_returns_empty() -> None:

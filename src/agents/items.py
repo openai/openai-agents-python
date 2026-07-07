@@ -698,6 +698,10 @@ class ItemHelpers:
             # ``extract_text`` below.
             return last_content.text or ""
         elif isinstance(last_content, ResponseOutputRefusal):
+            # Unlike output text, supported provider paths only create refusal parts after
+            # receiving refusal text. A ``None`` value requires bypassing model validation
+            # with ``model_construct``, so this intentionally does not mirror the fallback
+            # above.
             return last_content.refusal
         else:
             raise ModelBehaviorError(f"Unexpected content type: {type(last_content)}")
