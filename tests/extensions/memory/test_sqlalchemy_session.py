@@ -106,6 +106,51 @@ async def test_sqlalchemy_session_direct_ops(agent: Agent):
     assert len(retrieved_after_clear) == 0
 
 
+async def test_sqlalchemy_session_defaults_to_escaped_non_ascii_storage():
+    """Default storage keeps the historical escaped non-ASCII JSON representation."""
+    session = SQLAlchemySession.from_url("default_ascii_storage", url=DB_URL, create_tables=True)
+    item: TResponseInputItem = {"role": "user", "content": "café"}
+
+    await session.add_items([item])
+
+    async with session._session_factory() as sess:
+        rows = await sess.execute(
+            select(session._messages.c.message_data).where(
+                session._messages.c.session_id == session.session_id
+            )
+        )
+        stored = rows.scalar_one()
+
+    assert "\\u00e9" in stored
+    assert "café" not in stored
+    assert await session.get_items() == [item]
+
+
+async def test_sqlalchemy_session_can_store_non_ascii_without_escaping():
+    """ensure_ascii=False stores multilingual content readably while preserving round-trip data."""
+    session = SQLAlchemySession.from_url(
+        "non_ascii_storage",
+        url=DB_URL,
+        create_tables=True,
+        ensure_ascii=False,
+    )
+    item: TResponseInputItem = {"role": "user", "content": "café"}
+
+    await session.add_items([item])
+
+    async with session._session_factory() as sess:
+        rows = await sess.execute(
+            select(session._messages.c.message_data).where(
+                session._messages.c.session_id == session.session_id
+            )
+        )
+        stored = rows.scalar_one()
+
+    assert "café" in stored
+    assert "\\u00e9" not in stored
+    assert await session.get_items() == [item]
+
+
 async def test_runner_integration(agent: Agent):
     """Test that SQLAlchemySession works correctly with the agent Runner."""
     session_id = "runner_integration_test"
