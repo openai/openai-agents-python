@@ -84,6 +84,19 @@ def test_extract_last_content_of_refusal_message() -> None:
     assert ItemHelpers.extract_last_content(message) == "I cannot do that"
 
 
+def test_extract_last_content_tolerates_none_refusal_content() -> None:
+    """Regression: ``last_content.refusal`` can be ``None`` when output items are
+    assembled via ``model_construct`` or surfaced through provider gateways like
+    LiteLLM, even though the schema types it as ``str``. ``extract_last_content`` is
+    typed ``-> str``, so the refusal branch must coerce ``None`` to ``""`` just as the
+    text branch does (mirrors the #3394 guard for text).
+    """
+    none_refusal = ResponseOutputRefusal.model_construct(refusal=None, type="refusal")
+    result = ItemHelpers.extract_last_content(make_message([none_refusal]))
+    assert result == ""
+    assert result is not None
+
+
 def test_extract_last_content_non_message_returns_empty() -> None:
     # Construct some other type of output item, e.g. a tool call, to verify non-message returns "".
     tool_call = ResponseFunctionToolCall(
