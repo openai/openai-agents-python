@@ -155,7 +155,7 @@ OpenAIRealtimeAudioOutput = _rt_audio_config.RealtimeAudioConfigOutput  # type: 
 
 
 _USER_AGENT = f"Agents/Python {__version__}"
-DEFAULT_REALTIME_MODEL = "gpt-realtime-2"
+DEFAULT_REALTIME_MODEL = "gpt-realtime-2.1"
 
 DEFAULT_MODEL_SETTINGS: RealtimeSessionModelSettings = {
     "voice": "ash",
