@@ -73,9 +73,13 @@ Check out a variety of sample implementations of the SDK in the examples section
 - **[memory](https://github.com/openai/openai-agents-python/tree/main/examples/memory):** Examples of different memory implementations for agents, including:
 
     -   SQLite session storage
+    -   Session history limit with `SessionSettings(limit=N)` (`examples/memory/session_limit_example.py`)
+    -   Custom history merging with `session_input_callback` (`examples/memory/session_input_callback_example.py`)
+    -   Correcting the latest turn with `pop_item` (`examples/memory/session_pop_item_example.py`)
     -   Advanced SQLite session storage
     -   Redis session storage
     -   SQLAlchemy session storage
+    -   MongoDB session storage (`examples/memory/mongodb_session_example.py`)
     -   Dapr state store session storage
     -   Encrypted session storage
     -   OpenAI Conversations session storage

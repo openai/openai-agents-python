@@ -107,6 +107,8 @@ result = await Runner.run(
 
 Use this when you need custom pruning, reordering, or selective inclusion of history without changing how the session stores items. If you need a later final pass immediately before the model call, use [`call_model_input_filter`][agents.run.RunConfig.call_model_input_filter] from the [running agents guide](../running_agents.md).
 
+See [`examples/memory/session_input_callback_example.py`](https://github.com/openai/openai-agents-python/tree/main/examples/memory/session_input_callback_example.py) for a runnable example.
+
 ## Limiting retrieved history
 
 Use [`SessionSettings`][agents.memory.SessionSettings] to control how much history is fetched before each run.
@@ -131,6 +133,8 @@ result = await Runner.run(
 ```
 
 If your session implementation exposes default session settings, `RunConfig.session_settings` overrides any non-`None` values for that run. This is useful for long conversations where you want to cap retrieval size without changing the session's default behavior.
+
+See [`examples/memory/session_limit_example.py`](https://github.com/openai/openai-agents-python/tree/main/examples/memory/session_limit_example.py) for a runnable example.
 
 ## Memory operations
 
@@ -191,6 +195,8 @@ result = await Runner.run(
 )
 print(f"Agent: {result.final_output}")
 ```
+
+See [`examples/memory/session_pop_item_example.py`](https://github.com/openai/openai-agents-python/tree/main/examples/memory/session_pop_item_example.py) for a runnable example.
 
 ## Built-in session implementations
 
