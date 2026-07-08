@@ -258,7 +258,10 @@ class AdvancedSQLiteSession(SQLiteSession):
         Overrides the base implementation so the popped message's
         `message_structure` row is removed in the same transaction and only the
         current branch is affected. The underlying message row is deleted only
-        when no other branch still references it, mirroring `delete_branch`.
+        when no other branch still references it, mirroring `delete_branch`. When
+        popping empties a turn on the current branch, its `turn_usage` row is
+        removed as well so usage analytics do not report a turn that no longer
+        exists.
         """
 
         def _pop_item_sync():
@@ -268,7 +271,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                         # Find the most recent item on the current branch.
                         cursor.execute(
                             """
-                            SELECT id, message_id FROM message_structure
+                            SELECT id, message_id, user_turn_number FROM message_structure
                             WHERE session_id = ? AND branch_id = ?
                             ORDER BY sequence_number DESC
                             LIMIT 1
@@ -279,7 +282,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                         if row is None:
                             return None
 
-                        structure_id, message_id = row
+                        structure_id, message_id, user_turn_number = row
 
                         # Read the message payload before removing anything.
                         cursor.execute(
@@ -295,6 +298,26 @@ class AdvancedSQLiteSession(SQLiteSession):
                             (structure_id,),
                         )
                         self._cleanup_orphaned_messages_sync(conn)
+
+                        # If this was the last item of the turn on this branch,
+                        # drop the now-stale turn_usage row for that turn.
+                        if user_turn_number is not None:
+                            cursor.execute(
+                                """
+                                SELECT COUNT(*) FROM message_structure
+                                WHERE session_id = ? AND branch_id = ? AND user_turn_number = ?
+                                """,
+                                (self.session_id, self._current_branch_id, user_turn_number),
+                            )
+                            if cursor.fetchone()[0] == 0:
+                                cursor.execute(
+                                    """
+                                    DELETE FROM turn_usage
+                                    WHERE session_id = ? AND branch_id = ? AND user_turn_number = ?
+                                    """,
+                                    (self.session_id, self._current_branch_id, user_turn_number),
+                                )
+
                         conn.commit()
 
                         if message_row is None:

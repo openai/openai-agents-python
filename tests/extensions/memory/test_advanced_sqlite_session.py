@@ -1853,6 +1853,34 @@ async def test_pop_item_removes_its_structure_row():
     session.close()
 
 
+async def test_pop_item_removes_turn_usage_only_when_turn_emptied(usage_data: Usage):
+    """Regression: pop_item must drop a turn's turn_usage row once the turn has no
+    remaining items on the current branch, while keeping it for a partial pop.
+    """
+    session = AdvancedSQLiteSession(session_id="pop_turn_usage_test", create_tables=True)
+
+    # One turn with two items, plus stored usage for that turn.
+    await session.add_items(
+        [
+            {"role": "user", "content": "Question"},
+            {"role": "assistant", "content": "Answer"},
+        ]
+    )
+    await session.store_run_usage(create_mock_run_result(usage_data))
+    assert _count_rows(session, "turn_usage") == 1
+
+    # Popping only the assistant item leaves the turn non-empty: usage is kept.
+    await session.pop_item()
+    assert _count_rows(session, "turn_usage") == 1
+
+    # Popping the last item of the turn removes the now-stale usage row.
+    await session.pop_item()
+    assert _count_rows(session, "turn_usage") == 0
+    assert not await session.get_turn_usage(1)
+
+    session.close()
+
+
 async def test_pop_item_respects_current_branch_and_keeps_shared_messages():
     """Regression: pop_item must pop from the current branch and preserve messages
     still referenced by another branch (branches share the underlying message rows).
