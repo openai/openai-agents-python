@@ -264,11 +264,16 @@ class AdvancedSQLiteSession(SQLiteSession):
         exists.
         """
 
+        # Snapshot the current branch at call time so a concurrent
+        # switch_to_branch() cannot redirect this pop to a different branch once
+        # it has been dispatched to the worker thread.
+        branch_id = self._current_branch_id
+
         def _pop_item_sync():
             with self._locked_connection() as conn:
                 while True:
                     with closing(conn.cursor()) as cursor:
-                        # Find the most recent item on the current branch.
+                        # Find the most recent item on the snapshotted branch.
                         cursor.execute(
                             """
                             SELECT id, message_id, user_turn_number FROM message_structure
@@ -276,7 +281,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                             ORDER BY sequence_number DESC
                             LIMIT 1
                             """,
-                            (self.session_id, self._current_branch_id),
+                            (self.session_id, branch_id),
                         )
                         row = cursor.fetchone()
                         if row is None:
@@ -307,7 +312,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                                 SELECT COUNT(*) FROM message_structure
                                 WHERE session_id = ? AND branch_id = ? AND user_turn_number = ?
                                 """,
-                                (self.session_id, self._current_branch_id, user_turn_number),
+                                (self.session_id, branch_id, user_turn_number),
                             )
                             if cursor.fetchone()[0] == 0:
                                 cursor.execute(
@@ -315,7 +320,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                                     DELETE FROM turn_usage
                                     WHERE session_id = ? AND branch_id = ? AND user_turn_number = ?
                                     """,
-                                    (self.session_id, self._current_branch_id, user_turn_number),
+                                    (self.session_id, branch_id, user_turn_number),
                                 )
 
                         conn.commit()
