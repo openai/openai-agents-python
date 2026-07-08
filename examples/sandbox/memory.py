@@ -17,7 +17,7 @@ from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-DEFAULT_MODEL = "gpt-5.5"
+DEFAULT_MODEL = "gpt-5.6-sol"
 FIRST_PROMPT = "Inspect workspace and fix invoice total bug in src/acme_metrics/report.py."
 SECOND_PROMPT = "Add a regression test for the previous bug you fixed."
 

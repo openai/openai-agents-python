@@ -20,7 +20,7 @@ This demo exits after the scripted resume flow so the serialized session state a
 You can override the model or prompt:
 
 ```bash
-uv run python examples/sandbox/tutorials/sandbox_resume/main.py --model gpt-5.5 --question "Build a FastAPI service that exposes a warehouse robot's maintenance status."
+uv run python examples/sandbox/tutorials/sandbox_resume/main.py --model gpt-5.6-sol --question "Build a FastAPI service that exposes a warehouse robot's maintenance status."
 ```
 
 To run the same flow in Docker, build the shared tutorial image once and pass
