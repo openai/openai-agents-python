@@ -804,6 +804,68 @@ async def test_stream_handler_places_text_after_existing_refusal_part() -> None:
     assert assistant_item.content[1].refusal == "blocked"
 
 
+@pytest.mark.asyncio
+async def test_stream_handler_content_index_excludes_reasoning_item() -> None:
+    # Reasoning is emitted as its own output item (with its own output_index), not as a
+    # content part of the assistant message. So the message's text/refusal parts must be
+    # streamed at the content_index they occupy in message.content (0 and 1), independent
+    # of any preceding reasoning item. Regression: the streamed content_index used to be
+    # bumped by the reasoning item, diverging from both the final message and the index the
+    # OpenAI Responses API emits for the same output.
+    chunks = [
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[
+                Choice(index=0, delta=ChoiceDelta.model_construct(reasoning_content="thinking"))
+            ],
+        ),
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta(content="answer"))],
+        ),
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta.model_construct(refusal="blocked"))],
+        ),
+    ]
+
+    events = await _collect_handler_events(*chunks)
+
+    text_part_added = next(
+        event
+        for event in events
+        if event.type == "response.content_part.added"
+        and isinstance(event.part, ResponseOutputText)
+    )
+    refusal_part_added = next(
+        event
+        for event in events
+        if event.type == "response.content_part.added"
+        and isinstance(event.part, ResponseOutputRefusal)
+    )
+
+    # The reasoning item lives at output[0]; the assistant message at output[1].
+    completed_event = next(event for event in events if event.type == "response.completed")
+    assistant_item = completed_event.response.output[1]
+    assert isinstance(assistant_item, ResponseOutputMessage)
+    assert isinstance(assistant_item.content[0], ResponseOutputText)
+    assert isinstance(assistant_item.content[1], ResponseOutputRefusal)
+
+    # The streamed content_index must match each part's position in message.content,
+    # unaffected by the separate reasoning output item.
+    assert text_part_added.content_index == 0
+    assert refusal_part_added.content_index == 1
+
+
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 async def test_stream_response_passes_strict_validation_to_stream_handler(monkeypatch) -> None:

@@ -679,9 +679,10 @@ class ChatCmplStreamHandler:
             # Handle regular content
             if delta.content is not None:
                 if not state.text_content_index_and_output:
+                    # content_index is the part's position within this message's content
+                    # list. The reasoning item is a separate output item (its own
+                    # output_index), so it must not shift the content index here.
                     content_index = 0
-                    if state.reasoning_content_index_and_output:
-                        content_index += 1
                     if state.refusal_content_index_and_output:
                         content_index += 1
 
@@ -755,9 +756,9 @@ class ChatCmplStreamHandler:
             # This is always set by the OpenAI API, but not by others e.g. LiteLLM
             if hasattr(delta, "refusal") and delta.refusal:
                 if not state.refusal_content_index_and_output:
+                    # The reasoning item is a separate output item, so it must not shift
+                    # this content index (see the text branch above).
                     refusal_index = 0
-                    if state.reasoning_content_index_and_output:
-                        refusal_index += 1
                     if state.text_content_index_and_output:
                         refusal_index += 1
 
