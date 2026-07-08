@@ -22,3 +22,11 @@ Direct-model examples let you override the target model:
 uv run examples/model_providers/any_llm_provider.py --model openrouter/openai/gpt-5.4-mini
 uv run examples/model_providers/litellm_provider.py --model openrouter/openai/gpt-5.4-mini
 ```
+
+You can also point the SDK at an OpenAI-compatible provider directly. For example,
+TokenLab exposes an OpenAI-compatible `/v1` API:
+
+```bash
+export TOKENLAB_API_KEY="..."
+uv run examples/model_providers/tokenlab_chat_completions.py
+```
