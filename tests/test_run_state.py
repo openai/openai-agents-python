@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, TypeVar, cast
 
 import pytest
@@ -53,6 +54,7 @@ from agents.items import (
     ToolSearchCallItem,
     ToolSearchOutputItem,
     TResponseInputItem,
+    TResponseOutputItem,
     TResponseStreamEvent,
 )
 from agents.run_context import RunContextWrapper
@@ -232,6 +234,37 @@ def make_state(
         context=context,
         original_input=original_input,
         max_turns=max_turns,
+    )
+
+
+def record_pending_nested_agent_tool_state(
+    agent: Agent[Any],
+    tool_call: ResponseFunctionToolCall,
+    *,
+    inner_call_id: str,
+) -> None:
+    """Record a serializable nested interruption for an outer function call."""
+    from agents.agent_tool_state import record_agent_tool_run_result
+
+    nested_approval = make_tool_approval_item(
+        agent,
+        call_id=inner_call_id,
+        name="inner_sensitive_tool",
+    )
+    nested_state = make_state_with_interruptions(
+        agent,
+        [nested_approval],
+        original_input=f"nested input for {inner_call_id}",
+    )
+    record_agent_tool_run_result(
+        tool_call,
+        cast(
+            Any,
+            SimpleNamespace(
+                interruptions=nested_state.get_interruptions(),
+                to_state=lambda: nested_state,
+            ),
+        ),
     )
 
 
@@ -2641,8 +2674,214 @@ class TestDeserializeHelpers:
         assert interruptions[0].agent.name == "InnerAgent"
         assert interruptions[0].raw_item.name == "sensitive_tool"  # type: ignore[union-attr]
 
+    @pytest.mark.parametrize("drop_mode", ["disabled", "removed", "malformed_call"])
+    async def test_nested_agent_tool_state_survives_when_earlier_function_is_dropped(
+        self, drop_mode: str
+    ) -> None:
+        """A dropped function must not shift a later function's nested state."""
+        from agents.agent_tool_state import (
+            drop_agent_tool_run_result,
+            peek_agent_tool_run_result,
+        )
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="OuterAgent")
+        earlier_tool_enabled = True
+        conditional_tool = function_tool(
+            lambda: "conditional",
+            name_override="conditional_tool",
+            is_enabled=lambda _context, _agent: earlier_tool_enabled,
+        )
+        nested_tool = function_tool(lambda: "nested", name_override="nested_agent_tool")
+        agent.tools = [conditional_tool, nested_tool]
+
+        conditional_call = make_tool_call(call_id="conditional-call", name="conditional_tool")
+        nested_call = make_tool_call(call_id="nested-call", name="nested_agent_tool")
+        state = make_state(agent, context=context)
+        state._last_processed_response = make_processed_response(
+            functions=[
+                ToolRunFunction(tool_call=conditional_call, function_tool=conditional_tool),
+                ToolRunFunction(tool_call=nested_call, function_tool=nested_tool),
+            ]
+        )
+
+        record_pending_nested_agent_tool_state(
+            agent,
+            nested_call,
+            inner_call_id="inner-call",
+        )
+
+        restored_call: ResponseFunctionToolCall | None = None
+        restored_scope_id: str | None = None
+        try:
+            state_json = state.to_json()
+            if drop_mode == "disabled":
+                earlier_tool_enabled = False
+            elif drop_mode == "removed":
+                agent.tools = [nested_tool]
+            else:
+                functions_data = state_json["last_processed_response"]["functions"]
+                functions_data[0]["tool_call"].pop("call_id")
+
+            restored = await RunState.from_json(agent, state_json)
+
+            assert restored._last_processed_response is not None
+            restored_scope_id = restored._agent_tool_state_scope_id
+            assert restored_scope_id is not None
+            assert len(restored._last_processed_response.functions) == 1
+            restored_call = restored._last_processed_response.functions[0].tool_call
+            assert restored_call.call_id == "nested-call"
+            pending_result = peek_agent_tool_run_result(restored_call, scope_id=restored_scope_id)
+            assert pending_result is not None
+            assert len(pending_result.interruptions) == 1
+            restored_approval = pending_result.interruptions[0]
+            assert isinstance(restored_approval.raw_item, ResponseFunctionToolCall)
+            assert restored_approval.raw_item.call_id == "inner-call"
+        finally:
+            drop_agent_tool_run_result(nested_call)
+            if restored_call is not None:
+                drop_agent_tool_run_result(restored_call, scope_id=restored_scope_id)
+
+    async def test_dropped_nested_agent_tool_state_is_not_moved_to_later_function(
+        self,
+    ) -> None:
+        """Nested state owned by a dropped function must not migrate to a retained function."""
+        from agents.agent_tool_state import (
+            drop_agent_tool_run_result,
+            peek_agent_tool_run_result,
+        )
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="OuterAgent")
+        dropped_tool = function_tool(lambda: "dropped", name_override="dropped_agent_tool")
+        retained_tool = function_tool(lambda: "retained", name_override="retained_tool")
+        agent.tools = [dropped_tool, retained_tool]
+
+        dropped_call = make_tool_call(call_id="dropped-call", name="dropped_agent_tool")
+        retained_call = make_tool_call(call_id="retained-call", name="retained_tool")
+        state = make_state(agent, context=context)
+        state._last_processed_response = make_processed_response(
+            functions=[
+                ToolRunFunction(tool_call=dropped_call, function_tool=dropped_tool),
+                ToolRunFunction(tool_call=retained_call, function_tool=retained_tool),
+            ]
+        )
+
+        record_pending_nested_agent_tool_state(
+            agent,
+            dropped_call,
+            inner_call_id="dropped-inner-call",
+        )
+
+        restored_call: ResponseFunctionToolCall | None = None
+        restored_scope_id: str | None = None
+        try:
+            state_json = state.to_json()
+            agent.tools = [retained_tool]
+
+            restored = await RunState.from_json(agent, state_json)
+
+            assert restored._last_processed_response is not None
+            restored_scope_id = restored._agent_tool_state_scope_id
+            assert restored_scope_id is not None
+            assert len(restored._last_processed_response.functions) == 1
+            restored_call = restored._last_processed_response.functions[0].tool_call
+            assert restored_call.call_id == "retained-call"
+            assert peek_agent_tool_run_result(restored_call, scope_id=restored_scope_id) is None
+        finally:
+            drop_agent_tool_run_result(dropped_call)
+            if restored_call is not None:
+                drop_agent_tool_run_result(restored_call, scope_id=restored_scope_id)
+
+    async def test_multiple_nested_agent_tool_states_survive_multiple_dropped_functions(
+        self,
+    ) -> None:
+        """Multiple retained functions keep their own nested state across different drops."""
+        from agents.agent_tool_state import (
+            drop_agent_tool_run_result,
+            peek_agent_tool_run_result,
+        )
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="OuterAgent")
+        earlier_tool_enabled = True
+        disabled_tool = function_tool(
+            lambda: "disabled",
+            name_override="disabled_tool",
+            is_enabled=lambda _context, _agent: earlier_tool_enabled,
+        )
+        first_nested_tool = function_tool(lambda: "first", name_override="first_agent_tool")
+        malformed_tool = function_tool(lambda: "malformed", name_override="malformed_tool")
+        second_nested_tool = function_tool(lambda: "second", name_override="second_agent_tool")
+        agent.tools = [disabled_tool, first_nested_tool, malformed_tool, second_nested_tool]
+
+        disabled_call = make_tool_call(call_id="disabled-call", name="disabled_tool")
+        first_nested_call = make_tool_call(call_id="first-call", name="first_agent_tool")
+        malformed_call = make_tool_call(call_id="malformed-call", name="malformed_tool")
+        second_nested_call = make_tool_call(call_id="second-call", name="second_agent_tool")
+        state = make_state(agent, context=context)
+        state._last_processed_response = make_processed_response(
+            functions=[
+                ToolRunFunction(tool_call=disabled_call, function_tool=disabled_tool),
+                ToolRunFunction(tool_call=first_nested_call, function_tool=first_nested_tool),
+                ToolRunFunction(tool_call=malformed_call, function_tool=malformed_tool),
+                ToolRunFunction(tool_call=second_nested_call, function_tool=second_nested_tool),
+            ]
+        )
+
+        nested_calls = [first_nested_call, second_nested_call]
+        inner_call_ids = ["first-inner-call", "second-inner-call"]
+        for nested_call, inner_call_id in zip(nested_calls, inner_call_ids, strict=True):
+            record_pending_nested_agent_tool_state(
+                agent,
+                nested_call,
+                inner_call_id=inner_call_id,
+            )
+
+        restored_calls: list[ResponseFunctionToolCall] = []
+        restored_scope_id: str | None = None
+        try:
+            state_json = state.to_json()
+            earlier_tool_enabled = False
+            functions_data = state_json["last_processed_response"]["functions"]
+            functions_data[2]["tool_call"].pop("call_id")
+
+            restored = await RunState.from_json(agent, state_json)
+
+            assert restored._last_processed_response is not None
+            restored_scope_id = restored._agent_tool_state_scope_id
+            assert restored_scope_id is not None
+            restored_calls = [
+                function.tool_call for function in restored._last_processed_response.functions
+            ]
+            assert [call.call_id for call in restored_calls] == ["first-call", "second-call"]
+            for restored_call, expected_inner_call_id in zip(
+                restored_calls, inner_call_ids, strict=True
+            ):
+                pending_result = peek_agent_tool_run_result(
+                    restored_call, scope_id=restored_scope_id
+                )
+                assert pending_result is not None
+                assert len(pending_result.interruptions) == 1
+                restored_approval = pending_result.interruptions[0]
+                assert isinstance(restored_approval.raw_item, ResponseFunctionToolCall)
+                assert restored_approval.raw_item.call_id == expected_inner_call_id
+        finally:
+            for nested_call in nested_calls:
+                drop_agent_tool_run_result(nested_call)
+            for restored_call in restored_calls:
+                drop_agent_tool_run_result(restored_call, scope_id=restored_scope_id)
+
     @pytest.mark.asyncio
-    async def test_nested_agent_tool_hitl_resume_survives_json_round_trip_after_gc(self) -> None:
+    @pytest.mark.parametrize(
+        "approve_nested_tool",
+        [True, False],
+        ids=["approve", "reject"],
+    )
+    async def test_nested_agent_tool_hitl_resume_survives_json_round_trip_after_gc(
+        self,
+        approve_nested_tool: bool,
+    ) -> None:
         """Nested agent-tool resumptions should survive RunState JSON round-trips."""
 
         def _has_function_call_output(input_data: str | list[TResponseInputItem]) -> bool:
@@ -2659,12 +2898,19 @@ class TestDeserializeHelpers:
 
         class ResumeAwareToolModel(Model):
             def __init__(
-                self, *, tool_name: str, tool_arguments: str, final_text: str, call_prefix: str
+                self,
+                *,
+                tool_name: str,
+                tool_arguments: str,
+                final_text: str,
+                call_prefix: str,
+                preceding_tool_name: str | None = None,
             ) -> None:
                 self.tool_name = tool_name
                 self.tool_arguments = tool_arguments
                 self.final_text = final_text
                 self.call_prefix = call_prefix
+                self.preceding_tool_name = preceding_tool_name
                 self.call_count = 0
 
             async def get_response(
@@ -2700,15 +2946,26 @@ class TestDeserializeHelpers:
                     )
 
                 self.call_count += 1
-                return ModelResponse(
-                    output=[
+                output: list[TResponseOutputItem] = []
+                if self.preceding_tool_name is not None:
+                    output.append(
                         ResponseFunctionToolCall(
                             type="function_call",
-                            name=self.tool_name,
-                            call_id=f"{self.call_prefix}-{id(self)}-{self.call_count}",
-                            arguments=self.tool_arguments,
+                            name=self.preceding_tool_name,
+                            call_id=f"{self.call_prefix}-preceding-{self.call_count}",
+                            arguments="{}",
                         )
-                    ],
+                    )
+                output.append(
+                    ResponseFunctionToolCall(
+                        type="function_call",
+                        name=self.tool_name,
+                        call_id=f"{self.call_prefix}-{id(self)}-{self.call_count}",
+                        arguments=self.tool_arguments,
+                    )
+                )
+                return ModelResponse(
+                    output=output,
                     usage=Usage(),
                     response_id=f"{self.call_prefix}-call-{self.call_count}",
                 )
@@ -2767,14 +3024,29 @@ class TestDeserializeHelpers:
             tool_arguments=json.dumps({"input": "hello"}),
             final_text="outer-complete",
             call_prefix="outer",
+            preceding_tool_name="conditional_outer_tool",
         )
-        outer_agent = Agent(name="OuterAgent", model=outer_model, tools=[outer_tool])
+        outer_tool_enabled = True
+        conditional_outer_tool = function_tool(
+            lambda: "conditional-complete",
+            name_override="conditional_outer_tool",
+            is_enabled=lambda _context, _agent: outer_tool_enabled,
+        )
+        outer_agent = Agent(
+            name="OuterAgent", model=outer_model, tools=[conditional_outer_tool, outer_tool]
+        )
 
         first_result = await Runner.run(outer_agent, "start")
         assert first_result.final_output is None
         assert first_result.interruptions
 
         state_json = first_result.to_state().to_json()
+        serialized_functions = state_json["last_processed_response"]["functions"]
+        assert [entry["tool_call"]["name"] for entry in serialized_functions] == [
+            "conditional_outer_tool",
+            "inner_agent_tool",
+        ]
+        outer_tool_enabled = False
         del first_result
         gc.collect()
 
@@ -2785,8 +3057,12 @@ class TestDeserializeHelpers:
         restored_interruptions_two = restored_state_two.get_interruptions()
         assert len(restored_interruptions_one) == 1
         assert len(restored_interruptions_two) == 1
-        restored_state_one.approve(restored_interruptions_one[0])
-        restored_state_two.approve(restored_interruptions_two[0])
+        if approve_nested_tool:
+            restored_state_one.approve(restored_interruptions_one[0])
+            restored_state_two.approve(restored_interruptions_two[0])
+        else:
+            restored_state_one.reject(restored_interruptions_one[0])
+            restored_state_two.reject(restored_interruptions_two[0])
 
         resumed_result_one = await Runner.run(outer_agent, restored_state_one)
         resumed_result_two = await Runner.run(outer_agent, restored_state_two)
@@ -2795,7 +3071,7 @@ class TestDeserializeHelpers:
         assert resumed_result_one.interruptions == []
         assert resumed_result_two.final_output == "outer-complete"
         assert resumed_result_two.interruptions == []
-        assert tool_calls == ["hello", "hello"]
+        assert tool_calls == (["hello", "hello"] if approve_nested_tool else [])
 
     async def test_json_decode_error_handling(self):
         """Test that invalid JSON raises appropriate error."""

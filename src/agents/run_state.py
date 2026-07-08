@@ -112,10 +112,12 @@ if TYPE_CHECKING:
     from .run_internal.run_steps import (
         NextStepInterruption,
         ProcessedResponse,
+        ToolRunFunction,
     )
 
 TContext = TypeVar("TContext", default=Any)
 TAgent = TypeVar("TAgent", bound="Agent[Any]", default="Agent[Any]")
+TAction = TypeVar("TAction")
 ContextOverride = Mapping[str, Any] | RunContextWrapper[Any]
 ContextSerializer = Callable[[Any], Mapping[str, Any]]
 ContextDeserializer = Callable[[Mapping[str, Any]], Any]
@@ -1543,6 +1545,14 @@ class _SerializedAgentToolRunResult:
         return self._state
 
 
+@dataclass(frozen=True)
+class _DeserializedFunctionAction:
+    """Keep a function action with its normalized nested run state, if present."""
+
+    action: ToolRunFunction
+    nested_agent_run_state_data: Mapping[str, Any] | None
+
+
 def _serialize_guardrail_results(
     results: Sequence[InputGuardrailResult | OutputGuardrailResult],
     *,
@@ -1651,26 +1661,23 @@ def _build_handoffs_map(current_agent: Agent[Any]) -> dict[str, Handoff[Any, Age
 async def _restore_pending_nested_agent_tool_runs(
     *,
     current_agent: Agent[Any],
-    function_entries: Sequence[Any],
-    function_runs: Sequence[Any],
+    function_actions: Sequence[_DeserializedFunctionAction],
     scope_id: str | None = None,
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
 ) -> None:
     """Rehydrate nested agent-as-tool run state into the ephemeral tool-call cache."""
-    if not function_entries or not function_runs:
+    if not function_actions:
         return
 
     from .agent_tool_state import drop_agent_tool_run_result, record_agent_tool_run_result
 
-    for entry, function_run in zip(function_entries, function_runs, strict=False):
-        if not isinstance(entry, Mapping):
-            continue
-        nested_state_data = entry.get("agent_run_state")
-        if not isinstance(nested_state_data, Mapping):
+    for function_action in function_actions:
+        nested_state_data = function_action.nested_agent_run_state_data
+        if nested_state_data is None:
             continue
 
-        tool_call = getattr(function_run, "tool_call", None)
+        tool_call = function_action.action.tool_call
         if not isinstance(tool_call, ResponseFunctionToolCall):
             continue
 
@@ -1760,11 +1767,11 @@ async def _deserialize_processed_response(
         tool_key: str,
         tool_map: Mapping[NamedToolLookupKey, Any],
         call_parser: Callable[[dict[str, Any]], Any],
-        action_factory: Callable[[Any, Any], Any],
+        action_factory: Callable[[Any, Any], TAction],
         name_resolver: Callable[[Mapping[str, Any]], NamedToolLookupKey | None] | None = None,
-    ) -> list[Any]:
+    ) -> list[TAction]:
         """Deserialize tool actions with shared structure."""
-        deserialized: list[Any] = []
+        deserialized: list[TAction] = []
         for entry in entries or []:
             tool_container = entry.get(tool_key, {}) if isinstance(entry, Mapping) else {}
             if name_resolver:
@@ -1812,7 +1819,9 @@ async def _deserialize_processed_response(
         except Exception:
             return data
 
-    def _deserialize_action_groups() -> dict[str, list[Any]]:
+    def _deserialize_action_groups() -> tuple[
+        dict[str, list[Any]], list[_DeserializedFunctionAction]
+    ]:
         def _resolve_handoff_tool_name(data: Mapping[str, Any]) -> NamedToolLookupKey | None:
             handoff_data = data.get("handoff", {})
             if not isinstance(handoff_data, Mapping):
@@ -1845,6 +1854,40 @@ async def _deserialize_processed_response(
                 cast(str | None, tool_data.get("namespace")),
             )
 
+        def _deserialize_function_actions() -> list[_DeserializedFunctionAction]:
+            """Deserialize function actions and normalize their optional nested run state."""
+            deserialized: list[_DeserializedFunctionAction] = []
+            for entry in processed_response_data.get("functions", []):
+                if not isinstance(entry, Mapping):
+                    continue
+                tool_name = _resolve_function_tool_name(entry)
+                function_tool = tools_map.get(tool_name) if tool_name else None
+                if function_tool is None:
+                    continue
+
+                tool_call_data_raw = entry.get("tool_call", {})
+                tool_call_data = (
+                    dict(tool_call_data_raw) if isinstance(tool_call_data_raw, Mapping) else {}
+                )
+                try:
+                    tool_call = ResponseFunctionToolCall(**tool_call_data)
+                except Exception:
+                    continue
+
+                nested_state_data = entry.get("agent_run_state")
+                deserialized.append(
+                    _DeserializedFunctionAction(
+                        action=ToolRunFunction(
+                            tool_call=tool_call,
+                            function_tool=function_tool,
+                        ),
+                        nested_agent_run_state_data=(
+                            nested_state_data if isinstance(nested_state_data, Mapping) else None
+                        ),
+                    )
+                )
+            return deserialized
+
         action_specs: list[
             tuple[
                 str,
@@ -1862,16 +1905,6 @@ async def _deserialize_processed_response(
                 lambda data: ResponseFunctionToolCall(**data),
                 lambda tool_call, handoff: ToolRunHandoff(tool_call=tool_call, handoff=handoff),
                 _resolve_handoff_tool_name,
-            ),
-            (
-                "functions",
-                "tool",
-                tools_map,
-                lambda data: ResponseFunctionToolCall(**data),
-                lambda tool_call, function_tool: ToolRunFunction(
-                    tool_call=tool_call, function_tool=function_tool
-                ),
-                _resolve_function_tool_name,
             ),
             (
                 "computer_actions",
@@ -1925,7 +1958,10 @@ async def _deserialize_processed_response(
             ),
         ]
 
-        action_groups: dict[str, list[Any]] = {}
+        function_actions = _deserialize_function_actions()
+        action_groups: dict[str, list[Any]] = {
+            "functions": [function_action.action for function_action in function_actions]
+        }
         for (
             key,
             tool_key,
@@ -1942,9 +1978,9 @@ async def _deserialize_processed_response(
                 action_factory=action_factory,
                 name_resolver=name_resolver,
             )
-        return action_groups
+        return action_groups, function_actions
 
-    action_groups = _deserialize_action_groups()
+    action_groups, function_actions = _deserialize_action_groups()
     handoffs = action_groups["handoffs"]
     functions = action_groups["functions"]
     computer_actions = action_groups["computer_actions"]
@@ -1955,8 +1991,7 @@ async def _deserialize_processed_response(
 
     await _restore_pending_nested_agent_tool_runs(
         current_agent=current_agent,
-        function_entries=processed_response_data.get("functions", []),
-        function_runs=functions,
+        function_actions=function_actions,
         scope_id=scope_id,
         context_deserializer=context_deserializer,
         strict_context=strict_context,
