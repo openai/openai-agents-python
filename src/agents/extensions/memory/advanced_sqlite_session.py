@@ -252,6 +252,97 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         return await asyncio.to_thread(_get_items_sync)
 
+    async def pop_item(self) -> TResponseInputItem | None:
+        """Remove and return the most recent item from the current branch.
+
+        Overrides the base implementation so the popped message's
+        `message_structure` row is removed in the same transaction and only the
+        current branch is affected. The underlying message row is deleted only
+        when no other branch still references it, mirroring `delete_branch`.
+        """
+
+        def _pop_item_sync():
+            with self._locked_connection() as conn:
+                while True:
+                    with closing(conn.cursor()) as cursor:
+                        # Find the most recent item on the current branch.
+                        cursor.execute(
+                            """
+                            SELECT id, message_id FROM message_structure
+                            WHERE session_id = ? AND branch_id = ?
+                            ORDER BY sequence_number DESC
+                            LIMIT 1
+                            """,
+                            (self.session_id, self._current_branch_id),
+                        )
+                        row = cursor.fetchone()
+                        if row is None:
+                            return None
+
+                        structure_id, message_id = row
+
+                        # Read the message payload before removing anything.
+                        cursor.execute(
+                            f"SELECT message_data FROM {self.messages_table} WHERE id = ?",
+                            (message_id,),
+                        )
+                        message_row = cursor.fetchone()
+
+                        # Remove the structure row for this branch, then drop the
+                        # underlying message only if no other branch references it.
+                        cursor.execute(
+                            "DELETE FROM message_structure WHERE id = ?",
+                            (structure_id,),
+                        )
+                        self._cleanup_orphaned_messages_sync(conn)
+                        conn.commit()
+
+                        if message_row is None:
+                            # Structure row pointed at a missing message; keep looking.
+                            continue
+
+                        try:
+                            return json.loads(message_row[0])
+                        except (json.JSONDecodeError, TypeError):
+                            # Drop corrupted JSON entries and keep looking for a valid item.
+                            continue
+
+        return await asyncio.to_thread(_pop_item_sync)
+
+    async def clear_session(self) -> None:
+        """Clear all items for this session.
+
+        Overrides the base implementation so the `message_structure` and
+        `turn_usage` metadata tables are cleared in the same transaction. Those
+        rows declare an `ON DELETE CASCADE` foreign key, but SQLite does not
+        enforce foreign keys unless `PRAGMA foreign_keys=ON` is set, so they must
+        be deleted explicitly to avoid leaking stale structure and usage data.
+        """
+
+        def _clear_session_sync():
+            with self._locked_connection() as conn:
+                conn.execute(
+                    f"DELETE FROM {self.messages_table} WHERE session_id = ?",
+                    (self.session_id,),
+                )
+                conn.execute(
+                    f"DELETE FROM {self.sessions_table} WHERE session_id = ?",
+                    (self.session_id,),
+                )
+                conn.execute(
+                    "DELETE FROM message_structure WHERE session_id = ?",
+                    (self.session_id,),
+                )
+                conn.execute(
+                    "DELETE FROM turn_usage WHERE session_id = ?",
+                    (self.session_id,),
+                )
+                conn.commit()
+
+        await asyncio.to_thread(_clear_session_sync)
+        # All branches were removed, so reset the in-memory pointer to 'main'.
+        self._current_branch_id = "main"
+
     async def store_run_usage(self, result: RunResult) -> None:
         """Store usage data for the current conversation turn.
 

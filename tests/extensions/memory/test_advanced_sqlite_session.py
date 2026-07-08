@@ -1757,3 +1757,145 @@ async def test_output_tokens_details_persisted_when_input_details_missing():
     assert turn_usage["output_tokens_details"] == {"reasoning_tokens": 42}
     assert turn_usage["input_tokens_details"] is None
     session.close()
+
+
+def _count_rows(session: AdvancedSQLiteSession, table: str) -> int:
+    """Helper: count rows for the session in one of the metadata tables."""
+    with session._locked_connection() as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()
+        return cast(int, row[0])
+
+
+async def test_clear_session_removes_structure_and_usage_metadata(usage_data: Usage):
+    """Regression: clear_session must also clear message_structure and turn_usage.
+
+    Those tables declare an ON DELETE CASCADE foreign key, but SQLite does not
+    enforce foreign keys by default, so the inherited base clear_session left the
+    rows behind. That leaked stale structure/usage data and permanently offset
+    sequence and turn numbering for items added after clearing.
+    """
+    session = AdvancedSQLiteSession(session_id="clear_metadata_test", create_tables=True)
+
+    await session.add_items(
+        [
+            {"role": "user", "content": "First question"},
+            {"role": "assistant", "content": "First answer"},
+        ]
+    )
+    await session.store_run_usage(create_mock_run_result(usage_data))
+
+    assert _count_rows(session, "message_structure") > 0
+    assert _count_rows(session, "turn_usage") > 0
+
+    await session.clear_session()
+
+    assert await session.get_items() == []
+    assert _count_rows(session, "message_structure") == 0
+    assert _count_rows(session, "turn_usage") == 0
+
+    # Numbering must reset: the next item starts a fresh sequence and turn.
+    await session.add_items([{"role": "user", "content": "Fresh start"}])
+    with session._locked_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT sequence_number, user_turn_number
+            FROM message_structure
+            WHERE session_id = ?
+            """,
+            (session.session_id,),
+        ).fetchall()
+    assert rows == [(1, 1)]
+
+    session.close()
+
+
+async def test_pop_item_removes_its_structure_row():
+    """Regression: pop_item must delete the popped message's structure row.
+
+    The inherited base pop_item removed only the message row, leaving an orphaned
+    message_structure row that corrupted later MAX(sequence_number)/turn numbering.
+    """
+    session = AdvancedSQLiteSession(session_id="pop_structure_test", create_tables=True)
+
+    await session.add_items(
+        [
+            {"role": "user", "content": "Question"},
+            {"role": "assistant", "content": "Answer"},
+        ]
+    )
+
+    popped = await session.pop_item()
+    assert popped == {"role": "assistant", "content": "Answer"}
+
+    with session._locked_connection() as conn:
+        message_ids = {
+            row[0]
+            for row in conn.execute(
+                f"SELECT id FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchall()
+        }
+        structure_message_ids = {
+            row[0]
+            for row in conn.execute(
+                "SELECT message_id FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchall()
+        }
+
+    # No structure row may reference a message that no longer exists.
+    assert structure_message_ids <= message_ids
+    assert await session.get_items() == [{"role": "user", "content": "Question"}]
+
+    session.close()
+
+
+async def test_pop_item_respects_current_branch_and_keeps_shared_messages():
+    """Regression: pop_item must pop from the current branch and preserve messages
+    still referenced by another branch (branches share the underlying message rows).
+    """
+    session = AdvancedSQLiteSession(session_id="pop_branch_test", create_tables=True)
+
+    main_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Main first question"},
+        {"role": "assistant", "content": "Main first answer"},
+        {"role": "user", "content": "Main second question"},
+        {"role": "assistant", "content": "Main second answer"},
+    ]
+
+    try:
+        await session.add_items(main_items)
+        # Branch from turn 2 copies turn 1's shared messages into the new branch.
+        await session.create_branch_from_turn(2, "branch_a")
+        await session.switch_to_branch("branch_a")
+        await session.add_items([{"role": "user", "content": "Branch-only question"}])
+
+        # Popping on branch_a removes only its own newest item.
+        popped = await session.pop_item()
+        assert popped == {"role": "user", "content": "Branch-only question"}
+
+        # The main branch, which shares turn 1's messages, is untouched.
+        assert await session.get_items(branch_id="main") == main_items
+
+        # No orphaned structure rows anywhere in the session.
+        with session._locked_connection() as conn:
+            message_ids = {
+                row[0]
+                for row in conn.execute(
+                    f"SELECT id FROM {session.messages_table} WHERE session_id = ?",
+                    (session.session_id,),
+                ).fetchall()
+            }
+            structure_message_ids = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT message_id FROM message_structure WHERE session_id = ?",
+                    (session.session_id,),
+                ).fetchall()
+            }
+        assert structure_message_ids <= message_ids
+    finally:
+        session.close()
