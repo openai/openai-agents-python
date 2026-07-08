@@ -20,7 +20,7 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 import agents.sandbox.runtime_agent_preparation as runtime_agent_preparation_module
 from agents import Agent, AgentHooks, LocalShellTool, RunHooks, Runner, function_tool
-from agents.exceptions import InputGuardrailTripwireTriggered, UserError
+from agents.exceptions import InputGuardrailTripwireTriggered, ModelRefusalError, UserError
 from agents.guardrail import GuardrailFunctionOutput, InputGuardrail, OutputGuardrail
 from agents.items import ModelResponse, ToolCallOutputItem, TResponseInputItem
 from agents.model_settings import ModelSettings
@@ -92,6 +92,8 @@ from tests.test_responses import (
     get_function_tool,
     get_function_tool_call,
     get_handoff_tool_call,
+    get_refusal_message,
+    get_text_message,
 )
 from tests.testing_processor import fetch_normalized_spans
 from tests.utils.factories import TestSessionState
@@ -1827,6 +1829,70 @@ async def test_runner_rebuilds_sandbox_resources_for_handoff_target_agent() -> N
         "Worker workspace\n\n"
         f"{runtime_agent_preparation_module._filesystem_instructions(worker_manifest)}"
     )
+
+
+@pytest.mark.asyncio
+async def test_runner_continues_after_sandbox_handoff_text_preamble() -> None:
+    triage_model = FakeModel()
+    worker_model = FakeModel()
+    session = _FakeSession(Manifest())
+    client = _FakeClient(session)
+    worker = SandboxAgent(
+        name="worker",
+        model=worker_model,
+        instructions="Worker instructions.",
+    )
+    triage = Agent(
+        name="triage",
+        model=triage_model,
+        instructions="Triage instructions.",
+        handoffs=[worker],
+    )
+    triage_model.turn_outputs = [[get_handoff_tool_call(worker)]]
+    worker_model.add_multiple_turn_outputs(
+        [
+            [get_text_message("I'll inspect the workspace now.")],
+            [get_final_output_message("done")],
+        ]
+    )
+
+    result = await Runner.run(
+        triage,
+        "route this",
+        run_config=_sandbox_run_config(client),
+    )
+
+    assert result.final_output == "done"
+    assert len(result.raw_responses) == 3
+
+
+@pytest.mark.asyncio
+async def test_runner_preserves_sandbox_handoff_refusal_handling() -> None:
+    triage_model = FakeModel()
+    worker_model = FakeModel(initial_output=[get_refusal_message("I cannot do that.")])
+    session = _FakeSession(Manifest())
+    client = _FakeClient(session)
+    worker = SandboxAgent(
+        name="worker",
+        model=worker_model,
+        instructions="Worker instructions.",
+    )
+    triage = Agent(
+        name="triage",
+        model=triage_model,
+        instructions="Triage instructions.",
+        handoffs=[worker],
+    )
+    triage_model.turn_outputs = [[get_handoff_tool_call(worker)]]
+
+    with pytest.raises(ModelRefusalError) as exc_info:
+        await Runner.run(
+            triage,
+            "route this",
+            run_config=_sandbox_run_config(client),
+        )
+
+    assert exc_info.value.refusal == "I cannot do that."
 
 
 @pytest.mark.asyncio

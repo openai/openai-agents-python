@@ -70,6 +70,7 @@ from ..run_config import RunConfig, ToolErrorFormatterArgs
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
 from ..run_error_handlers import RunErrorHandlers
 from ..run_state import RunState
+from ..sandbox.sandbox_agent import SandboxAgent
 from ..stream_events import StreamEvent
 from ..tool import (
     ApplyPatchTool,
@@ -207,6 +208,30 @@ async def _maybe_finalize_from_tool_results(
         context_wrapper=context_wrapper,
         tool_input_guardrail_results=tool_input_guardrail_results,
         tool_output_guardrail_results=tool_output_guardrail_results,
+    )
+
+
+def _should_continue_after_sandbox_handoff_text_response(
+    *,
+    public_agent: Agent[Any],
+    execution_agent: Agent[Any],
+    pre_step_items: list[RunItem],
+    message_items: list[MessageOutputItem],
+    refusal: str | None,
+) -> bool:
+    if not isinstance(public_agent, SandboxAgent):
+        return False
+    if not execution_agent.tools:
+        return False
+    if not message_items:
+        return False
+    if refusal:
+        return False
+    if any(item.agent is public_agent for item in pre_step_items):
+        return False
+    return any(
+        isinstance(item, HandoffOutputItem) and item.target_agent is public_agent
+        for item in pre_step_items
     )
 
 
@@ -808,6 +833,22 @@ async def execute_tools_and_side_effects(
         has_tool_activity_without_message = not message_items and bool(
             processed_response.tools_used
         )
+        if _should_continue_after_sandbox_handoff_text_response(
+            public_agent=public_agent,
+            execution_agent=bindings.execution_agent,
+            pre_step_items=pre_step_items,
+            message_items=message_items,
+            refusal=refusal,
+        ):
+            return SingleStepResult(
+                original_input=original_input,
+                model_response=new_response,
+                pre_step_items=pre_step_items,
+                new_step_items=new_step_items,
+                next_step=NextStepRunAgain(),
+                tool_input_guardrail_results=tool_input_guardrail_results,
+                tool_output_guardrail_results=tool_output_guardrail_results,
+            )
         if not has_tool_activity_without_message:
             if refusal:
                 refusal_error = ModelRefusalError(refusal)
