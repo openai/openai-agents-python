@@ -366,10 +366,14 @@ class AdvancedSQLiteSession(SQLiteSession):
                     (self.session_id,),
                 )
                 conn.commit()
+                # All branches were removed, so reset the in-memory pointer to
+                # 'main' while still holding the lock. Doing this inside the
+                # locked operation keeps the reset atomic with the clear, so no
+                # other locked operation observes the session as cleared while
+                # the pointer still references a deleted branch.
+                self._current_branch_id = "main"
 
         await asyncio.to_thread(_clear_session_sync)
-        # All branches were removed, so reset the in-memory pointer to 'main'.
-        self._current_branch_id = "main"
 
     async def store_run_usage(self, result: RunResult) -> None:
         """Store usage data for the current conversation turn.
