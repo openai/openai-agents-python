@@ -1927,3 +1927,124 @@ async def test_pop_item_respects_current_branch_and_keeps_shared_messages():
         assert structure_message_ids <= message_ids
     finally:
         session.close()
+
+
+async def test_pop_item_deletes_shared_copied_message_only_when_unreferenced():
+    """Regression: popping a message that was copied into a branch (branches share
+    the underlying message row) must keep the message while another branch still
+    references it, and only remove it once no branch references it anymore.
+    """
+    session = AdvancedSQLiteSession(session_id="pop_shared_copy_test", create_tables=True)
+
+    main_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+
+    def message_count() -> int:
+        with session._locked_connection() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()
+            return cast(int, row[0])
+
+    try:
+        await session.add_items(main_items)
+        # Branch from turn 2 copies turn 1 (u1, a1) into branch_a as shared rows.
+        await session.create_branch_from_turn(2, "branch_a")
+        await session.switch_to_branch("branch_a")
+        await session.add_items([{"role": "user", "content": "branch-only"}])
+
+        assert message_count() == 5  # u1, a1, u2, a2, branch-only
+
+        # Pop the branch-only item (not shared): its message row is removed.
+        assert await session.pop_item() == {"role": "user", "content": "branch-only"}
+        assert message_count() == 4
+
+        # Pop the copied, shared a1 and u1 off branch_a. They remain in the
+        # messages table because the main branch still references them.
+        assert await session.pop_item() == {"role": "assistant", "content": "a1"}
+        assert await session.pop_item() == {"role": "user", "content": "u1"}
+        assert message_count() == 4
+        assert await session.get_items(branch_id="main") == main_items
+        assert await session.get_items(branch_id="branch_a") == []
+
+        # Now drain main: once no branch references u1/a1, the rows are removed.
+        await session.switch_to_branch("main")
+        for _ in range(len(main_items)):
+            await session.pop_item()
+        assert message_count() == 0
+        assert await session.get_items() == []
+
+        # No orphaned structure rows at any point.
+        with session._locked_connection() as conn:
+            leftover = conn.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+        assert leftover == 0
+    finally:
+        session.close()
+
+
+async def test_pop_item_uses_branch_snapshot_when_branch_switches_concurrently():
+    """Regression: pop_item snapshots the current branch at call time, so a branch
+    switch that interleaves after dispatch cannot redirect the pop to another branch.
+    """
+    session = AdvancedSQLiteSession(session_id="pop_snapshot_test", create_tables=True)
+
+    main_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+
+    try:
+        await session.add_items(main_items)
+        await session.create_branch_from_turn(2, "branch_a")
+        await session.switch_to_branch("branch_a")
+        await session.add_items([{"role": "user", "content": "branch-only"}])
+
+        # Start the pop while on branch_a, let it take its branch snapshot, then
+        # switch to main before it completes.
+        task = asyncio.ensure_future(session.pop_item())
+        await asyncio.sleep(0)  # let pop_item run up to its first await (snapshot taken)
+        await session.switch_to_branch("main")
+        popped = await task
+
+        # The pop targeted branch_a (its state at call time), not main.
+        assert popped == {"role": "user", "content": "branch-only"}
+        assert await session.get_items(branch_id="main") == main_items
+    finally:
+        session.close()
+
+
+async def test_clear_session_resets_current_branch_to_main():
+    """Regression: clear_session must reset the in-memory branch pointer to 'main'
+    (inside the locked operation) since every branch was removed.
+    """
+    session = AdvancedSQLiteSession(session_id="clear_branch_reset_test", create_tables=True)
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+                {"role": "assistant", "content": "a2"},
+            ]
+        )
+        await session.create_branch_from_turn(2, "branch_a")
+        await session.switch_to_branch("branch_a")
+        assert session._current_branch_id == "branch_a"
+
+        await session.clear_session()
+
+        assert session._current_branch_id == "main"
+        assert await session.get_items() == []
+    finally:
+        session.close()
