@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import datetime, timedelta
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
@@ -815,7 +815,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         model._audio_state_tracker.on_audio_delta("i1", 0, b"a" * 48_000)
         state = model._audio_state_tracker.get_state("i1", 0)
         assert state is not None
-        state.initial_received_time = datetime.now() - timedelta(seconds=5)
+        state.initial_received_time = time.monotonic() - 5
 
         monkeypatch.setattr(
             model,
@@ -846,7 +846,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         model._audio_state_tracker.on_audio_delta("i1", 0, b"a" * 48_000)
         state = model._audio_state_tracker.get_state("i1", 0)
         assert state is not None
-        state.initial_received_time = datetime.now() - timedelta(seconds=5)
+        state.initial_received_time = time.monotonic() - 5
         model._ongoing_response = True
 
         monkeypatch.setattr(

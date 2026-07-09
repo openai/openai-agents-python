@@ -6,9 +6,9 @@ import inspect
 import json
 import math
 import os
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Annotated, Any, Literal, TypeAlias, cast
 
 import pydantic
@@ -890,9 +890,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             item_id, item_content_index = last_audio_item_id
             audio_state = self._audio_state_tracker.get_state(item_id, item_content_index)
             if audio_state:
-                elapsed_ms = (
-                    datetime.now() - audio_state.initial_received_time
-                ).total_seconds() * 1000
+                elapsed_ms = (time.monotonic() - audio_state.initial_received_time) * 1000
                 return {
                     "current_item_id": item_id,
                     "current_item_content_index": item_content_index,

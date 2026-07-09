@@ -119,6 +119,7 @@ select = [
   "I",  # isort
   "B",  # flake8-bugbear
   "C4", # flake8-comprehensions
+  "DTZ005", # datetime.now() without a timezone
   "UP", # pyupgrade
 ]
 isort = { combine-as-imports = true, known-first-party = ["agents"] }
@@ -127,7 +128,7 @@ isort = { combine-as-imports = true, known-first-party = ["agents"] }
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"examples/**/*.py" = ["E501"]
+"examples/**/*.py" = ["DTZ005", "E501"]
 
 [tool.mypy]
 strict = true
