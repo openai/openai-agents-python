@@ -1,6 +1,5 @@
 import asyncio
 from collections.abc import Mapping
-from datetime import datetime
 from typing import Any
 from urllib.parse import unquote, urlparse, urlunparse
 
@@ -33,8 +32,12 @@ def _normalized_source_urls(sources: Any) -> list[str]:
         ".png",
         ".svg",
         ".svgz",
+        ".tar",
+        ".tgz",
         ".woff",
         ".woff2",
+        ".zip",
+        ".gz",
     )
 
     urls: list[str] = []
@@ -70,10 +73,11 @@ def _normalized_source_urls(sources: Any) -> list[str]:
 async def main():
     agent = Agent(
         name="WebOAI website searcher",
-        model="gpt-5-nano",
+        model="gpt-5.6",
         instructions=(
             "You are a helpful agent that searches OpenAI developer documentation and platform "
-            "docs. Ignore ChatGPT help-center or end-user release notes."
+            "docs. Ignore ChatGPT help-center or end-user release notes. Prefer the Web search "
+            "guide and do not summarize unrelated platform updates."
         ),
         tools=[
             WebSearchTool(
@@ -89,6 +93,7 @@ async def main():
         ],
         model_settings=ModelSettings(
             reasoning=Reasoning(effort="low"),
+            tool_choice="required",
             verbosity="low",
             # https://platform.openai.com/docs/guides/tools-web-search?api-mode=responses#sources
             response_include=["web_search_call.action.sources"],
@@ -96,11 +101,12 @@ async def main():
     )
 
     with trace("Web search example"):
-        today = datetime.now().strftime("%Y-%m-%d")
         query = (
-            "Write a summary of the latest OpenAI API and developer platform updates from the "
-            f"last few weeks (today is {today}). Focus on developer docs, API changes, model "
-            "release notes, and platform changelog items."
+            "Search the OpenAI developer docs for the guide titled 'Web search' and use it as "
+            "the primary source. "
+            "In three concise bullets, explain: (1) domain filtering syntax and limits, (2) how "
+            "to include all consulted source URLs, and (3) how complete sources differ from "
+            "inline citations. Do not discuss unrelated updates."
         )
         result = await Runner.run(agent, query)
 

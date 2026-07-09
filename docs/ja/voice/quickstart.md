@@ -6,19 +6,19 @@ search:
 
 ## 前提条件
 
-Agents SDK の基本の [クイックスタート手順](../quickstart.md) に従い、仮想環境をセットアップ済みであることを確認してください。その後、SDK のオプションの音声依存関係をインストールします:
+Agents SDK の基本的な[クイックスタート手順](../quickstart.md)に従い、仮想環境をセットアップしていることを確認してください。次に、SDK のオプションの音声依存パッケージをインストールします。
 
 ```bash
 pip install 'openai-agents[voice]'
 ```
 
-## 概念
+## 基本概念
 
-知っておくべき主な概念は [`VoicePipeline`][agents.voice.pipeline.VoicePipeline] です。これは 3 ステップのプロセスです:
+知っておくべき主要な概念は、3 ステップのプロセスである [`VoicePipeline`][agents.voice.pipeline.VoicePipeline] です。
 
-1. 音声をテキストに変換するために、speech-to-text モデルを実行します。
-2. 通常はエージェントを用いたワークフローであるコードを実行して、結果を生成します。
-3. text-to-speech モデルを実行して、結果のテキストを音声に戻します。
+1. 音声テキスト変換モデルを実行し、音声をテキストに変換します。
+2. 通常はエージェント型ワークフローであるコードを実行し、結果を生成します。
+3. テキスト音声変換モデルを実行し、結果のテキストを音声に戻します。
 
 ```mermaid
 graph LR
@@ -48,7 +48,7 @@ graph LR
 
 ## エージェント
 
-まず、いくつかのエージェントをセットアップしましょう。この SDK でエージェントを構築したことがあれば、なじみのある内容のはずです。ここでは、いくつかのエージェント、ハンドオフ、ツールを用意します。
+まず、いくつかのエージェントをセットアップします。この SDK でエージェントを構築した経験があれば、馴染みのある作業でしょう。ここでは、2 つのエージェント、1 つのハンドオフ、1 つのツールを用意します。
 
 ```python
 import asyncio
@@ -76,7 +76,7 @@ spanish_agent = Agent(
     instructions=prompt_with_handoff_instructions(
         "You're speaking to a human, so be polite and concise. Speak in Spanish.",
     ),
-    model="gpt-5.5",
+    model="gpt-5.6-sol",
 )
 
 agent = Agent(
@@ -84,7 +84,7 @@ agent = Agent(
     instructions=prompt_with_handoff_instructions(
         "You're speaking to a human, so be polite and concise. If the user speaks in Spanish, hand off to the Spanish agent.",
     ),
-    model="gpt-5.5",
+    model="gpt-5.6-sol",
     handoffs=[spanish_agent],
     tools=[get_weather],
 )
@@ -92,7 +92,7 @@ agent = Agent(
 
 ## 音声パイプライン
 
-ワークフローとして [`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow] を使用して、シンプルな音声パイプラインをセットアップします。
+ワークフローとして [`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow] を使用し、シンプルな音声パイプラインをセットアップします。
 
 ```python
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
@@ -160,7 +160,7 @@ spanish_agent = Agent(
     instructions=prompt_with_handoff_instructions(
         "You're speaking to a human, so be polite and concise. Speak in Spanish.",
     ),
-    model="gpt-5.5",
+    model="gpt-5.6-sol",
 )
 
 agent = Agent(
@@ -168,7 +168,7 @@ agent = Agent(
     instructions=prompt_with_handoff_instructions(
         "You're speaking to a human, so be polite and concise. If the user speaks in Spanish, hand off to the Spanish agent.",
     ),
-    model="gpt-5.5",
+    model="gpt-5.6-sol",
     handoffs=[spanish_agent],
     tools=[get_weather],
 )
@@ -195,4 +195,4 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-この例を実行すると、エージェントが話しかけてきます！ エージェントに自分で話しかけられるデモについては、[examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) の例を確認してください。
+この例を実行すると、エージェントが話しかけてきます！自分でエージェントに話しかけられるデモについては、[examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) の例をご覧ください。
