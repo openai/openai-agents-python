@@ -1330,7 +1330,7 @@ class RealtimeSession(RealtimeModelListener):
             if response_id in self._interrupted_response_ids or self._closing or self._closed:
                 return False
 
-            # Mark as interrupted immediately (before any awaits) to minimize race window
+            # Mark as interrupted immediately (before any awaits) to minimize race window.
             self._interrupted_response_ids.add(response_id)
 
             # Emit guardrail tripped event
@@ -1405,6 +1405,7 @@ class RealtimeSession(RealtimeModelListener):
         guardrail_tasks = [
             asyncio.create_task(_run_one(guardrail)) for guardrail in input_guardrails
         ]
+        interrupted = False
         triggered_results: list[InputGuardrailResult] = []
         try:
             for completed in asyncio.as_completed(guardrail_tasks):
@@ -1413,6 +1414,7 @@ class RealtimeSession(RealtimeModelListener):
                     triggered_results.append(result)
 
                     if item_id not in self._interrupted_input_item_ids:
+                        interrupted = True
                         # Mark as interrupted immediately (before any awaits)
                         # to minimize the race window.
                         self._interrupted_input_item_ids.add(item_id)
@@ -1444,7 +1446,7 @@ class RealtimeSession(RealtimeModelListener):
                     task.cancel()
             await asyncio.gather(*guardrail_tasks, return_exceptions=True)
 
-        return bool(triggered_results)
+        return interrupted
 
     def _enqueue_guardrail_task(self, text: str, response_id: str) -> None:
         # Runs the guardrails in a separate task to avoid blocking the main loop

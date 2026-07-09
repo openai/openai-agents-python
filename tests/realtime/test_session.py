@@ -4027,16 +4027,16 @@ class TestInputGuardrailFunctionality:
         )
         await session.on_event(transcription_event)
 
-        # Wait until the slow guardrail starts
+        # Wait until the slow guardrail starts.
         await slow_started.wait()
 
-        # Yield to let the concurrent fast guardrail complete and process the interrupt
+        # Yield to let the concurrent fast guardrail complete and process the interrupt.
         await asyncio.sleep(0.01)
 
-        # Verify the interrupt was called immediately, even though slow_can_resume is NOT set
+        # Verify the interrupt was called immediately, even though slow_can_resume is NOT set.
         assert mock_model.interrupts_called == 1
 
-        # Resume the slow guardrail to clean up
+        # Resume the slow guardrail to clean up.
         slow_can_resume.set()
         await self._wait_for_guardrail_tasks(session)
 
