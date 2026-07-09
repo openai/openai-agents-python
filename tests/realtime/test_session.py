@@ -209,6 +209,275 @@ async def test_aiter_exits_waiting_iterators_when_session_closes():
 
 
 @pytest.mark.asyncio
+async def test_close_waits_for_background_finalizers_before_model_close():
+    order: list[str] = []
+
+    class OrderingModel(_DummyModel):
+        async def close(self):
+            order.append("model")
+
+    session = RealtimeSession(OrderingModel(), RealtimeAgent(name="agent"), None)
+    guardrail_started = asyncio.Event()
+    tool_started = asyncio.Event()
+
+    async def background_task(label: str, started: asyncio.Event) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            order.append(label)
+
+    guardrail = asyncio.create_task(background_task("guardrail", guardrail_started))
+    tool = asyncio.create_task(background_task("tool", tool_started))
+    session._guardrail_tasks.add(guardrail)
+    session._tool_call_tasks.add(tool)
+    await guardrail_started.wait()
+    await tool_started.wait()
+
+    await session.close()
+
+    assert order[-1] == "model"
+    assert set(order[:-1]) == {"guardrail", "tool"}
+    assert guardrail.done()
+    assert tool.done()
+    assert session._guardrail_tasks == set()
+    assert session._tool_call_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_close_callers_share_failure_and_retry():
+    class FailOnceModel(_DummyModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_started = asyncio.Event()
+            self.release_close = asyncio.Event()
+            self.close_calls = 0
+
+        async def close(self):
+            self.close_calls += 1
+            self.close_started.set()
+            await self.release_close.wait()
+            if self.close_calls == 1:
+                raise RuntimeError("close failed")
+
+    model = FailOnceModel()
+    session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+
+    first = asyncio.create_task(session.close())
+    await model.close_started.wait()
+    second = asyncio.create_task(session.close())
+    await asyncio.sleep(0)
+    assert not second.done()
+
+    model.release_close.set()
+    first_result, second_result = await asyncio.gather(first, second, return_exceptions=True)
+
+    assert isinstance(first_result, RuntimeError)
+    assert second_result is first_result
+    assert model.close_calls == 1
+    assert session._closing
+    assert not session._closed
+
+    await session.close()
+
+    assert model.close_calls == 2
+    assert session._closed
+
+
+@pytest.mark.asyncio
+async def test_cancelling_one_close_waiter_does_not_cancel_cleanup():
+    class BlockingCloseModel(_DummyModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_started = asyncio.Event()
+            self.release_close = asyncio.Event()
+            self.close_calls = 0
+
+        async def close(self):
+            self.close_calls += 1
+            self.close_started.set()
+            await self.release_close.wait()
+
+    model = BlockingCloseModel()
+    session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+
+    surviving_waiter = asyncio.create_task(session.close())
+    await model.close_started.wait()
+    cancelled_waiter = asyncio.create_task(session.close())
+    await asyncio.sleep(0)
+    assert not cancelled_waiter.done()
+    cancelled_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_waiter
+
+    model.release_close.set()
+    await surviving_waiter
+
+    assert model.close_calls == 1
+    assert session._closed
+
+
+@pytest.mark.asyncio
+async def test_tracked_task_reentering_active_cleanup_does_not_create_wait_cycle():
+    class CountingCloseModel(_DummyModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_calls = 0
+
+        async def close(self):
+            self.close_calls += 1
+
+    model = CountingCloseModel()
+    session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+    task_started = asyncio.Event()
+    close_reentered = asyncio.Event()
+
+    async def close_during_cancellation() -> None:
+        task_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            close_reentered.set()
+            await session.close()
+
+    tracked = asyncio.create_task(close_during_cancellation())
+    session._tool_call_tasks.add(tracked)
+    tracked.add_done_callback(session._on_tool_call_task_done)
+    await task_started.wait()
+
+    await asyncio.wait_for(session.close(), timeout=0.5)
+
+    assert close_reentered.is_set()
+    assert tracked.cancelled()
+    assert model.close_calls == 1
+    assert session._closed
+    assert tracked not in session._tool_call_tasks
+
+
+@pytest.mark.asyncio
+async def test_tracked_task_can_start_cleanup_without_self_await():
+    class CountingCloseModel(_DummyModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_calls = 0
+
+        async def close(self):
+            self.close_calls += 1
+
+    model = CountingCloseModel()
+    session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+    close_started = asyncio.Event()
+    tracked_finally_ran = asyncio.Event()
+
+    async def close_from_tracked_task() -> None:
+        close_started.set()
+        try:
+            await session.close()
+        finally:
+            tracked_finally_ran.set()
+
+    tracked = asyncio.create_task(close_from_tracked_task())
+    session._tool_call_tasks.add(tracked)
+    tracked.add_done_callback(session._on_tool_call_task_done)
+    await close_started.wait()
+
+    cleanup_task = session._cleanup_task
+    assert cleanup_task is not None
+    await asyncio.shield(cleanup_task)
+    result = (await asyncio.gather(tracked, return_exceptions=True))[0]
+
+    assert isinstance(result, asyncio.CancelledError)
+    assert tracked_finally_ran.is_set()
+    assert model.close_calls == 1
+    assert session._closed
+    assert tracked not in session._tool_call_tasks
+
+
+@pytest.mark.asyncio
+async def test_late_tool_completion_stays_tracked_and_cannot_send_after_close(monkeypatch):
+    monkeypatch.setattr(
+        "agents.realtime.session._BACKGROUND_TASK_CANCEL_GRACE_SECONDS",
+        0.01,
+    )
+    tool_started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release_tool = asyncio.Event()
+
+    @function_tool
+    async def cancellation_resistant_tool() -> str:
+        tool_started.set()
+        try:
+            await asyncio.Event().wait()
+            return "unreachable output"
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release_tool.wait()
+            return "late output"
+
+    model = _DummyModel()
+    agent = RealtimeAgent(name="agent", tools=[cancellation_resistant_tool])
+    session = RealtimeSession(model, agent, None)
+    await session.on_event(
+        RealtimeModelToolCallEvent(
+            name=cancellation_resistant_tool.name,
+            call_id="late-call",
+            arguments="{}",
+        )
+    )
+    await tool_started.wait()
+    tracked = next(iter(session._tool_call_tasks))
+
+    await session.close()
+
+    assert cancellation_seen.is_set()
+    assert session._closed
+    assert tracked in session._tool_call_tasks
+    assert not any(isinstance(event, RealtimeModelSendToolOutput) for event in model.events)
+
+    release_tool.set()
+    await tracked
+    await asyncio.sleep(0)
+
+    assert tracked not in session._tool_call_tasks
+    assert session._stored_exception is None
+    assert not any(isinstance(event, RealtimeModelSendToolOutput) for event in model.events)
+
+
+@pytest.mark.asyncio
+async def test_in_flight_model_event_cannot_enqueue_work_after_close(monkeypatch):
+    model = _DummyModel()
+    session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+    put_started = asyncio.Event()
+    release_put = asyncio.Event()
+    original_put_event = session._put_event
+
+    async def blocked_put_event(event):
+        put_started.set()
+        await release_put.wait()
+        return await original_put_event(event)
+
+    monkeypatch.setattr(session, "_put_event", blocked_put_event)
+    event_task = asyncio.create_task(
+        session.on_event(
+            RealtimeModelToolCallEvent(
+                name="late-tool",
+                call_id="late-event",
+                arguments="{}",
+            )
+        )
+    )
+    await put_started.wait()
+
+    await session.close()
+    release_put.set()
+    await event_task
+
+    assert session._closed
+    assert session._tool_call_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_transcription_completed_adds_new_user_item():
     model = _DummyModel()
     agent = RealtimeAgent(name="agent")
