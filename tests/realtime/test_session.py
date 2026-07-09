@@ -3749,3 +3749,37 @@ class TestTranscriptPreservation:
         preserved_item = cast(AssistantMessageItem, session._history[0])
         assert isinstance(preserved_item.content[0], AssistantAudio)
         assert preserved_item.content[0].transcript == "Final complete transcript"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_awaits_cancelled_guardrail_and_tool_call_tasks(mock_model, mock_agent):
+    """Cancelled background tasks must finish (finally blocks run) before cleanup returns.
+
+    Regression test for issue #3334: ``_cleanup`` cancelled pending guardrail and
+    tool-call tasks but neither awaited them nor deferred clearing the tracking sets,
+    so ``_cleanup`` could return before the tasks' ``finally`` blocks executed and
+    the sets were cleared before cancellation took effect.
+    """
+
+    async def _never_returns() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            finished.set()
+
+    session = RealtimeSession(mock_model, mock_agent, None)
+    finished = asyncio.Event()
+
+    guardrail = asyncio.create_task(_never_returns())
+    tool_call = asyncio.create_task(_never_returns())
+    session._guardrail_tasks.add(guardrail)
+    session._tool_call_tasks.add(tool_call)
+
+    await session._cleanup()
+
+    assert guardrail.done()
+    assert tool_call.done()
+    assert finished.is_set()
+    assert session._guardrail_tasks == set()
+    assert session._tool_call_tasks == set()
