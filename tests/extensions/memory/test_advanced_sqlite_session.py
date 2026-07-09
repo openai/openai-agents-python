@@ -43,7 +43,9 @@ def usage_data() -> Usage:
         input_tokens=50,
         output_tokens=30,
         total_tokens=80,
-        input_tokens_details=InputTokensDetails(cached_tokens=10),
+        input_tokens_details=InputTokensDetails.model_validate(
+            {"cache_write_tokens": 0, "cached_tokens": 10}
+        ),
         output_tokens_details=OutputTokensDetails(reasoning_tokens=5),
     )
 
@@ -59,7 +61,9 @@ def create_mock_run_result(usage: Usage | None = None, agent: Agent | None = Non
             input_tokens=50,
             output_tokens=30,
             total_tokens=80,
-            input_tokens_details=InputTokensDetails(cached_tokens=10),
+            input_tokens_details=InputTokensDetails.model_validate(
+                {"cache_write_tokens": 0, "cached_tokens": 10}
+            ),
             output_tokens_details=OutputTokensDetails(reasoning_tokens=5),
         )
 
@@ -1146,7 +1150,9 @@ async def test_usage_tracking_storage(agent: Agent, usage_data: Usage):
         input_tokens=75,
         output_tokens=45,
         total_tokens=120,
-        input_tokens_details=InputTokensDetails(cached_tokens=20),
+        input_tokens_details=InputTokensDetails.model_validate(
+            {"cache_write_tokens": 0, "cached_tokens": 20}
+        ),
         output_tokens_details=OutputTokensDetails(reasoning_tokens=15),
     )
 

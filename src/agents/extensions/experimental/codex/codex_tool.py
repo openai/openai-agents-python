@@ -11,7 +11,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Mutabl
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias, TypeGuard
 
-from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
+from openai.types.responses.response_usage import OutputTokensDetails
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from typing_extensions import NotRequired, TypedDict
 
@@ -30,7 +30,7 @@ from agents.tool import (
 )
 from agents.tool_context import ToolContext
 from agents.tracing import SpanError, custom_span
-from agents.usage import Usage as AgentsUsage
+from agents.usage import Usage as AgentsUsage, _make_input_tokens_details
 from agents.util._types import MaybeAwaitable
 
 from .codex import Codex
@@ -1010,7 +1010,7 @@ def _to_agent_usage(usage: Usage) -> AgentsUsage:
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
         total_tokens=usage.input_tokens + usage.output_tokens,
-        input_tokens_details=InputTokensDetails(cached_tokens=usage.cached_input_tokens),
+        input_tokens_details=_make_input_tokens_details(cached_tokens=usage.cached_input_tokens),
         output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
     )
 

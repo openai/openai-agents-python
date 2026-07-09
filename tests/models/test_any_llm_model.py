@@ -117,7 +117,9 @@ def _chat_completion(text: str) -> ChatCompletion:
             completion_tokens=5,
             prompt_tokens=7,
             total_tokens=12,
-            prompt_tokens_details=PromptTokensDetails(cached_tokens=2),
+            prompt_tokens_details=PromptTokensDetails.model_validate(
+                {"cached_tokens": 2, "cache_write_tokens": 4}
+            ),
         ),
     )
 
@@ -155,7 +157,9 @@ def _response(text: str, response_id: str = "resp_123") -> Response:
             input_tokens=11,
             output_tokens=13,
             total_tokens=24,
-            input_tokens_details=InputTokensDetails(cached_tokens=0),
+            input_tokens_details=InputTokensDetails.model_validate(
+                {"cache_write_tokens": 0, "cached_tokens": 0}
+            ),
             output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
         ),
     )
@@ -289,6 +293,8 @@ async def test_any_llm_chat_path_is_used_when_responses_are_unsupported(monkeypa
     assert provider.chat_calls[0]["model"] == "openai/gpt-5.4-mini"
     assert response.response_id is None
     assert response.output[0].content[0].text == "Hello"
+    assert response.usage.input_tokens_details.cached_tokens == 2
+    assert getattr(response.usage.input_tokens_details, "cache_write_tokens", None) == 4
 
 
 @pytest.mark.allow_call_model_methods

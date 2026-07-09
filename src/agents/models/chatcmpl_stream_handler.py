@@ -46,11 +46,12 @@ from openai.types.responses.response_reasoning_text_delta_event import (
 from openai.types.responses.response_reasoning_text_done_event import (
     ResponseReasoningTextDoneEvent,
 )
-from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
+from openai.types.responses.response_usage import OutputTokensDetails
 
 from ..exceptions import ModelBehaviorError, UserError
 from ..items import TResponseStreamEvent
 from ..logger import logger
+from ..usage import _cache_write_tokens, _make_input_tokens_details
 from .chatcmpl_helpers import ChatCmplHelpers
 from .fake_id import FAKE_RESPONSES_ID
 
@@ -1073,10 +1074,11 @@ class ChatCmplStreamHandler:
                     and usage.completion_tokens_details.reasoning_tokens
                     else 0
                 ),
-                input_tokens_details=InputTokensDetails(
+                input_tokens_details=_make_input_tokens_details(
                     cached_tokens=usage.prompt_tokens_details.cached_tokens
                     if usage.prompt_tokens_details and usage.prompt_tokens_details.cached_tokens
-                    else 0
+                    else 0,
+                    cache_write_tokens=_cache_write_tokens(usage.prompt_tokens_details),
                 ),
             )
             if usage

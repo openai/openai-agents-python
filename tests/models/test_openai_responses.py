@@ -306,7 +306,7 @@ async def test_get_response_span_exports_usage():
             "input_tokens": 10,
             "output_tokens": 4,
             "total_tokens": 14,
-            "input_tokens_details": {"cached_tokens": 0},
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
             "output_tokens_details": {"reasoning_tokens": 0},
         },
     }

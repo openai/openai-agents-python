@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from copy import copy
 from typing import Any, Literal, cast, overload
 
-from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
+from openai.types.responses.response_usage import OutputTokensDetails
 
 from agents.exceptions import ModelBehaviorError
 
@@ -56,7 +56,7 @@ from ...tool import Tool
 from ...tracing import generation_span
 from ...tracing.span_data import GenerationSpanData
 from ...tracing.spans import Span
-from ...usage import Usage
+from ...usage import Usage, _cache_write_tokens, _make_input_tokens_details
 from ...util._json import _to_dump_compatible
 
 
@@ -263,11 +263,14 @@ class LitellmModel(Model):
                         input_tokens=response_usage.prompt_tokens,
                         output_tokens=response_usage.completion_tokens,
                         total_tokens=response_usage.total_tokens,
-                        input_tokens_details=InputTokensDetails(
+                        input_tokens_details=_make_input_tokens_details(
                             cached_tokens=getattr(
                                 response_usage.prompt_tokens_details, "cached_tokens", 0
                             )
-                            or 0
+                            or 0,
+                            cache_write_tokens=_cache_write_tokens(
+                                response_usage.prompt_tokens_details
+                            ),
                         ),
                         output_tokens_details=OutputTokensDetails(
                             reasoning_tokens=getattr(
@@ -372,7 +375,7 @@ class LitellmModel(Model):
                     "input_tokens_details": (
                         final_response.usage.input_tokens_details.model_dump()
                         if final_response.usage.input_tokens_details
-                        else {"cached_tokens": 0}
+                        else {"cached_tokens": 0, "cache_write_tokens": 0}
                     ),
                     "output_tokens_details": (
                         final_response.usage.output_tokens_details.model_dump()

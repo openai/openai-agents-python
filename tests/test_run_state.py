@@ -27,6 +27,7 @@ from openai.types.responses.response_computer_tool_call import (
     ResponseComputerToolCall,
 )
 from openai.types.responses.response_output_item import LocalShellCall, McpApprovalRequest
+from openai.types.responses.response_usage import InputTokensDetails
 from openai.types.responses.tool_param import Mcp
 from pydantic import BaseModel
 
@@ -1798,13 +1799,21 @@ class TestSerializationRoundTrip:
         context.usage.input_tokens = 100
         context.usage.output_tokens = 50
         context.usage.total_tokens = 150
+        context.usage.input_tokens_details = InputTokensDetails.model_validate(
+            {"cache_write_tokens": 7, "cached_tokens": 3}
+        )
 
         agent = Agent(name="UsageAgent")
         state = make_state(agent, context=context, original_input="test", max_turns=10)
 
         str_data = state.to_string()
+        serialized = json.loads(str_data)
         new_state = await RunState.from_string(agent, str_data)
 
+        assert serialized["$schemaVersion"] == "1.12"
+        assert serialized["context"]["usage"]["input_tokens_details"] == [
+            {"cached_tokens": 3, "cache_write_tokens": 7}
+        ]
         assert new_state._context is not None
         assert new_state._context.usage.requests == 5
         assert new_state._context.usage is not None
@@ -1813,6 +1822,41 @@ class TestSerializationRoundTrip:
         assert new_state._context.usage.output_tokens == 50
         assert new_state._context.usage is not None
         assert new_state._context.usage.total_tokens == 150
+        assert new_state._context.usage.input_tokens_details.cached_tokens == 3
+        assert (
+            getattr(
+                new_state._context.usage.input_tokens_details,
+                "cache_write_tokens",
+                None,
+            )
+            == 7
+        )
+
+    async def test_restores_schema_1_11_usage_without_cache_write_tokens(self):
+        """Released snapshots default the newly required OpenAI usage field to zero."""
+        agent = Agent(name="UsageAgent")
+        state: RunState[dict[str, Any]] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+            max_turns=10,
+        )
+        state_json = state.to_json()
+        state_json["$schemaVersion"] = "1.11"
+        state_json["context"]["usage"]["input_tokens_details"] = [{"cached_tokens": 3}]
+
+        restored = await RunState.from_json(agent, state_json)
+
+        assert restored._context is not None
+        assert restored._context.usage.input_tokens_details.cached_tokens == 3
+        assert (
+            getattr(
+                restored._context.usage.input_tokens_details,
+                "cache_write_tokens",
+                None,
+            )
+            == 0
+        )
 
     def test_serializes_generated_items(self):
         """Test that generated items are serialized and restored."""
@@ -4944,6 +4988,7 @@ class TestRunStateSerializationEdgeCases:
                 "1.8",
                 "1.9",
                 "1.10",
+                "1.11",
                 CURRENT_SCHEMA_VERSION,
             }
         )

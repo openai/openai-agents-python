@@ -89,7 +89,9 @@ async def test_task_and_turn_spans_export_aggregate_usage():
             input_tokens=10,
             output_tokens=3,
             total_tokens=13,
-            input_tokens_details=InputTokensDetails(cached_tokens=2),
+            input_tokens_details=InputTokensDetails.model_validate(
+                {"cache_write_tokens": 3, "cached_tokens": 2}
+            ),
         )
     )
     agent = Agent(name="test_agent", model=model, tools=[foo_tool])
@@ -116,6 +118,7 @@ async def test_task_and_turn_spans_export_aggregate_usage():
                 "output_tokens": 6,
                 "total_tokens": 26,
                 "cached_input_tokens": 4,
+                "cache_write_input_tokens": 6,
             },
         },
     }
@@ -125,11 +128,13 @@ async def test_task_and_turn_spans_export_aggregate_usage():
             "input_tokens": 10,
             "output_tokens": 3,
             "cached_input_tokens": 2,
+            "cache_write_input_tokens": 3,
         },
         {
             "input_tokens": 10,
             "output_tokens": 3,
             "cached_input_tokens": 2,
+            "cache_write_input_tokens": 3,
         },
     ]
     assert [span["span_data"] for span in turn_spans if span] == [
@@ -144,6 +149,7 @@ async def test_task_and_turn_spans_export_aggregate_usage():
                     "input_tokens": 10,
                     "output_tokens": 3,
                     "cached_input_tokens": 2,
+                    "cache_write_input_tokens": 3,
                 },
             },
         },
@@ -158,6 +164,7 @@ async def test_task_and_turn_spans_export_aggregate_usage():
                     "input_tokens": 10,
                     "output_tokens": 3,
                     "cached_input_tokens": 2,
+                    "cache_write_input_tokens": 3,
                 },
             },
         },
@@ -168,6 +175,7 @@ async def test_task_and_turn_spans_export_aggregate_usage():
         "output_tokens": 6,
         "total_tokens": 26,
         "cached_input_tokens": 4,
+        "cache_write_input_tokens": 6,
     }
 
     assert len(agent_spans) == 1
@@ -318,8 +326,16 @@ async def test_resumed_run_task_span_usage_is_run_local_delta():
     assert resumed.final_output == "done"
     task_spans = [span.export() for span in fetch_ordered_spans() if span.span_data.type == "task"]
     assert [span["span_data"]["data"]["usage"] for span in task_spans if span] == [
-        {**_usage_metadata(requests=1, input_tokens=10, output_tokens=3), "cached_input_tokens": 0},
-        {**_usage_metadata(requests=1, input_tokens=10, output_tokens=3), "cached_input_tokens": 0},
+        {
+            **_usage_metadata(requests=1, input_tokens=10, output_tokens=3),
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+        },
+        {
+            **_usage_metadata(requests=1, input_tokens=10, output_tokens=3),
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+        },
     ]
 
 
@@ -744,8 +760,16 @@ async def test_resumed_streaming_run_task_span_usage_is_run_local_delta():
     assert resumed.final_output == "done"
     task_spans = [span.export() for span in fetch_ordered_spans() if span.span_data.type == "task"]
     assert [span["span_data"]["data"]["usage"] for span in task_spans if span] == [
-        {**_usage_metadata(requests=1, input_tokens=11, output_tokens=4), "cached_input_tokens": 0},
-        {**_usage_metadata(requests=1, input_tokens=11, output_tokens=4), "cached_input_tokens": 0},
+        {
+            **_usage_metadata(requests=1, input_tokens=11, output_tokens=4),
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+        },
+        {
+            **_usage_metadata(requests=1, input_tokens=11, output_tokens=4),
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+        },
     ]
 
 

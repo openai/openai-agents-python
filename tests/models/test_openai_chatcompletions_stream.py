@@ -126,7 +126,9 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
             completion_tokens=5,
             prompt_tokens=7,
             total_tokens=12,
-            prompt_tokens_details=PromptTokensDetails(cached_tokens=2),
+            prompt_tokens_details=PromptTokensDetails.model_validate(
+                {"cached_tokens": 2, "cache_write_tokens": 4}
+            ),
             completion_tokens_details=CompletionTokensDetails(reasoning_tokens=3),
         ),
     )
@@ -197,6 +199,7 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
     assert completed_resp.usage.output_tokens == 5
     assert completed_resp.usage.total_tokens == 12
     assert completed_resp.usage.input_tokens_details.cached_tokens == 2
+    assert getattr(completed_resp.usage.input_tokens_details, "cache_write_tokens", None) == 4
     assert completed_resp.usage.output_tokens_details.reasoning_tokens == 3
 
 

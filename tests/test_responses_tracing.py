@@ -29,7 +29,9 @@ class DummyUsage:
         self.output_tokens = output_tokens
         self.total_tokens = total_tokens
         self.input_tokens_details = (
-            input_tokens_details if input_tokens_details else InputTokensDetails(cached_tokens=0)
+            input_tokens_details
+            if input_tokens_details
+            else InputTokensDetails.model_validate({"cache_write_tokens": 0, "cached_tokens": 0})
         )
         self.output_tokens_details = (
             output_tokens_details
@@ -102,7 +104,10 @@ async def test_get_response_creates_trace(monkeypatch):
                                 "input_tokens": 1,
                                 "output_tokens": 1,
                                 "total_tokens": 2,
-                                "input_tokens_details": {"cached_tokens": 0},
+                                "input_tokens_details": {
+                                    "cached_tokens": 0,
+                                    "cache_write_tokens": 0,
+                                },
                                 "output_tokens_details": {"reasoning_tokens": 0},
                             },
                         },
@@ -162,7 +167,10 @@ async def test_non_data_tracing_doesnt_set_response_id(monkeypatch):
                                 "input_tokens": 1,
                                 "output_tokens": 1,
                                 "total_tokens": 2,
-                                "input_tokens_details": {"cached_tokens": 0},
+                                "input_tokens_details": {
+                                    "cached_tokens": 0,
+                                    "cache_write_tokens": 0,
+                                },
                                 "output_tokens_details": {"reasoning_tokens": 0},
                             }
                         },
@@ -276,7 +284,10 @@ async def test_stream_response_creates_trace(monkeypatch):
                                 "input_tokens": 0,
                                 "output_tokens": 0,
                                 "total_tokens": 0,
-                                "input_tokens_details": {"cached_tokens": 0},
+                                "input_tokens_details": {
+                                    "cached_tokens": 0,
+                                    "cache_write_tokens": 0,
+                                },
                                 "output_tokens_details": {"reasoning_tokens": 0},
                             },
                         },
@@ -414,7 +425,10 @@ async def test_stream_non_data_tracing_doesnt_set_response_id(monkeypatch):
                                 "input_tokens": 0,
                                 "output_tokens": 0,
                                 "total_tokens": 0,
-                                "input_tokens_details": {"cached_tokens": 0},
+                                "input_tokens_details": {
+                                    "cached_tokens": 0,
+                                    "cache_write_tokens": 0,
+                                },
                                 "output_tokens_details": {"reasoning_tokens": 0},
                             }
                         },

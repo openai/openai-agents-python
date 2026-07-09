@@ -130,7 +130,9 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
             prompt_tokens=7,
             total_tokens=12,
             # completion_tokens_details left blank to test default
-            prompt_tokens_details=PromptTokensDetails(cached_tokens=3),
+            prompt_tokens_details=PromptTokensDetails.model_validate(
+                {"cached_tokens": 3, "cache_write_tokens": 4}
+            ),
         ),
     )
 
@@ -164,6 +166,7 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
     assert resp.usage.output_tokens == 5
     assert resp.usage.total_tokens == 12
     assert resp.usage.input_tokens_details.cached_tokens == 3
+    assert getattr(resp.usage.input_tokens_details, "cache_write_tokens", None) == 4
     assert resp.usage.output_tokens_details.reasoning_tokens == 0
     assert resp.response_id is None
 
