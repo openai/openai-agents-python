@@ -266,6 +266,65 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         return await asyncio.to_thread(_get_items_sync)
 
+    async def pop_item(self) -> TResponseInputItem | None:
+        """Remove and return the most recent item from the current branch.
+
+        The base SQLiteSession.pop_item deletes the newest row for the whole
+        session regardless of branch, so on a non-main branch it removes an item
+        from another branch (usually main) and corrupts it. Scope the pop to the
+        active branch instead: drop the branch's newest message_structure row,
+        and delete the underlying message only when no other branch still
+        references it (branches share message rows, and foreign keys are not
+        enforced so ON DELETE CASCADE does not run).
+
+        Returns:
+            The most recent item on the current branch, or None if it is empty.
+        """
+
+        def _pop_item_sync() -> TResponseInputItem | None:
+            with self._locked_connection() as conn:
+                while True:
+                    cursor = conn.execute(
+                        f"""
+                        SELECT s.rowid, m.id, m.message_data
+                        FROM {self.messages_table} m
+                        JOIN message_structure s ON m.id = s.message_id
+                        WHERE m.session_id = ? AND s.branch_id = ?
+                        ORDER BY s.sequence_number DESC
+                        LIMIT 1
+                        """,
+                        (self.session_id, self._current_branch_id),
+                    )
+                    row = cursor.fetchone()
+                    if row is None:
+                        return None
+
+                    structure_rowid, message_id, message_data = row
+                    conn.execute(
+                        "DELETE FROM message_structure WHERE rowid = ?",
+                        (structure_rowid,),
+                    )
+                    # Branches share message rows, so only delete the underlying
+                    # message when no other branch still references it.
+                    still_referenced = conn.execute(
+                        "SELECT 1 FROM message_structure WHERE message_id = ? LIMIT 1",
+                        (message_id,),
+                    ).fetchone()
+                    if still_referenced is None:
+                        conn.execute(
+                            f"DELETE FROM {self.messages_table} WHERE id = ?",
+                            (message_id,),
+                        )
+                    conn.commit()
+
+                    try:
+                        return cast(TResponseInputItem, json.loads(message_data))
+                    except (json.JSONDecodeError, TypeError):
+                        # Drop corrupted JSON entries and keep looking on this branch.
+                        continue
+
+        return await asyncio.to_thread(_pop_item_sync)
+
     async def store_run_usage(self, result: RunResult) -> None:
         """Store usage data for the current conversation turn.
 

@@ -615,6 +615,65 @@ async def test_branching_functionality(agent: Agent):
     session.close()
 
 
+async def test_pop_item_is_branch_scoped():
+    """pop_item must only affect the current branch and never corrupt main."""
+    session = AdvancedSQLiteSession(session_id="pop_item_branch_test", create_tables=True)
+
+    await session.add_items(
+        [
+            {"role": "user", "content": "First question"},
+            {"role": "assistant", "content": "First answer"},
+        ]
+    )
+    await session.add_items(
+        [
+            {"role": "user", "content": "Second question"},
+            {"role": "assistant", "content": "Second answer"},
+        ]
+    )
+
+    # Branch from turn 2 -> the current branch holds only the first turn.
+    await session.create_branch_from_turn(2, "test_branch")
+    assert session._current_branch_id == "test_branch"
+    assert [i.get("content") for i in await session.get_items()] == [
+        "First question",
+        "First answer",
+    ]
+
+    # Popping on the branch returns the branch tail, not main's newest item.
+    popped = await session.pop_item()
+    assert popped is not None
+    assert popped.get("content") == "First answer"
+    assert [i.get("content") for i in await session.get_items()] == ["First question"]
+
+    # main must be left untouched.
+    main_items = await session.get_items(branch_id="main")
+    assert [i.get("content") for i in main_items] == [
+        "First question",
+        "First answer",
+        "Second question",
+        "Second answer",
+    ]
+
+    # Popping the current (main) branch still works normally.
+    await session.switch_to_branch("main")
+    popped_main = await session.pop_item()
+    assert popped_main is not None
+    assert popped_main.get("content") == "Second answer"
+    assert [i.get("content") for i in await session.get_items()] == [
+        "First question",
+        "First answer",
+        "Second question",
+    ]
+
+    session.close()
+
+    # An empty branch pops to None.
+    empty = AdvancedSQLiteSession(session_id="empty_pop_test", create_tables=True)
+    assert await empty.pop_item() is None
+    empty.close()
+
+
 async def test_delete_branch_removes_branch_only_messages():
     """Deleting a branch should not leave unreferenced branch-only messages behind."""
     session_id = "branch_delete_cleanup_test"
