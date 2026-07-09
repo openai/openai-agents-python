@@ -2180,7 +2180,7 @@ async def test_stale_store_run_usage_not_recorded_against_reused_turn_number(
         result = create_mock_run_result(usage_data)
 
         with _gate_worker("_update_sync") as (started, real_to_thread, release):
-            # Reads current_turn (1), captures the version, parks before writing.
+            # Reads current_turn (1), captures the turn anchor, parks before write.
             task = asyncio.ensure_future(session.store_run_usage(result))
             await real_to_thread(started.wait)
             # Remove turn 1 entirely, then create a brand-new turn that reuses the
@@ -2194,6 +2194,46 @@ async def test_stale_store_run_usage_not_recorded_against_reused_turn_number(
         # The new turn 1 must not carry the previous run's usage.
         assert _count_rows(session, "turn_usage") == 0
         assert not await session.get_turn_usage(1)
+    finally:
+        session.close()
+
+
+async def test_store_run_usage_survives_unrelated_branch_deletion(usage_data: Usage):
+    """A store_run_usage in flight must not be dropped when an unrelated turn is
+    removed (e.g. delete_branch on a non-current branch). The invalidation is
+    scoped to the captured branch/turn, so the write still lands.
+    """
+    session = AdvancedSQLiteSession(session_id="usage_scope_test", create_tables=True)
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+                {"role": "assistant", "content": "a2"},
+            ]
+        )
+        # A separate branch that shares turn 1's messages; deleting it must not
+        # affect usage captured for the current (main) branch.
+        await session.create_branch_from_turn(2, "side_branch")
+        await session.switch_to_branch("main")
+        result = create_mock_run_result(usage_data)
+
+        with _gate_worker("_update_sync") as (started, real_to_thread, release):
+            # Captures main/turn 2 and its anchor, then parks before the write.
+            task = asyncio.ensure_future(session.store_run_usage(result))
+            await real_to_thread(started.wait)
+            # Delete an unrelated branch while the usage write is parked.
+            await session.delete_branch("side_branch")
+            release.set()
+            await task
+
+        # The write landed: main's turn 2 usage is recorded despite the deletion.
+        assert _count_rows(session, "turn_usage") == 1
+        turn_2_usage = await session.get_turn_usage(2)
+        assert isinstance(turn_2_usage, dict)
+        assert turn_2_usage["total_tokens"] == usage_data.total_tokens
     finally:
         session.close()
 
