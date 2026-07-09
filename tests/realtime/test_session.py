@@ -331,6 +331,73 @@ async def test_on_guardrail_task_done_emits_error_event():
 
 
 @pytest.mark.asyncio
+async def test_cleanup_awaits_cancelled_background_tasks():
+    """`_cleanup` should cancel and await pending guardrail/tool-call tasks.
+
+    Regression test for the case where cleanup cancelled the tracked tasks but
+    cleared the tracking sets before awaiting them, so cancelled tasks could
+    outlive `_cleanup()` with their `finally` blocks not yet run.
+    """
+    session = RealtimeSession(_DummyModel(), RealtimeAgent(name="agent"), None)
+
+    guardrail_started = asyncio.Event()
+    guardrail_finished = asyncio.Event()
+    tool_started = asyncio.Event()
+    tool_finished = asyncio.Event()
+
+    async def guardrail_task() -> None:
+        guardrail_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            guardrail_finished.set()
+
+    async def tool_call_task() -> None:
+        tool_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            tool_finished.set()
+
+    guardrail = asyncio.create_task(guardrail_task())
+    tool_call = asyncio.create_task(tool_call_task())
+    session._guardrail_tasks.add(guardrail)
+    session._tool_call_tasks.add(tool_call)
+
+    await guardrail_started.wait()
+    await tool_started.wait()
+
+    await session._cleanup()
+
+    assert guardrail.done()
+    assert tool_call.done()
+    assert guardrail_finished.is_set()
+    assert tool_finished.is_set()
+    assert len(session._guardrail_tasks) == 0
+    assert len(session._tool_call_tasks) == 0
+
+
+@pytest.mark.asyncio
+async def test_cleanup_is_idempotent_with_completed_tasks():
+    """`_cleanup` should not raise when tracked tasks have already completed."""
+    session = RealtimeSession(_DummyModel(), RealtimeAgent(name="agent"), None)
+
+    async def done_task() -> None:
+        return None
+
+    guardrail = asyncio.create_task(done_task())
+    tool_call = asyncio.create_task(done_task())
+    await asyncio.gather(guardrail, tool_call)
+    session._guardrail_tasks.add(guardrail)
+    session._tool_call_tasks.add(tool_call)
+
+    await session._cleanup()
+
+    assert len(session._guardrail_tasks) == 0
+    assert len(session._tool_call_tasks) == 0
+
+
+@pytest.mark.asyncio
 async def test_get_handoffs_async_is_enabled(monkeypatch):
     # Agent includes both a direct Handoff and a RealtimeAgent (auto-converted)
     target = RealtimeAgent(name="target")
