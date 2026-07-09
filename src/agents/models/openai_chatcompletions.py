@@ -554,6 +554,15 @@ class OpenAIChatCompletionsModel(Model):
             "extra_body": model_settings.extra_body,
             "metadata": self._non_null_or_omit(model_settings.metadata),
         }
+        # The Chat Completions API requires logprobs=True whenever top_logprobs is set.
+        # Skip the key when the caller already supplies logprobs via extra_args, so that
+        # extra_args={"logprobs": ...} keeps passing through and setting both top_logprobs
+        # and extra_args["logprobs"] (a pre-existing workaround) does not collide with the
+        # duplicate-key check below.
+        if model_settings.top_logprobs is not None and "logprobs" not in (
+            model_settings.extra_args or {}
+        ):
+            create_kwargs["logprobs"] = True
         duplicate_extra_arg_keys = sorted(
             set(create_kwargs).intersection(model_settings.extra_args or {})
         )
