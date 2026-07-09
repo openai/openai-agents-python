@@ -671,6 +671,83 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         assert types.count("item_updated") >= 2
 
     @pytest.mark.asyncio
+    async def test_output_item_done_finalizes_status_to_completed(self, model):
+        """A response.output_item.done event finalizes the assistant status.
+
+        Regression test for #1434: some server payloads still carry
+        `status="in_progress"` on the done event, which previously left the
+        emitted history item stuck as unfinished.
+        """
+        listener = AsyncMock()
+        model.add_listener(listener)
+
+        def _last_item_status() -> str | None:
+            item_updated_calls = [
+                call
+                for call in listener.on_event.call_args_list
+                if call[0][0].type == "item_updated"
+            ]
+            return item_updated_calls[-1][0][0].item.status
+
+        # Server reports the item as still in_progress on the done event.
+        await model._handle_ws_event(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "id": "m1",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "done"}],
+                    "status": "in_progress",
+                },
+            }
+        )
+        assert _last_item_status() == "completed"
+
+        # Server omits status on done -> still completed.
+        await model._handle_ws_event(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "id": "m2",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "done"}],
+                },
+            }
+        )
+        assert _last_item_status() == "completed"
+
+        # A genuine interruption reported by the server is preserved.
+        await model._handle_ws_event(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "id": "m3",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "partial"}],
+                    "status": "incomplete",
+                },
+            }
+        )
+        assert _last_item_status() == "incomplete"
+
+        # An added (not done) event stays in_progress.
+        await model._handle_ws_event(
+            {
+                "type": "response.output_item.added",
+                "item": {
+                    "id": "m4",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "typing"}],
+                },
+            }
+        )
+        assert _last_item_status() == "in_progress"
+
+    @pytest.mark.asyncio
     async def test_text_mode_output_item_content(self, model):
         """output_text content is properly handled in message items."""
         listener = AsyncMock()

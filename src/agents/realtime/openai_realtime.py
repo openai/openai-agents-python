@@ -1102,9 +1102,16 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     elif part.get("type") in ("text", "output_text"):
                         converted_content.append({"type": "text", "text": part.get("text")})
                 status = item.get("status")
-                if status not in ("in_progress", "completed", "incomplete"):
-                    is_done = event.get("type") == "response.output_item.done"
-                    status = "completed" if is_done else "in_progress"
+                is_done = event.get("type") == "response.output_item.done"
+                if is_done:
+                    # A "response.output_item.done" event is authoritative: the item
+                    # is finalized, so surface "completed" unless the server explicitly
+                    # reported a genuine interruption. Some server payloads still carry
+                    # "in_progress" on the done event, which would otherwise leave the
+                    # history item stuck as unfinished.
+                    status = "incomplete" if status == "incomplete" else "completed"
+                elif status not in ("in_progress", "completed", "incomplete"):
+                    status = "in_progress"
                 # Explicitly type the adapter for mypy
                 type_adapter: TypeAdapter[RealtimeMessageItem] = TypeAdapter(RealtimeMessageItem)
                 message_item: RealtimeMessageItem = type_adapter.validate_python(
