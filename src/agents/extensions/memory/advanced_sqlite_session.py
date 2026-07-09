@@ -48,7 +48,27 @@ class AdvancedSQLiteSession(SQLiteSession):
         if create_tables:
             self._init_structure_tables()
         self._current_branch_id = "main"
+        # Bumped (under the connection lock) whenever clear_session() wipes the
+        # session. Branch-pointer and usage writes capture the generation before
+        # their DB work and skip their mutation if a clear has committed since,
+        # so a stale switch/create/store_run_usage cannot resurrect a branch or
+        # a turn that clear already removed.
+        self._generation = 0
         self._logger = logger or logging.getLogger(__name__)
+
+    def _commit_branch_pointer(self, branch_id: str, generation: int) -> bool:
+        """Set the current-branch pointer unless a clear has committed meanwhile.
+
+        Acquires the connection lock so the generation check and the assignment
+        are atomic with clear_session's reset. Returns True if the pointer was
+        updated, False if a clear_session committed after ``generation`` was
+        captured (in which case its reset to 'main' wins).
+        """
+        with self._lock:
+            if self._generation != generation:
+                return False
+            self._current_branch_id = branch_id
+            return True
 
     def _init_structure_tables(self):
         """Add structure and usage tracking tables.
@@ -370,7 +390,10 @@ class AdvancedSQLiteSession(SQLiteSession):
                 # 'main' while still holding the lock. Doing this inside the
                 # locked operation keeps the reset atomic with the clear, so no
                 # other locked operation observes the session as cleared while
-                # the pointer still references a deleted branch.
+                # the pointer still references a deleted branch. Bumping the
+                # generation invalidates any in-flight switch/create/usage write
+                # that captured the pre-clear generation.
+                self._generation += 1
                 self._current_branch_id = "main"
 
         await asyncio.to_thread(_clear_session_sync)
@@ -717,6 +740,11 @@ class AdvancedSQLiteSession(SQLiteSession):
         """
         import time
 
+        # Capture the generation before any DB work so a clear that commits
+        # while this branch is being created cannot be overwritten by the
+        # pointer update below.
+        generation = self._generation
+
         # Validate the turn exists and contains a user message
         def _validate_turn():
             """Synchronous helper to validate turn exists and contains user message."""
@@ -757,9 +785,11 @@ class AdvancedSQLiteSession(SQLiteSession):
         # Copy messages before the branch point to the new branch
         await self._copy_messages_to_new_branch(branch_name, turn_number)
 
-        # Switch to new branch
+        # Switch to new branch under the lock; skipped if a clear_session has
+        # committed since `generation` was captured (its reset to 'main' wins),
+        # so we never point at a branch that clear removed.
         old_branch = self._current_branch_id
-        self._current_branch_id = branch_name
+        await asyncio.to_thread(self._commit_branch_pointer, branch_name, generation)
 
         self._logger.debug(
             f"Created branch '{branch_name}' from turn {turn_number} ('{turn_content}') in '{old_branch}'"  # noqa: E501
@@ -799,6 +829,10 @@ class AdvancedSQLiteSession(SQLiteSession):
             ValueError: If the branch doesn't exist.
         """
 
+        # Capture the generation before validating so a clear that commits
+        # between validation and the pointer update is detected and skipped.
+        generation = self._generation
+
         # Validate branch exists
         def _validate_branch():
             """Synchronous helper to validate branch exists."""
@@ -819,8 +853,11 @@ class AdvancedSQLiteSession(SQLiteSession):
         await asyncio.to_thread(_validate_branch)
 
         old_branch = self._current_branch_id
-        self._current_branch_id = branch_id
-        self._logger.info(f"Switched from branch '{old_branch}' to '{branch_id}'")
+        # Update the pointer under the lock; a no-op if a clear_session has
+        # committed since `generation` was captured (its reset to 'main' wins).
+        switched = await asyncio.to_thread(self._commit_branch_pointer, branch_id, generation)
+        if switched:
+            self._logger.info(f"Switched from branch '{old_branch}' to '{branch_id}'")
 
     async def delete_branch(self, branch_id: str, force: bool = False) -> None:
         """Delete a branch and all its associated data.
