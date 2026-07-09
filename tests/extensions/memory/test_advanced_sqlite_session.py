@@ -1,10 +1,13 @@
 """Tests for AdvancedSQLiteSession functionality."""
 
 import asyncio
+import contextlib
 import json
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 
@@ -1990,9 +1993,41 @@ async def test_pop_item_deletes_shared_copied_message_only_when_unreferenced():
         session.close()
 
 
+@contextlib.contextmanager
+def _gate_worker(target_name: str):
+    """Deterministically pause a session worker to control interleaving.
+
+    Patches ``asyncio.to_thread`` in the session module so the first dispatch of
+    a worker whose ``__name__`` equals ``target_name`` signals ``started`` and
+    blocks on ``release`` before running. The pause happens before the worker
+    acquires the connection lock, so other operations can run to completion
+    while it is held. Yields ``(started, release)`` threading events.
+    """
+    started = threading.Event()
+    release = threading.Event()
+    real_to_thread = asyncio.to_thread
+    state = {"gated": False}
+
+    async def gated(func, /, *args, **kwargs):
+        if not state["gated"] and getattr(func, "__name__", "") == target_name:
+            state["gated"] = True
+            started.set()
+            await real_to_thread(release.wait)
+        return await real_to_thread(func, *args, **kwargs)
+
+    with patch(
+        "agents.extensions.memory.advanced_sqlite_session.asyncio.to_thread",
+        gated,
+    ):
+        yield started, real_to_thread, release
+
+
 async def test_pop_item_uses_branch_snapshot_when_branch_switches_concurrently():
     """Regression: pop_item snapshots the current branch at call time, so a branch
     switch that interleaves after dispatch cannot redirect the pop to another branch.
+
+    Uses a barrier (not sleep) to prove the ordering: the pop worker is held after
+    its branch snapshot is taken while a full switch_to_branch("main") completes.
     """
     session = AdvancedSQLiteSession(session_id="pop_snapshot_test", create_tables=True)
 
@@ -2009,16 +2044,117 @@ async def test_pop_item_uses_branch_snapshot_when_branch_switches_concurrently()
         await session.switch_to_branch("branch_a")
         await session.add_items([{"role": "user", "content": "branch-only"}])
 
-        # Start the pop while on branch_a, let it take its branch snapshot, then
-        # switch to main before it completes.
-        task = asyncio.ensure_future(session.pop_item())
-        await asyncio.sleep(0)  # let pop_item run up to its first await (snapshot taken)
-        await session.switch_to_branch("main")
-        popped = await task
+        with _gate_worker("_pop_item_sync") as (started, real_to_thread, release):
+            # pop_item snapshots _current_branch_id ("branch_a") synchronously,
+            # then dispatches its worker, which parks at the barrier.
+            task = asyncio.ensure_future(session.pop_item())
+            await real_to_thread(started.wait)
+            # Switch to main completes fully while the pop worker is parked.
+            await session.switch_to_branch("main")
+            release.set()
+            popped = await task
 
         # The pop targeted branch_a (its state at call time), not main.
         assert popped == {"role": "user", "content": "branch-only"}
         assert await session.get_items(branch_id="main") == main_items
+    finally:
+        session.close()
+
+
+async def test_stale_switch_after_clear_does_not_repoint_to_deleted_branch():
+    """A switch_to_branch that commits its pointer after clear_session must not
+    resurrect the deleted branch; the generation guard makes it a no-op.
+    """
+    session = AdvancedSQLiteSession(session_id="stale_switch_test", create_tables=True)
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+                {"role": "assistant", "content": "a2"},
+            ]
+        )
+        await session.create_branch_from_turn(2, "branch_a")
+        await session.switch_to_branch("main")
+        assert session._current_branch_id == "main"
+
+        with _gate_worker("_commit_branch_pointer") as (started, real_to_thread, release):
+            # switch validates branch_a and captures the generation, then parks
+            # right before committing the pointer.
+            task = asyncio.ensure_future(session.switch_to_branch("branch_a"))
+            await real_to_thread(started.wait)
+            # A full clear commits: it bumps the generation and resets to main.
+            await session.clear_session()
+            release.set()
+            await task
+
+        # The stale switch saw a newer generation and left the pointer on main.
+        assert session._current_branch_id == "main"
+        assert await session.get_items() == []
+    finally:
+        session.close()
+
+
+async def test_stale_create_branch_after_clear_does_not_repoint():
+    """A create_branch_from_turn that commits its pointer after clear_session must
+    not point at the branch clear removed.
+    """
+    session = AdvancedSQLiteSession(session_id="stale_create_test", create_tables=True)
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+                {"role": "assistant", "content": "a2"},
+            ]
+        )
+
+        with _gate_worker("_commit_branch_pointer") as (started, real_to_thread, release):
+            task = asyncio.ensure_future(session.create_branch_from_turn(2, "branch_b"))
+            await real_to_thread(started.wait)
+            await session.clear_session()
+            release.set()
+            await task
+
+        # clear won: the pointer stays on main, not the wiped branch_b.
+        assert session._current_branch_id == "main"
+        assert await session.get_items() == []
+    finally:
+        session.close()
+
+
+async def test_stale_store_run_usage_skipped_when_turn_removed_by_pop(usage_data: Usage):
+    """A store_run_usage that reads a turn and then races with pop_item removing
+    that turn must not reinsert usage for the now-nonexistent turn.
+    """
+    session = AdvancedSQLiteSession(session_id="stale_usage_test", create_tables=True)
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+            ]
+        )
+        result = create_mock_run_result(usage_data)
+
+        with _gate_worker("_update_sync") as (started, real_to_thread, release):
+            # store_run_usage reads current_turn (1) and captures the generation,
+            # then parks before writing turn_usage.
+            task = asyncio.ensure_future(session.store_run_usage(result))
+            await real_to_thread(started.wait)
+            # Pop both items of turn 1 so the turn no longer exists.
+            await session.pop_item()
+            await session.pop_item()
+            release.set()
+            await task
+
+        # The stale usage write was skipped: no row for the removed turn.
+        assert _count_rows(session, "turn_usage") == 0
     finally:
         session.close()
 
