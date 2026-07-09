@@ -401,7 +401,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agents import RunContextWrapper, FunctionTool
+from agents import FunctionTool, ToolContext
 
 
 
@@ -414,7 +414,7 @@ class FunctionArgs(BaseModel):
     age: int
 
 
-async def run_function(ctx: RunContextWrapper[Any], args: str) -> str:
+async def run_function(ctx: ToolContext[Any], args: str) -> str:
     parsed = FunctionArgs.model_validate_json(args)
     return do_some_work(data=f"{parsed.username} is {parsed.age} years old")
 
