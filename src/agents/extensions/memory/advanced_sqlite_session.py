@@ -49,11 +49,17 @@ class AdvancedSQLiteSession(SQLiteSession):
             self._init_structure_tables()
         self._current_branch_id = "main"
         # Bumped (under the connection lock) whenever clear_session() wipes the
-        # session. Branch-pointer and usage writes capture the generation before
-        # their DB work and skip their mutation if a clear has committed since,
-        # so a stale switch/create/store_run_usage cannot resurrect a branch or
-        # a turn that clear already removed.
+        # session. switch_to_branch / create_branch_from_turn capture the
+        # generation before their DB work and only update the branch pointer if
+        # no clear has committed since, so a stale switch/create cannot resurrect
+        # a branch that clear already removed.
         self._generation = 0
+        # Bumped (under the connection lock) whenever a turn is removed
+        # (clear_session, delete_branch, or a pop_item that empties a turn).
+        # store_run_usage captures this before reading the turn and the write is
+        # skipped if it changed, so usage is never recorded against a turn that
+        # was removed — even if a new turn later reuses the same numeric id.
+        self._turn_usage_version = 0
         self._logger = logger or logging.getLogger(__name__)
 
     def _commit_branch_pointer(self, branch_id: str, generation: int) -> bool:
@@ -342,6 +348,10 @@ class AdvancedSQLiteSession(SQLiteSession):
                                     """,
                                     (self.session_id, branch_id, user_turn_number),
                                 )
+                                # The turn is gone; invalidate any in-flight usage
+                                # write for it, even if a new turn later reuses
+                                # this numeric id.
+                                self._turn_usage_version += 1
 
                         conn.commit()
 
@@ -391,9 +401,11 @@ class AdvancedSQLiteSession(SQLiteSession):
                 # locked operation keeps the reset atomic with the clear, so no
                 # other locked operation observes the session as cleared while
                 # the pointer still references a deleted branch. Bumping the
-                # generation invalidates any in-flight switch/create/usage write
-                # that captured the pre-clear generation.
+                # generation invalidates any in-flight switch/create that
+                # captured the pre-clear generation; bumping the turn-usage
+                # version invalidates any in-flight usage write.
                 self._generation += 1
+                self._turn_usage_version += 1
                 self._current_branch_id = "main"
 
         await asyncio.to_thread(_clear_session_sync)
@@ -409,14 +421,17 @@ class AdvancedSQLiteSession(SQLiteSession):
         """
         try:
             if result.context_wrapper.usage is not None:
-                # Capture the generation before reading the turn so a clear that
-                # commits before the usage write is detected and skipped.
-                generation = self._generation
+                # Capture the turn-usage version before reading the turn. If the
+                # turn is removed (by clear/pop/delete) before the write commits,
+                # the version changes and the write is skipped, so usage is never
+                # recorded against a turn that no longer exists — even when a new
+                # turn later reuses the same numeric id.
+                turn_usage_version = self._turn_usage_version
                 # Get the current turn number for this branch
                 current_turn = self._get_current_turn_number()
                 # Only update turn-level usage - session usage is aggregated on demand
                 await self._update_turn_usage_internal(
-                    current_turn, result.context_wrapper.usage, generation
+                    current_turn, result.context_wrapper.usage, turn_usage_version
                 )
         except Exception as e:
             self._logger.error(f"Failed to store usage for session {self.session_id}: {e}")
@@ -933,6 +948,10 @@ class AdvancedSQLiteSession(SQLiteSession):
                     structure_deleted = cursor.rowcount
 
                     orphaned_messages_deleted = self._cleanup_orphaned_messages_sync(conn)
+
+                    # Turns were removed; invalidate any in-flight usage write.
+                    if structure_deleted:
+                        self._turn_usage_version += 1
 
                     conn.commit()
 
@@ -1452,26 +1471,31 @@ class AdvancedSQLiteSession(SQLiteSession):
         return cast(list[dict[str, Any]] | dict[str, Any], result)
 
     async def _update_turn_usage_internal(
-        self, user_turn_number: int, usage_data: Usage, generation: int | None = None
+        self,
+        user_turn_number: int,
+        usage_data: Usage,
+        turn_usage_version: int | None = None,
     ) -> None:
         """Internal method to update usage for a specific turn with full JSON details.
 
         Args:
             user_turn_number: The turn number to update usage for.
             usage_data: The usage data to store.
-            generation: The generation captured before the turn was read. When
-                provided, the write is skipped if a clear_session has committed
-                since (generation mismatch) or if the turn no longer exists on
-                the current branch (e.g. it was removed by pop_item), so stale
-                usage is never recorded for a turn that no longer exists.
+            turn_usage_version: The value of ``self._turn_usage_version`` captured
+                before the turn was read. When provided, the write is skipped if
+                the version has changed since — i.e. a clear_session, pop_item, or
+                delete_branch removed a turn — so usage is never recorded against a
+                turn that was removed, even when a new turn reuses the same numeric
+                id. The turn-existence check below is a defensive backstop.
         """
 
         def _update_sync():
             """Synchronous helper to update turn usage data."""
             with self._locked_connection() as conn:
-                if generation is not None:
-                    if self._generation != generation:
-                        # A clear_session committed after the turn was read.
+                if turn_usage_version is not None:
+                    if self._turn_usage_version != turn_usage_version:
+                        # A turn was removed after this turn number was read; the
+                        # captured turn is stale (its id may have been reused).
                         return
                     with closing(conn.cursor()) as guard_cursor:
                         guard_cursor.execute(
@@ -1482,8 +1506,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                             (self.session_id, self._current_branch_id, user_turn_number),
                         )
                         if guard_cursor.fetchone()[0] == 0:
-                            # The turn was removed (e.g. by pop_item) after it was
-                            # read; do not resurrect usage for a nonexistent turn.
+                            # The turn does not exist on the current branch.
                             return
                 # Serialize token details as JSON
                 input_details_json = None
