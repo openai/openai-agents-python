@@ -1298,7 +1298,10 @@ class RealtimeSession(RealtimeModelListener):
                 task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        self._guardrail_tasks.clear()
+        # Only discard the tasks we snapshotted. Tasks enqueued while awaiting
+        # above stay tracked so the caller can drain them too.
+        for task in tasks:
+            self._guardrail_tasks.discard(task)
 
     def _enqueue_tool_call_task(
         self,
@@ -1374,7 +1377,10 @@ class RealtimeSession(RealtimeModelListener):
                 task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        self._tool_call_tasks.clear()
+        # Only discard the tasks we snapshotted. Tasks enqueued while awaiting
+        # above stay tracked so the caller can drain them too.
+        for task in tasks:
+            self._tool_call_tasks.discard(task)
 
     def _wake_event_iterators(self) -> None:
         for _ in range(self._event_iterator_waiters):
@@ -1386,12 +1392,16 @@ class RealtimeSession(RealtimeModelListener):
             self._wake_event_iterators()
             return
 
-        # Cancel and cleanup guardrail tasks
-        await self._cleanup_guardrail_tasks()
-        await self._cleanup_tool_call_tasks()
-
-        # Remove ourselves as a listener
+        # Remove ourselves as a listener before awaiting below. Otherwise an
+        # in-flight on_event could enqueue new guardrail/tool-call tasks while we
+        # await cancellation, and those tasks could keep running after cleanup.
         self._model.remove_listener(self)
+
+        # Cancel and await guardrail/tool-call tasks. Awaiting yields control, so
+        # a suspended on_event may still enqueue a task; drain until none remain.
+        while self._guardrail_tasks or self._tool_call_tasks:
+            await self._cleanup_guardrail_tasks()
+            await self._cleanup_tool_call_tasks()
 
         # Close the model connection
         await self._model.close()

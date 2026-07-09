@@ -398,6 +398,50 @@ async def test_cleanup_is_idempotent_with_completed_tasks():
 
 
 @pytest.mark.asyncio
+async def test_cleanup_drains_tasks_enqueued_during_cleanup():
+    """`_cleanup` should drain tasks enqueued while it is awaiting cancellation.
+
+    Awaiting a cancelled task yields control, so a suspended handler could enqueue
+    a new background task after its set was already processed. Cleanup must keep
+    draining until no tracked tasks remain.
+    """
+    session = RealtimeSession(_DummyModel(), RealtimeAgent(name="agent"), None)
+
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    second_finished = asyncio.Event()
+
+    async def second_task() -> None:
+        second_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            second_finished.set()
+
+    async def first_task() -> None:
+        first_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            # Simulate a suspended handler enqueueing a new task mid-cleanup,
+            # after the guardrail set has already been processed this iteration.
+            new_task = asyncio.create_task(second_task())
+            session._guardrail_tasks.add(new_task)
+            await second_started.wait()
+
+    first = asyncio.create_task(first_task())
+    session._tool_call_tasks.add(first)
+    await first_started.wait()
+
+    await session._cleanup()
+
+    assert first.done()
+    assert second_finished.is_set()
+    assert len(session._guardrail_tasks) == 0
+    assert len(session._tool_call_tasks) == 0
+
+
+@pytest.mark.asyncio
 async def test_get_handoffs_async_is_enabled(monkeypatch):
     # Agent includes both a direct Handoff and a RealtimeAgent (auto-converted)
     target = RealtimeAgent(name="target")
