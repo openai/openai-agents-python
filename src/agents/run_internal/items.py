@@ -29,6 +29,7 @@ _TOOL_CALL_TO_OUTPUT_TYPE: dict[str, str] = {
     "local_shell_call": "local_shell_call_output",
     "tool_search_call": "tool_search_output",
 }
+_CALL_OUTPUT_TYPES: frozenset[str] = frozenset(_TOOL_CALL_TO_OUTPUT_TYPE.values())
 
 __all__ = [
     "ReasoningItemIdPolicy",
@@ -37,6 +38,7 @@ __all__ = [
     "TOOL_CALL_SESSION_TITLE_KEY",
     "copy_input_items",
     "drop_orphan_function_calls",
+    "drop_orphaned_messages_after_consumed_reasoning",
     "ensure_input_item_format",
     "prepare_model_input_items",
     "run_item_to_input_item",
@@ -177,6 +179,63 @@ def _drop_reasoning_items_preceding_dropped_calls(
             break
     excluded = dropped_indexes | drop_reasoning
     return [entry for idx, entry in enumerate(items) if idx not in excluded]
+
+
+def drop_orphaned_messages_after_consumed_reasoning(
+    items: list[TResponseInputItem],
+) -> list[TResponseInputItem]:
+    """Drop assistant message items orphaned because their reasoning item was consumed by a call.
+
+    Some Responses endpoints (notably Azure OpenAI) require every assistant message item to be
+    paired with its own reasoning item. When a reasoning-enabled agent hands off, the model emits
+    ``[reasoning, function_call, message]`` in a single response: the reasoning is consumed by the
+    ``function_call``, so the trailing message has no reasoning of its own. Replaying that shape
+    triggers a 400: ``Item 'msg_...' of type 'message' was provided without its required
+    'reasoning' item``.
+
+    This walks the flat item list and drops any assistant message that follows a tool call which
+    consumed the most recent reasoning item, until the next call-output item ends the sequence.
+    Only ``assistant`` messages are dropped -- user/system/developer messages are always kept so a
+    resumed turn's new input is never discarded. Reasoning items and tool calls are preserved.
+
+    This is intentionally NOT part of the shared run pipeline: official OpenAI tolerates the shape
+    (it ignores reasoning items that are not relevant), so callers apply this only when targeting a
+    strict, non-official Responses endpoint. It is the message-side counterpart to
+    :func:`drop_orphan_function_calls`, which removes calls without outputs and their reasoning.
+    """
+    fresh_reasoning = False  # True when the most-recent reasoning item is not yet consumed.
+    consumed_by_call = False  # True after a tool call consumes the fresh reasoning item.
+    result: list[TResponseInputItem] = []
+
+    for item in items:
+        if not isinstance(item, dict):
+            result.append(item)
+            continue
+        item_type = item.get("type")
+
+        if item_type == "reasoning":
+            fresh_reasoning = True
+            consumed_by_call = False
+            result.append(item)
+        elif item_type in _TOOL_CALL_TO_OUTPUT_TYPE:
+            if fresh_reasoning:
+                fresh_reasoning = False
+                consumed_by_call = True  # The reasoning is now consumed by this call.
+            result.append(item)
+        elif item_type in _CALL_OUTPUT_TYPES:
+            # A call output ends the call sequence. Reset so a turn with no trailing message does
+            # not bleed consumed_by_call into a later agent's legitimately reasoning-less message.
+            consumed_by_call = False
+            result.append(item)
+        elif item_type == "message":
+            if not consumed_by_call or item.get("role") != "assistant":
+                result.append(item)
+            # else: orphaned assistant message -- drop it without resetting so that any further
+            # assistant messages in the same turn are dropped until a call output resets the flag.
+        else:
+            result.append(item)
+
+    return result
 
 
 def ensure_input_item_format(item: TResponseInputItem) -> TResponseInputItem:

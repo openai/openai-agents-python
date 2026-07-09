@@ -45,6 +45,7 @@ from ..items import ItemHelpers, ModelResponse, TResponseInputItem
 from ..logger import logger
 from ..model_settings import MCPToolChoice
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
+from ..run_internal.items import drop_orphaned_messages_after_consumed_reasoning
 from ..tool import (
     ApplyPatchTool,
     CodeInterpreterTool,
@@ -742,6 +743,12 @@ class OpenAIResponsesModel(Model):
         list_input = ItemHelpers.input_to_new_input_list(input)
         list_input = _to_dump_compatible(list_input)
         list_input = self._remove_openai_responses_api_incompatible_fields(list_input)
+        # Official OpenAI tolerates a handoff's trailing message whose reasoning was consumed by the
+        # tool call, but strict Responses endpoints (e.g. Azure OpenAI) reject it with a 400. Strip
+        # that orphaned assistant message only for non-official endpoints; official OpenAI receives
+        # the items untouched, per the Responses API guidance to pass items through as-is.
+        if not is_official_openai_client(self._get_client()):
+            list_input = drop_orphaned_messages_after_consumed_reasoning(list_input)
 
         if model_settings.parallel_tool_calls and tools:
             parallel_tool_calls: bool | Omit = True

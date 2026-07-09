@@ -313,6 +313,140 @@ def test_drop_orphan_function_calls_keeps_reasoning_chain_before_non_dropped_ite
     ]
 
 
+def test_drop_orphaned_messages_after_consumed_reasoning_drops_handoff_message() -> None:
+    # A reasoning-enabled handoff emits [reasoning, function_call, message]; the reasoning is
+    # consumed by the call, so the trailing assistant message is orphaned and must be dropped.
+    payload: list[Any] = [
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_1", "summary": []}),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call", "call_id": "fc_1", "name": "transfer", "arguments": "{}"},
+        ),
+        cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "Transferring you now."},
+        ),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call_output", "call_id": "fc_1", "output": "ok"},
+        ),
+    ]
+
+    filtered = run_items.drop_orphaned_messages_after_consumed_reasoning(
+        cast(list[TResponseInputItem], payload)
+    )
+
+    assert not any(
+        isinstance(entry, dict)
+        and entry.get("type") == "message"
+        and entry.get("role") == "assistant"
+        for entry in filtered
+    )
+    # The reasoning, call, and output are preserved -- only the orphaned message is removed.
+    assert [cast(dict[str, Any], entry)["type"] for entry in filtered] == [
+        "reasoning",
+        "function_call",
+        "function_call_output",
+    ]
+
+
+def test_drop_orphaned_messages_after_consumed_reasoning_preserves_user_message() -> None:
+    # A resumed turn appends a new user message after an interrupted [reasoning, function_call].
+    # User input must never be discarded even though consumed_by_call is set.
+    payload: list[Any] = [
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_1", "summary": []}),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call", "call_id": "fc_1", "name": "transfer", "arguments": "{}"},
+        ),
+        cast(
+            TResponseInputItem,
+            {"type": "message", "role": "user", "content": "Actually, cancel that."},
+        ),
+    ]
+
+    filtered = run_items.drop_orphaned_messages_after_consumed_reasoning(
+        cast(list[TResponseInputItem], payload)
+    )
+
+    user_messages = [
+        entry for entry in filtered if isinstance(entry, dict) and entry.get("role") == "user"
+    ]
+    assert len(user_messages) == 1
+    assert cast(dict[str, Any], user_messages[0])["content"] == "Actually, cancel that."
+
+
+def test_drop_orphaned_messages_after_consumed_reasoning_drops_multiple_messages() -> None:
+    # Every orphaned assistant message before the call output is dropped, not just the first.
+    payload: list[Any] = [
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_1", "summary": []}),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call", "call_id": "fc_1", "name": "transfer", "arguments": "{}"},
+        ),
+        cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "one"}),
+        cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "two"}),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call_output", "call_id": "fc_1", "output": "ok"},
+        ),
+    ]
+
+    filtered = run_items.drop_orphaned_messages_after_consumed_reasoning(
+        cast(list[TResponseInputItem], payload)
+    )
+
+    assert not any(
+        isinstance(entry, dict) and entry.get("type") == "message" for entry in filtered
+    )
+
+
+def test_drop_orphaned_messages_after_consumed_reasoning_keeps_unconsumed_message() -> None:
+    # When no tool call consumed the reasoning, the assistant message keeps its own reasoning and
+    # must be preserved.
+    payload: list[Any] = [
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_1", "summary": []}),
+        cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "Hi there."}),
+    ]
+
+    filtered = run_items.drop_orphaned_messages_after_consumed_reasoning(
+        cast(list[TResponseInputItem], payload)
+    )
+
+    assert filtered == payload
+
+
+def test_drop_orphaned_messages_after_consumed_reasoning_resets_after_call_output() -> None:
+    # After a call output ends the sequence, a later agent's legitimately reasoning-less assistant
+    # message must not be dropped (the consumed flag must not bleed across turns).
+    payload: list[Any] = [
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_1", "summary": []}),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call", "call_id": "fc_1", "name": "transfer", "arguments": "{}"},
+        ),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call_output", "call_id": "fc_1", "output": "ok"},
+        ),
+        cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "Here is the answer."},
+        ),
+    ]
+
+    filtered = run_items.drop_orphaned_messages_after_consumed_reasoning(
+        cast(list[TResponseInputItem], payload)
+    )
+
+    assert any(
+        isinstance(entry, dict)
+        and entry.get("type") == "message"
+        and entry.get("content") == "Here is the answer."
+        for entry in filtered
+    )
+
+
 def test_normalize_and_ensure_input_item_format_keep_non_dict_entries() -> None:
     item = cast(TResponseInputItem, "raw-item")
     assert run_items.ensure_input_item_format(item) == item

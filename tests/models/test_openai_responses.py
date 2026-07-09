@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
-from openai import NOT_GIVEN, APIConnectionError, AsyncOpenAI, RateLimitError, omit
+from openai import NOT_GIVEN, APIConnectionError, AsyncOpenAI, BadRequestError, RateLimitError, omit
 from openai.types.responses import ResponseCompletedEvent, ResponseErrorEvent
 from openai.types.responses.response_create_params import ContextManagement
 from openai.types.shared.reasoning import Reasoning
@@ -25,6 +25,7 @@ from agents import (
     trace,
 )
 from agents.exceptions import ModelBehaviorError, UserError
+from agents.items import TResponseInputItem
 from agents.models._retry_runtime import (
     provider_managed_retries_disabled,
     websocket_pre_event_retries_disabled,
@@ -3849,3 +3850,161 @@ def test_websocket_pre_event_disconnect_retry_respects_websocket_retry_disable()
 
     with websocket_pre_event_retries_disabled(True):
         assert _should_retry_pre_event_websocket_disconnect() is False
+
+
+# ---------------------------------------------------------------------------
+# Orphaned handoff message handling (reasoning consumed by a tool call).
+#
+# When a reasoning-enabled agent hands off, the model emits
+# ``[reasoning, function_call, message]`` in one response. The reasoning is consumed by the call,
+# so the trailing assistant message is orphaned. Official OpenAI tolerates this shape, but strict
+# Responses endpoints (e.g. Azure OpenAI) reject it with a 400. The Responses model strips that
+# message only for non-official endpoints; official OpenAI receives the items untouched.
+# ---------------------------------------------------------------------------
+
+
+def _orphaned_handoff_input() -> list[TResponseInputItem]:
+    return [
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_1", "summary": []}),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call", "call_id": "fc_1", "name": "transfer", "arguments": "{}"},
+        ),
+        cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "Transferring you now."},
+        ),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call_output", "call_id": "fc_1", "output": "ok"},
+        ),
+    ]
+
+
+def _has_orphaned_assistant_message(items: list[Any]) -> bool:
+    return any(
+        isinstance(item, dict)
+        and item.get("type") == "message"
+        and item.get("role") == "assistant"
+        for item in items
+    )
+
+
+class _CapturingResponses:
+    def __init__(self) -> None:
+        self.kwargs: dict[str, Any] = {}
+
+    async def create(self, **kwargs: Any) -> Any:
+        self.kwargs = kwargs
+        return get_response_obj([])
+
+
+class _CapturingClient:
+    def __init__(self, base_url: str) -> None:
+        self.responses = _CapturingResponses()
+        self.base_url = httpx.URL(base_url)
+
+
+async def _capture_sent_input(base_url: str, input_items: list[TResponseInputItem]) -> list[Any]:
+    client = _CapturingClient(base_url)
+    model = OpenAIResponsesModel(model="gpt-5", openai_client=cast(Any, client))
+    await model.get_response(
+        system_instructions=None,
+        input=input_items,
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+    return cast(list[Any], client.responses.kwargs["input"])
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_non_official_endpoint_strips_orphaned_handoff_message() -> None:
+    sent_input = await _capture_sent_input(
+        "https://my-resource.openai.azure.com/openai/v1/", _orphaned_handoff_input()
+    )
+
+    assert not _has_orphaned_assistant_message(sent_input), (
+        "The orphaned handoff message must be stripped for non-official (Azure) endpoints."
+    )
+    # Reasoning and the tool call/output are preserved -- only the orphaned message is removed.
+    assert [cast(dict[str, Any], item)["type"] for item in sent_input] == [
+        "reasoning",
+        "function_call",
+        "function_call_output",
+    ]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_official_endpoint_preserves_orphaned_handoff_message() -> None:
+    sent_input = await _capture_sent_input(
+        "https://api.openai.com/v1/", _orphaned_handoff_input()
+    )
+
+    assert _has_orphaned_assistant_message(sent_input), (
+        "Official OpenAI must receive items untouched, per the Responses API guidance."
+    )
+
+
+def _reject_orphaned_message_like_azure(items: list[Any]) -> None:
+    """Reproduce Azure's validation: an assistant message right after a tool call is rejected."""
+    for previous, item in zip(items, items[1:], strict=False):
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "message"
+            and item.get("role") == "assistant"
+            and isinstance(previous, dict)
+            and previous.get("type") == "function_call"
+        ):
+            request = httpx.Request("POST", "https://my-resource.openai.azure.com/openai/responses")
+            raise BadRequestError(
+                "Item 'msg_1' of type 'message' was provided "
+                "without its required 'reasoning' item.",
+                response=httpx.Response(400, request=request),
+                body=None,
+            )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_non_official_endpoint_avoids_reasoning_item_400_on_handoff() -> None:
+    orphaned = _orphaned_handoff_input()
+
+    # Document the actual reported failure: the unstripped shape is a hard 400 on Azure.
+    with pytest.raises(BadRequestError):
+        _reject_orphaned_message_like_azure(cast(list[Any], orphaned))
+
+    class _ValidatingResponses:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, Any] = {}
+
+        async def create(self, **kwargs: Any) -> Any:
+            self.kwargs = kwargs
+            _reject_orphaned_message_like_azure(cast(list[Any], kwargs["input"]))
+            return get_response_obj([])
+
+    class _ValidatingClient:
+        def __init__(self) -> None:
+            self.responses = _ValidatingResponses()
+            self.base_url = httpx.URL("https://my-resource.openai.azure.com/openai/v1/")
+
+    client = _ValidatingClient()
+    model = OpenAIResponsesModel(model="gpt-5", openai_client=cast(Any, client))
+
+    # With the fix, the seam strips the orphaned message before create() validates, so the strict
+    # endpoint no longer raises the 400.
+    await model.get_response(
+        system_instructions=None,
+        input=orphaned,
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+
+    assert not _has_orphaned_assistant_message(cast(list[Any], client.responses.kwargs["input"]))
