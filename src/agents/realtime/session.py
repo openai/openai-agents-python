@@ -302,6 +302,7 @@ class RealtimeSession(RealtimeModelListener):
             raise asyncio.CancelledError
 
         if cleanup_task is None:
+            self._closing = True
             cleanup_task = asyncio.create_task(
                 self._cleanup(),
                 name="agents-realtime-session-cleanup",
@@ -1500,8 +1501,6 @@ class RealtimeSession(RealtimeModelListener):
         if self._closed:
             self._wake_event_iterators()
             return
-
-        self._closing = True
 
         # Stop new model events before cleanup yields control.
         self._model.remove_listener(self)

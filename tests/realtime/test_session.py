@@ -319,6 +319,41 @@ async def test_cancelling_one_close_waiter_does_not_cancel_cleanup():
 
 
 @pytest.mark.asyncio
+async def test_close_sets_closing_before_cleanup_task_runs(monkeypatch):
+    model = _DummyModel()
+    session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+    release_cleanup = asyncio.Event()
+    original_cleanup = session._cleanup
+
+    async def delayed_cleanup() -> None:
+        await release_cleanup.wait()
+        await original_cleanup()
+
+    monkeypatch.setattr(session, "_cleanup", delayed_cleanup)
+    close_task = asyncio.create_task(session.close())
+    await asyncio.sleep(0)
+
+    try:
+        assert session._cleanup_task is not None
+        assert session._closing
+
+        await session.on_event(
+            RealtimeModelInputAudioTranscriptionCompletedEvent(
+                item_id="late-item",
+                transcript="late transcript",
+            )
+        )
+
+        assert session._history == []
+        assert session._event_queue.empty()
+    finally:
+        release_cleanup.set()
+        await close_task
+
+    assert session._closed
+
+
+@pytest.mark.asyncio
 async def test_tracked_task_reentering_active_cleanup_does_not_create_wait_cycle():
     class CountingCloseModel(_DummyModel):
         def __init__(self) -> None:
