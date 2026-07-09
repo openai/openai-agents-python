@@ -96,14 +96,14 @@ def test_get_default_model_settings_returns_none_reasoning_defaults_for_gpt_5_5_
     assert get_default_model_settings("gpt-5.5-2026-04-23") == _gpt_5_default_settings("none")
 
 
-@pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
+@pytest.mark.parametrize("model", ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
 def test_get_default_model_settings_returns_none_reasoning_defaults_for_gpt_5_6_models(
     model: str,
 ):
     assert get_default_model_settings(model) == _gpt_5_default_settings("none")
 
 
-@pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
+@pytest.mark.parametrize("model", ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
 def test_agent_uses_gpt_5_6_model_settings_from_default_model_env(
     model: str, monkeypatch: pytest.MonkeyPatch
 ):
