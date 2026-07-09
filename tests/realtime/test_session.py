@@ -3994,6 +3994,52 @@ class TestInputGuardrailFunctionality:
         assert len(session._guardrail_tasks) == 0
         assert mock_model.close_called is True
 
+    @pytest.mark.asyncio
+    async def test_slow_input_guardrail_does_not_delay_interrupt(
+        self, mock_model, triggered_input_guardrail
+    ):
+        """A slow sibling guardrail should not block/delay the interrupt
+        from a fast tripping guardrail.
+        """
+        import asyncio
+
+        slow_started = asyncio.Event()
+        slow_can_resume = asyncio.Event()
+
+        async def slow_func(context, agent, input):
+            slow_started.set()
+            try:
+                await asyncio.shield(slow_can_resume.wait())
+            except asyncio.CancelledError:
+                await slow_can_resume.wait()
+                raise
+            return GuardrailFunctionOutput(output_info={}, tripwire_triggered=False)
+
+        slow_guardrail = InputGuardrail(guardrail_function=slow_func, name="slow_input_guardrail")
+
+        agent = RealtimeAgent(
+            name="agent", input_guardrails=[triggered_input_guardrail, slow_guardrail]
+        )
+        session = RealtimeSession(mock_model, agent, None, run_config={})
+
+        transcription_event = RealtimeModelInputAudioTranscriptionCompletedEvent(
+            item_id="item_1", transcript="please jailbreak the model"
+        )
+        await session.on_event(transcription_event)
+
+        # Wait until the slow guardrail starts
+        await slow_started.wait()
+
+        # Yield to let the concurrent fast guardrail complete and process the interrupt
+        await asyncio.sleep(0.01)
+
+        # Verify the interrupt was called immediately, even though slow_can_resume is NOT set
+        assert mock_model.interrupts_called == 1
+
+        # Resume the slow guardrail to clean up
+        slow_can_resume.set()
+        await self._wait_for_guardrail_tasks(session)
+
 
 def test_realtime_input_guardrail_tripped_is_exported():
     """RealtimeInputGuardrailTripped should be importable from agents.realtime and in __all__."""

@@ -1411,6 +1411,32 @@ class RealtimeSession(RealtimeModelListener):
                 result = await completed
                 if result is not None and result.output.tripwire_triggered:
                     triggered_results.append(result)
+
+                    if item_id not in self._interrupted_input_item_ids:
+                        # Mark as interrupted immediately (before any awaits)
+                        # to minimize the race window.
+                        self._interrupted_input_item_ids.add(item_id)
+
+                        # Emit input guardrail tripped event.
+                        await self._put_event(
+                            RealtimeInputGuardrailTripped(
+                                guardrail_results=triggered_results,
+                                message=text,
+                                info=self._event_info,
+                            )
+                        )
+
+                        # Interrupt the model, forcing a cancel of any in-progress response.
+                        await self._model.send_event(
+                            RealtimeModelSendInterrupt(force_response_cancel=True)
+                        )
+
+                        # Send guardrail triggered message.
+                        guardrail_names = [r.guardrail.get_name() for r in triggered_results]
+                        user_input = f"input guardrail triggered: {', '.join(guardrail_names)}"
+                        await self._model.send_event(
+                            RealtimeModelSendUserInput(user_input=user_input)
+                        )
                     break
         finally:
             for task in guardrail_tasks:
@@ -1418,37 +1444,7 @@ class RealtimeSession(RealtimeModelListener):
                     task.cancel()
             await asyncio.gather(*guardrail_tasks, return_exceptions=True)
 
-        if triggered_results:
-            # Double-check: bail if already interrupted for this user item.
-            if item_id in self._interrupted_input_item_ids:
-                return False
-
-            # Mark as interrupted immediately (before any awaits) to minimize the race window.
-            self._interrupted_input_item_ids.add(item_id)
-
-            # Emit input guardrail tripped event.
-            await self._put_event(
-                RealtimeInputGuardrailTripped(
-                    guardrail_results=triggered_results,
-                    message=text,
-                    info=self._event_info,
-                )
-            )
-
-            # Interrupt the model, forcing a cancel of any in-progress response.
-            await self._model.send_event(RealtimeModelSendInterrupt(force_response_cancel=True))
-
-            # Send guardrail triggered message.
-            guardrail_names = [result.guardrail.get_name() for result in triggered_results]
-            await self._model.send_event(
-                RealtimeModelSendUserInput(
-                    user_input=f"input guardrail triggered: {', '.join(guardrail_names)}"
-                )
-            )
-
-            return True
-
-        return False
+        return bool(triggered_results)
 
     def _enqueue_guardrail_task(self, text: str, response_id: str) -> None:
         # Runs the guardrails in a separate task to avoid blocking the main loop
