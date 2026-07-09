@@ -409,10 +409,15 @@ class AdvancedSQLiteSession(SQLiteSession):
         """
         try:
             if result.context_wrapper.usage is not None:
+                # Capture the generation before reading the turn so a clear that
+                # commits before the usage write is detected and skipped.
+                generation = self._generation
                 # Get the current turn number for this branch
                 current_turn = self._get_current_turn_number()
                 # Only update turn-level usage - session usage is aggregated on demand
-                await self._update_turn_usage_internal(current_turn, result.context_wrapper.usage)
+                await self._update_turn_usage_internal(
+                    current_turn, result.context_wrapper.usage, generation
+                )
         except Exception as e:
             self._logger.error(f"Failed to store usage for session {self.session_id}: {e}")
 
@@ -1446,17 +1451,40 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         return cast(list[dict[str, Any]] | dict[str, Any], result)
 
-    async def _update_turn_usage_internal(self, user_turn_number: int, usage_data: Usage) -> None:
+    async def _update_turn_usage_internal(
+        self, user_turn_number: int, usage_data: Usage, generation: int | None = None
+    ) -> None:
         """Internal method to update usage for a specific turn with full JSON details.
 
         Args:
             user_turn_number: The turn number to update usage for.
             usage_data: The usage data to store.
+            generation: The generation captured before the turn was read. When
+                provided, the write is skipped if a clear_session has committed
+                since (generation mismatch) or if the turn no longer exists on
+                the current branch (e.g. it was removed by pop_item), so stale
+                usage is never recorded for a turn that no longer exists.
         """
 
         def _update_sync():
             """Synchronous helper to update turn usage data."""
             with self._locked_connection() as conn:
+                if generation is not None:
+                    if self._generation != generation:
+                        # A clear_session committed after the turn was read.
+                        return
+                    with closing(conn.cursor()) as guard_cursor:
+                        guard_cursor.execute(
+                            """
+                            SELECT COUNT(*) FROM message_structure
+                            WHERE session_id = ? AND branch_id = ? AND user_turn_number = ?
+                            """,
+                            (self.session_id, self._current_branch_id, user_turn_number),
+                        )
+                        if guard_cursor.fetchone()[0] == 0:
+                            # The turn was removed (e.g. by pop_item) after it was
+                            # read; do not resurrect usage for a nonexistent turn.
+                            return
                 # Serialize token details as JSON
                 input_details_json = None
                 output_details_json = None
