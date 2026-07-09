@@ -478,6 +478,40 @@ async def test_in_flight_model_event_cannot_enqueue_work_after_close(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_model_event_cannot_mutate_history_after_raw_event_enqueue_and_close(monkeypatch):
+    model = _DummyModel()
+    session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+    raw_event_enqueued = asyncio.Event()
+    release_raw_put = asyncio.Event()
+    original_put_event = session._put_event
+
+    async def blocked_put_event(event):
+        was_enqueued = await original_put_event(event)
+        if isinstance(event, RealtimeRawModelEvent):
+            raw_event_enqueued.set()
+            await release_raw_put.wait()
+        return was_enqueued
+
+    monkeypatch.setattr(session, "_put_event", blocked_put_event)
+    event_task = asyncio.create_task(
+        session.on_event(
+            RealtimeModelInputAudioTranscriptionCompletedEvent(
+                item_id="late-item",
+                transcript="late transcript",
+            )
+        )
+    )
+    await raw_event_enqueued.wait()
+
+    await session.close()
+    release_raw_put.set()
+    await event_task
+
+    assert session._closed
+    assert session._history == []
+
+
+@pytest.mark.asyncio
 async def test_transcription_completed_adds_new_user_item():
     model = _DummyModel()
     agent = RealtimeAgent(name="agent")

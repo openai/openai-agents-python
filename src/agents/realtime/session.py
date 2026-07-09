@@ -344,6 +344,8 @@ class RealtimeSession(RealtimeModelListener):
 
         if not await self._put_event(RealtimeRawModelEvent(data=event, info=self._event_info)):
             return
+        if self._closing or self._closed:
+            return
 
         if event.type == "error":
             await self._put_event(RealtimeError(info=self._event_info, error=event.error))
