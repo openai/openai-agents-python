@@ -60,7 +60,12 @@ from agents.realtime.model_inputs import (
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
 )
-from agents.realtime.session import REJECTION_MESSAGE, RealtimeSession, _serialize_tool_output
+from agents.realtime.session import (
+    REJECTION_MESSAGE,
+    RealtimeSession,
+    _PendingToolOutputSendError,
+    _serialize_tool_output,
+)
 from agents.run_context import RunContextWrapper
 from agents.tool import FunctionTool, function_tool, tool_namespace
 from agents.tool_context import ToolContext
@@ -660,12 +665,51 @@ async def test_on_guardrail_task_done_emits_error_event():
 
     session._on_guardrail_task_done(task)
 
-    # Allow event task to enqueue
-    await asyncio.sleep(0.01)
-
-    # Should have a RealtimeError queued
-    err = await session._event_queue.get()
+    err = session._event_queue.get_nowait()
     assert isinstance(err, RealtimeError)
+
+
+@pytest.mark.parametrize("state_name", ["_closing", "_closed"])
+def test_put_event_nowait_skips_events_during_cleanup(state_name: str):
+    session = RealtimeSession(_DummyModel(), RealtimeAgent(name="agent"), None)
+    setattr(session, state_name, True)
+
+    enqueued = session._put_event_nowait(
+        RealtimeError(info=session._event_info, error={"message": "late error"})
+    )
+
+    assert not enqueued
+    assert session._event_queue.empty()
+
+
+@pytest.mark.parametrize(
+    ("exception", "expected_message"),
+    [
+        (RuntimeError("tool failed"), "Tool call task failed: tool failed"),
+        (
+            _PendingToolOutputSendError("call-1", RuntimeError("send failed")),
+            "Tool output send failed; cached output will be retried: send failed",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_on_tool_call_task_done_emits_error_event_immediately(
+    exception: Exception,
+    expected_message: str,
+):
+    session = RealtimeSession(_DummyModel(), RealtimeAgent(name="agent"), None)
+
+    async def failing_task() -> None:
+        raise exception
+
+    task = asyncio.create_task(failing_task())
+    await asyncio.gather(task, return_exceptions=True)
+
+    session._on_tool_call_task_done(task)
+
+    err = session._event_queue.get_nowait()
+    assert isinstance(err, RealtimeError)
+    assert err.error["message"] == expected_message
 
 
 @pytest.mark.asyncio

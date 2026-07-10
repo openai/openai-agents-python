@@ -532,6 +532,13 @@ class RealtimeSession(RealtimeModelListener):
         await self._event_queue.put(event)
         return True
 
+    def _put_event_nowait(self, event: RealtimeSessionEvent) -> bool:
+        """Put an event into the unbounded queue from a synchronous callback."""
+        if self._closing or self._closed:
+            return False
+        self._event_queue.put_nowait(event)
+        return True
+
     async def _function_needs_approval(
         self, function_tool: FunctionTool, tool_call: RealtimeModelToolCallEvent
     ) -> bool:
@@ -1372,12 +1379,10 @@ class RealtimeSession(RealtimeModelListener):
             exception = task.exception()
             if exception:
                 # Create an exception event instead of raising
-                asyncio.create_task(
-                    self._put_event(
-                        RealtimeError(
-                            info=self._event_info,
-                            error={"message": f"Guardrail task failed: {str(exception)}"},
-                        )
+                self._put_event_nowait(
+                    RealtimeError(
+                        info=self._event_info,
+                        error={"message": f"Guardrail task failed: {str(exception)}"},
                     )
                 )
 
@@ -1428,17 +1433,14 @@ class RealtimeSession(RealtimeModelListener):
                 exception.call_id,
                 exc_info=exception,
             )
-            asyncio.create_task(
-                self._put_event(
-                    RealtimeError(
-                        info=self._event_info,
-                        error={
-                            "message": (
-                                "Tool output send failed; cached output will be retried: "
-                                f"{exception}"
-                            )
-                        },
-                    )
+            self._put_event_nowait(
+                RealtimeError(
+                    info=self._event_info,
+                    error={
+                        "message": (
+                            f"Tool output send failed; cached output will be retried: {exception}"
+                        )
+                    },
                 )
             )
             return
@@ -1448,12 +1450,10 @@ class RealtimeSession(RealtimeModelListener):
         if self._stored_exception is None:
             self._stored_exception = exception
 
-        asyncio.create_task(
-            self._put_event(
-                RealtimeError(
-                    info=self._event_info,
-                    error={"message": f"Tool call task failed: {exception}"},
-                )
+        self._put_event_nowait(
+            RealtimeError(
+                info=self._event_info,
+                error={"message": f"Tool call task failed: {exception}"},
             )
         )
 
