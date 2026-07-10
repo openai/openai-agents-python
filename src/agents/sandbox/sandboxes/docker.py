@@ -482,7 +482,8 @@ class DockerSandboxSession(BaseSandboxSession):
     async def _after_stop(self) -> None:
         await self._wait_for_cleanup_tasks()
 
-    async def _after_shutdown(self) -> None:
+    async def _before_shutdown(self) -> None:
+        await super()._before_shutdown()
         await self._wait_for_cleanup_tasks()
 
     def _mark_workspace_root_ready_from_probe(self) -> None:

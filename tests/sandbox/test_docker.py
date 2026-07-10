@@ -684,6 +684,47 @@ async def test_docker_persist_workspace_defers_stage_cleanup_until_archive_close
 
 
 @pytest.mark.asyncio
+async def test_docker_shutdown_drains_deferred_cleanup_before_backend_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_root = tmp_path / "container"
+    host_root.mkdir()
+    session = _CleanupTrackingDockerSession(
+        host_root=host_root,
+        manifest=Manifest(root="/workspace"),
+    )
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    events: list[str] = []
+
+    async def blocked_cleanup(_path: Path) -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+        events.append("cleanup")
+
+    async def shutdown_backend() -> None:
+        events.append("shutdown")
+
+    monkeypatch.setattr(session, "_rm_best_effort", blocked_cleanup)
+    monkeypatch.setattr(session, "_shutdown_backend", shutdown_backend)
+
+    session._schedule_rm_best_effort(Path("/tmp/stage"))
+    await cleanup_started.wait()
+
+    shutdown_task = asyncio.create_task(session.shutdown())
+    await asyncio.sleep(0)
+
+    assert events == []
+
+    release_cleanup.set()
+    await shutdown_task
+
+    assert events == ["cleanup", "shutdown"]
+    assert session._cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_docker_after_stop_bounds_deferred_cleanup_wait(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
