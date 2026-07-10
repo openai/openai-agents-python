@@ -13,6 +13,7 @@ Start with the simplest path that fits your setup:
 | --- | --- | --- |
 | Use OpenAI models only | Use the default OpenAI provider with the Responses model path | [OpenAI models](#openai-models) |
 | Use OpenAI Responses API over websocket transport | Keep the Responses model path and enable websocket transport | [Responses WebSocket transport](#responses-websocket-transport) |
+| Use OpenAI-hosted subagents | Use the experimental hosted multi-agent model | [Hosted multi-agent](#hosted-multi-agent-experimental) |
 | Use one non-OpenAI provider | Start with the built-in provider integration points | [Non-OpenAI models](#non-openai-models) |
 | Mix models or providers across agents | Select providers per run or per agent and review feature differences | [Mixing models in one workflow](#mixing-models-in-one-workflow) and [Mixing models across providers](#mixing-models-across-providers) |
 | Tune advanced OpenAI Responses request settings | Use `ModelSettings` on the OpenAI Responses path | [Advanced OpenAI Responses settings](#advanced-openai-responses-settings) |
@@ -230,6 +231,74 @@ If you use a custom OpenAI-compatible endpoint or proxy, websocket transport als
 -   You can use [`Runner.run_streamed()`][agents.run.Runner.run_streamed] directly after enabling websocket transport. For multi-turn workflows where you want to reuse the same websocket connection across turns (and nested agent-as-tool calls), the [`responses_websocket_session()`][agents.responses_websocket_session] helper is recommended. See the [Running agents](../running_agents.md) guide and [`examples/basic/stream_ws.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/stream_ws.py).
 -   For long reasoning turns or networks with latency spikes, customize websocket keepalive behavior with `responses_websocket_options`. Increase `ping_timeout` to tolerate delayed pong frames, or set `ping_timeout=None` to disable heartbeat timeouts while keeping pings enabled. Prefer HTTP/SSE transport when reliability is more important than websocket latency.
 -   By default the SDK disables the incoming message-size limit (`max_size=None`). For long-lived agent processes behind proxies or in memory-constrained containers, set `responses_websocket_options={"max_size": 8 * 1024 * 1024}` to bound per-message memory usage.
+
+### Hosted multi-agent (experimental)
+
+The OpenAI Responses API hosted multi-agent beta lets a GPT-5.6 root model create and coordinate server-hosted subagents. The Agents SDK can keep using its normal `Runner`: hosted orchestration stays on the service, while developer-defined function tools execute in your application.
+
+This integration is experimental and uses the Responses WebSocket transport so local function outputs can be returned to an active hosted agent with `response.inject`. It requires `openai[realtime]>=2.45.0`, including a beta build that exposes `client.beta.responses.connect`. The interface and beta item schemas may change before general availability.
+
+#### Configure the model
+
+Import the model from the experimental module and assign it to an SDK `Agent`:
+
+```python
+from agents import Agent
+from agents.extensions.experimental.hosted_multi_agent import OpenAIHostedMultiAgentModel
+
+agent = Agent(
+    name="Research coordinator",
+    instructions="Delegate independent research tasks, then synthesize the findings.",
+    model=OpenAIHostedMultiAgentModel(model="gpt-5.6-sol", config={"max_concurrent_subagents": 3}),
+)
+```
+
+Constructing `OpenAIHostedMultiAgentModel` enables `multi_agent.enabled` and sends the `OpenAI-Beta: responses_multi_agent=v1` WebSocket header. The model uses the default OpenAI client unless `openai_client` is provided. If `max_concurrent_subagents` is omitted, the service default is used.
+
+#### Local function tools
+
+All hosted agents share the model and tools configured for the request. The Responses API decides which hosted agent calls a function. The normal SDK Runner executes the function locally and injects a `function_call_output` with the same call ID into the active WebSocket response, which lets the service resume the original hosted caller. Function execution still passes through the Runner's normal approvals, guardrails, hooks, and failure conversion.
+
+Use `get_hosted_agent_metadata()` when a tool needs caller-aware logging or authorization:
+
+```python
+from typing import Any
+
+from agents import function_tool
+from agents.extensions.experimental.hosted_multi_agent import get_hosted_agent_metadata
+from agents.tool_context import ToolContext
+
+@function_tool
+def lookup_document(ctx: ToolContext[Any], section: str) -> str:
+    metadata = get_hosted_agent_metadata(ctx)
+    caller = metadata.agent_name if metadata else "unknown"
+    print(f"tool caller: {caller}; call ID: {ctx.tool_call_id}")
+    return f"Contents for {section}"
+```
+
+Hosted agent names are observational metadata, not a local routing mechanism. Route outputs with the call ID supplied by the SDK. For side-effecting tools, use that call ID as an idempotency key and keep the usual tool approval and authorization checks. Tool arguments and outputs cross the Responses API boundary.
+
+#### Output and streaming behavior
+
+Only a message attributed to `/root` with phase `final_answer` becomes a normal final message. The experimental adapter filters subagent messages and hosted orchestration records out of the high-level `RunResult`; the SDK never executes those records as local functions.
+
+Raw streaming continues to expose beta Responses events, including hosted output items and `response.inject.created` acknowledgements. The adapter divides one active provider response into SDK-visible logical model turns when a function call is ready, then resumes that same provider response after the Runner produces an output. Use `get_hosted_agent_metadata()` with a raw hosted item or a `ToolContext` to inspect attribution.
+
+#### Relationship to SDK orchestration
+
+Hosted multi-agent is separate from SDK handoffs and agents-as-tools:
+
+-   Hosted multi-agent creates subagents on the OpenAI service. Your application does not create or schedule those subagents.
+-   SDK handoffs change the active local SDK `Agent`. They are rejected when this experimental model is used because every hosted agent receives the same handoff tools, which would create conflicting ownership.
+-   Agents-as-tools remain available, but using them creates nested client-side and server-side orchestration. Evaluate the additional latency, cost, and tool exposure deliberately.
+
+#### Current limitations
+
+The experimental model rejects `reasoning.summary`, `max_tool_calls`, and caller-supplied `multi_agent` or `betas` overrides. The Responses `/compact` endpoint is not supported by the beta, although an explicit `context_management.compact_threshold` may be used because the service automatically compacts each hosted agent context independently.
+
+One `OpenAIHostedMultiAgentModel` instance owns at most one active hosted response at a time. Keep the same model instance while an approval interruption is pending. If a run is abandoned while waiting for a tool or approval, call `await model.close()` to release its WebSocket. Restoring an in-flight hosted response in a different process or event loop is not currently supported.
+
+See the [OpenAI Multi-agent guide](https://developers.openai.com/api/docs/guides/tools-multi-agent) for the underlying Responses API beta behavior. See [`examples/agent_patterns/hosted_multi_agent_beta.py`](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns/hosted_multi_agent_beta.py) for non-streaming and streaming SDK usage.
 
 ## Non-OpenAI models
 
