@@ -943,7 +943,13 @@ class DaytonaSandboxSession(BaseSandboxSession):
             if worker_task is not None and worker_task is not asyncio.current_task():
                 if not worker_task.done():
                     worker_task.cancel()
-                await asyncio.gather(worker_task, return_exceptions=True)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(worker_task, return_exceptions=True),
+                        timeout=self.state.timeouts.cleanup_s,
+                    )
+                except asyncio.TimeoutError:
+                    pass
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
         error_path = posix_path_as_path(coerce_posix_path(path))
