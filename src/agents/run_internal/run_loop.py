@@ -63,7 +63,6 @@ from ..models._response_terminal import (
     response_terminal_failure_error,
 )
 from ..models._run_context import model_run_context, model_run_context_stream
-from ..models.interface import Model
 from ..result import RunResultStreaming
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
@@ -243,7 +242,7 @@ __all__ = [
     "check_for_final_output_from_tools",
     "get_model_tracing_impl",
     "validate_run_hooks",
-    "cleanup_model_after_run",
+    "cleanup_models_after_run",
     "maybe_filter_model_input",
     "run_input_guardrails_with_queue",
     "start_streaming",
@@ -261,25 +260,13 @@ __all__ = [
 ]
 
 
-async def cleanup_model_after_run(
-    agent: Agent[Any],
-    run_config: RunConfig,
-    owner: object,
-) -> None:
-    """Notify an explicitly configured model that its owning run has ended."""
-    model: Model | None = None
-    if isinstance(run_config.model, Model):
-        model = run_config.model
-    elif run_config.model is None and isinstance(agent.model, Model):
-        model = agent.model
-
-    if model is None:
-        return
-
-    try:
-        await model._cleanup_on_run_end(owner)
-    except Exception as error:
-        logger.warning("Failed to clean up model resources after run: %s", error)
+async def cleanup_models_after_run(tool_use_tracker: AgentToolUseTracker) -> None:
+    """Notify every model resolved during the run that its owning run has ended."""
+    for model in tool_use_tracker.models:
+        try:
+            await model._cleanup_on_run_end(tool_use_tracker)
+        except Exception as error:
+            logger.warning("Failed to clean up model resources after run: %s", error)
 
 
 def _should_attach_generic_agent_error(exc: Exception) -> bool:
@@ -1225,7 +1212,7 @@ async def start_streaming(
     else:
         streamed_result.is_complete = True
     finally:
-        await cleanup_model_after_run(current_agent, run_config, tool_use_tracker)
+        await cleanup_models_after_run(tool_use_tracker)
         _sync_conversation_tracking_from_tracker()
         if streamed_result._input_guardrails_task:
             try:
@@ -1368,6 +1355,7 @@ async def run_single_turn_streamed(
 
     handoffs = await get_handoffs(execution_agent, context_wrapper)
     model = get_model(execution_agent, run_config)
+    tool_use_tracker.record_model(model)
     model_settings = get_model_settings(execution_agent, run_config)
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
@@ -1845,6 +1833,7 @@ async def get_new_response(
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
 
     model = get_model(execution_agent, run_config)
+    tool_use_tracker.record_model(model)
     model_settings = get_model_settings(execution_agent, run_config)
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 

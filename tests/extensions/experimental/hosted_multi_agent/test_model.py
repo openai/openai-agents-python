@@ -18,6 +18,7 @@ from openai.types.shared.reasoning import Reasoning
 from agents import (
     Agent,
     MaxTurnsExceeded,
+    ModelProvider,
     ModelSettings,
     ModelTracing,
     RunConfig,
@@ -208,6 +209,16 @@ class _DummyBetaResponses:
 class _DummyClient:
     def __init__(self, event_batches: Sequence[Sequence[object]]) -> None:
         self.beta = SimpleNamespace(responses=_DummyBetaResponses(event_batches))
+
+
+class _StaticModelProvider(ModelProvider):
+    def __init__(self, model: OpenAIHostedMultiAgentModel) -> None:
+        self.model = model
+        self.requested_names: list[str | None] = []
+
+    def get_model(self, model_name: str | None) -> OpenAIHostedMultiAgentModel:
+        self.requested_names.append(model_name)
+        return self.model
 
 
 def _model(
@@ -790,6 +801,67 @@ async def test_runner_closes_paused_response_when_max_turns_is_exceeded(
                 run_config=RunConfig(tracing_disabled=True),
             )
 
+    assert client.beta.responses.connections[0].closed
+    assert model._active_response is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("model_source", ["run_config", "agent"])
+async def test_runner_cleans_up_provider_resolved_paused_response(
+    streamed: bool,
+    model_source: str,
+) -> None:
+    function_call = {
+        "id": "fc_provider",
+        "type": "function_call",
+        "call_id": "call_provider",
+        "name": "lookup_document",
+        "arguments": '{"section":"alpha"}',
+        "status": "completed",
+        "agent": {"agent_name": "/root/researcher"},
+    }
+    model, client = _model(
+        [
+            _created("resp_provider"),
+            _done(function_call, sequence_number=2, output_index=0),
+        ]
+    )
+    provider = _StaticModelProvider(model)
+
+    @function_tool
+    def lookup_document(section: str) -> str:
+        return f"document:{section}"
+
+    agent = Agent(
+        name="SDK root",
+        model="hosted" if model_source == "agent" else "unused",
+        tools=[lookup_document],
+    )
+    run_config = RunConfig(
+        model="hosted" if model_source == "run_config" else None,
+        model_provider=provider,
+        tracing_disabled=True,
+    )
+
+    with pytest.raises(MaxTurnsExceeded):
+        if streamed:
+            result = Runner.run_streamed(
+                agent,
+                "Inspect alpha.",
+                max_turns=1,
+                run_config=run_config,
+            )
+            _ = [event async for event in result.stream_events()]
+        else:
+            await Runner.run(
+                agent,
+                "Inspect alpha.",
+                max_turns=1,
+                run_config=run_config,
+            )
+
+    assert provider.requested_names == ["hosted"]
     assert client.beta.responses.connections[0].closed
     assert model._active_response is None
 
