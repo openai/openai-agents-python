@@ -839,6 +839,7 @@ class OpenAIResponsesModel(Model):
             "text": response_format,
             "store": self._non_null_or_omit(model_settings.store),
             "prompt_cache_retention": self._non_null_or_omit(model_settings.prompt_cache_retention),
+            "prompt_cache_options": self._non_null_or_omit(model_settings.prompt_cache_options),
             "reasoning": self._non_null_or_omit(model_settings.reasoning),
             "metadata": self._non_null_or_omit(model_settings.metadata),
             "context_management": self._non_null_or_omit(model_settings.context_management),
@@ -1366,10 +1367,18 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
 
     def _merge_websocket_headers(self, extra_headers: Mapping[str, Any]) -> dict[str, str]:
         headers: dict[str, str] = {}
-        for key, value in self._client.default_headers.items():
-            if _is_openai_omitted_value(value):
-                continue
-            headers[key] = str(value)
+        for source in (
+            getattr(self._client, "auth_headers", {}),
+            self._client.default_headers,
+        ):
+            for key, value in source.items():
+                if _is_openai_omitted_value(value):
+                    continue
+                header_key = str(key)
+                for existing_key in list(headers):
+                    if existing_key.lower() == header_key.lower():
+                        del headers[existing_key]
+                headers[header_key] = str(value)
 
         for key, value in extra_headers.items():
             if isinstance(value, NotGiven):

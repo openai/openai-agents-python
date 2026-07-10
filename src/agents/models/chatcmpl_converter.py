@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, Literal, cast
 
 from openai import Omit, omit
@@ -349,7 +349,9 @@ class Converter:
             if not isinstance(text, str):
                 raise UserError(f"Only text content is supported here, got: {content_part}")
             # Cast the normalized dict because we are constructing a TypedDict alias by hand.
-            return cast(ResponseInputTextParam, {"type": "input_text", "text": text})
+            normalized_text: dict[str, Any] = {"type": "input_text", "text": text}
+            cls._copy_prompt_cache_breakpoint(content_part, normalized_text)
+            return cast(ResponseInputTextParam, normalized_text)
 
         if content_type != "image_url":
             return content_part
@@ -366,8 +368,15 @@ class Converter:
         detail = image_payload.get("detail")
         if detail is not None:
             normalized["detail"] = detail
+        cls._copy_prompt_cache_breakpoint(content_part, normalized)
         # Cast the normalized dict because we are constructing a TypedDict alias by hand.
         return cast(ResponseInputImageParam, normalized)
+
+    @staticmethod
+    def _copy_prompt_cache_breakpoint(source: Mapping[str, Any], target: dict[str, Any]) -> None:
+        prompt_cache_breakpoint = source.get("prompt_cache_breakpoint")
+        if prompt_cache_breakpoint is not None:
+            target["prompt_cache_breakpoint"] = prompt_cache_breakpoint
 
     @classmethod
     def extract_all_content(
@@ -381,12 +390,12 @@ class Converter:
             c = cls._normalize_input_content_part_alias(c)
             if isinstance(c, dict) and c.get("type") == "input_text":
                 casted_text_param = cast(ResponseInputTextParam, c)
-                out.append(
-                    ChatCompletionContentPartTextParam(
-                        type="text",
-                        text=casted_text_param["text"],
-                    )
-                )
+                text_part: dict[str, Any] = {
+                    "type": "text",
+                    "text": casted_text_param["text"],
+                }
+                cls._copy_prompt_cache_breakpoint(c, text_part)
+                out.append(cast(ChatCompletionContentPartTextParam, text_part))
             elif isinstance(c, dict) and c.get("type") == "input_image":
                 casted_image_param = cast(ResponseInputImageParam, c)
                 if "image_url" not in casted_image_param or not casted_image_param["image_url"]:
@@ -398,15 +407,15 @@ class Converter:
                     # Chat Completions only supports auto/low/high, so preserve the caller's
                     # highest-fidelity intent with the closest available value.
                     detail = "high"
-                out.append(
-                    ChatCompletionContentPartImageParam(
-                        type="image_url",
-                        image_url={
-                            "url": casted_image_param["image_url"],
-                            "detail": detail,
-                        },
-                    )
-                )
+                image_part: dict[str, Any] = {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": casted_image_param["image_url"],
+                        "detail": detail,
+                    },
+                }
+                cls._copy_prompt_cache_breakpoint(c, image_part)
+                out.append(cast(ChatCompletionContentPartImageParam, image_part))
             elif isinstance(c, dict) and c.get("type") == "video_url":
                 video_payload = c.get("video_url")
                 if not isinstance(video_payload, dict) or not video_payload.get("url"):
@@ -437,15 +446,15 @@ class Converter:
                     raise UserError(
                         f"input_audio requires both data and format {casted_audio_param}"
                     )
-                out.append(
-                    ChatCompletionContentPartInputAudioParam(
-                        type="input_audio",
-                        input_audio={
-                            "data": audio_data,
-                            "format": audio_format,
-                        },
-                    )
-                )
+                audio_part: dict[str, Any] = {
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": audio_data,
+                        "format": audio_format,
+                    },
+                }
+                cls._copy_prompt_cache_breakpoint(c, audio_part)
+                out.append(cast(ChatCompletionContentPartInputAudioParam, audio_part))
             elif isinstance(c, dict) and c.get("type") == "input_file":
                 casted_file_param = cast(ResponseInputFileParam, c)
                 if "file_data" not in casted_file_param or not casted_file_param["file_data"]:
@@ -457,7 +466,9 @@ class Converter:
                 if "filename" in casted_file_param and casted_file_param["filename"]:
                     filedata["filename"] = casted_file_param["filename"]
 
-                out.append(File(type="file", file=filedata))
+                file_part: dict[str, Any] = {"type": "file", "file": filedata}
+                cls._copy_prompt_cache_breakpoint(c, file_part)
+                out.append(cast(File, file_part))
             else:
                 raise UserError(f"Unknown content: {c}")
         return out

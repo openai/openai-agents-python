@@ -72,6 +72,29 @@ my_agent = Agent(
 
 For lower latency, using `reasoning.effort="none"` with GPT-5 models is recommended.
 
+GPT-5.6 also supports reasoning mode, persisted reasoning context, and the `"max"` effort level through the existing `reasoning` setting. These controls are available on the Responses API path:
+
+```python
+from openai.types.shared import Reasoning
+from agents import Agent, ModelSettings
+
+agent = Agent(
+    name="Deep research agent",
+    model="gpt-5.6-sol",
+    model_settings=ModelSettings(
+        reasoning=Reasoning(
+            mode="pro",
+            effort="max",
+            context="all_turns",
+        ),
+    ),
+)
+```
+
+`reasoning.mode` and `reasoning.context` are Responses-only settings. Chat Completions uses only `reasoning.effort`, and the supported effort levels depend on the model and API surface. Use the Responses API for GPT-5.6 `"max"` effort. The Chat Completions adapter ignores mode and context with a warning; set `strict_feature_validation=True` on the OpenAI provider to turn that warning into an error.
+
+When using `context="all_turns"`, preserve the conversation through `previous_response_id`, a server-side conversation, or by replaying prior reasoning items. For stateless `store=False` calls, include `reasoning.encrypted_content` in the response and replay those reasoning items on the next request.
+
 #### ComputerTool model selection
 
 If an agent includes [`ComputerTool`][agents.tool.ComputerTool], the effective model on the actual Responses request determines which computer-tool payload the SDK sends. Explicit `gpt-5.5` requests use the GA built-in `computer` tool, while explicit `computer-use-preview` requests keep the older `computer_use_preview` payload.
@@ -316,6 +339,7 @@ When you are using the OpenAI Responses API, several request fields already have
 - `store`: Control whether the generated response is stored server-side for later retrieval. This matters for follow-up workflows that rely on response IDs, and for session compaction flows that may need to fall back to local input when `store=False`.
 - `context_management`: Configure server-side context handling such as Responses compaction with `compact_threshold`.
 - `prompt_cache_retention`: Keep cached prompt prefixes around longer, for example with `"24h"`.
+- `prompt_cache_options`: Select implicit or explicit prompt caching and, for GPT-5.6, configure a `"30m"` cache TTL.
 - `response_include`: Request richer response payloads such as `web_search_call.action.sources`, `file_search_call.results`, or `reasoning.encrypted_content`.
 - `top_logprobs`: Request top-token logprobs for output text. The SDK also adds `message.output_text.logprobs` automatically.
 - `retry`: Opt in to runner-managed retry settings for model calls. See [Runner-managed retries](#runner-managed-retries).
@@ -332,11 +356,40 @@ research_agent = Agent(
         store=True,
         context_management=[{"type": "compaction", "compact_threshold": 200000}],
         prompt_cache_retention="24h",
+        prompt_cache_options={"mode": "explicit", "ttl": "30m"},
         response_include=["web_search_call.action.sources"],
         top_logprobs=5,
     ),
 )
 ```
+
+With explicit prompt caching, add a breakpoint to the content part that ends the reusable prefix. The same `ModelSettings.prompt_cache_options` field is passed through on Responses and Chat Completions requests, and the Chat Completions converter preserves breakpoints on text, image, audio, and file content parts.
+
+```python
+from agents import Runner
+
+result = await Runner.run(
+    research_agent,
+    [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "Reusable background material...",
+                    "prompt_cache_breakpoint": {"mode": "explicit"},
+                },
+                {
+                    "type": "input_text",
+                    "text": "Analyze the latest question.",
+                },
+            ],
+        }
+    ],
+)
+```
+
+`prompt_cache_retention` remains available for models that use the earlier retention control. Do not combine a direct `ModelSettings` field with the same key in `extra_args`.
 
 When you set `store=False`, the Responses API does not keep that response available for later server-side retrieval. This is useful for stateless or zero-data-retention style flows, but it also means features that would otherwise reuse response IDs need to rely on locally managed state instead. For example, [`OpenAIResponsesCompactionSession`][agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession] switches its default `"auto"` compaction path to input-based compaction when the last response was not stored. See the [Sessions guide](../sessions/index.md#openai-responses-compaction-sessions).
 

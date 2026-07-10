@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from openai.types.responses.response_create_params import ContextManagement
+from openai.types.responses.response_create_params import ContextManagement, PromptCacheOptions
 
 from agents import Agent, ModelSettings, RunConfig, Runner
 
@@ -165,6 +165,24 @@ async def test_runner_preserves_context_management_when_adding_prompt_cache_key(
     assert sent_model_settings.context_management == context_management
     assert sent_model_settings.extra_args == {"prompt_cache_key": _sent_prompt_cache_key(model)}
     assert model_settings.context_management == context_management
+    assert model_settings.extra_args is None
+
+
+@pytest.mark.asyncio
+async def test_runner_preserves_prompt_cache_options_when_adding_prompt_cache_key() -> None:
+    model = PromptCacheFakeModel()
+    model.set_next_output([get_text_message("done")])
+    prompt_cache_options: PromptCacheOptions = {"mode": "explicit", "ttl": "30m"}
+    model_settings = ModelSettings(prompt_cache_options=prompt_cache_options)
+    agent = Agent(name="test", model=model, model_settings=model_settings)
+
+    await Runner.run(agent, "hi")
+
+    assert _sent_prompt_cache_key(model) is not None
+    sent_model_settings = _sent_model_settings(model)
+    assert sent_model_settings.prompt_cache_options == prompt_cache_options
+    assert sent_model_settings.extra_args == {"prompt_cache_key": _sent_prompt_cache_key(model)}
+    assert model_settings.prompt_cache_options == prompt_cache_options
     assert model_settings.extra_args is None
 
 

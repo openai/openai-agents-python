@@ -68,6 +68,7 @@ class OpenAIChatCompletionsModel(Model):
         self._buffer_streamed_tool_calls = buffer_streamed_tool_calls
         self._has_warned_unsupported_prompt = False
         self._has_warned_unsupported_conversation_state = False
+        self._has_warned_unsupported_reasoning_settings = False
 
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
@@ -93,6 +94,34 @@ class OpenAIChatCompletionsModel(Model):
                 message,
             )
             self._has_warned_unsupported_prompt = True
+
+    def _handle_unsupported_reasoning_settings(self, model_settings: ModelSettings) -> None:
+        reasoning = model_settings.reasoning
+        if reasoning is None:
+            return
+
+        unsupported = [
+            name for name in ("mode", "context") if getattr(reasoning, name, None) is not None
+        ]
+        if not unsupported:
+            return
+
+        unsupported_params = ", ".join(f"reasoning.{name}" for name in unsupported)
+        message = (
+            f"OpenAIChatCompletionsModel does not support {unsupported_params}. "
+            "These reasoning settings require the Responses API; Chat Completions only "
+            "uses reasoning.effort."
+        )
+        if self._strict_feature_validation:
+            raise UserError(message)
+
+        if not self._has_warned_unsupported_reasoning_settings:
+            logger.warning(
+                "%s Ignoring unsupported reasoning settings; enable strict feature validation "
+                "to raise an error instead.",
+                message,
+            )
+            self._has_warned_unsupported_reasoning_settings = True
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)
@@ -461,6 +490,7 @@ class OpenAIChatCompletionsModel(Model):
         prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
         self._handle_unsupported_prompt(prompt)
+        self._handle_unsupported_reasoning_settings(model_settings)
         self._validate_official_openai_input_content_types(input)
         converted_messages = Converter.items_to_messages(
             input,
@@ -549,6 +579,7 @@ class OpenAIChatCompletionsModel(Model):
             "verbosity": self._non_null_or_omit(model_settings.verbosity),
             "top_logprobs": self._non_null_or_omit(model_settings.top_logprobs),
             "prompt_cache_retention": self._non_null_or_omit(model_settings.prompt_cache_retention),
+            "prompt_cache_options": self._non_null_or_omit(model_settings.prompt_cache_options),
             "extra_headers": self._merge_headers(model_settings),
             "extra_query": model_settings.extra_query,
             "extra_body": model_settings.extra_body,
@@ -564,7 +595,9 @@ class OpenAIChatCompletionsModel(Model):
         ):
             create_kwargs["logprobs"] = True
         duplicate_extra_arg_keys = sorted(
-            set(create_kwargs).intersection(model_settings.extra_args or {})
+            key
+            for key in model_settings.extra_args or {}
+            if key in create_kwargs and not isinstance(create_kwargs[key], Omit)
         )
         if duplicate_extra_arg_keys:
             if len(duplicate_extra_arg_keys) == 1:

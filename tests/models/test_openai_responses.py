@@ -9,7 +9,7 @@ import httpx
 import pytest
 from openai import NOT_GIVEN, APIConnectionError, AsyncOpenAI, RateLimitError, omit
 from openai.types.responses import ResponseCompletedEvent, ResponseErrorEvent
-from openai.types.responses.response_create_params import ContextManagement
+from openai.types.responses.response_create_params import ContextManagement, PromptCacheOptions
 from openai.types.shared.reasoning import Reasoning
 
 from agents import (
@@ -136,10 +136,8 @@ class DummyWSClient:
         self.base_url = httpx.URL("https://api.openai.com/v1/")
         self.websocket_base_url = None
         self.default_query: dict[str, Any] = {}
-        self.default_headers = {
-            "Authorization": "Bearer test-key",
-            "User-Agent": "AsyncOpenAI/Python test",
-        }
+        self.auth_headers = {"Authorization": "Bearer test-key"}
+        self.default_headers = {"User-Agent": "AsyncOpenAI/Python test"}
         self.timeout: Any = None
         self.refresh_calls = 0
 
@@ -904,6 +902,81 @@ def test_build_response_create_kwargs_includes_context_management():
     )
 
     assert kwargs["context_management"] == context_management
+
+
+@pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_includes_gpt_5_6_request_controls():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-5.6-sol", openai_client=client)  # type: ignore[arg-type]
+    reasoning = Reasoning(mode="pro", effort="max", context="all_turns")
+    prompt_cache_options: PromptCacheOptions = {"mode": "explicit", "ttl": "30m"}
+
+    kwargs = model._build_response_create_kwargs(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(
+            reasoning=reasoning,
+            prompt_cache_retention="24h",
+            prompt_cache_options=prompt_cache_options,
+        ),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id="resp-previous",
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert kwargs["reasoning"] is reasoning
+    assert kwargs["prompt_cache_retention"] == "24h"
+    assert kwargs["prompt_cache_options"] == prompt_cache_options
+    assert kwargs["previous_response_id"] == "resp-previous"
+
+
+@pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_rejects_duplicate_prompt_cache_options_extra_args():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-5.6-sol", openai_client=client)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="multiple values.*prompt_cache_options"):
+        model._build_response_create_kwargs(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(
+                prompt_cache_options={"mode": "explicit", "ttl": "30m"},
+                extra_args={"prompt_cache_options": {"mode": "implicit"}},
+            ),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            previous_response_id=None,
+            conversation_id=None,
+            stream=False,
+            prompt=None,
+        )
+
+
+@pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_allows_prompt_cache_options_extra_args_when_direct_omitted():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-5.6-sol", openai_client=client)  # type: ignore[arg-type]
+    prompt_cache_options = {"mode": "explicit", "ttl": "30m"}
+
+    kwargs = model._build_response_create_kwargs(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(extra_args={"prompt_cache_options": prompt_cache_options}),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert kwargs["prompt_cache_options"] == prompt_cache_options
 
 
 @pytest.mark.allow_call_model_methods
@@ -1707,7 +1780,10 @@ async def test_websocket_model_reuses_connection_and_sends_response_create_frame
     first = await model.get_response(
         system_instructions=None,
         input="hi",
-        model_settings=ModelSettings(reasoning=Reasoning(effort="medium", summary="detailed")),
+        model_settings=ModelSettings(
+            reasoning=Reasoning(mode="pro", effort="max", context="all_turns"),
+            prompt_cache_options={"mode": "explicit", "ttl": "30m"},
+        ),
         tools=[],
         output_schema=None,
         handoffs=[],
@@ -1730,7 +1806,15 @@ async def test_websocket_model_reuses_connection_and_sends_response_create_frame
     assert len(opened) == 1
     assert ws.sent_messages[0]["type"] == "response.create"
     assert ws.sent_messages[0]["stream"] is True
-    assert ws.sent_messages[0]["reasoning"] == {"effort": "medium", "summary": "detailed"}
+    assert ws.sent_messages[0]["reasoning"] == {
+        "context": "all_turns",
+        "effort": "max",
+        "mode": "pro",
+    }
+    assert ws.sent_messages[0]["prompt_cache_options"] == {
+        "mode": "explicit",
+        "ttl": "30m",
+    }
     assert ws.sent_messages[1]["type"] == "response.create"
     assert ws.sent_messages[1]["stream"] is True
     assert ws.sent_messages[1]["previous_response_id"] == "resp-1"
@@ -3232,6 +3316,42 @@ async def test_websocket_model_get_response_uses_client_default_timeout_when_ove
         )
 
     assert ws.close_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_websocket_model_prepare_websocket_request_includes_client_auth_headers():
+    client = DummyWSClient()
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    _frame, _ws_url, headers = await model._prepare_websocket_request(
+        {
+            "model": "gpt-4",
+            "input": "hi",
+            "stream": True,
+        }
+    )
+
+    assert headers["Authorization"] == "Bearer test-key"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_websocket_model_default_headers_override_auth_case_insensitively():
+    client = DummyWSClient()
+    client.default_headers["authorization"] = "Bearer override-key"
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    _frame, _ws_url, headers = await model._prepare_websocket_request(
+        {
+            "model": "gpt-4",
+            "input": "hi",
+            "stream": True,
+        }
+    )
+
+    assert headers["authorization"] == "Bearer override-key"
+    assert "Authorization" not in headers
 
 
 @pytest.mark.allow_call_model_methods

@@ -33,6 +33,7 @@ from openai.types.responses import (
     ResponseOutputRefusal,
     ResponseOutputText,
 )
+from openai.types.shared import Reasoning
 
 from agents import (
     Agent,
@@ -722,7 +723,11 @@ async def test_fetch_response_non_stream(monkeypatch) -> None:
         result = await model._fetch_response(
             system_instructions="sys",
             input="hi",
-            model_settings=ModelSettings(),
+            model_settings=ModelSettings(
+                reasoning=Reasoning(effort="xhigh"),
+                prompt_cache_retention="24h",
+                prompt_cache_options={"mode": "explicit", "ttl": "30m"},
+            ),
             tools=[],
             output_schema=None,
             handoffs=[],
@@ -744,6 +749,42 @@ async def test_fetch_response_non_stream(monkeypatch) -> None:
     assert kwargs["tool_choice"] is omit
     assert kwargs["response_format"] is omit
     assert kwargs["stream_options"] is omit
+    assert kwargs["reasoning_effort"] == "xhigh"
+    assert kwargs["prompt_cache_retention"] == "24h"
+    assert kwargs["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
+
+
+def test_chat_completions_warns_once_for_responses_only_reasoning_settings(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    model = OpenAIChatCompletionsModel(
+        model="gpt-5.6-sol",
+        openai_client=cast(Any, object()),
+    )
+    model_settings = ModelSettings(
+        reasoning=Reasoning(mode="pro", effort="max", context="all_turns")
+    )
+    caplog.set_level(logging.WARNING, logger="openai.agents")
+
+    model._handle_unsupported_reasoning_settings(model_settings)
+    model._handle_unsupported_reasoning_settings(model_settings)
+
+    assert caplog.text.count("Ignoring unsupported reasoning settings") == 1
+    assert "reasoning.mode" in caplog.text
+    assert "reasoning.context" in caplog.text
+
+
+def test_chat_completions_rejects_responses_only_reasoning_settings_in_strict_mode() -> None:
+    model = OpenAIChatCompletionsModel(
+        model="gpt-5.6-sol",
+        openai_client=cast(Any, object()),
+        strict_feature_validation=True,
+    )
+
+    with pytest.raises(UserError, match="reasoning.mode"):
+        model._handle_unsupported_reasoning_settings(
+            ModelSettings(reasoning=Reasoning(mode="pro", context="all_turns"))
+        )
 
 
 @pytest.mark.allow_call_model_methods
@@ -756,6 +797,30 @@ async def test_custom_base_url_prompt_cache_key_uses_model_settings_only() -> No
 
     assert "prompt_cache_key" not in default_kwargs
     assert explicit_kwargs["prompt_cache_key"] == "cache-key"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_extra_args_prompt_cache_options_allowed_when_direct_field_is_omitted() -> None:
+    prompt_cache_options = {"mode": "explicit", "ttl": "30m"}
+
+    kwargs = await _run_chat_completions_model_with_custom_base_url(
+        model_settings=ModelSettings(extra_args={"prompt_cache_options": prompt_cache_options})
+    )
+
+    assert kwargs["prompt_cache_options"] == prompt_cache_options
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_duplicate_prompt_cache_options_rejected() -> None:
+    with pytest.raises(TypeError, match="multiple values.*prompt_cache_options"):
+        await _run_chat_completions_model_with_custom_base_url(
+            model_settings=ModelSettings(
+                prompt_cache_options={"mode": "explicit", "ttl": "30m"},
+                extra_args={"prompt_cache_options": {"mode": "implicit"}},
+            )
+        )
 
 
 @pytest.mark.allow_call_model_methods

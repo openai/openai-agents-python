@@ -24,7 +24,7 @@ These tests exercise both conversion directions:
 from __future__ import annotations
 
 import logging
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import pytest
 from openai import omit
@@ -532,6 +532,59 @@ def test_extract_all_content_handles_input_audio():
             "input_audio": {"data": "AAA=", "format": "wav"},
         }
     ]
+
+
+def test_extract_all_content_preserves_prompt_cache_breakpoints() -> None:
+    breakpoint = {"mode": "explicit"}
+    content: list[dict[str, Any]] = [
+        {
+            "type": "input_text",
+            "text": "one",
+            "prompt_cache_breakpoint": breakpoint,
+        },
+        {
+            "type": "input_image",
+            "image_url": "https://example.com/image.png",
+            "prompt_cache_breakpoint": breakpoint,
+        },
+        {
+            "type": "input_audio",
+            "input_audio": {"data": "AAA=", "format": "wav"},
+            "prompt_cache_breakpoint": breakpoint,
+        },
+        {
+            "type": "input_file",
+            "file_data": "data:text/plain;base64,SGVsbG8=",
+            "filename": "hello.txt",
+            "prompt_cache_breakpoint": breakpoint,
+        },
+    ]
+
+    parts = Converter.extract_all_content(content)
+
+    assert isinstance(parts, list)
+    assert [part["prompt_cache_breakpoint"] for part in parts] == [breakpoint] * 4
+
+
+def test_raw_chat_content_aliases_preserve_prompt_cache_breakpoints() -> None:
+    breakpoint = {"mode": "explicit"}
+
+    parts = Converter.extract_all_content(
+        cast(
+            list[dict[str, Any]],
+            [
+                {"type": "text", "text": "one", "prompt_cache_breakpoint": breakpoint},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/image.png"},
+                    "prompt_cache_breakpoint": breakpoint,
+                },
+            ],
+        )
+    )
+
+    assert isinstance(parts, list)
+    assert [part["prompt_cache_breakpoint"] for part in parts] == [breakpoint, breakpoint]
 
 
 def test_extract_all_content_rejects_invalid_input_audio():

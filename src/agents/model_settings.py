@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal, TypeAlias, cast
 from openai import Omit as _Omit
 from openai._types import Body, Query
 from openai.types.responses import ResponseIncludable
-from openai.types.responses.response_create_params import ContextManagement
+from openai.types.responses.response_create_params import ContextManagement, PromptCacheOptions
 from openai.types.shared import Reasoning
 from pydantic import GetCoreSchemaHandler, TypeAdapter
 from pydantic.dataclasses import dataclass
@@ -79,6 +79,7 @@ _TRACEABLE_MODEL_SETTING_FIELDS = (
     "top_logprobs",
     "retry",
     "context_management",
+    "prompt_cache_options",
 )
 
 
@@ -189,6 +190,13 @@ class ModelSettings:
 
     For example, use ``[{"type": "compaction", "compact_threshold": 200000}]``
     to enable server-side compaction when the rendered context crosses a token threshold.
+    """
+
+    prompt_cache_options: PromptCacheOptions | None = None
+    """Prompt-cache configuration for OpenAI API requests.
+
+    Use ``{"mode": "explicit", "ttl": "30m"}`` with content-part cache breakpoints to
+    control which prompt prefixes are eligible for caching.
     """
 
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
