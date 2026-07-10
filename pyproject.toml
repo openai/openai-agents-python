@@ -211,8 +211,10 @@ format-command = "ruff format --stdin-filename {filename}"
 
 [tool.uv]
 exclude-newer = "7 days"
+exclude-newer-package = { openai = false }
 index-strategy = "first-index"
 
 [tool.uv.pip]
 exclude-newer = "7 days"
+exclude-newer-package = { openai = false }
 index-strategy = "first-index"
