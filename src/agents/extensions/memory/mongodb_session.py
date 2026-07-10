@@ -35,7 +35,7 @@ import json
 import threading
 import weakref
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, ClassVar
 
 from ._optional_imports import raise_optional_dependency_error
 
@@ -97,8 +97,8 @@ class MongoDBSession(SessionABC):
     #   one across loops raises RuntimeError.  create_index is idempotent, so
     #   we only need the threading lock to guard the boolean done flag — no
     #   async coordination is required.
-    _init_state: dict[int, dict[tuple[str, str, str], bool]] = {}
-    _init_guard: threading.Lock = threading.Lock()
+    _init_state: ClassVar[dict[int, dict[tuple[str, str, str], bool]]] = {}
+    _init_guard: ClassVar[threading.Lock] = threading.Lock()
 
     session_settings: SessionSettings | None = None
 

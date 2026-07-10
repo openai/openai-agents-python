@@ -122,6 +122,7 @@ select = [
   "DTZ005", # datetime.now() without a timezone
   "G004", # logging statement uses f-string
   "RUF006", # unowned asyncio tasks
+  "RUF012", # mutable class attributes without ClassVar
   "UP", # pyupgrade
 ]
 isort = { combine-as-imports = true, known-first-party = ["agents"] }
@@ -131,8 +132,8 @@ logger-objects = ["agents.logger.logger"]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"examples/**/*.py" = ["DTZ005", "E501", "G004", "RUF006"]
-"tests/**/*.py" = ["RUF006"]
+"examples/**/*.py" = ["DTZ005", "E501", "G004", "RUF006", "RUF012"]
+"tests/**/*.py" = ["RUF006", "RUF012"]
 
 [tool.mypy]
 strict = true

@@ -9,7 +9,17 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeGuard, cast, get_args, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Literal,
+    TypedDict,
+    TypeGuard,
+    cast,
+    get_args,
+    overload,
+)
 
 import httpx
 from openai import AsyncOpenAI, NotGiven, Omit, omit
@@ -221,7 +231,7 @@ class OpenAIResponsesWebSocketOptions(TypedDict):
 class _ResponseStreamWithRequestId:
     """Wrap an SDK event stream and retain the originating request ID."""
 
-    _TERMINAL_EVENT_TYPES = {
+    _TERMINAL_EVENT_TYPES: ClassVar[set[str]] = {
         "response.completed",
         "response.failed",
         "response.incomplete",
