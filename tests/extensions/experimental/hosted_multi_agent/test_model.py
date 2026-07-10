@@ -29,7 +29,6 @@ from agents.extensions.experimental.hosted_multi_agent import (
     OpenAIHostedMultiAgentModel,
     get_hosted_agent_metadata,
 )
-from agents.run_state import RunState
 from agents.tool_context import ToolContext
 
 pytestmark = pytest.mark.allow_call_model_methods
@@ -910,65 +909,36 @@ async def test_streamed_runner_routes_tools_and_emits_raw_hosted_items() -> None
     )
 
 
-@pytest.mark.asyncio
-async def test_approval_run_state_resume_keeps_active_response_and_caller() -> None:
-    first_items = [
-        {
-            "id": "mac_approval",
-            "type": "multi_agent_call",
-            "call_id": "call_spawn_approval",
-            "action": "spawn_agent",
-            "arguments": "{}",
-            "agent": {"agent_name": "/root"},
-        },
-        {
-            "id": "fc_approval",
-            "type": "function_call",
-            "call_id": "call_sensitive",
-            "name": "sensitive_lookup",
-            "arguments": '{"section":"alpha"}',
-            "status": "completed",
-            "agent": {"agent_name": "/root/auditor"},
-        },
-    ]
-    final_items = [_root_final_message("approved")]
-    model, client = _model(_tool_flow_events("resp_approval", first_items, final_items))
-    callers: list[str] = []
+def test_tools_with_approval_settings_are_rejected_before_transport() -> None:
+    model, client = _model()
+
+    async def requires_approval(
+        _ctx: Any,
+        _params: dict[str, Any],
+        _call_id: str,
+    ) -> bool:
+        return False
 
     @function_tool(needs_approval=True)
-    def sensitive_lookup(ctx: ToolContext[Any], section: str) -> str:
-        metadata = get_hosted_agent_metadata(ctx)
-        assert metadata is not None
-        callers.append(metadata.agent_name)
+    def always_sensitive(section: str) -> str:
         return f"sensitive:{section}"
 
-    agent = Agent(
-        name="SDK root",
-        instructions="Delegate the sensitive lookup.",
-        model=model,
-        tools=[sensitive_lookup],
-    )
-    first = await Runner.run(
-        agent,
-        "Inspect alpha.",
-        run_config=RunConfig(tracing_disabled=True),
-    )
+    @function_tool(needs_approval=requires_approval)
+    def dynamically_sensitive(section: str) -> str:
+        return f"sensitive:{section}"
 
-    assert len(first.interruptions) == 1
-    state = first.to_state()
-    state.approve(first.interruptions[0])
-    restored_state = await RunState.from_string(agent, state.to_string())
+    for tool in (always_sensitive, dynamically_sensitive):
+        with pytest.raises(UserError, match="does not support SDK tool approval interruptions"):
+            model._build_response_create_kwargs(
+                system_instructions=None,
+                input="hello",
+                model_settings=ModelSettings(),
+                tools=[tool],
+                output_schema=None,
+                handoffs=[],
+            )
 
-    resumed = await Runner.run(
-        agent,
-        restored_state,
-        run_config=RunConfig(tracing_disabled=True),
-    )
-
-    assert resumed.final_output == "approved"
-    assert callers == ["/root/auditor"]
-    assert client.beta.responses.connections[0].sent[1]["type"] == "response.inject"
-    assert client.beta.responses.connections[0].sent[1]["input"][0]["call_id"] == ("call_sensitive")
+    assert client.beta.responses.connect_calls == []
 
 
 def test_missing_beta_client_has_actionable_error() -> None:

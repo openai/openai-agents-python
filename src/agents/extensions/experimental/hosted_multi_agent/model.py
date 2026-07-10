@@ -379,12 +379,24 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
     def _validate_beta_settings(
         self,
         model_settings: ModelSettings,
+        tools: list[Tool],
         handoffs: list[Handoff],
     ) -> None:
         if handoffs:
             raise UserError(
                 "OpenAI hosted multi-agent cannot be combined with SDK handoffs. "
                 "Use local function tools or agents-as-tools instead."
+            )
+
+        approval_tool_names = sorted(
+            tool.name for tool in tools if getattr(tool, "needs_approval", False) is not False
+        )
+        if approval_tool_names:
+            tool_names = ", ".join(approval_tool_names)
+            raise UserError(
+                "OpenAI hosted multi-agent does not support SDK tool approval interruptions "
+                "because an active hosted response cannot be restored from serialized RunState. "
+                f"Remove needs_approval from these tools: {tool_names}."
             )
 
         extra_args = model_settings.extra_args or {}
@@ -421,7 +433,7 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
         stream: bool = False,
         prompt: ResponsePromptParam | None = None,
     ) -> dict[str, Any]:
-        self._validate_beta_settings(model_settings, handoffs)
+        self._validate_beta_settings(model_settings, tools, handoffs)
         kwargs = super()._build_response_create_kwargs(
             system_instructions=system_instructions,
             input=input,
