@@ -282,7 +282,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 # Only update turn-level usage - session usage is aggregated on demand
                 await self._update_turn_usage_internal(current_turn, result.context_wrapper.usage)
         except Exception as e:
-            self._logger.error(f"Failed to store usage for session {self.session_id}: {e}")
+            self._logger.error("Failed to store usage for session %s: %s", self.session_id, e)
 
     def _get_next_turn_number(self, branch_id: str) -> int:
         """Get the next turn number for a specific branch.
@@ -505,7 +505,7 @@ class AdvancedSQLiteSession(SQLiteSession):
 
             deleted_count = cursor.rowcount
             if deleted_count:
-                self._logger.info(f"Cleaned up {deleted_count} orphaned messages")
+                self._logger.info("Cleaned up %s orphaned messages", deleted_count)
             return deleted_count
 
     def _classify_message_type(self, item: TResponseInputItem) -> str:
@@ -653,7 +653,11 @@ class AdvancedSQLiteSession(SQLiteSession):
         self._current_branch_id = branch_name
 
         self._logger.debug(
-            f"Created branch '{branch_name}' from turn {turn_number} ('{turn_content}') in '{old_branch}'"  # noqa: E501
+            "Created branch '%s' from turn %s ('%s') in '%s'",
+            branch_name,
+            turn_number,
+            turn_content,
+            old_branch,
         )
         return branch_name
 
@@ -711,7 +715,7 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         old_branch = self._current_branch_id
         self._current_branch_id = branch_id
-        self._logger.info(f"Switched from branch '{old_branch}' to '{branch_id}'")
+        self._logger.info("Switched from branch '%s' to '%s'", old_branch, branch_id)
 
     async def delete_branch(self, branch_id: str, force: bool = False) -> None:
         """Delete a branch and all its associated data.
@@ -792,8 +796,11 @@ class AdvancedSQLiteSession(SQLiteSession):
         )
 
         self._logger.info(
-            f"Deleted branch '{branch_id}': {structure_deleted} message entries, "
-            f"{usage_deleted} usage entries, {orphaned_messages_deleted} orphaned messages"
+            "Deleted branch '%s': %s message entries, %s usage entries, %s orphaned messages",
+            branch_id,
+            structure_deleted,
+            usage_deleted,
+            orphaned_messages_deleted,
         )
 
     async def list_branches(self) -> list[dict[str, Any]]:
@@ -1317,7 +1324,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                     try:
                         input_details_json = json.dumps(usage_data.input_tokens_details.__dict__)
                     except (TypeError, ValueError) as e:
-                        self._logger.warning(f"Failed to serialize input tokens details: {e}")
+                        self._logger.warning("Failed to serialize input tokens details: %s", e)
                         input_details_json = None
 
                 if (
@@ -1327,7 +1334,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                     try:
                         output_details_json = json.dumps(usage_data.output_tokens_details.__dict__)
                     except (TypeError, ValueError) as e:
-                        self._logger.warning(f"Failed to serialize output tokens details: {e}")
+                        self._logger.warning("Failed to serialize output tokens details: %s", e)
                         output_details_json = None
 
                 with closing(conn.cursor()) as cursor:

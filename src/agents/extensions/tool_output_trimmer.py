@@ -148,8 +148,9 @@ class ToolOutputTrimmer:
 
         if trimmed_count > 0:
             logger.debug(
-                f"ToolOutputTrimmer: trimmed {trimmed_count} tool output(s), "
-                f"saved ~{chars_saved} chars"
+                "ToolOutputTrimmer: trimmed %s tool output(s), saved ~%s chars",
+                trimmed_count,
+                chars_saved,
             )
 
         return _ModelInputData(input=new_items, instructions=model_data.instructions)
