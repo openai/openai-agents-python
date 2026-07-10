@@ -388,6 +388,7 @@ class _DaytonaPtySessionEntry:
     last_used: float = field(default_factory=time.monotonic)
     done: bool = False
     exit_code: int | None = None
+    worker_task: asyncio.Task[None] | None = None
 
 
 class DaytonaSandboxSession(BaseSandboxSession):
@@ -672,7 +673,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
                     timeout=exec_timeout,
                 )
                 entry.pty_handle = pty_handle
-                asyncio.create_task(self._run_pty_waiter(entry))
+                entry.worker_task = asyncio.create_task(self._run_pty_waiter(entry))
                 await asyncio.wait_for(pty_handle.wait_for_connection(), timeout=exec_timeout)
                 await asyncio.wait_for(
                     pty_handle.send_input(cmd_str + "\n"),
@@ -699,7 +700,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
                     timeout=exec_timeout,
                 )
                 entry.cmd_id = resp.cmd_id
-                asyncio.create_task(
+                entry.worker_task = asyncio.create_task(
                     self._run_session_reader(
                         entry,
                         daytona_session_id,
@@ -936,6 +937,13 @@ class DaytonaSandboxSession(BaseSandboxSession):
                 await self._sandbox.process.delete_session(entry.daytona_session_id)
         except Exception:
             pass
+        finally:
+            worker_task = entry.worker_task
+            entry.worker_task = None
+            if worker_task is not None and worker_task is not asyncio.current_task():
+                if not worker_task.done():
+                    worker_task.cancel()
+                await asyncio.gather(worker_task, return_exceptions=True)
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
         error_path = posix_path_as_path(coerce_posix_path(path))

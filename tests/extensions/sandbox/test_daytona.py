@@ -1526,6 +1526,43 @@ class TestDaytonaSandbox:
         assert entry.done is False
         assert entry.exit_code is None
 
+    @pytest.mark.asyncio
+    async def test_terminate_pty_entry_awaits_worker_finalizer(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        daytona_module = _load_daytona_module(monkeypatch)
+        sandbox = _FakeDaytonaSandbox()
+        state = daytona_module.DaytonaSandboxSessionState(
+            manifest=Manifest(root=daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT),
+            snapshot=NoopSnapshot(id="snapshot"),
+            sandbox_id=sandbox.id,
+        )
+        session = daytona_module.DaytonaSandboxSession.from_state(state, sandbox=sandbox)
+        entry = daytona_module._DaytonaPtySessionEntry(  # noqa: SLF001
+            daytona_session_id="session-123",
+            pty_handle=object(),
+            tty=False,
+            cmd_id="cmd-123",
+        )
+        finalizer_finished = asyncio.Event()
+
+        async def worker() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                finalizer_finished.set()
+
+        entry.worker_task = asyncio.create_task(worker())
+        await asyncio.sleep(0)
+
+        await session._terminate_pty_entry(entry)  # noqa: SLF001
+
+        assert finalizer_finished.is_set()
+        assert entry.worker_task is None
+        assert sandbox.process.delete_session_calls == ["session-123"]
+
 
 # ---------------------------------------------------------------------------
 # DaytonaCloudBucketMountStrategy tests
