@@ -149,7 +149,7 @@ class OpenAIChatCompletionsModel(Model):
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            logger.debug(f"Background stream cleanup failed after cancellation: {exc}")
+            logger.debug("Background stream cleanup failed after cancellation: %s", exc)
 
     def _validate_official_openai_input_content_types(
         self, request_input: str | list[TResponseInputItem]
@@ -246,7 +246,7 @@ class OpenAIChatCompletionsModel(Model):
                     )
                 else:
                     finish_reason = first_choice.finish_reason if first_choice else "-"
-                    logger.debug(f"LLM resp had no message. finish_reason: {finish_reason}")
+                    logger.debug("LLM resp had no message. finish_reason: %s", finish_reason)
 
             usage = (
                 Usage(
@@ -388,7 +388,7 @@ class OpenAIChatCompletionsModel(Model):
                     except Exception as exc:
                         if yielded_terminal_event:
                             logger.debug(
-                                f"Ignoring stream cleanup error after terminal event: {exc}"
+                                "Ignoring stream cleanup error after terminal event: %s", exc
                             )
                         else:
                             raise
@@ -544,11 +544,12 @@ class OpenAIChatCompletionsModel(Model):
                 ensure_ascii=False,
             )
             logger.debug(
-                f"{messages_json}\n"
-                f"Tools:\n{tools_json}\n"
-                f"Stream: {stream}\n"
-                f"Tool choice: {tool_choice}\n"
-                f"Response format: {response_format}\n"
+                "%s\nTools:\n%s\nStream: %s\nTool choice: %s\nResponse format: %s\n",
+                messages_json,
+                tools_json,
+                stream,
+                tool_choice,
+                response_format,
             )
 
         reasoning_effort = model_settings.reasoning.effort if model_settings.reasoning else None

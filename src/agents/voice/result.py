@@ -186,7 +186,7 @@ class StreamedAudioResult:
                         },
                     }
                 )
-                logger.error(f"Error streaming audio: {e}")
+                logger.error("Error streaming audio: %s", e)
 
                 # Signal completion for whole session because of error
                 await local_queue.put(VoiceStreamEventLifecycle(event="session_ended"))
@@ -302,7 +302,7 @@ class StreamedAudioResult:
                 break
             if isinstance(event, VoiceStreamEventError):
                 self._stored_exception = event.error
-                logger.error(f"Error processing output: {event.error}")
+                logger.error("Error processing output: %s", event.error)
                 break
             if event is None:
                 break

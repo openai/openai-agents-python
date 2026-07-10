@@ -3181,9 +3181,9 @@ def _deserialize_items(
         agent, agent_name = _resolve_agent_info(item_data, item_type)
         if not agent:
             if agent_name:
-                logger.warning(f"Agent {agent_name} not found, skipping item")
+                logger.warning("Agent %s not found, skipping item", agent_name)
             else:
-                logger.warning(f"Item missing agent field, skipping: {item_type}")
+                logger.warning("Item missing agent field, skipping: %s", item_type)
             continue
 
         raw_item_data = item_data["raw_item"]
@@ -3339,7 +3339,7 @@ def _deserialize_items(
         except UserError:
             raise
         except Exception as e:
-            logger.warning(f"Failed to deserialize item of type {item_type}: {e}")
+            logger.warning("Failed to deserialize item of type %s: %s", item_type, e)
             continue
 
     return result

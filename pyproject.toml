@@ -125,6 +125,7 @@ select = [
   "UP", # pyupgrade
 ]
 isort = { combine-as-imports = true, known-first-party = ["agents"] }
+logger-objects = ["agents.logger.logger"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

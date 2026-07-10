@@ -305,7 +305,7 @@ async def _close_async_iterator_quietly(iterator: Any | None) -> None:
     try:
         await _close_async_iterator(iterator)
     except Exception as exc:
-        logger.debug(f"Ignoring retry stream cleanup error: {exc}")
+        logger.debug("Ignoring retry stream cleanup error: %s", exc)
 
 
 def _get_stream_event_type(event: TResponseStreamEvent) -> str | None:

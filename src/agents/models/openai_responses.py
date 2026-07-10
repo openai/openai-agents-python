@@ -297,7 +297,7 @@ class _ResponseStreamWithRequestId:
             await self._cleanup_once()
         except Exception as exc:
             if self._yielded_terminal_event:
-                logger.debug(f"Ignoring stream cleanup error after terminal event: {exc}")
+                logger.debug("Ignoring stream cleanup error after terminal event: %s", exc)
                 return
             raise
 
@@ -449,7 +449,7 @@ class OpenAIResponsesModel(Model):
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            logger.debug(f"Background stream cleanup failed after cancellation: {exc}")
+            logger.debug("Background stream cleanup failed after cancellation: %s", exc)
 
     async def get_response(
         self,
@@ -483,14 +483,12 @@ class OpenAIResponsesModel(Model):
                     logger.debug("LLM responded")
                 else:
                     logger.debug(
-                        "LLM resp:\n"
-                        f"""{
-                            json.dumps(
-                                [x.model_dump() for x in response.output],
-                                indent=2,
-                                ensure_ascii=False,
-                            )
-                        }\n"""
+                        "LLM resp:\n%s\n",
+                        json.dumps(
+                            [x.model_dump() for x in response.output],
+                            indent=2,
+                            ensure_ascii=False,
+                        ),
                     )
 
                 usage = _response_usage_to_usage(response.usage) if response.usage else Usage()
@@ -510,7 +508,7 @@ class OpenAIResponsesModel(Model):
                     )
                 )
                 request_id = getattr(e, "request_id", None)
-                logger.error(f"Error getting response: {e}. (request_id: {request_id})")
+                logger.error("Error getting response: %s. (request_id: %s)", e, request_id)
                 raise
 
         return ModelResponse(
@@ -596,7 +594,7 @@ class OpenAIResponsesModel(Model):
                         except Exception as exc:
                             if yielded_terminal_event:
                                 logger.debug(
-                                    f"Ignoring stream cleanup error after terminal event: {exc}"
+                                    "Ignoring stream cleanup error after terminal event: %s", exc
                                 )
                             else:
                                 raise
@@ -620,7 +618,7 @@ class OpenAIResponsesModel(Model):
                         },
                     )
                 )
-                logger.error(f"Error streaming response: {e}")
+                logger.error("Error streaming response: %s", e)
                 raise
 
     @overload
@@ -796,14 +794,16 @@ class OpenAIResponsesModel(Model):
                 ensure_ascii=False,
             )
             logger.debug(
-                f"Calling LLM {self.model} with input:\n"
-                f"{input_json}\n"
-                f"Tools:\n{tools_json}\n"
-                f"Stream: {stream}\n"
-                f"Tool choice: {tool_choice_param}\n"
-                f"Response format: {response_format}\n"
-                f"Previous response id: {previous_response_id}\n"
-                f"Conversation id: {conversation_id}\n"
+                "Calling LLM %s with input:\n%s\nTools:\n%s\nStream: %s\nTool choice: %s\n"
+                "Response format: %s\nPrevious response id: %s\nConversation id: %s\n",
+                self.model,
+                input_json,
+                tools_json,
+                stream,
+                tool_choice_param,
+                response_format,
+                previous_response_id,
+                conversation_id,
             )
 
         extra_args = dict(model_settings.extra_args or {})

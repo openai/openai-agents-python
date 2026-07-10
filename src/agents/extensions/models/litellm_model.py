@@ -247,13 +247,12 @@ class LitellmModel(Model):
             else:
                 if message is not None:
                     logger.debug(
-                        f"""LLM resp:\n{
-                            json.dumps(message.model_dump(), indent=2, ensure_ascii=False)
-                        }\n"""
+                        "LLM resp:\n%s\n",
+                        json.dumps(message.model_dump(), indent=2, ensure_ascii=False),
                     )
                 else:
                     finish_reason = first_choice.finish_reason if first_choice else "-"
-                    logger.debug(f"LLM resp had no message. finish_reason: {finish_reason}")
+                    logger.debug("LLM resp had no message. finish_reason: %s", finish_reason)
 
             if hasattr(response, "usage"):
                 response_usage = response.usage
@@ -497,12 +496,14 @@ class LitellmModel(Model):
                 ensure_ascii=False,
             )
             logger.debug(
-                f"Calling Litellm model: {self.model}\n"
-                f"{messages_json}\n"
-                f"Tools:\n{tools_json}\n"
-                f"Stream: {stream}\n"
-                f"Tool choice: {tool_choice}\n"
-                f"Response format: {response_format}\n"
+                "Calling Litellm model: %s\n%s\nTools:\n%s\nStream: %s\n"
+                "Tool choice: %s\nResponse format: %s\n",
+                self.model,
+                messages_json,
+                tools_json,
+                stream,
+                tool_choice,
+                response_format,
             )
 
         reasoning_effort = self._get_reasoning_effort(model_settings)

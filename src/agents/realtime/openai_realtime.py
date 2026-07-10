@@ -214,7 +214,7 @@ def _log_server_event_validation_failure(event: Any, error: BaseException) -> st
             _server_event_validation_summary(error),
         )
     else:
-        logger.error(f"Failed to validate server event: {event}", exc_info=True)
+        logger.error("Failed to validate server event: %s", event, exc_info=True)
 
     return str(event_type)
 
@@ -715,7 +715,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 else:
                     await self._send_raw_message(converted)
             else:
-                logger.error(f"Failed to convert raw message: {event}")
+                logger.error("Failed to convert raw message: %s", event)
         elif isinstance(event, RealtimeModelSendUserInput):
             await self._send_user_input(event)
         elif isinstance(event, RealtimeModelSendAudio):
@@ -918,10 +918,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
         if current_item_id is None or elapsed_ms is None:
             logger.debug(
-                "Skipping interrupt. "
-                f"Item id: {current_item_id}, "
-                f"elapsed ms: {elapsed_ms}, "
-                f"content index: {current_item_content_index}"
+                "Skipping interrupt. Item id: %s, elapsed ms: %s, content index: %s",
+                current_item_id,
+                elapsed_ms,
+                current_item_content_index,
             )
         else:
             current_item_content_index = current_item_content_index or 0
@@ -946,10 +946,11 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     await self._send_raw_message(converted)
             else:
                 logger.debug(
-                    "Didn't interrupt bc elapsed ms is < 0. "
-                    f"Item id: {current_item_id}, "
-                    f"elapsed ms: {elapsed_ms}, "
-                    f"content index: {current_item_content_index}"
+                    "Didn't interrupt bc elapsed ms is < 0. Item id: %s, "
+                    "elapsed ms: %s, content index: %s",
+                    current_item_id,
+                    elapsed_ms,
+                    current_item_content_index,
                 )
 
         session = self._created_session
@@ -1181,11 +1182,12 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                         and not self._ongoing_response
                     ):
                         logger.debug(
-                            "Skipping truncate because playback appears complete. "
-                            f"Item id: {playback_item_id}, "
-                            f"elapsed ms: {effective_elapsed_ms}, "
-                            f"content index: {playback_content_index}, "
-                            f"audio length ms: {max_audio_ms}"
+                            "Skipping truncate because playback appears complete. Item id: %s, "
+                            "elapsed ms: %s, content index: %s, audio length ms: %s",
+                            playback_item_id,
+                            effective_elapsed_ms,
+                            playback_content_index,
+                            max_audio_ms,
                         )
                     else:
                         if max_audio_ms is not None:

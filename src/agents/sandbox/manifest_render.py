@@ -35,15 +35,17 @@ def _truncate_manifest_description(description: str, max_chars: int | None) -> s
     if len(marker) >= max_chars:
         truncated = marker[:max_chars]
         logger.warning(
-            f"Manifest description exceeded {max_chars} characters "
-            f"and was truncated to {len(truncated)} characters."
+            "Manifest description exceeded %s characters and was truncated to %s characters.",
+            max_chars,
+            len(truncated),
         )
         return truncated
     if len(truncated) > max_chars:
         truncated = truncated[:max_chars]
     logger.warning(
-        f"Manifest description exceeded {max_chars} characters "
-        f"and was truncated to {len(truncated)} characters."
+        "Manifest description exceeded %s characters and was truncated to %s characters.",
+        max_chars,
+        len(truncated),
     )
     return truncated
 

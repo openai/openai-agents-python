@@ -504,7 +504,7 @@ class AnyLLMModel(Model):
                     )
                 else:
                     finish_reason = first_choice.finish_reason if first_choice else "-"
-                    logger.debug(f"LLM resp had no message. finish_reason: {finish_reason}")
+                    logger.debug("LLM resp had no message. finish_reason: %s", finish_reason)
 
             usage = (
                 Usage(

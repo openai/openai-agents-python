@@ -958,8 +958,8 @@ class Agent(AgentBase, Generic[TContext]):
 
         elif self.instructions is not None:
             logger.error(
-                f"Instructions must be a string or a callable function, "
-                f"got {type(self.instructions).__name__}"
+                "Instructions must be a string or a callable function, got %s",
+                type(self.instructions).__name__,
             )
 
         return None

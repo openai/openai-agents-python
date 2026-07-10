@@ -1230,7 +1230,7 @@ async def start_streaming(
                         raise InputGuardrailTripwireTriggered(first_trigger)
             except Exception as e:
                 logger.debug(
-                    f"Error in streamed_result finalize for agent {current_agent.name} - {e}"
+                    "Error in streamed_result finalize for agent %s - %s", current_agent.name, e
                 )
         try:
             await dispose_resolved_computers(run_context=context_wrapper)

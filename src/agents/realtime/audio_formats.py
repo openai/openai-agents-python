@@ -26,7 +26,7 @@ def to_realtime_audio_format(
             elif input_audio_format in ["g711_alaw", "audio/pcma", "pcma"]:
                 format = AudioPCMA(type="audio/pcma")
             else:
-                logger.debug(f"Unknown input_audio_format: {input_audio_format}")
+                logger.debug("Unknown input_audio_format: %s", input_audio_format)
         elif isinstance(input_audio_format, Mapping):
             fmt_type = input_audio_format.get("type")
             rate = input_audio_format.get("rate")
@@ -38,7 +38,7 @@ def to_realtime_audio_format(
                     pcm_rate = 24000
                 else:
                     logger.debug(
-                        f"Unknown pcm rate in input_audio_format mapping: {input_audio_format}"
+                        "Unknown pcm rate in input_audio_format mapping: %s", input_audio_format
                     )
                     pcm_rate = 24000
                 format = AudioPCM(type="audio/pcm", rate=pcm_rate)
@@ -47,7 +47,7 @@ def to_realtime_audio_format(
             elif fmt_type == "audio/pcma":
                 format = AudioPCMA(type="audio/pcma")
             else:
-                logger.debug(f"Unknown input_audio_format mapping: {input_audio_format}")
+                logger.debug("Unknown input_audio_format mapping: %s", input_audio_format)
         else:
             format = input_audio_format
     return format

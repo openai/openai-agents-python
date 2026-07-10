@@ -160,7 +160,7 @@ async def _streamablehttp_client_with_transport(
     async with client:
         async with anyio.create_task_group() as tg:
             try:
-                logger.debug(f"Connecting to StreamableHTTP endpoint: {url}")
+                logger.debug("Connecting to StreamableHTTP endpoint: %s", url)
 
                 def start_get_stream() -> None:
                     tg.start_soon(transport.handle_get_stream, client, read_stream_writer)
@@ -691,7 +691,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     filtered_tools.append(tool)
             except Exception as e:
                 logger.error(
-                    f"Error applying tool filter to tool '{tool.name}' on server '{self.name}': {e}"
+                    "Error applying tool filter to tool '%s' on server '%s': %s",
+                    tool.name,
+                    self.name,
+                    e,
                 )
                 # On error, exclude the tool for safety
                 continue
@@ -815,14 +818,15 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                         cleanup_error
                     ):
                         logger.debug(
-                            f"Ignoring cancel scope error during cleanup of MCP server "
-                            f"'{self.name}': {cleanup_error}"
+                            "Ignoring cancel scope error during cleanup of MCP server '%s': %s",
+                            self.name,
+                            cleanup_error,
                         )
                     else:
                         # Log other cleanup errors but don't raise - original error is more
                         # important
                         logger.warning(
-                            f"Error during cleanup of MCP server '{self.name}': {cleanup_error}"
+                            "Error during cleanup of MCP server '%s': %s", self.name, cleanup_error
                         )
 
     async def list_tools(
@@ -1000,7 +1004,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             try:
                 await self.exit_stack.aclose()
             except asyncio.CancelledError as e:
-                logger.debug(f"Cleanup cancelled for MCP server '{self.name}': {e}")
+                logger.debug("Cleanup cancelled for MCP server '%s': %s", self.name, e)
                 raise
             except BaseExceptionGroup as eg:
                 # Extract HTTP errors from ExceptionGroup raised during cleanup
@@ -1027,7 +1031,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     else:
                         # Normal teardown - log but don't raise
                         logger.warning(
-                            f"HTTP error during cleanup of MCP server '{self.name}': {http_error}"
+                            "HTTP error during cleanup of MCP server '%s': %s",
+                            self.name,
+                            http_error,
                         )
                 elif connect_error:
                     if is_failed_connection_cleanup:
@@ -1035,7 +1041,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                         raise UserError(error_message) from connect_error
                     else:
                         logger.warning(
-                            f"Connection error during cleanup of MCP server '{self.name}': {connect_error}"  # noqa: E501
+                            "Connection error during cleanup of MCP server '%s': %s",
+                            self.name,
+                            connect_error,  # noqa: E501
                         )
                 elif timeout_error:
                     if is_failed_connection_cleanup:
@@ -1043,7 +1051,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                         raise UserError(error_message) from timeout_error
                     else:
                         logger.warning(
-                            f"Timeout error during cleanup of MCP server '{self.name}': {timeout_error}"  # noqa: E501
+                            "Timeout error during cleanup of MCP server '%s': %s",
+                            self.name,
+                            timeout_error,  # noqa: E501
                         )
                 else:
                     # No HTTP error found, suppress RuntimeError about cancel scopes
@@ -1052,16 +1062,16 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                         for exc in eg.exceptions
                     )
                     if has_cancel_scope_error:
-                        logger.debug(f"Ignoring cancel scope error during cleanup: {eg}")
+                        logger.debug("Ignoring cancel scope error during cleanup: %s", eg)
                     else:
-                        logger.error(f"Error cleaning up server: {eg}")
+                        logger.error("Error cleaning up server: %s", eg)
             except Exception as e:
                 # Suppress RuntimeError about cancel scopes - this is a known issue with the MCP
                 # library when background tasks fail during async generator cleanup
                 if isinstance(e, RuntimeError) and "cancel scope" in str(e):
-                    logger.debug(f"Ignoring cancel scope error during cleanup: {e}")
+                    logger.debug("Ignoring cancel scope error during cleanup: %s", e)
                 else:
-                    logger.error(f"Error cleaning up server: {e}")
+                    logger.error("Error cleaning up server: %s", e)
             finally:
                 self.session = None
                 self._get_session_id = None
