@@ -13,15 +13,18 @@ from email.utils import format_datetime
 import httpx
 
 from agents.models._openai_retry import (
-    _get_error_code,
     _get_header_value,
-    _get_status_code,
     _header_lookup,
     _parse_retry_after,
     _parse_retry_after_ms,
     get_openai_retry_advice,
 )
+from agents.models._retry_runtime import (
+    get_error_code as _get_error_code,
+    get_status_code as _get_status_code,
+)
 from agents.retry import ModelRetryAdviceRequest
+from agents.run_internal.model_retry import _normalize_retry_error
 
 
 class _HeaderError(Exception):
@@ -97,6 +100,23 @@ def test_get_error_code_from_body_mapping() -> None:
     assert _get_error_code(_NestedBody("a")) == "rate_limit_exceeded"
     assert _get_error_code(_TopLevelBody("b")) == "server_error"
     assert _get_error_code(Exception("none")) is None
+
+
+def test_provider_and_runner_retry_normalization_share_metadata() -> None:
+    class _RetryableError(Exception):
+        status_code = 429
+        request_id = "req_test"
+        body = {"error": {"code": "rate_limit_exceeded"}}
+
+    error = _RetryableError("slow down")
+    advice = get_openai_retry_advice(_make_request(error))
+    runner_normalized = _normalize_retry_error(error, None)
+
+    assert advice is not None
+    assert advice.normalized is not None
+    assert advice.normalized.status_code == runner_normalized.status_code
+    assert advice.normalized.error_code == runner_normalized.error_code
+    assert advice.normalized.request_id == runner_normalized.request_id
 
 
 def test_advice_unsafe_to_replay() -> None:

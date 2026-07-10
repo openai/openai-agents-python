@@ -1,24 +1,20 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
-from openai import APIConnectionError, APIStatusError, APITimeoutError
+from openai import APIConnectionError, APITimeoutError
 
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest, ModelRetryNormalizedError
-
-
-def _iter_error_chain(error: Exception) -> Iterator[Exception]:
-    current: Exception | None = error
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        yield current
-        next_error = current.__cause__ or current.__context__
-        current = next_error if isinstance(next_error, Exception) else None
+from ._retry_runtime import (
+    get_error_code as _get_error_code,
+    get_request_id as _get_request_id,
+    get_status_code as _get_status_code,
+    iter_error_chain as _iter_error_chain,
+)
 
 
 def _header_lookup(headers: Any, key: str) -> str | None:
@@ -76,46 +72,6 @@ def _parse_retry_after(value: str | None) -> float | None:
         return None
 
     return max(retry_datetime.timestamp() - time.time(), 0.0)
-
-
-def _get_status_code(error: Exception) -> int | None:
-    for candidate in _iter_error_chain(error):
-        if isinstance(candidate, APIStatusError):
-            return candidate.status_code
-        status_code = getattr(candidate, "status_code", None)
-        if isinstance(status_code, int):
-            return status_code
-        status = getattr(candidate, "status", None)
-        if isinstance(status, int):
-            return status
-    return None
-
-
-def _get_request_id(error: Exception) -> str | None:
-    for candidate in _iter_error_chain(error):
-        request_id = getattr(candidate, "request_id", None)
-        if isinstance(request_id, str):
-            return request_id
-    return None
-
-
-def _get_error_code(error: Exception) -> str | None:
-    for candidate in _iter_error_chain(error):
-        error_code = getattr(candidate, "code", None)
-        if isinstance(error_code, str):
-            return error_code
-
-        body = getattr(candidate, "body", None)
-        if isinstance(body, Mapping):
-            nested_error = body.get("error")
-            if isinstance(nested_error, Mapping):
-                nested_code = nested_error.get("code")
-                if isinstance(nested_code, str):
-                    return nested_code
-            body_code = body.get("code")
-            if isinstance(body_code, str):
-                return body_code
-    return None
 
 
 def _is_stateful_request(request: ModelRetryAdviceRequest) -> bool:
