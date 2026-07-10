@@ -70,6 +70,7 @@ _DEFAULT_WORKSPACE_PREFIX = "sandbox-local-"
 _DEFAULT_MANIFEST_ROOT = cast(str, Manifest.model_fields["root"].default)
 _PTY_READ_CHUNK_BYTES = 16_384
 _PTY_CHILD_SIGNAL_DEFAULTS = (signal.SIGINT, signal.SIGQUIT)
+_PTY_FD_CLOSE_GRACE_SECONDS = 0.1
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     _pty_lock: asyncio.Lock
     _pty_processes: dict[int, _UnixPtyProcessEntry]
     _reserved_pty_process_ids: set[int]
+    _fd_close_tasks: set[asyncio.Task[None]]
 
     def __init__(self, *, state: UnixLocalSandboxSessionState) -> None:
         self.state = state
@@ -137,6 +139,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         self._pty_lock = asyncio.Lock()
         self._pty_processes = {}
         self._reserved_pty_process_ids = set()
+        self._fd_close_tasks = set()
 
     @classmethod
     def from_state(cls, state: UnixLocalSandboxSessionState) -> "UnixLocalSandboxSession":
@@ -192,9 +195,13 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             )
 
     async def _after_shutdown(self) -> None:
+        await self._wait_for_fd_close_tasks()
         # Best-effort: mark session not running. We intentionally do not delete the workspace
         # directory here; cleanup is handled by the Client.delete().
         self._running = False
+
+    async def _after_stop(self) -> None:
+        await self._wait_for_fd_close_tasks()
 
     async def _resolve_exposed_port(self, port: int) -> ExposedPortEndpoint:
         return ExposedPortEndpoint(host="127.0.0.1", port=port, tls=False)
@@ -564,9 +571,9 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         if entry.tty:
             if primary_fd is not None:
                 # On macOS we have observed os.close() on the PTY master fd block while a
-                # background reader thread is still inside os.read(). Close it off-thread so
-                # session teardown remains best-effort and non-blocking.
-                asyncio.create_task(asyncio.to_thread(_close_fd_quietly, primary_fd))
+                # background reader thread is still inside os.read(). Keep the close task owned
+                # by the session without making PTY termination wait indefinitely for it.
+                self._schedule_fd_close(primary_fd)
             entry.output_closed.set()
             entry.output_notify.set()
             return
@@ -576,6 +583,16 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         await asyncio.gather(*entry.pump_tasks, return_exceptions=True)
         if entry.wait_task is not None:
             await asyncio.gather(entry.wait_task, return_exceptions=True)
+
+    def _schedule_fd_close(self, fd: int) -> None:
+        task = asyncio.create_task(asyncio.to_thread(_close_fd_quietly, fd))
+        self._fd_close_tasks.add(task)
+        task.add_done_callback(self._fd_close_tasks.discard)
+
+    async def _wait_for_fd_close_tasks(self) -> None:
+        tasks = tuple(self._fd_close_tasks)
+        if tasks:
+            await asyncio.wait(tasks, timeout=_PTY_FD_CLOSE_GRACE_SECONDS)
 
     def _confined_exec_command(
         self,

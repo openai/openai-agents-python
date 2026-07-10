@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import signal
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -11,6 +14,7 @@ from agents.sandbox.sandboxes.unix_local import (
     UnixLocalSandboxClient,
     UnixLocalSandboxSession,
     UnixLocalSandboxSessionState,
+    _UnixPtyProcessEntry,
 )
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, User
@@ -37,6 +41,41 @@ class _RecordingUnixLocalSession(UnixLocalSandboxSession):
 
 
 class TestUnixLocalPty:
+    @pytest.mark.asyncio
+    async def test_tty_fd_close_is_owned_without_blocking_termination(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = _RecordingUnixLocalSession(tmp_path)
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+
+        async def blocked_to_thread(*args: object, **kwargs: object) -> None:
+            _ = (args, kwargs)
+            close_started.set()
+            await release_close.wait()
+
+        monkeypatch.setattr(asyncio, "to_thread", blocked_to_thread)
+        process = cast(
+            asyncio.subprocess.Process,
+            SimpleNamespace(returncode=0, pid=None),
+        )
+        entry = _UnixPtyProcessEntry(process=process, tty=True, primary_fd=123)
+
+        await asyncio.wait_for(session._terminate_pty_entry(entry), timeout=0.5)
+        await close_started.wait()
+
+        assert len(session._fd_close_tasks) == 1
+        await asyncio.wait_for(session._after_stop(), timeout=0.5)
+        assert len(session._fd_close_tasks) == 1
+
+        release_close.set()
+        await asyncio.gather(*session._fd_close_tasks)
+        await asyncio.sleep(0)
+
+        assert session._fd_close_tasks == set()
+
     @pytest.mark.asyncio
     async def test_pty_exec_write_poll_and_unknown_session_errors(self, tmp_path: Path) -> None:
         client = UnixLocalSandboxClient()
