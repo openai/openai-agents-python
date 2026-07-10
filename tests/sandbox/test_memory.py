@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from openai.types.responses import ResponseCustomToolCall
+from openai.types.responses import ResponseCustomToolCall, ResponseFunctionToolCall
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
@@ -24,7 +24,12 @@ from agents import (
     TResponseInputItem,
 )
 from agents.exceptions import UserError
-from agents.items import CompactionItem, MessageOutputItem, TResponseOutputItem
+from agents.items import (
+    CompactionItem,
+    MessageOutputItem,
+    ToolApprovalItem,
+    TResponseOutputItem,
+)
 from agents.result import RunResultStreaming
 from agents.run import _sandbox_memory_input
 from agents.run_context import RunContextWrapper
@@ -256,6 +261,34 @@ def test_build_rollout_payload_filters_developer_and_noisy_items() -> None:
         assistant_message.model_dump(exclude_unset=True),
     ]
     assert payload["final_output"] == "done"
+
+
+def test_build_rollout_payload_serializes_model_interruptions_as_dicts() -> None:
+    agent = Agent(name="test")
+    raw = ResponseFunctionToolCall(
+        id="fc_1",
+        call_id="call_1",
+        name="get_weather",
+        arguments='{"city":"Paris"}',
+        type="function_call",
+    )
+    approval = ToolApprovalItem(agent=agent, raw_item=raw)
+
+    payload = build_rollout_payload(
+        input="hello",
+        new_items=[],
+        final_output=None,
+        interruptions=[approval],
+        terminal_metadata=RolloutTerminalMetadata(terminal_state="interrupted"),
+    )
+
+    interruption = payload["interruptions"][0]
+    assert isinstance(interruption, dict)
+    assert interruption == raw.model_dump(exclude_unset=True)
+    assert interruption["type"] == "function_call"
+    assert interruption["call_id"] == "call_1"
+    assert interruption["name"] == "get_weather"
+    assert interruption["arguments"] == '{"city":"Paris"}'
 
 
 def test_render_phase_one_prompt_truncates_large_rollout_contents() -> None:
