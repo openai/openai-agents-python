@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from email.utils import parsedate_to_datetime
+from typing import Any
 
+import httpx
 from openai import APIStatusError
 
 
@@ -15,6 +19,68 @@ def iter_error_chain(error: Exception) -> Iterator[Exception]:
         yield current
         next_error = current.__cause__ or current.__context__
         current = next_error if isinstance(next_error, Exception) else None
+
+
+def header_lookup(headers: Any, key: str) -> str | None:
+    normalized_key = key.lower()
+    if isinstance(headers, httpx.Headers):
+        value = headers.get(key)
+        return value if isinstance(value, str) else None
+    if isinstance(headers, Mapping):
+        for header_name, header_value in headers.items():
+            if str(header_name).lower() == normalized_key and isinstance(header_value, str):
+                return header_value
+    return None
+
+
+def get_error_header(error: Exception, key: str) -> str | None:
+    for candidate in iter_error_chain(error):
+        response = getattr(candidate, "response", None)
+        if isinstance(response, httpx.Response):
+            header_value = header_lookup(response.headers, key)
+            if header_value is not None:
+                return header_value
+
+        for attr_name in ("headers", "response_headers"):
+            header_value = header_lookup(getattr(candidate, attr_name, None), key)
+            if header_value is not None:
+                return header_value
+    return None
+
+
+def parse_retry_after_ms(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value) / 1000.0
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def parse_retry_after_value(value: str | None) -> float | None:
+    if value is None:
+        return None
+
+    try:
+        parsed = float(value)
+    except ValueError:
+        parsed = None
+    if parsed is not None:
+        return parsed if parsed >= 0 else None
+
+    try:
+        retry_datetime = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    return max(retry_datetime.timestamp() - time.time(), 0.0)
+
+
+def get_retry_after(error: Exception) -> float | None:
+    retry_after = parse_retry_after_ms(get_error_header(error, "retry-after-ms"))
+    if retry_after is not None:
+        return retry_after
+    return parse_retry_after_value(get_error_header(error, "retry-after"))
 
 
 def get_status_code(error: Exception) -> int | None:

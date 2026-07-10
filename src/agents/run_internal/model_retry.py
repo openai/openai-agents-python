@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from email.utils import parsedate_to_datetime
 from inspect import isawaitable
 from typing import Any
 
@@ -16,6 +14,7 @@ from ..logger import logger
 from ..models._retry_runtime import (
     get_error_code as _get_error_code,
     get_request_id as _get_request_id,
+    get_retry_after as _get_retry_after,
     get_status_code as _get_status_code,
     iter_error_chain as _iter_error_chain,
     provider_managed_retries_disabled,
@@ -52,64 +51,6 @@ def _is_conversation_locked_error(error: Exception) -> bool:
     return (
         isinstance(error, BadRequestError) and getattr(error, "code", "") == "conversation_locked"
     )
-
-
-def _get_header_value(headers: Any, key: str) -> str | None:
-    normalized_key = key.lower()
-    if isinstance(headers, httpx.Headers):
-        value = headers.get(key)
-        return value if isinstance(value, str) else None
-    if isinstance(headers, Mapping):
-        for header_name, header_value in headers.items():
-            if str(header_name).lower() == normalized_key and isinstance(header_value, str):
-                return header_value
-    return None
-
-
-def _extract_headers(error: Exception) -> httpx.Headers | Mapping[str, str] | None:
-    for candidate in _iter_error_chain(error):
-        response = getattr(candidate, "response", None)
-        if isinstance(response, httpx.Response):
-            return response.headers
-
-        for attr_name in ("headers", "response_headers"):
-            headers = getattr(candidate, attr_name, None)
-            if isinstance(headers, httpx.Headers | Mapping):
-                return headers
-
-    return None
-
-
-def _parse_retry_after(headers: httpx.Headers | Mapping[str, str] | None) -> float | None:
-    if headers is None:
-        return None
-
-    retry_after_ms = _get_header_value(headers, "retry-after-ms")
-    if retry_after_ms is not None:
-        try:
-            parsed_ms = float(retry_after_ms) / 1000.0
-        except ValueError:
-            parsed_ms = None
-        if parsed_ms is not None and parsed_ms >= 0:
-            return parsed_ms
-
-    retry_after = _get_header_value(headers, "retry-after")
-    if retry_after is None:
-        return None
-
-    try:
-        parsed_seconds = float(retry_after)
-    except ValueError:
-        parsed_seconds = None
-    if parsed_seconds is not None:
-        return parsed_seconds if parsed_seconds >= 0 else None
-
-    try:
-        retry_datetime = parsedate_to_datetime(retry_after)
-    except (TypeError, ValueError, IndexError):
-        return None
-
-    return max(retry_datetime.timestamp() - time.time(), 0.0)
 
 
 def _is_abort_like_error(error: Exception) -> bool:
@@ -165,7 +106,7 @@ def _normalize_retry_error(
         error_code=_get_error_code(error),
         message=str(error),
         request_id=_get_request_id(error),
-        retry_after=_parse_retry_after(_extract_headers(error)),
+        retry_after=_get_retry_after(error),
         is_abort=_is_abort_like_error(error),
         is_network_error=_is_network_like_error(error),
         is_timeout=any(
