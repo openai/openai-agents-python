@@ -683,6 +683,49 @@ async def test_docker_persist_workspace_defers_stage_cleanup_until_archive_close
     assert session._cleanup_tasks == set()
 
 
+@pytest.mark.asyncio
+async def test_docker_after_stop_bounds_deferred_cleanup_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_root = tmp_path / "container"
+    host_root.mkdir()
+    session = _CleanupTrackingDockerSession(
+        host_root=host_root,
+        manifest=Manifest(root="/workspace"),
+    )
+    cleanup_started = asyncio.Event()
+    cleanup_cancelled = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def stalled_cleanup(_path: Path) -> None:
+        cleanup_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cleanup_cancelled.set()
+            await release_cleanup.wait()
+
+    monkeypatch.setattr(docker_sandbox, "_DEFERRED_CLEANUP_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(session, "_rm_best_effort", stalled_cleanup)
+
+    session._schedule_rm_best_effort(Path("/tmp/stage"))
+    cleanup_task = next(iter(session._cleanup_tasks))
+    await cleanup_started.wait()
+
+    await asyncio.wait_for(session._after_stop(), timeout=0.5)
+    await asyncio.wait_for(cleanup_cancelled.wait(), timeout=0.5)
+
+    assert cleanup_task in session._cleanup_tasks
+    assert not cleanup_task.done()
+
+    release_cleanup.set()
+    await cleanup_task
+    await asyncio.sleep(0)
+
+    assert session._cleanup_tasks == set()
+
+
 def test_docker_start_exec_socket_closes_underlying_http_response() -> None:
     api = _SocketStartAPI()
 

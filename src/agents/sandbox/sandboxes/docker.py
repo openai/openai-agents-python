@@ -89,6 +89,7 @@ logger = logging.getLogger(__name__)
 # Non-seekable payloads are spooled to measure their length; keep small ones in
 # RAM and spill larger ones to a temp file so a big upload can't OOM the process.
 _STREAM_SPOOL_MAX_SIZE = 16 * 1024 * 1024
+_DEFERRED_CLEANUP_TIMEOUT_S = 30.0
 
 
 def _measure_stream(stream: io.IOBase) -> tuple[int, io.IOBase, io.IOBase | None]:
@@ -1407,8 +1408,19 @@ class DockerSandboxSession(BaseSandboxSession):
         task.add_done_callback(self._cleanup_tasks.discard)
 
     async def _wait_for_cleanup_tasks(self) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _DEFERRED_CLEANUP_TIMEOUT_S
         while cleanup_tasks := tuple(self._cleanup_tasks):
-            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+            remaining_s = deadline - loop.time()
+            if remaining_s <= 0:
+                break
+            done, pending = await asyncio.wait(cleanup_tasks, timeout=remaining_s)
+            self._cleanup_tasks.difference_update(done)
+            if pending:
+                break
+
+        for task in tuple(self._cleanup_tasks):
+            task.cancel()
 
     def _workspace_archive_stream(
         self,
