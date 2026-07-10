@@ -885,3 +885,24 @@ def test_function_with_annotated_field_multiple_constraints():
 
     with pytest.raises(ValidationError):  # zero factor
         fs.params_pydantic_model(**{"score": 50, "factor": 0.0})
+
+
+def test_docstring_without_summary_keeps_param_descriptions():
+    """A Google-style docstring that opens directly with the Args section (no summary line)
+    should still have its parameter descriptions parsed rather than swallowed as the summary."""
+
+    def func(a: int, b: str):
+        """
+        Args:
+            a: the first argument
+            b: the second argument
+        """
+        return f"{a}-{b}"
+
+    fs = function_schema(func)
+
+    properties = fs.params_json_schema.get("properties", {})
+    assert properties.get("a").get("description") == "the first argument"
+    assert properties.get("b").get("description") == "the second argument"
+    # The Args block is a section, not free text, so there is no function description.
+    assert fs.description is None

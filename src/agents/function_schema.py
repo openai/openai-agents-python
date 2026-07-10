@@ -165,8 +165,13 @@ def generate_func_documentation(
     if not doc:
         return FuncDocumentation(name=name, description=None, param_descriptions=None)
 
+    # griffe's Google parser treats the first line of the docstring as the summary. When a
+    # docstring omits the summary and opens directly with a section header (e.g. "Args:"), that
+    # header gets swallowed into the description and every parameter description is dropped.
+    # inspect.getdoc() strips the leading blank line that would otherwise mark an empty summary,
+    # so re-add one here to keep the section intact.
     with _suppress_griffe_logging():
-        docstring = Docstring(doc, lineno=1, parser=style or _detect_docstring_style(doc))
+        docstring = Docstring("\n" + doc, lineno=1, parser=style or _detect_docstring_style(doc))
         parsed = docstring.parse()
 
     description: str | None = next(
