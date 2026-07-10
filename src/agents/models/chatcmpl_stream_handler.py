@@ -504,6 +504,11 @@ class ChatCmplStreamHandler:
         state = StreamingState()
         output_layout = _StreamOutputLayout()
         sequence_number = SequenceNumber()
+        # Some providers (e.g. Anthropic on Amazon Bedrock via LiteLLM) signal a
+        # safety block only through finish_reason == "content_filter" with an
+        # empty delta and no refusal field. Track it so we can synthesize an
+        # explicit refusal after the stream if nothing else was emitted.
+        saw_content_filter = False
         async for chunk in stream:
             if not state.started:
                 state.started = True
@@ -543,6 +548,9 @@ class ChatCmplStreamHandler:
             choice = next((choice for choice in chunk.choices if choice.index == 0), None)
             if choice is None:
                 continue
+
+            if choice.finish_reason == "content_filter":
+                saw_content_filter = True
 
             if not choice.delta:
                 continue
@@ -938,6 +946,66 @@ class ChatCmplStreamHandler:
                             type="response.function_call_arguments.delta",
                             sequence_number=sequence_number.get_and_increment(),
                         )
+
+        # Content-filter refusal with no emitted output: synthesize a refusal so
+        # the completed response carries a ResponseOutputRefusal rather than an
+        # empty turn. Only when nothing else was produced (text / refusal / tool
+        # calls) — a content_filter that still emitted content is left as-is.
+        if (
+            saw_content_filter
+            and not (
+                state.text_content_index_and_output and state.text_content_index_and_output[1].text
+            )
+            and state.refusal_content_index_and_output is None
+            and not state.function_calls
+        ):
+            # A content-filtered turn on Bedrock often opens an empty text part
+            # (a "" content delta) before terminating, so gate on the accumulated
+            # text being empty rather than on the part being absent. Reuse that
+            # empty text part's index for the refusal and drop the empty part so
+            # the completed message carries only the refusal.
+            refusal_index = 0
+            if state.reasoning_content_index_and_output:
+                refusal_index += 1
+            if state.text_content_index_and_output:
+                refusal_index = state.text_content_index_and_output[0]
+                state.text_content_index_and_output = None
+            refusal_message = "Response withheld by the provider's content filter."
+            state.refusal_content_index_and_output = (
+                refusal_index,
+                ResponseOutputRefusal(refusal=refusal_message, type="refusal"),
+            )
+            assistant_item = ResponseOutputMessage(
+                id=FAKE_RESPONSES_ID,
+                content=[],
+                role="assistant",
+                type="message",
+                status="in_progress",
+            )
+            if state.provider_data:
+                assistant_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+            yield ResponseOutputItemAddedEvent(
+                item=assistant_item,
+                output_index=output_layout.assistant_message_output_index(state),
+                type="response.output_item.added",
+                sequence_number=sequence_number.get_and_increment(),
+            )
+            yield ResponseContentPartAddedEvent(
+                content_index=refusal_index,
+                item_id=FAKE_RESPONSES_ID,
+                output_index=output_layout.assistant_message_output_index(state),
+                part=ResponseOutputRefusal(refusal="", type="refusal"),
+                type="response.content_part.added",
+                sequence_number=sequence_number.get_and_increment(),
+            )
+            yield ResponseRefusalDeltaEvent(
+                content_index=refusal_index,
+                delta=refusal_message,
+                item_id=FAKE_RESPONSES_ID,
+                output_index=output_layout.assistant_message_output_index(state),
+                type="response.refusal.delta",
+                sequence_number=sequence_number.get_and_increment(),
+            )
 
         for event in cls._finish_reasoning_item(state, sequence_number):
             yield event

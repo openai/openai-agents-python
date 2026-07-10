@@ -417,3 +417,160 @@ async def test_stream_response_yields_real_time_function_call_arguments(monkeypa
     assert isinstance(added_event.item, ResponseFunctionToolCall)
     assert added_event.item.name == "generate_code"
     assert added_event.item.call_id == "litellm-call-456"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_synthesizes_refusal_on_content_filter(monkeypatch) -> None:
+    """A stream that terminates with finish_reason == "content_filter" and no
+    emitted content (as Anthropic-on-Bedrock does via LiteLLM) must synthesize a
+    ResponseOutputRefusal so the completed response carries an explicit refusal
+    rather than an empty assistant turn.
+
+    Mirrors the real Bedrock chunk shape: an empty-string content delta (which
+    opens a text content part) followed by a terminal content_filter chunk with
+    no content. The synthesized refusal must replace that empty text part, not
+    sit alongside it.
+    """
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(role="assistant", content=""))],
+    )
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(), finish_reason="content_filter")],
+        usage=CompletionUsage(
+            completion_tokens=0,
+            prompt_tokens=7,
+            total_tokens=7,
+        ),
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for c in (chunk1, chunk2):
+            yield c
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    monkeypatch.setattr(LitellmModel, "_fetch_response", patched_fetch_response)
+    model = LitellmProvider().get_model("gpt-4")
+    output_events = []
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    ):
+        output_events.append(event)
+
+    types = [e.type for e in output_events]
+    # Coherent refusal sequence: the message + refusal part are opened, a refusal
+    # delta is emitted, and the parts/message are closed before completion.
+    assert "response.output_item.added" in types
+    assert "response.content_part.added" in types
+    assert "response.refusal.delta" in types
+    assert types[-1] == "response.completed"
+    # done events for the refusal part + assistant message precede completion.
+    assert "response.content_part.done" in types
+    assert "response.output_item.done" in types
+
+    # The refusal delta carries a non-empty message.
+    refusal_deltas = [e for e in output_events if e.type == "response.refusal.delta"]
+    assert refusal_deltas and refusal_deltas[0].delta
+
+    # The completed response contains exactly one content part: the refusal.
+    # (The empty text part opened by the "" content delta must be dropped, not
+    # left sitting alongside the refusal.)
+    completed_resp = output_events[-1].response
+    assert isinstance(completed_resp.output[0], ResponseOutputMessage)
+    assert len(completed_resp.output[0].content) == 1
+    refusal_part = completed_resp.output[0].content[0]
+    assert isinstance(refusal_part, ResponseOutputRefusal)
+    assert refusal_part.refusal
+    # No spurious empty text delta leaked through as real content.
+    assert not any(e.type == "response.output_text.delta" and e.delta for e in output_events)
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_content_filter_does_not_clobber_text(monkeypatch) -> None:
+    """A content_filter finish_reason that arrives AFTER real text was streamed
+    must not synthesize a refusal (the text stands)."""
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(content="answer"))],
+    )
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(), finish_reason="content_filter")],
+        usage=CompletionUsage(completion_tokens=1, prompt_tokens=7, total_tokens=8),
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for c in (chunk1, chunk2):
+            yield c
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    monkeypatch.setattr(LitellmModel, "_fetch_response", patched_fetch_response)
+    model = LitellmProvider().get_model("gpt-4")
+    output_events = [
+        event
+        async for event in model.stream_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+    ]
+
+    assert "response.refusal.delta" not in [e.type for e in output_events]
+    completed_resp = output_events[-1].response
+    assert isinstance(completed_resp.output[0].content[0], ResponseOutputText)
+    assert completed_resp.output[0].content[0].text == "answer"
