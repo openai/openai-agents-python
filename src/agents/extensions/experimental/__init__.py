@@ -3,4 +3,5 @@
 
 __all__ = [
     "codex",
+    "hosted_multi_agent",
 ]

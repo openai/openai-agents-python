@@ -64,7 +64,7 @@ from ..tool import (
     validate_responses_tool_search_configuration,
 )
 from ..tracing import SpanError, response_span
-from ..usage import Usage, model_usage_to_span_usage
+from ..usage import Usage, _response_usage_to_usage, model_usage_to_span_usage
 from ..util._json import _to_dump_compatible
 from ..version import __version__
 from ._openai_retry import get_openai_retry_advice
@@ -493,18 +493,7 @@ class OpenAIResponsesModel(Model):
                         }\n"""
                     )
 
-                usage = (
-                    Usage(
-                        requests=1,
-                        input_tokens=response.usage.input_tokens,
-                        output_tokens=response.usage.output_tokens,
-                        total_tokens=response.usage.total_tokens,
-                        input_tokens_details=response.usage.input_tokens_details,
-                        output_tokens_details=response.usage.output_tokens_details,
-                    )
-                    if response.usage
-                    else Usage()
-                )
+                usage = _response_usage_to_usage(response.usage) if response.usage else Usage()
                 if response.usage:
                     span_response.span_data.usage = model_usage_to_span_usage(usage)
 
@@ -619,14 +608,7 @@ class OpenAIResponsesModel(Model):
                     span_response.span_data.input = input
                 if final_response and final_response.usage:
                     span_response.span_data.usage = model_usage_to_span_usage(
-                        Usage(
-                            requests=1,
-                            input_tokens=final_response.usage.input_tokens,
-                            output_tokens=final_response.usage.output_tokens,
-                            total_tokens=final_response.usage.total_tokens,
-                            input_tokens_details=final_response.usage.input_tokens_details,
-                            output_tokens_details=final_response.usage.output_tokens_details,
-                        )
+                        _response_usage_to_usage(final_response.usage)
                     )
 
             except Exception as e:

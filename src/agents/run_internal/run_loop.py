@@ -84,7 +84,7 @@ from ..tool import (
 from ..tracing import Span, SpanError, agent_span, get_current_trace, task_span, turn_span
 from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData, TaskSpanData
-from ..usage import Usage
+from ..usage import Usage, _response_usage_to_usage
 from ..util import _coro, _error_tracing
 from .agent_bindings import AgentBindings, bind_public_agent
 from .agent_runner_helpers import (
@@ -1507,14 +1507,7 @@ async def run_single_turn_streamed(
                 terminal_response.output = list(streamed_response_output)
             usage = (
                 apply_retry_attempt_usage(
-                    Usage(
-                        requests=1,
-                        input_tokens=terminal_response.usage.input_tokens,
-                        output_tokens=terminal_response.usage.output_tokens,
-                        total_tokens=terminal_response.usage.total_tokens,
-                        input_tokens_details=terminal_response.usage.input_tokens_details,
-                        output_tokens_details=terminal_response.usage.output_tokens_details,
-                    ),
+                    _response_usage_to_usage(terminal_response.usage),
                     stream_failed_retry_attempts[0],
                 )
                 if terminal_response.usage

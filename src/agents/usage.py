@@ -254,6 +254,37 @@ class Usage:
             self.request_usage_entries.append(request_usage)
 
 
+def _response_usage_to_usage(response_usage: Any) -> Usage:
+    """Convert Responses API usage, including adapter-supplied per-request details."""
+    request_usages = getattr(response_usage, "_agents_sdk_request_usages", None)
+    request_count = getattr(response_usage, "_agents_sdk_request_count", 1)
+
+    if isinstance(request_usages, list):
+        usage = Usage()
+        for request_usage in request_usages:
+            usage.add(
+                Usage(
+                    requests=1,
+                    input_tokens=request_usage.input_tokens,
+                    output_tokens=request_usage.output_tokens,
+                    total_tokens=request_usage.total_tokens,
+                    input_tokens_details=request_usage.input_tokens_details,
+                    output_tokens_details=request_usage.output_tokens_details,
+                )
+            )
+        usage.requests = max(usage.requests, request_count)
+        return usage
+
+    return Usage(
+        requests=request_count,
+        input_tokens=response_usage.input_tokens,
+        output_tokens=response_usage.output_tokens,
+        total_tokens=response_usage.total_tokens,
+        input_tokens_details=response_usage.input_tokens_details,
+        output_tokens_details=response_usage.output_tokens_details,
+    )
+
+
 def _serialize_usage_details(details: Any, default: dict[str, int]) -> dict[str, Any]:
     """Serialize token details while applying the given default when empty."""
     if hasattr(details, "model_dump"):
