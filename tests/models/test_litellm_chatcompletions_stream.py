@@ -493,13 +493,18 @@ async def test_stream_response_synthesizes_refusal_on_content_filter(monkeypatch
     assert "response.content_part.added" in types
     assert "response.refusal.delta" in types
     assert types[-1] == "response.completed"
-    # done events for the refusal part + assistant message precede completion.
-    assert "response.content_part.done" in types
     assert "response.output_item.done" in types
 
     # The refusal delta carries a non-empty message.
     refusal_deltas = [e for e in output_events if e.type == "response.refusal.delta"]
     assert refusal_deltas and refusal_deltas[0].delta
+
+    # Event coherence: the assistant message is announced exactly once (not
+    # re-announced by the synthesized refusal), and every content part that is
+    # opened is also closed — the empty text part opened by the "" content delta
+    # must be given a matching content_part.done, not left dangling.
+    assert types.count("response.output_item.added") == 1
+    assert types.count("response.content_part.added") == types.count("response.content_part.done")
 
     # The completed response contains exactly one content part: the refusal.
     # (The empty text part opened by the "" content delta must be dropped, not
