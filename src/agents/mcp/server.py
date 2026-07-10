@@ -1043,7 +1043,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                         logger.warning(
                             "Connection error during cleanup of MCP server '%s': %s",
                             self.name,
-                            connect_error,  # noqa: E501
+                            connect_error,
                         )
                 elif timeout_error:
                     if is_failed_connection_cleanup:
@@ -1053,7 +1053,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                         logger.warning(
                             "Timeout error during cleanup of MCP server '%s': %s",
                             self.name,
-                            timeout_error,  # noqa: E501
+                            timeout_error,
                         )
                 else:
                     # No HTTP error found, suppress RuntimeError about cancel scopes
