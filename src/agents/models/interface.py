@@ -37,7 +37,7 @@ class ModelTracing(enum.Enum):
 class Model(abc.ABC):
     """The base interface for calling an LLM."""
 
-    async def _cleanup_on_run_end(self) -> None:
+    async def _cleanup_on_run_end(self, owner: object) -> None:
         """Release run-scoped resources after the runner finishes using this model."""
         return None
 

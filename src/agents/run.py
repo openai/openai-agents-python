@@ -1518,7 +1518,7 @@ class AgentRunner:
                     )
                 raise
             finally:
-                await cleanup_model_after_run(current_agent, run_config)
+                await cleanup_model_after_run(current_agent, run_config, tool_use_tracker)
                 try:
                     try:
                         memory_input = _sandbox_memory_input(

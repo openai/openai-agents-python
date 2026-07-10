@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from agents import (
     ModelSettings,
     ModelTracing,
     RunConfig,
+    RunContextWrapper,
     Runner,
     function_tool,
     handoff,
@@ -842,6 +844,71 @@ async def test_runner_closes_paused_response_when_tool_execution_fails() -> None
     assert result.final_output == "recovered"
     assert len(client.beta.responses.connect_calls) == 2
     assert client.beta.responses.connections[1].closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_concurrent_run_does_not_consume_or_close_paused_response(
+    streamed: bool,
+) -> None:
+    function_call = {
+        "id": "fc_concurrent",
+        "type": "function_call",
+        "call_id": "call_concurrent",
+        "name": "lookup_document",
+        "arguments": '{"section":"alpha"}',
+        "status": "completed",
+        "agent": {"agent_name": "/root/researcher"},
+    }
+    final_message = _root_final_message("continued")
+    model, client = _model(_tool_flow_events("resp_concurrent", [function_call], [final_message]))
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+
+    @function_tool
+    async def lookup_document(section: str) -> str:
+        tool_started.set()
+        await release_tool.wait()
+        return f"document:{section}"
+
+    agent = Agent(name="SDK root", model=model, tools=[lookup_document])
+    shared_context = RunContextWrapper(context=None)
+
+    async def run_agent(prompt: str) -> Any:
+        if not streamed:
+            return await Runner.run(
+                agent,
+                prompt,
+                context=shared_context,
+                run_config=RunConfig(tracing_disabled=True),
+            )
+        result = Runner.run_streamed(
+            agent,
+            prompt,
+            context=shared_context,
+            run_config=RunConfig(tracing_disabled=True),
+        )
+        _ = [event async for event in result.stream_events()]
+        return result
+
+    first_run = asyncio.create_task(run_agent("Inspect alpha."))
+    await tool_started.wait()
+    paused_response = model._active_response
+    assert paused_response is not None
+
+    try:
+        with pytest.raises(UserError, match="another agent run"):
+            await run_agent("Inspect beta.")
+
+        assert model._active_response is paused_response
+        assert len(client.beta.responses.connect_calls) == 1
+        assert not client.beta.responses.connections[0].closed
+    finally:
+        release_tool.set()
+
+    result = await first_run
+    assert result.final_output == "continued"
+    assert client.beta.responses.connections[0].closed
 
 
 @pytest.mark.asyncio

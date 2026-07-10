@@ -33,6 +33,7 @@ from ....models._response_terminal import (
     response_error_event_failure_error,
     response_terminal_failure_error,
 )
+from ....models._run_context import get_model_run_owner
 from ....models.openai_responses import OpenAIResponsesModel
 from ....tool import Tool
 from ....tool_context import ToolContext
@@ -104,6 +105,7 @@ class _ActiveWebSocketResponse:
     manager: Any
     connection: Any
     loop: asyncio.AbstractEventLoop
+    owner: object
     response_id: str | None = None
     response_template: object | None = None
     pending_call_ids: set[str] = field(default_factory=set)
@@ -535,6 +537,7 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
     async def _start_active_response(
         self,
         create_kwargs: dict[str, Any],
+        owner: object,
     ) -> _ActiveWebSocketResponse:
         frame, headers, query = self._prepare_websocket_request(create_kwargs)
         responses = self._get_beta_responses()
@@ -557,6 +560,7 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
             manager=manager,
             connection=connection,
             loop=asyncio.get_running_loop(),
+            owner=owner,
         )
         try:
             await connection.send(frame)
@@ -590,8 +594,10 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
         self._request_lock = None
         self._request_lock_loop_ref = None
 
-    async def _cleanup_on_run_end(self) -> None:
-        await self._close_active_response()
+    async def _cleanup_on_run_end(self, owner: object) -> None:
+        active = self._active_response
+        if active is not None and active.owner is owner:
+            await self._close_active_response(active)
 
     @staticmethod
     def _matching_function_outputs(
@@ -746,12 +752,25 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
         create_kwargs: dict[str, Any],
     ) -> AsyncIterator[ResponseStreamEvent]:
         reached_boundary = False
+        owner = get_model_run_owner()
+        if owner is None:
+            owner = asyncio.current_task()
+        if owner is None:
+            raise UserError("Hosted multi-agent could not identify the current model run.")
         async with self._get_request_lock():
             active = self._active_response
+            owns_active = False
             try:
                 if active is None:
-                    active = await self._start_active_response(create_kwargs)
+                    active = await self._start_active_response(create_kwargs, owner)
+                    owns_active = True
                 else:
+                    if active.owner is not owner:
+                        raise UserError(
+                            "OpenAIHostedMultiAgentModel already has a paused response owned by "
+                            "another agent run. Use a separate model instance for concurrent runs."
+                        )
+                    owns_active = True
                     if active.loop is not asyncio.get_running_loop():
                         raise UserError(
                             "An active hosted multi-agent WebSocket response cannot be resumed "
@@ -882,7 +901,7 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
                     )
                     return
             except BaseException:
-                if not reached_boundary:
+                if owns_active and not reached_boundary:
                     with contextlib.suppress(Exception):
                         await self._close_active_response(active)
                 raise
