@@ -172,3 +172,32 @@ class ToolOutputGuardrailTripwireTriggered(AgentsException):
         self.guardrail = guardrail
         self.output = output
         super().__init__(f"Tool output guardrail {guardrail.__class__.__name__} triggered tripwire")
+
+
+def get_user_friendly_error_message(error: Exception) -> str:
+    """Get a user-friendly error message from an AgentsException.
+
+    Returns a simplified, user-facing error message that hides implementation details
+    while preserving actionable context about why an error occurred.
+
+    Args:
+        error: The exception to get a message from.
+
+    Returns:
+        A user-friendly error message string.
+    """
+    if isinstance(error, ModelRefusalError):
+        return f"The AI model declined to complete this request: {error.refusal}"
+    if isinstance(error, MaxTurnsExceeded):
+        return "The request exceeded the maximum number of turns. Try simplifying your request."
+    if isinstance(error, ToolTimeoutError):
+        return f"The tool '{error.tool_name}' took too long to execute (>{error.timeout_seconds}s)."
+    if isinstance(error, ModelBehaviorError):
+        return f"The model behaved unexpectedly: {error.message}"
+    if isinstance(error, InputGuardrailTripwireTriggered):
+        return "The input was rejected by security guardrails."
+    if isinstance(error, OutputGuardrailTripwireTriggered):
+        return "The output was rejected by security guardrails."
+    if isinstance(error, AgentsException):
+        return str(error)
+    return str(error)
