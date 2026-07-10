@@ -78,6 +78,15 @@ def nest_handoff_history(
     normalized_history = _normalize_input_history(handoff_input_data.input_history)
     flattened_history = _flatten_nested_history_messages(normalized_history)
 
+    # A previous handoff may have forwarded a message verbatim alongside a
+    # summary that already records it. Such a message reappears here as a
+    # pre-handoff item, so track what the summarized history already covers and
+    # skip re-adding it to the transcript. Otherwise it would be listed twice
+    # inside the summary, with the duplication compounding on every handoff.
+    summarized_keys = {
+        key for item in flattened_history if (key := _summary_dedupe_key(item)) is not None
+    }
+
     # Convert items to plain inputs for the transcript summary.
     pre_items_as_inputs: list[TResponseInputItem] = []
     filtered_pre_items: list[RunItem] = []
@@ -85,10 +94,14 @@ def nest_handoff_history(
         if isinstance(run_item, ToolApprovalItem):
             continue
         plain_input = _run_item_to_plain_input(run_item)
-        pre_items_as_inputs.append(plain_input)
+        if not _is_already_summarized(plain_input, summarized_keys):
+            pre_items_as_inputs.append(plain_input)
         if _should_forward_pre_item(plain_input):
             filtered_pre_items.append(run_item)
 
+    # ``new_items`` are produced by the current agent turn, so they are never
+    # forwarded copies of something the summary already records. They are kept
+    # verbatim, even when they happen to serialize identically to an earlier item.
     new_items_as_inputs: list[TResponseInputItem] = []
     filtered_input_items: list[RunItem] = []
     for run_item in handoff_input_data.new_items:
@@ -221,6 +234,19 @@ def _flatten_nested_history_messages(
             continue
         flattened.append(deepcopy(item))
     return flattened
+
+
+def _summary_dedupe_key(item: TResponseInputItem) -> str | None:
+    payload = {k: v for k, v in item.items() if k != "provider_data"}
+    try:
+        return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_already_summarized(item: TResponseInputItem, summarized_keys: set[str]) -> bool:
+    key = _summary_dedupe_key(item)
+    return key is not None and key in summarized_keys
 
 
 def _extract_nested_history_transcript(

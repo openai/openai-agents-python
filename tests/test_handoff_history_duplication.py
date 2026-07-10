@@ -6,6 +6,7 @@ in the input sent to the next agent.
 """
 
 import json
+import re
 from typing import Any, cast
 
 import pytest
@@ -247,6 +248,31 @@ class TestHandoffHistoryDuplicationFix:
         assert nested.input_items is not None
         assert len(nested.input_items) == 1, "MessageOutputItem should be preserved in input_items"
         assert isinstance(nested.input_items[0], MessageOutputItem)
+
+    def test_new_items_are_kept_when_identical_to_summarized_history(self):
+        """Verify a current-turn item is never dropped as "already summarized".
+
+        ``new_items`` are produced by the current agent turn, so they are never
+        forwarded copies of a message the summary already records. An item that
+        happens to serialize identically to one already in the history must still
+        be recorded in the transcript, otherwise the current turn silently loses
+        an output.
+        """
+        agent = _create_mock_agent()
+        message_item = _create_message_item(agent)
+
+        handoff_data = HandoffInputData(
+            input_history=(message_item.to_input_item(),),
+            pre_handoff_items=(),
+            new_items=(message_item,),
+        )
+
+        nested = nest_handoff_history(handoff_data)
+
+        summary = str(cast(dict[str, Any], nested.input_history[0]).get("content", ""))
+        assert summary.count("Hello!") == 2, (
+            f"current-turn message must not be dropped as a duplicate, got: {summary}"
+        )
 
     def test_reasoning_items_are_filtered_from_input_items(self):
         """Verify ReasoningItem in new_items is filtered from input_items.
@@ -524,3 +550,51 @@ async def test_to_input_list_normalized_uses_custom_filter_input_items() -> None
     assert len(normalized_input) == 3
     assert "function_call" not in normalized_types
     assert "function_call_output" not in normalized_types
+
+
+@pytest.mark.asyncio
+async def test_nested_handoff_chain_does_not_duplicate_summary_records() -> None:
+    """A chain of handoffs must not duplicate records inside the summary block.
+
+    Each agent's pre-handoff message is both summarized and forwarded verbatim
+    to the next agent. When the next agent hands off again, the verbatim copy is
+    re-summarized alongside the previous summary that already contains it, so the
+    same message ends up listed twice inside a single <CONVERSATION HISTORY>
+    block, and the duplication compounds on every subsequent handoff.
+    """
+    names = ["A", "B", "C", "D"]
+    models = [FakeModel() for _ in names]
+    agents = [Agent(name=name, model=model) for name, model in zip(names, models, strict=True)]
+    for i in range(len(agents) - 1):
+        agents[i].handoffs = [agents[i + 1]]
+
+    for i in range(len(agents) - 1):
+        models[i].add_multiple_turn_outputs(
+            [[get_text_message(f"{names[i]}: msg"), get_handoff_tool_call(agents[i + 1])]]
+        )
+    models[-1].add_multiple_turn_outputs([[get_text_message("D: final")]])
+
+    await Runner.run(
+        agents[0],
+        input="user_question",
+        run_config=RunConfig(nest_handoff_history=True),
+    )
+
+    final_input = models[-1].last_turn_args["input"]
+    summary = str(cast(dict[str, Any], final_input[0]).get("content", ""))
+    start = summary.index("<CONVERSATION HISTORY>") + len("<CONVERSATION HISTORY>")
+    end = summary.index("</CONVERSATION HISTORY>")
+    # Drop the ``N.`` ordering prefix so records are compared by content only.
+    records = [
+        re.sub(r"^\d+\.\s*", "", line.strip())
+        for line in summary[start:end].splitlines()
+        if line.strip()
+    ]
+
+    # No two records inside the summary block should be identical.
+    assert len(records) == len(set(records)), f"summary has duplicate records: {records}"
+
+    # Each intermediate agent's message must appear exactly once in the summary.
+    for name in names[:-1]:
+        count = summary.count(f"{name}: msg")
+        assert count == 1, f"{name}: msg should appear once in the summary, got {count}"
