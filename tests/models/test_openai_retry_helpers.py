@@ -16,6 +16,7 @@ from agents.models._openai_retry import get_openai_retry_advice
 from agents.models._retry_runtime import (
     get_error_code as _get_error_code,
     get_error_header as _get_header_value,
+    get_retry_after,
     get_status_code as _get_status_code,
     header_lookup as _header_lookup,
     parse_retry_after_ms as _parse_retry_after_ms,
@@ -74,6 +75,13 @@ def test_parse_retry_after_numeric_and_http_date() -> None:
     assert parsed is not None and parsed > 0
 
     assert _parse_retry_after("definitely not a date") is None
+
+
+def test_get_retry_after_preserves_outer_exception_precedence() -> None:
+    outer = _HeaderError("wrapped", headers={"retry-after": "2"})
+    outer.__cause__ = _HeaderError("provider", headers={"retry-after-ms": "1500"})
+
+    assert get_retry_after(outer) == 2.0
 
 
 def test_get_status_code_from_status_code_and_status_attrs() -> None:

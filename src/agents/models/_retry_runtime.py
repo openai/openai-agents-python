@@ -33,18 +33,25 @@ def header_lookup(headers: Any, key: str) -> str | None:
     return None
 
 
+def _get_candidate_header(candidate: Exception, key: str) -> str | None:
+    response = getattr(candidate, "response", None)
+    if isinstance(response, httpx.Response):
+        header_value = header_lookup(response.headers, key)
+        if header_value is not None:
+            return header_value
+
+    for attr_name in ("headers", "response_headers"):
+        header_value = header_lookup(getattr(candidate, attr_name, None), key)
+        if header_value is not None:
+            return header_value
+    return None
+
+
 def get_error_header(error: Exception, key: str) -> str | None:
     for candidate in iter_error_chain(error):
-        response = getattr(candidate, "response", None)
-        if isinstance(response, httpx.Response):
-            header_value = header_lookup(response.headers, key)
-            if header_value is not None:
-                return header_value
-
-        for attr_name in ("headers", "response_headers"):
-            header_value = header_lookup(getattr(candidate, attr_name, None), key)
-            if header_value is not None:
-                return header_value
+        header_value = _get_candidate_header(candidate, key)
+        if header_value is not None:
+            return header_value
     return None
 
 
@@ -77,10 +84,15 @@ def parse_retry_after_value(value: str | None) -> float | None:
 
 
 def get_retry_after(error: Exception) -> float | None:
-    retry_after = parse_retry_after_ms(get_error_header(error, "retry-after-ms"))
-    if retry_after is not None:
-        return retry_after
-    return parse_retry_after_value(get_error_header(error, "retry-after"))
+    for candidate in iter_error_chain(error):
+        retry_after = parse_retry_after_ms(_get_candidate_header(candidate, "retry-after-ms"))
+        if retry_after is not None:
+            return retry_after
+
+        retry_after = parse_retry_after_value(_get_candidate_header(candidate, "retry-after"))
+        if retry_after is not None:
+            return retry_after
+    return None
 
 
 def get_status_code(error: Exception) -> int | None:
