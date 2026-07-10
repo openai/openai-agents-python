@@ -1,5 +1,5 @@
 # Copy/paste command (does not modify uv.lock):
-# uv run --frozen --with 'openai[realtime]==2.45.0' --exclude-newer-package 'openai=2026-07-10T00:00:00Z' -m examples.agent_patterns.hosted_multi_agent_beta --mode stream
+# uv run -m examples.agent_patterns.hosted_multi_agent_beta --mode stream
 
 import argparse
 import asyncio
