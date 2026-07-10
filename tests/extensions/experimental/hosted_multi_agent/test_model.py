@@ -183,6 +183,9 @@ class _DummyConnection:
             raise RuntimeError("Dummy WebSocket event queue exhausted")
         return self.events.popleft()
 
+    async def close(self) -> None:
+        self.closed = True
+
 
 class _DummyConnectionManager:
     def __init__(self, connection: _DummyConnection) -> None:
@@ -192,7 +195,7 @@ class _DummyConnectionManager:
         return self.connection
 
     async def __aexit__(self, *_args: object) -> None:
-        self.connection.closed = True
+        await self.connection.close()
 
 
 class _DummyBetaResponses:
@@ -1178,16 +1181,6 @@ def test_tools_with_approval_settings_are_rejected_before_transport() -> None:
             )
 
     assert client.beta.responses.connect_calls == []
-
-
-def test_missing_beta_client_has_actionable_error() -> None:
-    model = OpenAIHostedMultiAgentModel(
-        model="gpt-5.6-sol",
-        openai_client=cast(Any, SimpleNamespace()),
-    )
-
-    with pytest.raises(UserError, match="client.beta.responses"):
-        model._get_beta_responses()
 
 
 def test_default_config_omits_service_default_concurrency() -> None:

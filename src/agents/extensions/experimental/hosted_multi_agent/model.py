@@ -9,7 +9,9 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, cast, get_args, overload
 
 from openai import AsyncOpenAI
+from openai.resources.beta.responses.responses import AsyncResponsesConnection
 from openai.types import ChatModel
+from openai.types.beta.beta_responses_client_event_param import BetaResponsesClientEventParam
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
@@ -34,7 +36,7 @@ from ....models._response_terminal import (
     response_terminal_failure_error,
 )
 from ....models._run_context import get_model_run_owner
-from ....models.openai_responses import OpenAIResponsesModel
+from ....models.openai_responses import OpenAIResponsesModel, _is_openai_omitted_value
 from ....tool import Tool
 from ....tool_context import ToolContext
 
@@ -61,6 +63,13 @@ def _stable_response_output_types() -> frozenset[str]:
 
 
 _STABLE_RESPONSE_OUTPUT_TYPES = _stable_response_output_types()
+
+
+async def _send_websocket_event(
+    connection: AsyncResponsesConnection,
+    event: dict[str, Any],
+) -> None:
+    await connection.send(cast(BetaResponsesClientEventParam, event))
 
 
 @dataclass(frozen=True)
@@ -102,8 +111,7 @@ class _PendingInjection:
 
 @dataclass
 class _ActiveWebSocketResponse:
-    manager: Any
-    connection: Any
+    connection: AsyncResponsesConnection
     loop: asyncio.AbstractEventLoop
     owner: object
     response_id: str | None = None
@@ -455,19 +463,6 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
         kwargs["betas"] = [_BETA_ID]
         return kwargs
 
-    def _get_beta_responses(self) -> Any:
-        client = self._get_client()
-        beta = getattr(client, "beta", None)
-        responses = getattr(beta, "responses", None)
-        connect = getattr(responses, "connect", None)
-        if not callable(connect):
-            raise UserError(
-                "OpenAIHostedMultiAgentModel requires an OpenAI Python beta build that "
-                "provides client.beta.responses.connect. Install openai[realtime]>=2.45.0 "
-                "before using this experimental model."
-            )
-        return responses
-
     def _get_request_lock(self) -> asyncio.Lock:
         loop = asyncio.get_running_loop()
         if (
@@ -478,10 +473,6 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
             self._request_lock = asyncio.Lock()
             self._request_lock_loop_ref = weakref.ref(loop)
         return self._request_lock
-
-    @staticmethod
-    def _is_omitted(value: object) -> bool:
-        return value.__class__.__name__ in {"NotGiven", "Omit"}
 
     def _prepare_websocket_request(
         self,
@@ -496,14 +487,14 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
         kwargs.pop("betas", None)
 
         headers: dict[str, str] = {}
-        if extra_headers is not None and not self._is_omitted(extra_headers):
+        if extra_headers is not None and not _is_openai_omitted_value(extra_headers):
             if not isinstance(extra_headers, Mapping):
                 raise UserError("Hosted multi-agent WebSocket headers must be a mapping.")
             headers.update(
                 {
                     str(key): str(value)
                     for key, value in extra_headers.items()
-                    if not self._is_omitted(value)
+                    if not _is_openai_omitted_value(value)
                 }
             )
         for existing_key in list(headers):
@@ -512,23 +503,23 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
         headers["OpenAI-Beta"] = _BETA_ID
 
         query: dict[str, Any] = {}
-        if extra_query is not None and not self._is_omitted(extra_query):
+        if extra_query is not None and not _is_openai_omitted_value(extra_query):
             if not isinstance(extra_query, Mapping):
                 raise UserError("Hosted multi-agent WebSocket query must be a mapping.")
             query.update(extra_query)
 
         frame: dict[str, Any] = {"type": "response.create"}
         for key, value in kwargs.items():
-            if not self._is_omitted(value):
+            if not _is_openai_omitted_value(value):
                 frame[key] = value
-        if extra_body is not None and not self._is_omitted(extra_body):
+        if extra_body is not None and not _is_openai_omitted_value(extra_body):
             if not isinstance(extra_body, Mapping):
                 raise UserError("Hosted multi-agent WebSocket extra_body must be a mapping.")
             frame.update(
                 {
                     str(key): value
                     for key, value in extra_body.items()
-                    if not self._is_omitted(value)
+                    if not _is_openai_omitted_value(value)
                 }
             )
         frame["type"] = "response.create"
@@ -540,33 +531,23 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
         owner: object,
     ) -> _ActiveWebSocketResponse:
         frame, headers, query = self._prepare_websocket_request(create_kwargs)
-        responses = self._get_beta_responses()
-        manager = responses.connect(
+        manager = self._get_client().beta.responses.connect(
             extra_headers=headers,
             extra_query=query,
             max_retries=0,
         )
-        try:
-            connection = await manager.enter()
-        except Exception as exc:
-            if "openai[realtime]" in str(exc):
-                raise UserError(
-                    "OpenAIHostedMultiAgentModel requires the openai[realtime] extra. "
-                    "Install openai[realtime]>=2.45.0."
-                ) from exc
-            raise
+        connection = await manager.enter()
 
         active = _ActiveWebSocketResponse(
-            manager=manager,
             connection=connection,
             loop=asyncio.get_running_loop(),
             owner=owner,
         )
         try:
-            await connection.send(frame)
+            await _send_websocket_event(connection, frame)
         except BaseException:
             with contextlib.suppress(Exception):
-                await manager.__aexit__(None, None, None)
+                await connection.close()
             raise
         self._active_response = active
         return active
@@ -587,7 +568,7 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
             if callable(abort):
                 abort()
             return
-        await target.manager.__aexit__(None, None, None)
+        await target.connection.close()
 
     async def close(self) -> None:
         await self._close_active_response()
@@ -647,12 +628,13 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
 
         for output in outputs:
             call_id = cast(str, output["call_id"])
-            await active.connection.send(
+            await _send_websocket_event(
+                active.connection,
                 {
                     "type": "response.inject",
                     "response_id": active.response_id,
                     "input": [output],
-                }
+                },
             )
             active.sent_call_ids.add(call_id)
             active.pending_injections.append(_PendingInjection(call_id=call_id, input_item=output))
@@ -728,7 +710,7 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
         continuation_kwargs = dict(create_kwargs)
         continuation_kwargs["input"] = fallback_input
         conversation = continuation_kwargs.get("conversation")
-        if conversation is not None and not self._is_omitted(conversation):
+        if conversation is not None and not _is_openai_omitted_value(conversation):
             continuation_kwargs.pop("previous_response_id", None)
         else:
             continuation_kwargs["previous_response_id"] = response_id
@@ -744,7 +726,7 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
         active.fallback_input.clear()
         active.request_count += 1
         active.last_sequence_number = 0
-        await active.connection.send(frame)
+        await _send_websocket_event(active.connection, frame)
         return active
 
     async def _iter_websocket_turn(
