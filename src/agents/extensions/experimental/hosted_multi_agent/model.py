@@ -590,6 +590,9 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
         self._request_lock = None
         self._request_lock_loop_ref = None
 
+    async def _cleanup_on_run_end(self) -> None:
+        await self._close_active_response()
+
     @staticmethod
     def _matching_function_outputs(
         create_kwargs: dict[str, Any],

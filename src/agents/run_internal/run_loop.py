@@ -62,6 +62,7 @@ from ..models._response_terminal import (
     response_error_event_failure_error,
     response_terminal_failure_error,
 )
+from ..models.interface import Model
 from ..result import RunResultStreaming
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
@@ -241,6 +242,7 @@ __all__ = [
     "check_for_final_output_from_tools",
     "get_model_tracing_impl",
     "validate_run_hooks",
+    "cleanup_model_after_run",
     "maybe_filter_model_input",
     "run_input_guardrails_with_queue",
     "start_streaming",
@@ -256,6 +258,23 @@ __all__ = [
     "get_model",
     "input_guardrail_tripwire_triggered_for_stream",
 ]
+
+
+async def cleanup_model_after_run(agent: Agent[Any], run_config: RunConfig) -> None:
+    """Notify an explicitly configured model that its owning run has ended."""
+    model: Model | None = None
+    if isinstance(run_config.model, Model):
+        model = run_config.model
+    elif run_config.model is None and isinstance(agent.model, Model):
+        model = agent.model
+
+    if model is None:
+        return
+
+    try:
+        await model._cleanup_on_run_end()
+    except Exception as error:
+        logger.warning("Failed to clean up model resources after run: %s", error)
 
 
 def _should_attach_generic_agent_error(exc: Exception) -> bool:
@@ -1201,6 +1220,7 @@ async def start_streaming(
     else:
         streamed_result.is_complete = True
     finally:
+        await cleanup_model_after_run(current_agent, run_config)
         _sync_conversation_tracking_from_tracker()
         if streamed_result._input_guardrails_task:
             try:

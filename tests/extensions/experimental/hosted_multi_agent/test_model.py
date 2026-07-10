@@ -16,6 +16,7 @@ from openai.types.shared.reasoning import Reasoning
 
 from agents import (
     Agent,
+    MaxTurnsExceeded,
     ModelSettings,
     ModelTracing,
     RunConfig,
@@ -742,6 +743,105 @@ async def test_model_close_releases_paused_response() -> None:
     await model.close()
     assert client.beta.responses.connections[0].closed
     assert model._active_response is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_runner_closes_paused_response_when_max_turns_is_exceeded(
+    streamed: bool,
+) -> None:
+    function_call = {
+        "id": "fc_max_turns",
+        "type": "function_call",
+        "call_id": "call_max_turns",
+        "name": "lookup_document",
+        "arguments": '{"section":"alpha"}',
+        "status": "completed",
+        "agent": {"agent_name": "/root/researcher"},
+    }
+    model, client = _model(
+        [
+            _created("resp_max_turns"),
+            _done(function_call, sequence_number=2, output_index=0),
+        ]
+    )
+
+    @function_tool
+    def lookup_document(section: str) -> str:
+        return f"document:{section}"
+
+    agent = Agent(name="SDK root", model=model, tools=[lookup_document])
+    with pytest.raises(MaxTurnsExceeded):
+        if streamed:
+            result = Runner.run_streamed(
+                agent,
+                "Inspect alpha.",
+                max_turns=1,
+                run_config=RunConfig(tracing_disabled=True),
+            )
+            _ = [event async for event in result.stream_events()]
+        else:
+            await Runner.run(
+                agent,
+                "Inspect alpha.",
+                max_turns=1,
+                run_config=RunConfig(tracing_disabled=True),
+            )
+
+    assert client.beta.responses.connections[0].closed
+    assert model._active_response is None
+
+
+@pytest.mark.asyncio
+async def test_runner_closes_paused_response_when_tool_execution_fails() -> None:
+    function_call = {
+        "id": "fc_tool_failure",
+        "type": "function_call",
+        "call_id": "call_tool_failure",
+        "name": "lookup_document",
+        "arguments": '{"section":"alpha"}',
+        "status": "completed",
+        "agent": {"agent_name": "/root/researcher"},
+    }
+    recovered_message = _root_final_message("recovered")
+    model, client = _model(
+        event_batches=[
+            [
+                _created("resp_tool_failure"),
+                _done(function_call, sequence_number=2, output_index=0),
+            ],
+            [
+                _created("resp_recovered"),
+                _done(recovered_message, sequence_number=2, output_index=0),
+                _completed("resp_recovered", [recovered_message], sequence_number=3),
+            ],
+        ]
+    )
+
+    def lookup_document(section: str) -> str:
+        raise RuntimeError(f"Unable to read {section}")
+
+    tool = function_tool(lookup_document, failure_error_function=None)
+    agent = Agent(name="SDK root", model=model, tools=[tool])
+    with pytest.raises(UserError, match="Unable to read alpha"):
+        await Runner.run(
+            agent,
+            "Inspect alpha.",
+            run_config=RunConfig(tracing_disabled=True),
+        )
+
+    assert client.beta.responses.connections[0].closed
+    assert model._active_response is None
+
+    result = await Runner.run(
+        agent,
+        "Try again.",
+        run_config=RunConfig(tracing_disabled=True),
+    )
+
+    assert result.final_output == "recovered"
+    assert len(client.beta.responses.connect_calls) == 2
+    assert client.beta.responses.connections[1].closed
 
 
 @pytest.mark.asyncio
