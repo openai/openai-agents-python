@@ -4,11 +4,7 @@ import openai
 import pytest
 
 from agents.exceptions import UserError
-
-try:
-    from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider
-except ImportError:
-    pass
+from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider
 
 
 @pytest.mark.parametrize(
