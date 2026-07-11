@@ -2263,3 +2263,123 @@ async def test_clear_session_resets_current_branch_to_main():
         assert await session.get_items() == []
     finally:
         session.close()
+
+
+async def test_pop_item_rolls_back_on_failure_after_earlier_delete():
+    """Regression: a failure partway through pop_item's delete sequence must
+    roll back so no partial mutation or open transaction survives.
+
+    _locked_connection() does not manage transactions itself, so pop_item must
+    roll back explicitly on failure. Otherwise the message_structure delete
+    that already ran would remain pending in an open transaction for whatever
+    the connection does next (on this thread) to inherit and possibly commit.
+    """
+    session = AdvancedSQLiteSession(session_id="pop_rollback_test", create_tables=True)
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "Question"},
+                {"role": "assistant", "content": "Answer"},
+            ]
+        )
+
+        message_count_before = _count_rows(session, session.messages_table)
+        structure_count_before = _count_rows(session, "message_structure")
+        branch_before = session._current_branch_id
+
+        # Fail the step that runs immediately after the message_structure
+        # delete, simulating a failure after an earlier delete has executed.
+        with patch.object(
+            session,
+            "_cleanup_orphaned_messages_sync",
+            side_effect=RuntimeError("Simulated failure after earlier delete"),
+        ):
+            with pytest.raises(RuntimeError, match="Simulated failure"):
+                await session.pop_item()
+
+        # The message_structure delete that ran before the injected failure
+        # must have been rolled back: nothing was actually removed.
+        assert _count_rows(session, session.messages_table) == message_count_before
+        assert _count_rows(session, "message_structure") == structure_count_before
+        assert session._current_branch_id == branch_before
+        with session._locked_connection() as conn:
+            assert conn.in_transaction is False
+
+        # The connection must be left clean for a subsequent legitimate pop.
+        popped = await session.pop_item()
+        assert popped == {"role": "assistant", "content": "Answer"}
+        assert await session.get_items() == [{"role": "user", "content": "Question"}]
+    finally:
+        session.close()
+
+
+async def test_clear_session_rolls_back_on_failure_after_earlier_delete(usage_data: Usage):
+    """Regression: a failure partway through clear_session's delete sequence
+    must roll back so no partial mutation or open transaction survives.
+
+    _locked_connection() does not manage transactions itself, so clear_session
+    must roll back explicitly. Otherwise a failure after the first deletes
+    would leave those deletes pending in an open transaction, and the branch
+    pointer / generation reset (which only happens after a successful commit)
+    could drift out of sync with what's actually persisted.
+    """
+    session = AdvancedSQLiteSession(session_id="clear_rollback_test", create_tables=True)
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "First question"},
+                {"role": "assistant", "content": "First answer"},
+            ]
+        )
+        await session.store_run_usage(create_mock_run_result(usage_data))
+
+        message_count_before = _count_rows(session, session.messages_table)
+        structure_count_before = _count_rows(session, "message_structure")
+        usage_count_before = _count_rows(session, "turn_usage")
+        assert structure_count_before > 0
+        assert usage_count_before > 0
+        branch_before = session._current_branch_id
+        generation_before = session._generation
+
+        real_conn = session._shared_connection
+
+        class _FailOnTurnUsageDelete:
+            """Delegates to the real connection but fails the turn_usage
+            delete, simulating a failure after the earlier deletes in
+            clear_session have already executed against this connection."""
+
+            def execute(self, sql, parameters=()):
+                if "DELETE FROM turn_usage" in sql:
+                    raise RuntimeError("Simulated failure after earlier deletes")
+                return real_conn.execute(sql, parameters)
+
+            def __getattr__(self, name):
+                return getattr(real_conn, name)
+
+        session._shared_connection = _FailOnTurnUsageDelete()  # type: ignore
+        try:
+            with pytest.raises(RuntimeError, match="Simulated failure"):
+                await session.clear_session()
+        finally:
+            session._shared_connection = real_conn
+
+        # The earlier deletes (messages, sessions, message_structure) that ran
+        # before the injected failure must have been rolled back too.
+        assert _count_rows(session, session.messages_table) == message_count_before
+        assert _count_rows(session, "message_structure") == structure_count_before
+        assert _count_rows(session, "turn_usage") == usage_count_before
+        assert real_conn.in_transaction is False
+        # In-memory state is only updated after a successful commit, so it
+        # must be untouched when the commit never happened.
+        assert session._current_branch_id == branch_before
+        assert session._generation == generation_before
+
+        # The connection must be left clean for a subsequent legitimate clear.
+        await session.clear_session()
+        assert _count_rows(session, "message_structure") == 0
+        assert _count_rows(session, "turn_usage") == 0
+        assert await session.get_items() == []
+    finally:
+        session.close()
