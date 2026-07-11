@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from openai.types.responses.response_text_delta_event import ResponseTextDeltaEvent
@@ -37,7 +38,7 @@ async def run_demo_loop(
     input_items: list[TResponseInputItem] = []
     while True:
         try:
-            user_input = input(" > ")
+            user_input = await asyncio.to_thread(input, " > ")
         except (EOFError, KeyboardInterrupt):
             print()
             break

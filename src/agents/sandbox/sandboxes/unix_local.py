@@ -148,7 +148,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     async def _prepare_backend_workspace(self) -> None:
         workspace = Path(self.state.manifest.root)
         try:
-            workspace.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
         except OSError as e:
             raise WorkspaceStartError(path=workspace, cause=e) from e
 
@@ -223,7 +223,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         self, *command: str | Path, timeout: float | None = None
     ) -> ExecResult:
         env, cwd = await self._resolved_exec_context()
-        workspace_root = Path(cwd).resolve()
+        workspace_root = await asyncio.to_thread(Path(cwd).resolve)
         command_parts = self._workspace_relative_command_parts(command, workspace_root)
         process_cwd, command_parts = self._shell_workspace_process_context(
             command_parts=command_parts,
@@ -276,7 +276,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     ) -> PtyExecUpdate:
         _ = timeout
         env, cwd = await self._resolved_exec_context()
-        workspace_root = Path(cwd).resolve()
+        workspace_root = await asyncio.to_thread(Path(cwd).resolve)
         sanitized_command = self._prepare_exec_command(*command, shell=shell, user=user)
         command_parts = self._workspace_relative_command_parts(sanitized_command, workspace_root)
         process_cwd, command_parts = self._shell_workspace_process_context(
@@ -427,7 +427,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         env.update(await self.state.manifest.environment.resolve())
 
         workspace = Path(self.state.manifest.root)
-        if not workspace.exists():
+        if not await asyncio.to_thread(workspace.exists):
             raise WorkspaceRootNotFoundError(path=workspace)
 
         env["HOME"] = str(workspace)
@@ -942,7 +942,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         user: str | User,
     ) -> None:
         env, cwd = await self._resolved_exec_context()
-        workspace_root = Path(cwd).resolve()
+        workspace_root = await asyncio.to_thread(Path(cwd).resolve)
         command_parts = self._prepare_exec_command(
             "sh",
             "-c",
@@ -999,7 +999,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
     async def persist_workspace(self) -> io.IOBase:
         root = Path(self.state.manifest.root)
-        if not root.exists():
+        if not await asyncio.to_thread(root.exists):
             raise WorkspaceArchiveReadError(
                 path=root, context={"reason": "workspace_root_not_found"}
             )
@@ -1030,7 +1030,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     async def hydrate_workspace(self, data: io.IOBase) -> None:
         root = Path(self.state.manifest.root)
         try:
-            root.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
             with tarfile.open(fileobj=data, mode="r:*") as tar:
                 safe_extract_tarfile(
                     tar,

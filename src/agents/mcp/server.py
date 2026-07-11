@@ -132,7 +132,7 @@ async def _streamablehttp_client_with_transport(
     url: str,
     *,
     headers: dict[str, str] | None = None,
-    timeout: float | timedelta = 30,
+    timeout: float | timedelta = 30,  # noqa: ASYNC109
     sse_read_timeout: float | timedelta = 60 * 5,
     terminate_on_close: bool = True,
     httpx_client_factory: HttpClientFactory = _create_default_streamable_http_client,
