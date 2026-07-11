@@ -257,7 +257,7 @@ Constructing `OpenAIHostedMultiAgentModel` enables `multi_agent.enabled` and sen
 
 #### Local function tools
 
-All hosted agents share the model and tools configured for the request. The Responses API decides which hosted agent calls a function. The normal SDK Runner executes the function locally and injects a `function_call_output` with the same call ID into the active WebSocket response, which lets the service resume the original hosted caller. Function execution still passes through the Runner's normal approvals, guardrails, hooks, and failure conversion.
+All hosted agents share the model and tools configured for the request. The Responses API decides which hosted agent calls a function. The normal SDK Runner executes the function locally and injects a `function_call_output` with the same call ID into the active WebSocket response, which lets the service resume the original hosted caller. Function execution still passes through the Runner's normal guardrails, hooks, and failure conversion. SDK tool approval interruptions are not supported: any function tool whose `needs_approval` setting is not `False` is rejected before the request is sent.
 
 Use `get_hosted_agent_metadata()` when a tool needs caller-aware logging or authorization:
 
@@ -276,7 +276,7 @@ def lookup_document(ctx: ToolContext[Any], section: str) -> str:
     return f"Contents for {section}"
 ```
 
-Hosted agent names are observational metadata, not a local routing mechanism. Route outputs with the call ID supplied by the SDK. For side-effecting tools, use that call ID as an idempotency key and keep the usual tool approval and authorization checks. Tool arguments and outputs cross the Responses API boundary.
+Hosted agent names are observational metadata, not a local routing mechanism. Route outputs with the call ID supplied by the SDK. For side-effecting tools, use that call ID as an idempotency key and enforce any required authorization in application code before or during tool execution; do not use `needs_approval` with this model. Tool arguments and outputs cross the Responses API boundary.
 
 #### Output and streaming behavior
 
@@ -296,7 +296,7 @@ Hosted multi-agent is separate from SDK handoffs and agents-as-tools:
 
 The experimental model rejects `reasoning.summary`, `max_tool_calls`, and caller-supplied `multi_agent` or `betas` overrides. The Responses `/compact` endpoint is not supported by the beta, although an explicit `context_management.compact_threshold` may be used because the service automatically compacts each hosted agent context independently.
 
-One `OpenAIHostedMultiAgentModel` instance owns at most one active hosted response at a time. Keep the same model instance while an approval interruption is pending. If a run is abandoned while waiting for a tool or approval, call `await model.close()` to release its WebSocket. Restoring an in-flight hosted response in a different process or event loop is not currently supported.
+One `OpenAIHostedMultiAgentModel` instance owns at most one active hosted response at a time. If a run is abandoned while waiting for local function output, call `await model.close()` to release its WebSocket. Restoring an in-flight hosted response in a different process or event loop is not currently supported.
 
 See the [OpenAI Multi-agent guide](https://developers.openai.com/api/docs/guides/tools-multi-agent) for the underlying Responses API beta behavior. See [`examples/agent_patterns/hosted_multi_agent_beta.py`](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns/hosted_multi_agent_beta.py) for non-streaming and streaming SDK usage.
 
