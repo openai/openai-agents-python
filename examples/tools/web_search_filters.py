@@ -8,6 +8,8 @@ from openai.types.shared.reasoning import Reasoning
 
 from agents import Agent, ModelSettings, Runner, WebSearchTool, trace
 
+ALLOWED_DOMAINS = ["developers.openai.com"]
+
 
 def _get_field(obj: Any, key: str) -> Any:
     if isinstance(obj, Mapping):
@@ -20,7 +22,7 @@ def _get_field(obj: Any, key: str) -> Any:
 
 
 def _normalized_source_urls(sources: Any) -> list[str]:
-    allowed_hosts = {"developers.openai.com", "platform.openai.com"}
+    allowed_hosts = set(ALLOWED_DOMAINS)
     blocked_suffixes = (
         ".css",
         ".eot",
@@ -75,19 +77,13 @@ async def main():
         name="WebOAI website searcher",
         model="gpt-5.6",
         instructions=(
-            "You are a helpful agent that searches OpenAI developer documentation and platform "
-            "docs. Ignore ChatGPT help-center or end-user release notes. Prefer the Web search "
-            "guide and do not summarize unrelated platform updates."
+            "You are a helpful agent that searches OpenAI developer documentation. Answer only "
+            "from the allowed official documentation sources and include inline citations."
         ),
         tools=[
             WebSearchTool(
                 # https://platform.openai.com/docs/guides/tools-web-search?api-mode=responses#domain-filtering
-                filters=Filters(
-                    allowed_domains=[
-                        "developers.openai.com",
-                        "platform.openai.com",
-                    ],
-                ),
+                filters=Filters(allowed_domains=ALLOWED_DOMAINS),
                 search_context_size="medium",
             )
         ],
@@ -102,17 +98,12 @@ async def main():
 
     with trace("Web search example"):
         query = (
-            "Search the OpenAI developer docs for the guide titled 'Web search' and use it as "
-            "the primary source. "
-            "In three concise bullets, explain: (1) domain filtering syntax and limits, (2) how "
-            "to include all consulted source URLs, and (3) how complete sources differ from "
-            "inline citations. Do not discuss unrelated updates."
+            "Using only official OpenAI developer documentation, compare GPT-5.6 Sol and "
+            "GPT-5.6 Terra in three concise bullets and explain when to use each model."
         )
         result = await Runner.run(agent, query)
 
-        print()
-        print("### Sources ###")
-        print()
+        source_urls: list[str] = []
         for item in result.new_items:
             if item.type != "tool_call_item":
                 continue
@@ -128,7 +119,19 @@ async def main():
                 continue
 
             for url in _normalized_source_urls(sources):
-                print(f"- {url}")
+                if url not in source_urls:
+                    source_urls.append(url)
+
+        if not any("/models/gpt-5.6-" in url for url in source_urls):
+            raise RuntimeError(
+                f"Expected GPT-5.6 model documentation in sources, got {source_urls}"
+            )
+
+        print()
+        print("### Sources ###")
+        print()
+        for url in source_urls:
+            print(f"- {url}")
         print()
         print("### Final output ###")
         print()
