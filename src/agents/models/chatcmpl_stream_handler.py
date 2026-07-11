@@ -685,7 +685,17 @@ class ChatCmplStreamHandler:
                     yield event
 
             # Handle regular content
-            if delta.content is not None:
+            if delta.content is not None and not (
+                not state.text_content_index_and_output and delta.content == ""
+            ):
+                # An empty leading content delta ("") is dropped rather than
+                # opening a text content part: materializing an empty part would
+                # add a spurious ResponseOutputText to response.completed. Bedrock
+                # content-filter turns emit exactly this "" warm-up chunk before
+                # the terminal content_filter, so suppressing it here keeps the
+                # synthesized refusal (below) at content index 0 in both the
+                # streamed events and the completed response. Empty deltas after a
+                # text part has already opened keep their existing behavior.
                 if not state.text_content_index_and_output:
                     content_index = 0
                     if state.reasoning_content_index_and_output:
@@ -953,63 +963,39 @@ class ChatCmplStreamHandler:
         # calls) — a content_filter that still emitted content is left as-is.
         if (
             saw_content_filter
-            and not (
-                state.text_content_index_and_output and state.text_content_index_and_output[1].text
-            )
+            and state.text_content_index_and_output is None
             and state.refusal_content_index_and_output is None
             and not state.function_calls
         ):
-            # A content-filtered turn on Bedrock often opens an empty text part
-            # (a "" content delta) before terminating, so gate on the accumulated
-            # text being empty rather than on the part being absent.
+            # A content-filtered turn (e.g. Bedrock) can terminate with no
+            # emitted output. Its leading empty "" content delta is suppressed
+            # above so no text part opens, so we announce a fresh assistant
+            # message and place the refusal at the first content index — the same
+            # index it occupies in response.completed, keeping raw-event replay
+            # and the final response aligned.
             refusal_index = 0
             if state.reasoning_content_index_and_output:
                 refusal_index += 1
-            # If an empty text part was already opened, the assistant message +
-            # that content part have already been announced on the stream. Close
-            # the stale text part and reuse its index for the refusal, rather than
-            # re-announcing the message and leaving the text part unterminated
-            # (which would produce an incoherent event sequence).
-            empty_text_part = state.text_content_index_and_output
-            if empty_text_part is not None:
-                # Close the stale empty text part and give the refusal a DISTINCT
-                # index (not the text part's), so a consumer replaying events by
-                # (item_id, content_index) never sees two different part types at
-                # the same slot. The empty text part is dropped from the final
-                # message, so only the refusal remains in response.completed.
-                yield ResponseContentPartDoneEvent(
-                    content_index=empty_text_part[0],
-                    item_id=FAKE_RESPONSES_ID,
-                    output_index=output_layout.assistant_message_output_index(state),
-                    part=empty_text_part[1],
-                    type="response.content_part.done",
-                    sequence_number=sequence_number.get_and_increment(),
-                )
-                refusal_index = empty_text_part[0] + 1
-                state.text_content_index_and_output = None
             refusal_message = "Response withheld by the provider's content filter."
             state.refusal_content_index_and_output = (
                 refusal_index,
                 ResponseOutputRefusal(refusal=refusal_message, type="refusal"),
             )
-            # Announce the assistant message only if it wasn't already opened by a
-            # prior text part.
-            if empty_text_part is None:
-                assistant_item = ResponseOutputMessage(
-                    id=FAKE_RESPONSES_ID,
-                    content=[],
-                    role="assistant",
-                    type="message",
-                    status="in_progress",
-                )
-                if state.provider_data:
-                    assistant_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
-                yield ResponseOutputItemAddedEvent(
-                    item=assistant_item,
-                    output_index=output_layout.assistant_message_output_index(state),
-                    type="response.output_item.added",
-                    sequence_number=sequence_number.get_and_increment(),
-                )
+            assistant_item = ResponseOutputMessage(
+                id=FAKE_RESPONSES_ID,
+                content=[],
+                role="assistant",
+                type="message",
+                status="in_progress",
+            )
+            if state.provider_data:
+                assistant_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+            yield ResponseOutputItemAddedEvent(
+                item=assistant_item,
+                output_index=output_layout.assistant_message_output_index(state),
+                type="response.output_item.added",
+                sequence_number=sequence_number.get_and_increment(),
+            )
             yield ResponseContentPartAddedEvent(
                 content_index=refusal_index,
                 item_id=FAKE_RESPONSES_ID,

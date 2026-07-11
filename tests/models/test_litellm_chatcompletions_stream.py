@@ -428,10 +428,10 @@ async def test_stream_response_synthesizes_refusal_on_content_filter(monkeypatch
     ResponseOutputRefusal so the completed response carries an explicit refusal
     rather than an empty assistant turn.
 
-    Mirrors the real Bedrock chunk shape: an empty-string content delta (which
-    opens a text content part) followed by a terminal content_filter chunk with
-    no content. The synthesized refusal must replace that empty text part, not
-    sit alongside it.
+    Mirrors the real Bedrock chunk shape: an empty-string content delta followed
+    by a terminal content_filter chunk with no content. The empty "" delta must
+    not open a text content part; the synthesized refusal must be the only
+    content part, at the same index in the stream and in response.completed.
     """
     chunk1 = ChatCompletionChunk(
         id="chunk-id",
@@ -500,16 +500,19 @@ async def test_stream_response_synthesizes_refusal_on_content_filter(monkeypatch
     refusal_deltas = [e for e in output_events if e.type == "response.refusal.delta"]
     assert refusal_deltas and refusal_deltas[0].delta
 
-    # Event coherence: the assistant message is announced exactly once (not
-    # re-announced by the synthesized refusal), and every content part that is
-    # opened is also closed — the empty text part opened by the "" content delta
-    # must be given a matching content_part.done, not left dangling.
+    # Event coherence: the assistant message is announced exactly once, and every
+    # content part that is opened is also closed.
     assert types.count("response.output_item.added") == 1
     assert types.count("response.content_part.added") == types.count("response.content_part.done")
 
+    # The empty "" content delta must NOT open a text content part: no text part
+    # events and no output_text.delta are emitted at all.
+    assert "response.output_text.delta" not in types
+    added_parts = [e for e in output_events if e.type == "response.content_part.added"]
+    assert len(added_parts) == 1
+    assert isinstance(added_parts[0].part, ResponseOutputRefusal)
+
     # The completed response contains exactly one content part: the refusal.
-    # (The empty text part opened by the "" content delta must be dropped, not
-    # left sitting alongside the refusal.)
     completed_event = output_events[-1]
     assert isinstance(completed_event, ResponseCompletedEvent)
     completed_resp = completed_event.response
@@ -518,8 +521,14 @@ async def test_stream_response_synthesizes_refusal_on_content_filter(monkeypatch
     refusal_part = completed_resp.output[0].content[0]
     assert isinstance(refusal_part, ResponseOutputRefusal)
     assert refusal_part.refusal
-    # No spurious empty text delta leaked through as real content.
-    assert not any(e.type == "response.output_text.delta" and e.delta for e in output_events)
+
+    # The refusal's streamed content_index matches its position in the completed
+    # response (0), so raw-event replay and the final response stay aligned.
+    assert added_parts[0].content_index == 0
+    assert refusal_deltas[0].content_index == 0
+    done_parts = [e for e in output_events if e.type == "response.content_part.done"]
+    assert len(done_parts) == 1
+    assert done_parts[0].content_index == 0
 
 
 @pytest.mark.allow_call_model_methods
