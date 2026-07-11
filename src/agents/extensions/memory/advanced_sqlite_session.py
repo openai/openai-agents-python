@@ -381,23 +381,33 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         def _clear_session_sync():
             with self._locked_connection() as conn:
-                conn.execute(
-                    f"DELETE FROM {self.messages_table} WHERE session_id = ?",
-                    (self.session_id,),
-                )
-                conn.execute(
-                    f"DELETE FROM {self.sessions_table} WHERE session_id = ?",
-                    (self.session_id,),
-                )
-                conn.execute(
-                    "DELETE FROM message_structure WHERE session_id = ?",
-                    (self.session_id,),
-                )
-                conn.execute(
-                    "DELETE FROM turn_usage WHERE session_id = ?",
-                    (self.session_id,),
-                )
-                conn.commit()
+                try:
+                    conn.execute(
+                        f"DELETE FROM {self.messages_table} WHERE session_id = ?",
+                        (self.session_id,),
+                    )
+                    conn.execute(
+                        f"DELETE FROM {self.sessions_table} WHERE session_id = ?",
+                        (self.session_id,),
+                    )
+                    conn.execute(
+                        "DELETE FROM message_structure WHERE session_id = ?",
+                        (self.session_id,),
+                    )
+                    conn.execute(
+                        "DELETE FROM turn_usage WHERE session_id = ?",
+                        (self.session_id,),
+                    )
+                    conn.commit()
+                except Exception:
+                    # _locked_connection() does not manage transactions; roll
+                    # back explicitly so a failure partway through this delete
+                    # sequence never leaves a partial mutation or an open
+                    # transaction for a later operation on this connection to
+                    # inherit. The in-memory branch state below is only updated
+                    # after a successful commit, so it stays consistent with it.
+                    conn.rollback()
+                    raise
                 # All branches were removed, so reset the in-memory pointer to
                 # 'main' while still holding the lock. Doing this inside the
                 # locked operation keeps the reset atomic with the clear, so no
