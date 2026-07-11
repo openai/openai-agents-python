@@ -298,6 +298,27 @@ class LitellmModel(Model):
                 "output_tokens_details": usage.output_tokens_details.model_dump(),
             }
 
+            # Surface content-filter refusals explicitly. Some providers (e.g.
+            # Anthropic on Amazon Bedrock) signal a safety block only via
+            # ``finish_reason == "content_filter"`` with an empty message and no
+            # ``refusal`` field. Without this, ``message`` converts to zero
+            # output items and the caller sees an indistinguishable "empty turn",
+            # which drives agent loops into fruitless retries. Synthesize a
+            # refusal so downstream handling (ResponseOutputRefusal) fires.
+            if (
+                message is not None
+                and first_choice is not None
+                and getattr(first_choice, "finish_reason", None) == "content_filter"
+                and not message.content
+                and not getattr(message, "tool_calls", None)
+            ):
+                provider_specific_fields = getattr(message, "provider_specific_fields", None) or {}
+                if not provider_specific_fields.get("refusal"):
+                    provider_specific_fields["refusal"] = (
+                        "Response withheld by the provider's content filter."
+                    )
+                    message.provider_specific_fields = provider_specific_fields
+
             # Build provider_data for provider specific fields
             provider_data: dict[str, Any] = {"model": self.model}
             if message is not None and hasattr(response, "id"):
