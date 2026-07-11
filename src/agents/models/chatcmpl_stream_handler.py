@@ -972,15 +972,20 @@ class ChatCmplStreamHandler:
             # (which would produce an incoherent event sequence).
             empty_text_part = state.text_content_index_and_output
             if empty_text_part is not None:
-                refusal_index = empty_text_part[0]
+                # Close the stale empty text part and give the refusal a DISTINCT
+                # index (not the text part's), so a consumer replaying events by
+                # (item_id, content_index) never sees two different part types at
+                # the same slot. The empty text part is dropped from the final
+                # message, so only the refusal remains in response.completed.
                 yield ResponseContentPartDoneEvent(
-                    content_index=refusal_index,
+                    content_index=empty_text_part[0],
                     item_id=FAKE_RESPONSES_ID,
                     output_index=output_layout.assistant_message_output_index(state),
                     part=empty_text_part[1],
                     type="response.content_part.done",
                     sequence_number=sequence_number.get_and_increment(),
                 )
+                refusal_index = empty_text_part[0] + 1
                 state.text_content_index_and_output = None
             refusal_message = "Response withheld by the provider's content filter."
             state.refusal_content_index_and_output = (

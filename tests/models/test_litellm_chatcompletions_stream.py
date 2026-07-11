@@ -15,6 +15,7 @@ from openai.types.completion_usage import (
 )
 from openai.types.responses import (
     Response,
+    ResponseCompletedEvent,
     ResponseFunctionToolCall,
     ResponseOutputMessage,
     ResponseOutputRefusal,
@@ -509,7 +510,9 @@ async def test_stream_response_synthesizes_refusal_on_content_filter(monkeypatch
     # The completed response contains exactly one content part: the refusal.
     # (The empty text part opened by the "" content delta must be dropped, not
     # left sitting alongside the refusal.)
-    completed_resp = output_events[-1].response
+    completed_event = output_events[-1]
+    assert isinstance(completed_event, ResponseCompletedEvent)
+    completed_resp = completed_event.response
     assert isinstance(completed_resp.output[0], ResponseOutputMessage)
     assert len(completed_resp.output[0].content) == 1
     refusal_part = completed_resp.output[0].content[0]
@@ -576,6 +579,9 @@ async def test_stream_response_content_filter_does_not_clobber_text(monkeypatch)
     ]
 
     assert "response.refusal.delta" not in [e.type for e in output_events]
-    completed_resp = output_events[-1].response
+    completed_event = output_events[-1]
+    assert isinstance(completed_event, ResponseCompletedEvent)
+    completed_resp = completed_event.response
+    assert isinstance(completed_resp.output[0], ResponseOutputMessage)
     assert isinstance(completed_resp.output[0].content[0], ResponseOutputText)
     assert completed_resp.output[0].content[0].text == "answer"
