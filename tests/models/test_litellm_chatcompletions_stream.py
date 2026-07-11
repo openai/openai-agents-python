@@ -16,10 +16,13 @@ from openai.types.completion_usage import (
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
+    ResponseContentPartAddedEvent,
     ResponseFunctionToolCall,
     ResponseOutputMessage,
     ResponseOutputRefusal,
     ResponseOutputText,
+    ResponseReasoningItem,
+    ResponseRefusalDeltaEvent,
 )
 
 from agents.extensions.models.litellm_model import LitellmModel
@@ -594,3 +597,101 @@ async def test_stream_response_content_filter_does_not_clobber_text(monkeypatch)
     assert isinstance(completed_resp.output[0], ResponseOutputMessage)
     assert isinstance(completed_resp.output[0].content[0], ResponseOutputText)
     assert completed_resp.output[0].content[0].text == "answer"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_content_filter_refusal_after_reasoning(monkeypatch) -> None:
+    """A content_filter turn preceded by reasoning must still place the
+    synthesized refusal at content_index 0 of the assistant message. Reasoning
+    is a *separate* output item (it shifts the message's output_index, not its
+    content_index), so the refusal — the sole content part — stays at
+    content_index 0 in both the stream and response.completed."""
+    reasoning_delta = ChoiceDelta(role="assistant", content=None)
+    # reasoning_content is a provider extra field the handler reads via hasattr.
+    reasoning_delta.reasoning_content = "thinking..."  # type: ignore[attr-defined]
+    chunk_reasoning = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=reasoning_delta)],
+    )
+    chunk_empty = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(content=""))],
+    )
+    chunk_filter = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(), finish_reason="content_filter")],
+        usage=CompletionUsage(completion_tokens=0, prompt_tokens=7, total_tokens=7),
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for c in (chunk_reasoning, chunk_empty, chunk_filter):
+            yield c
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    monkeypatch.setattr(LitellmModel, "_fetch_response", patched_fetch_response)
+    model = LitellmProvider().get_model("gpt-4")
+    output_events = [
+        event
+        async for event in model.stream_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+    ]
+
+    # A reasoning item was produced as a separate output item.
+    completed_event = output_events[-1]
+    assert isinstance(completed_event, ResponseCompletedEvent)
+    completed_resp = completed_event.response
+    assert isinstance(completed_resp.output[0], ResponseReasoningItem)
+    assistant_msg = completed_resp.output[1]
+    assert isinstance(assistant_msg, ResponseOutputMessage)
+    # The refusal is the sole content part of the assistant message, at index 0.
+    assert len(assistant_msg.content) == 1
+    assert isinstance(assistant_msg.content[0], ResponseOutputRefusal)
+
+    # The assistant message's output_index is 1 (after the reasoning item), and
+    # every refusal event uses that output_index and content_index 0 — matching
+    # the refusal's position in response.completed.
+    added = [
+        e
+        for e in output_events
+        if isinstance(e, ResponseContentPartAddedEvent)
+        and isinstance(e.part, ResponseOutputRefusal)
+    ]
+    deltas = [e for e in output_events if isinstance(e, ResponseRefusalDeltaEvent)]
+    assert len(added) == 1
+    assert added[0].content_index == 0
+    assert added[0].output_index == 1
+    assert deltas and all(d.content_index == 0 and d.output_index == 1 for d in deltas)
+    # The empty "" delta still opens no text part.
+    assert "response.output_text.delta" not in [e.type for e in output_events]

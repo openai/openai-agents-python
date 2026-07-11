@@ -970,12 +970,13 @@ class ChatCmplStreamHandler:
             # A content-filtered turn (e.g. Bedrock) can terminate with no
             # emitted output. Its leading empty "" content delta is suppressed
             # above so no text part opens, so we announce a fresh assistant
-            # message and place the refusal at the first content index — the same
-            # index it occupies in response.completed, keeping raw-event replay
-            # and the final response aligned.
+            # message and place the refusal at content index 0. A reasoning item
+            # is a *separate* output item (it affects the message's output_index,
+            # via assistant_message_output_index, not its content_index) and is
+            # never appended to the assistant message's content — so the refusal,
+            # the sole content part, is at content_index 0 in both the stream and
+            # response.completed regardless of any reasoning item.
             refusal_index = 0
-            if state.reasoning_content_index_and_output:
-                refusal_index += 1
             refusal_message = "Response withheld by the provider's content filter."
             state.refusal_content_index_and_output = (
                 refusal_index,
