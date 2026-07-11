@@ -316,34 +316,46 @@ class AdvancedSQLiteSession(SQLiteSession):
                         )
                         message_row = cursor.fetchone()
 
-                        # Remove the structure row for this branch, then drop the
-                        # underlying message only if no other branch references it.
-                        cursor.execute(
-                            "DELETE FROM message_structure WHERE id = ?",
-                            (structure_id,),
-                        )
-                        self._cleanup_orphaned_messages_sync(conn)
-
-                        # If this was the last item of the turn on this branch,
-                        # drop the now-stale turn_usage row for that turn.
-                        if user_turn_number is not None:
+                        try:
+                            # Remove the structure row for this branch, then drop
+                            # the underlying message only if no other branch
+                            # references it.
                             cursor.execute(
-                                """
-                                SELECT COUNT(*) FROM message_structure
-                                WHERE session_id = ? AND branch_id = ? AND user_turn_number = ?
-                                """,
-                                (self.session_id, branch_id, user_turn_number),
+                                "DELETE FROM message_structure WHERE id = ?",
+                                (structure_id,),
                             )
-                            if cursor.fetchone()[0] == 0:
+                            self._cleanup_orphaned_messages_sync(conn)
+
+                            # If this was the last item of the turn on this
+                            # branch, drop the now-stale turn_usage row for it.
+                            if user_turn_number is not None:
                                 cursor.execute(
                                     """
-                                    DELETE FROM turn_usage
-                                    WHERE session_id = ? AND branch_id = ? AND user_turn_number = ?
+                                    SELECT COUNT(*) FROM message_structure
+                                    WHERE session_id = ? AND branch_id = ?
+                                    AND user_turn_number = ?
                                     """,
                                     (self.session_id, branch_id, user_turn_number),
                                 )
+                                if cursor.fetchone()[0] == 0:
+                                    cursor.execute(
+                                        """
+                                        DELETE FROM turn_usage
+                                        WHERE session_id = ? AND branch_id = ?
+                                        AND user_turn_number = ?
+                                        """,
+                                        (self.session_id, branch_id, user_turn_number),
+                                    )
 
-                        conn.commit()
+                            conn.commit()
+                        except Exception:
+                            # _locked_connection() does not manage transactions;
+                            # roll back explicitly so a failure partway through
+                            # this delete sequence never leaves a partial
+                            # mutation or an open transaction for a later
+                            # operation on this connection to inherit.
+                            conn.rollback()
+                            raise
 
                         if message_row is None:
                             # Structure row pointed at a missing message; keep looking.
