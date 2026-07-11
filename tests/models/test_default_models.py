@@ -2,6 +2,7 @@ import os
 from typing import Literal
 from unittest.mock import patch
 
+import pytest
 from openai.types.shared.reasoning import Reasoning
 
 from agents import Agent
@@ -93,6 +94,26 @@ def test_get_default_model_settings_returns_none_reasoning_defaults_for_gpt_5_4_
 def test_get_default_model_settings_returns_none_reasoning_defaults_for_gpt_5_5_models():
     assert get_default_model_settings("gpt-5.5") == _gpt_5_default_settings("none")
     assert get_default_model_settings("gpt-5.5-2026-04-23") == _gpt_5_default_settings("none")
+
+
+@pytest.mark.parametrize("model", ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
+def test_get_default_model_settings_returns_none_reasoning_defaults_for_gpt_5_6_models(
+    model: str,
+):
+    assert get_default_model_settings(model) == _gpt_5_default_settings("none")
+
+
+@pytest.mark.parametrize("model", ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
+def test_agent_uses_gpt_5_6_model_settings_from_default_model_env(
+    model: str, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", model.upper())
+
+    agent = Agent(name="test")
+
+    assert get_default_model() == model
+    assert agent.model is None
+    assert agent.model_settings == _gpt_5_default_settings("none")
 
 
 def test_get_default_model_settings_returns_low_reasoning_defaults_for_base_gpt_5():

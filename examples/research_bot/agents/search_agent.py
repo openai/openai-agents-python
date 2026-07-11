@@ -11,7 +11,7 @@ INSTRUCTIONS = (
 
 search_agent = Agent(
     name="Search agent",
-    model="gpt-5.5",
+    model="gpt-5.6-sol",
     instructions=INSTRUCTIONS,
     tools=[WebSearchTool()],
 )

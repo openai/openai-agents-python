@@ -9,7 +9,15 @@ WRITER_PROMPT = (
     "a set of raw search summaries. Your task is to synthesize these into a long‑form markdown "
     "report (at least several paragraphs) including a short executive summary and follow‑up "
     "questions. If needed, you can call the available analysis tools (e.g. fundamentals_analysis, "
-    "risk_analysis) to get short specialist write‑ups to incorporate."
+    "risk_analysis) to get short specialist write‑ups to incorporate. Every material numeric or "
+    "time-sensitive claim must include an inline Markdown citation using a URL supplied in the "
+    "research evidence. Never invent or alter a source URL."
+)
+
+REVISION_PROMPT = (
+    f"{WRITER_PROMPT} You are revising an existing report after evidence verification. Address "
+    "every verification issue, remove claims that cannot be supported, preserve valid analysis, "
+    "and return a complete replacement report rather than a patch or commentary."
 )
 
 
@@ -29,6 +37,6 @@ class FinancialReportData(BaseModel):
 writer_agent = Agent(
     name="FinancialWriterAgent",
     instructions=WRITER_PROMPT,
-    model="gpt-5.5",
+    model="gpt-5.6-sol",
     output_type=FinancialReportData,
 )

@@ -15,7 +15,7 @@ from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-DEFAULT_MODEL = "gpt-5.5"
+DEFAULT_MODEL = "gpt-5.6-sol"
 GTM_SESSION_ID = "gtm-q2-pipeline-review"
 ENGINEERING_SESSION_ID = "eng-invoice-test-fix"
 

@@ -168,7 +168,7 @@ class BackendSpanExporter(TracingExporter):
 
                     # If the response is successful, break out of the loop
                     if response.status_code < 300:
-                        logger.debug(f"Exported {len(grouped)} items")
+                        logger.debug("Exported %s items", len(grouped))
                         break
 
                     # If the response is a client error (4xx), we won't retry
@@ -182,11 +182,11 @@ class BackendSpanExporter(TracingExporter):
 
                     # For 5xx or other unexpected codes, treat it as transient and retry
                     logger.warning(
-                        f"[non-fatal] Tracing: server error {response.status_code}, retrying."
+                        "[non-fatal] Tracing: server error %s, retrying.", response.status_code
                     )
                 except httpx.RequestError as exc:
                     # Network or other I/O error, we'll retry
-                    logger.warning(f"[non-fatal] Tracing: request failed: {exc}")
+                    logger.warning("[non-fatal] Tracing: request failed: %s", exc)
 
                 # If we reach here, we need to retry or give up
                 if attempt >= self.max_retries:

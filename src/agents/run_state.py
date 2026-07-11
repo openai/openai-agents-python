@@ -130,7 +130,7 @@ ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.11"
+CURRENT_SCHEMA_VERSION = "1.12"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
 SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
@@ -148,6 +148,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.9": "Persists pending custom tool calls and tool origin metadata across resume flows.",
     "1.10": "Allows serialized RunState snapshots to disable max_turns with null.",
     "1.11": "Persists SDK-only custom data on tool output items across resume flows.",
+    "1.12": "Persists input cache-write token usage across resume flows.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -3180,9 +3181,9 @@ def _deserialize_items(
         agent, agent_name = _resolve_agent_info(item_data, item_type)
         if not agent:
             if agent_name:
-                logger.warning(f"Agent {agent_name} not found, skipping item")
+                logger.warning("Agent %s not found, skipping item", agent_name)
             else:
-                logger.warning(f"Item missing agent field, skipping: {item_type}")
+                logger.warning("Item missing agent field, skipping: %s", item_type)
             continue
 
         raw_item_data = item_data["raw_item"]
@@ -3338,7 +3339,7 @@ def _deserialize_items(
         except UserError:
             raise
         except Exception as e:
-            logger.warning(f"Failed to deserialize item of type {item_type}: {e}")
+            logger.warning("Failed to deserialize item of type %s: %s", item_type, e)
             continue
 
     return result

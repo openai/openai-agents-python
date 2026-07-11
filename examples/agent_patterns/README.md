@@ -2,6 +2,10 @@
 
 This folder contains examples of different common patterns for agents.
 
+## Hosted multi-agent (experimental)
+
+The Responses API can coordinate server-hosted GPT-5.6 subagents while the normal SDK Runner executes developer-defined function tools locally. See [`hosted_multi_agent_beta.py`](./hosted_multi_agent_beta.py) for non-streaming and streaming examples using the experimental model module.
+
 ## Deterministic flows
 
 A common tactic is to break down a task into a series of smaller steps. Each task can be performed by an agent, and the output of one agent is used as input to the next. For example, if your task was to generate a story, you could break it down into the following steps:

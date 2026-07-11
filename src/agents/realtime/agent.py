@@ -125,6 +125,6 @@ class RealtimeAgent(AgentBase, Generic[TContext]):
             else:
                 return cast(str, self.instructions(run_context, self))
         elif self.instructions is not None:
-            logger.error(f"Instructions must be a string or a function, got {self.instructions}")
+            logger.error("Instructions must be a string or a function, got %s", self.instructions)
 
         return None

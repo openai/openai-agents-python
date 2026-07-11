@@ -546,7 +546,7 @@ class MCPUtil:
                 schema = ensure_strict_json_schema(copy.deepcopy(schema))
                 is_strict = True
             except Exception as e:
-                logger.info(f"Error converting MCP schema to strict mode: {e}")
+                logger.info("Error converting MCP schema to strict mode: %s", e)
 
         needs_approval: (
             bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
@@ -684,9 +684,9 @@ class MCPUtil:
             )
 
         if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug(f"Invoking MCP tool {tool_name_for_display}")
+            logger.debug("Invoking MCP tool %s", tool_name_for_display)
         else:
-            logger.debug(f"Invoking MCP tool {tool_name_for_display} with input {input_json}")
+            logger.debug("Invoking MCP tool %s with input %s", tool_name_for_display, input_json)
 
         try:
             resolved_meta = await cls._resolve_meta(server, context, tool.name, json_data)
@@ -726,22 +726,27 @@ class MCPUtil:
                 # failure_error_function=None will have the error raised as documented.
                 error_text = e.error.message if hasattr(e, "error") and e.error else str(e)
                 logger.warning(
-                    f"MCP tool {tool_name_for_display} on server '{server.name}' "
-                    f"returned an error: {error_text}"
+                    "MCP tool %s on server '%s' returned an error: %s",
+                    tool_name_for_display,
+                    server.name,
+                    error_text,
                 )
                 raise
 
             logger.error(
-                f"Error invoking MCP tool {tool_name_for_display} on server '{server.name}': {e}"
+                "Error invoking MCP tool %s on server '%s': %s",
+                tool_name_for_display,
+                server.name,
+                e,
             )
             raise AgentsException(
                 f"Error invoking MCP tool {tool_name_for_display} on server '{server.name}': {e}"
             ) from e
 
         if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug(f"MCP tool {tool_name_for_display} completed.")
+            logger.debug("MCP tool %s completed.", tool_name_for_display)
         else:
-            logger.debug(f"MCP tool {tool_name_for_display} returned {result}")
+            logger.debug("MCP tool %s returned %s", tool_name_for_display, result)
 
         # If structured content is requested and available, use it exclusively
         tool_output: ToolOutput
@@ -792,7 +797,7 @@ class MCPUtil:
                 }
             else:
                 logger.warning(
-                    f"Current span is not a FunctionSpanData, skipping tool output: {current_span}"
+                    "Current span is not a FunctionSpanData, skipping tool output: %s", current_span
                 )
 
         return tool_output

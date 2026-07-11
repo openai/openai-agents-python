@@ -196,14 +196,18 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         if not should_compact:
             logger.debug(
-                f"skip: decision hook declined compaction for {self._response_id} "
-                f"(mode={resolved_mode})"
+                "skip: decision hook declined compaction for %s (mode=%s)",
+                self._response_id,
+                resolved_mode,
             )
             return
 
         self._deferred_response_id = None
         logger.debug(
-            f"compact: start for {self._response_id} using {self.model} (mode={resolved_mode})"
+            "compact: start for %s using %s (mode=%s)",
+            self._response_id,
+            self.model,
+            resolved_mode,
         )
 
         compact_kwargs: dict[str, Any] = {"model": self.model}
@@ -228,9 +232,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._session_items = output_items
 
         logger.debug(
-            f"compact: done for {self._response_id} "
-            f"(mode={resolved_mode}, output={len(output_items)}, "
-            f"candidates={len(self._compaction_candidate_items)})"
+            "compact: done for %s (mode=%s, output=%s, candidates=%s)",
+            self._response_id,
+            resolved_mode,
+            len(output_items),
+            len(self._compaction_candidate_items),
         )
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
@@ -367,7 +373,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._session_items = history
 
         logger.debug(
-            f"candidates: initialized (history={len(history)}, candidates={len(candidates)})"
+            "candidates: initialized (history=%s, candidates=%s)",
+            len(history),
+            len(candidates),
         )
         return (candidates[:], history[:])
 

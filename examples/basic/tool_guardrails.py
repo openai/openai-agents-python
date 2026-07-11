@@ -107,7 +107,11 @@ get_contact_info.tool_output_guardrails = [reject_phone_numbers]
 
 agent = Agent(
     name="Secure Assistant",
-    instructions="You are a helpful assistant with access to email and user data tools.",
+    instructions=(
+        "You are a helpful assistant with access to email and user data tools. "
+        "When the user provides all required arguments for a requested tool, call it instead of "
+        "asking a follow-up question."
+    ),
     tools=[send_email, get_user_data, get_contact_info],
 )
 
@@ -118,13 +122,19 @@ async def main():
     try:
         # Example 1: Normal operation - should work fine
         print("1. Normal email sending:")
-        result = await Runner.run(agent, "Send a welcome email to john@example.com")
+        result = await Runner.run(
+            agent,
+            "Send an email to john@example.com with subject 'Welcome' and body "
+            "'Welcome to our service.'",
+        )
         print(f"✅ Successful tool execution: {result.final_output}\n")
 
         # Example 2: Input guardrail triggers - function tool call is rejected but execution continues
         print("2. Attempting to send email with suspicious content:")
         result = await Runner.run(
-            agent, "Send an email to john@example.com introducing the company ACME corp."
+            agent,
+            "Send an email to john@example.com with subject 'Introduction' and body "
+            "'Introducing ACME corp.'",
         )
         print(f"❌ Guardrail rejected function tool call: {result.final_output}\n")
     except Exception as e:

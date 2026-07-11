@@ -1526,6 +1526,96 @@ class TestDaytonaSandbox:
         assert entry.done is False
         assert entry.exit_code is None
 
+    @pytest.mark.asyncio
+    async def test_terminate_pty_entry_awaits_worker_finalizer(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        daytona_module = _load_daytona_module(monkeypatch)
+        sandbox = _FakeDaytonaSandbox()
+        state = daytona_module.DaytonaSandboxSessionState(
+            manifest=Manifest(root=daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT),
+            snapshot=NoopSnapshot(id="snapshot"),
+            sandbox_id=sandbox.id,
+        )
+        session = daytona_module.DaytonaSandboxSession.from_state(state, sandbox=sandbox)
+        entry = daytona_module._DaytonaPtySessionEntry(  # noqa: SLF001
+            daytona_session_id="session-123",
+            pty_handle=object(),
+            tty=False,
+            cmd_id="cmd-123",
+        )
+        finalizer_finished = asyncio.Event()
+
+        async def worker() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                finalizer_finished.set()
+
+        entry.worker_task = asyncio.create_task(worker())
+        await asyncio.sleep(0)
+
+        await session._terminate_pty_entry(entry)  # noqa: SLF001
+
+        assert finalizer_finished.is_set()
+        assert entry.worker_task is None
+        assert sandbox.process.delete_session_calls == ["session-123"]
+
+    @pytest.mark.asyncio
+    async def test_terminate_pty_entry_bounds_worker_finalizer(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        daytona_module = _load_daytona_module(monkeypatch)
+        sandbox = _FakeDaytonaSandbox()
+        state = daytona_module.DaytonaSandboxSessionState(
+            manifest=Manifest(root=daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT),
+            snapshot=NoopSnapshot(id="snapshot"),
+            sandbox_id=sandbox.id,
+        )
+        monkeypatch.setattr(state.timeouts, "cleanup_s", 0.01)
+        session = daytona_module.DaytonaSandboxSession.from_state(state, sandbox=sandbox)
+        entry = daytona_module._DaytonaPtySessionEntry(  # noqa: SLF001
+            daytona_session_id="session-123",
+            pty_handle=object(),
+            tty=False,
+            cmd_id="cmd-123",
+        )
+        logs_started = asyncio.Event()
+        finalizer_started = asyncio.Event()
+
+        async def read_logs(*_args: object) -> None:
+            logs_started.set()
+            await asyncio.Event().wait()
+
+        async def get_command(*_args: object) -> object:
+            finalizer_started.set()
+            await asyncio.Event().wait()
+            return types.SimpleNamespace(exit_code=None)
+
+        monkeypatch.setattr(sandbox.process, "get_session_command_logs_async", read_logs)
+        monkeypatch.setattr(sandbox.process, "get_session_command", get_command)
+
+        worker_task = asyncio.create_task(
+            session._run_session_reader(  # noqa: SLF001
+                entry,
+                "session-123",
+                "cmd-123",
+                lambda _chunk: None,
+            )
+        )
+        entry.worker_task = worker_task
+        await logs_started.wait()
+
+        await asyncio.wait_for(session._terminate_pty_entry(entry), timeout=0.5)  # noqa: SLF001
+
+        assert finalizer_started.is_set()
+        assert worker_task.done()
+        assert entry.worker_task is None
+        assert sandbox.process.delete_session_calls == ["session-123"]
+
 
 # ---------------------------------------------------------------------------
 # DaytonaCloudBucketMountStrategy tests

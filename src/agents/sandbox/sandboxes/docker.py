@@ -49,6 +49,7 @@ from ..session import SandboxSession, SandboxSessionState
 from ..session.base_sandbox_session import BaseSandboxSession
 from ..session.dependencies import Dependencies
 from ..session.manager import Instrumentation
+from ..session.pty_output import collect_pty_output
 from ..session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -57,7 +58,6 @@ from ..session.pty_types import (
     clamp_pty_yield_time_ms,
     process_id_to_prune_from_meta,
     resolve_pty_write_yield_time_ms,
-    truncate_text_by_tokens,
 )
 from ..session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
 from ..session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
@@ -89,6 +89,7 @@ logger = logging.getLogger(__name__)
 # Non-seekable payloads are spooled to measure their length; keep small ones in
 # RAM and spill larger ones to a temp file so a big upload can't OOM the process.
 _STREAM_SPOOL_MAX_SIZE = 16 * 1024 * 1024
+_DEFERRED_CLEANUP_TIMEOUT_S = 30.0
 
 
 def _measure_stream(stream: io.IOBase) -> tuple[int, io.IOBase, io.IOBase | None]:
@@ -230,6 +231,7 @@ class DockerSandboxSession(BaseSandboxSession):
     _pty_lock: asyncio.Lock
     _pty_processes: dict[int, _DockerPtyProcessEntry]
     _reserved_pty_process_ids: set[int]
+    _cleanup_tasks: set[asyncio.Task[None]]
 
     state: DockerSandboxSessionState
     _ARCHIVE_STAGING_DIR: Path = posix_path_as_path(
@@ -251,6 +253,7 @@ class DockerSandboxSession(BaseSandboxSession):
         self._pty_lock = asyncio.Lock()
         self._pty_processes = {}
         self._reserved_pty_process_ids = set()
+        self._cleanup_tasks = set()
 
     @classmethod
     def from_state(
@@ -475,6 +478,13 @@ class DockerSandboxSession(BaseSandboxSession):
     async def _after_start(self) -> None:
         self._workspace_root_ready = True
         self._resume_workspace_probe_pending = False
+
+    async def _after_stop(self) -> None:
+        await self._wait_for_cleanup_tasks()
+
+    async def _before_shutdown(self) -> None:
+        await super()._before_shutdown()
+        await self._wait_for_cleanup_tasks()
 
     def _mark_workspace_root_ready_from_probe(self) -> None:
         super()._mark_workspace_root_ready_from_probe()
@@ -1180,36 +1190,14 @@ class DockerSandboxSession(BaseSandboxSession):
         yield_time_ms: int,
         max_output_tokens: int | None,
     ) -> tuple[bytes, int | None]:
-        deadline = time.monotonic() + (yield_time_ms / 1000)
-        output = bytearray()
-
-        while True:
-            async with entry.output_lock:
-                while entry.output_chunks:
-                    output.extend(entry.output_chunks.popleft())
-
-            if time.monotonic() >= deadline:
-                break
-
-            if entry.output_closed.is_set():
-                async with entry.output_lock:
-                    while entry.output_chunks:
-                        output.extend(entry.output_chunks.popleft())
-                break
-
-            remaining_s = deadline - time.monotonic()
-            if remaining_s <= 0:
-                break
-
-            try:
-                await asyncio.wait_for(entry.output_notify.wait(), timeout=remaining_s)
-            except asyncio.TimeoutError:
-                break
-            entry.output_notify.clear()
-
-        text = output.decode("utf-8", errors="replace")
-        truncated_text, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
-        return truncated_text.encode("utf-8", errors="replace"), original_token_count
+        return await collect_pty_output(
+            output_chunks=entry.output_chunks,
+            output_lock=entry.output_lock,
+            output_notify=entry.output_notify,
+            is_done=entry.output_closed.is_set,
+            yield_time_ms=yield_time_ms,
+            max_output_tokens=max_output_tokens,
+        )
 
     async def _finalize_pty_update(
         self,
@@ -1394,7 +1382,24 @@ class DockerSandboxSession(BaseSandboxSession):
 
     def _schedule_rm_best_effort(self, path: Path) -> None:
         loop = asyncio.get_running_loop()
-        loop.create_task(self._rm_best_effort(path))
+        task = loop.create_task(self._rm_best_effort(path))
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_tasks.discard)
+
+    async def _wait_for_cleanup_tasks(self) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _DEFERRED_CLEANUP_TIMEOUT_S
+        while cleanup_tasks := tuple(self._cleanup_tasks):
+            remaining_s = deadline - loop.time()
+            if remaining_s <= 0:
+                break
+            done, pending = await asyncio.wait(cleanup_tasks, timeout=remaining_s)
+            self._cleanup_tasks.difference_update(done)
+            if pending:
+                break
+
+        for task in tuple(self._cleanup_tasks):
+            task.cancel()
 
     def _workspace_archive_stream(
         self,

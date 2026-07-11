@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, cast
 
-from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
+from openai.types.responses.response_usage import OutputTokensDetails
 
 from ..agent import Agent
 from ..agent_tool_state import set_agent_tool_state_scope
@@ -24,6 +24,9 @@ from ..tracing.config import TracingConfig
 from ..tracing.traces import TraceState
 from ..usage import (
     Usage,
+    _cache_write_tokens,
+    _cached_tokens,
+    _make_input_tokens_details,
     task_usage_to_span_data,
     total_usage_to_span_metadata,
     turn_usage_to_span_data,
@@ -73,12 +76,9 @@ def snapshot_usage(usage: Usage) -> Usage:
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
         total_tokens=usage.total_tokens,
-        input_tokens_details=InputTokensDetails(
-            cached_tokens=(
-                usage.input_tokens_details.cached_tokens
-                if usage.input_tokens_details and usage.input_tokens_details.cached_tokens
-                else 0
-            )
+        input_tokens_details=_make_input_tokens_details(
+            cached_tokens=_cached_tokens(usage.input_tokens_details),
+            cache_write_tokens=_cache_write_tokens(usage.input_tokens_details),
         ),
         output_tokens_details=OutputTokensDetails(
             reasoning_tokens=(
@@ -97,11 +97,15 @@ def usage_delta(start: Usage, end: Usage) -> Usage:
         input_tokens=end.input_tokens - start.input_tokens,
         output_tokens=end.output_tokens - start.output_tokens,
         total_tokens=end.total_tokens - start.total_tokens,
-        input_tokens_details=InputTokensDetails(
+        input_tokens_details=_make_input_tokens_details(
             cached_tokens=(
                 (end.input_tokens_details.cached_tokens or 0)
                 - (start.input_tokens_details.cached_tokens or 0)
-            )
+            ),
+            cache_write_tokens=(
+                _cache_write_tokens(end.input_tokens_details)
+                - _cache_write_tokens(start.input_tokens_details)
+            ),
         ),
         output_tokens_details=OutputTokensDetails(
             reasoning_tokens=(
@@ -122,6 +126,7 @@ def attach_usage_to_span(
         if usage.input_tokens_details and usage.input_tokens_details.cached_tokens
         else 0
     )
+    cache_write_tokens = _cache_write_tokens(usage.input_tokens_details)
     reasoning_tokens = (
         usage.output_tokens_details.reasoning_tokens
         if usage.output_tokens_details and usage.output_tokens_details.reasoning_tokens
@@ -133,6 +138,7 @@ def attach_usage_to_span(
         and usage.output_tokens == 0
         and usage.total_tokens == 0
         and cached_tokens == 0
+        and cache_write_tokens == 0
         and reasoning_tokens == 0
     ):
         return

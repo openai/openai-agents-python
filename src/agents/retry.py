@@ -145,8 +145,8 @@ def _mark_retry_capabilities(
     retries_safe_transport_errors: bool,
     retries_all_transient_errors: bool,
 ) -> RetryPolicy:
-    setattr(policy, _RETRIES_SAFE_TRANSPORT_ERRORS_ATTR, retries_safe_transport_errors)  # noqa: B010
-    setattr(policy, _RETRIES_ALL_TRANSIENT_ERRORS_ATTR, retries_all_transient_errors)  # noqa: B010
+    setattr(policy, _RETRIES_SAFE_TRANSPORT_ERRORS_ATTR, retries_safe_transport_errors)
+    setattr(policy, _RETRIES_ALL_TRANSIENT_ERRORS_ATTR, retries_all_transient_errors)
     return policy
 
 

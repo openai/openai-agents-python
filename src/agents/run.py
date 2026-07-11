@@ -82,6 +82,7 @@ from .run_internal.oai_conversation import OpenAIServerConversationTracker
 from .run_internal.prompt_cache_key import PromptCacheKeyResolver
 from .run_internal.run_grouping import resolve_run_grouping_id
 from .run_internal.run_loop import (
+    cleanup_models_after_run,
     get_all_tools,
     get_handoffs,
     get_output_schema,
@@ -1517,6 +1518,7 @@ class AgentRunner:
                     )
                 raise
             finally:
+                await cleanup_models_after_run(tool_use_tracker)
                 try:
                     try:
                         memory_input = _sandbox_memory_input(

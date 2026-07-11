@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
-from datetime import datetime
 
 from ._util import calculate_audio_length_ms
 from .config import RealtimeAudioFormat
@@ -9,7 +9,7 @@ from .config import RealtimeAudioFormat
 
 @dataclass
 class ModelAudioState:
-    initial_received_time: datetime
+    initial_received_time: float
     audio_length_ms: float
 
 
@@ -35,7 +35,7 @@ class ModelAudioTracker:
 
         self._last_audio_item = new_key
         if new_key not in self._states:
-            self._states[new_key] = ModelAudioState(datetime.now(), ms)
+            self._states[new_key] = ModelAudioState(time.monotonic(), ms)
         else:
             self._states[new_key].audio_length_ms += ms
 

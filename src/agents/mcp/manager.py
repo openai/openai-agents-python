@@ -260,10 +260,10 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
             except asyncio.CancelledError as exc:
                 if not self.suppress_cancelled_error:
                     raise
-                logger.debug(f"Cleanup cancelled for MCP server '{server.name}': {exc}")
+                logger.debug("Cleanup cancelled for MCP server '%s': %s", server.name, exc)
                 self.errors[server] = exc
             except Exception as exc:
-                logger.exception(f"Failed to cleanup MCP server '{server.name}': {exc}")
+                logger.exception("Failed to cleanup MCP server '%s': %s", server.name, exc)
                 self.errors[server] = exc
 
     async def _run_with_timeout(
@@ -302,7 +302,7 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
             self._active_servers = list(self._all_servers)
 
     def _record_failure(self, server: MCPServer, exc: BaseException, phase: str) -> None:
-        logger.exception(f"Failed to {phase} MCP server '{server.name}': {exc}")
+        logger.exception("Failed to %s MCP server '%s': %s", phase, server.name, exc)
         if server not in self._failed_server_set:
             self.failed_servers.append(server)
             self._failed_server_set.add(server)
@@ -340,10 +340,10 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
             except asyncio.CancelledError as exc:
                 if not self.suppress_cancelled_error:
                     raise
-                logger.debug(f"Cleanup cancelled for MCP server '{server.name}': {exc}")
+                logger.debug("Cleanup cancelled for MCP server '%s': %s", server.name, exc)
                 self.errors[server] = exc
             except Exception as exc:
-                logger.exception(f"Failed to cleanup MCP server '{server.name}': {exc}")
+                logger.exception("Failed to cleanup MCP server '%s': %s", server.name, exc)
                 self.errors[server] = exc
 
     async def _connect_all_parallel(self, servers: list[MCPServer]) -> None:

@@ -1,121 +1,16 @@
 from __future__ import annotations
 
-import time
-from collections.abc import Iterator, Mapping
-from email.utils import parsedate_to_datetime
-from typing import Any
-
-import httpx
-from openai import APIConnectionError, APIStatusError, APITimeoutError
+from openai import APIConnectionError, APITimeoutError
 
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest, ModelRetryNormalizedError
-
-
-def _iter_error_chain(error: Exception) -> Iterator[Exception]:
-    current: Exception | None = error
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        yield current
-        next_error = current.__cause__ or current.__context__
-        current = next_error if isinstance(next_error, Exception) else None
-
-
-def _header_lookup(headers: Any, key: str) -> str | None:
-    normalized_key = key.lower()
-    if isinstance(headers, httpx.Headers):
-        value = headers.get(key)
-        return value if isinstance(value, str) else None
-    if isinstance(headers, Mapping):
-        for header_name, header_value in headers.items():
-            if str(header_name).lower() == normalized_key and isinstance(header_value, str):
-                return header_value
-    return None
-
-
-def _get_header_value(error: Exception, key: str) -> str | None:
-    for candidate in _iter_error_chain(error):
-        response = getattr(candidate, "response", None)
-        if isinstance(response, httpx.Response):
-            header_value = _header_lookup(response.headers, key)
-            if header_value is not None:
-                return header_value
-
-        for attr_name in ("headers", "response_headers"):
-            header_value = _header_lookup(getattr(candidate, attr_name, None), key)
-            if header_value is not None:
-                return header_value
-
-    return None
-
-
-def _parse_retry_after_ms(value: str | None) -> float | None:
-    if value is None:
-        return None
-    try:
-        parsed = float(value) / 1000.0
-    except ValueError:
-        return None
-    return parsed if parsed >= 0 else None
-
-
-def _parse_retry_after(value: str | None) -> float | None:
-    if value is None:
-        return None
-
-    try:
-        parsed = float(value)
-    except ValueError:
-        parsed = None
-    if parsed is not None:
-        return parsed if parsed >= 0 else None
-
-    try:
-        retry_datetime = parsedate_to_datetime(value)
-    except (TypeError, ValueError, IndexError):
-        return None
-
-    return max(retry_datetime.timestamp() - time.time(), 0.0)
-
-
-def _get_status_code(error: Exception) -> int | None:
-    for candidate in _iter_error_chain(error):
-        if isinstance(candidate, APIStatusError):
-            return candidate.status_code
-        status_code = getattr(candidate, "status_code", None)
-        if isinstance(status_code, int):
-            return status_code
-        status = getattr(candidate, "status", None)
-        if isinstance(status, int):
-            return status
-    return None
-
-
-def _get_request_id(error: Exception) -> str | None:
-    for candidate in _iter_error_chain(error):
-        request_id = getattr(candidate, "request_id", None)
-        if isinstance(request_id, str):
-            return request_id
-    return None
-
-
-def _get_error_code(error: Exception) -> str | None:
-    for candidate in _iter_error_chain(error):
-        error_code = getattr(candidate, "code", None)
-        if isinstance(error_code, str):
-            return error_code
-
-        body = getattr(candidate, "body", None)
-        if isinstance(body, Mapping):
-            nested_error = body.get("error")
-            if isinstance(nested_error, Mapping):
-                nested_code = nested_error.get("code")
-                if isinstance(nested_code, str):
-                    return nested_code
-            body_code = body.get("code")
-            if isinstance(body_code, str):
-                return body_code
-    return None
+from ._retry_runtime import (
+    get_error_code as _get_error_code,
+    get_error_header as _get_header_value,
+    get_request_id as _get_request_id,
+    get_retry_after,
+    get_status_code as _get_status_code,
+    iter_error_chain as _iter_error_chain,
+)
 
 
 def _is_stateful_request(request: ModelRetryAdviceRequest) -> bool:
@@ -163,9 +58,7 @@ def get_openai_retry_advice(request: ModelRetryAdviceRequest) -> ModelRetryAdvic
             reason=str(error),
         )
 
-    retry_after = _parse_retry_after_ms(_get_header_value(error, "retry-after-ms"))
-    if retry_after is None:
-        retry_after = _parse_retry_after(_get_header_value(error, "retry-after"))
+    retry_after = get_retry_after(error)
 
     normalized = _build_normalized_error(error, retry_after=retry_after)
     stateful_request = _is_stateful_request(request)

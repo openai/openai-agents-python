@@ -46,11 +46,12 @@ from openai.types.responses.response_reasoning_text_delta_event import (
 from openai.types.responses.response_reasoning_text_done_event import (
     ResponseReasoningTextDoneEvent,
 )
-from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
+from openai.types.responses.response_usage import OutputTokensDetails
 
 from ..exceptions import ModelBehaviorError, UserError
 from ..items import TResponseStreamEvent
 from ..logger import logger
+from ..usage import _cache_write_tokens, _make_input_tokens_details
 from .chatcmpl_helpers import ChatCmplHelpers
 from .fake_id import FAKE_RESPONSES_ID
 
@@ -504,6 +505,11 @@ class ChatCmplStreamHandler:
         state = StreamingState()
         output_layout = _StreamOutputLayout()
         sequence_number = SequenceNumber()
+        # Some providers (e.g. Anthropic on Amazon Bedrock via LiteLLM) signal a
+        # safety block only through finish_reason == "content_filter" with an
+        # empty delta and no refusal field. Track it so we can synthesize an
+        # explicit refusal after the stream if nothing else was emitted.
+        saw_content_filter = False
         async for chunk in stream:
             if not state.started:
                 state.started = True
@@ -543,6 +549,9 @@ class ChatCmplStreamHandler:
             choice = next((choice for choice in chunk.choices if choice.index == 0), None)
             if choice is None:
                 continue
+
+            if choice.finish_reason == "content_filter":
+                saw_content_filter = True
 
             if not choice.delta:
                 continue
@@ -677,7 +686,17 @@ class ChatCmplStreamHandler:
                     yield event
 
             # Handle regular content
-            if delta.content is not None:
+            if delta.content is not None and not (
+                not state.text_content_index_and_output and delta.content == ""
+            ):
+                # An empty leading content delta ("") is dropped rather than
+                # opening a text content part: materializing an empty part would
+                # add a spurious ResponseOutputText to response.completed. Bedrock
+                # content-filter turns emit exactly this "" warm-up chunk before
+                # the terminal content_filter, so suppressing it here keeps the
+                # synthesized refusal (below) at content index 0 in both the
+                # streamed events and the completed response. Empty deltas after a
+                # text part has already opened keep their existing behavior.
                 if not state.text_content_index_and_output:
                     content_index = 0
                     if state.reasoning_content_index_and_output:
@@ -746,10 +765,13 @@ class ChatCmplStreamHandler:
                 # Accumulate the text into the response part
                 state.text_content_index_and_output[1].text += delta.content
                 if output_logprobs:
-                    existing_logprobs = state.text_content_index_and_output[1].logprobs or []
-                    state.text_content_index_and_output[1].logprobs = (
-                        existing_logprobs + output_logprobs
-                    )
+                    existing_logprobs = state.text_content_index_and_output[1].logprobs
+                    if existing_logprobs is None:
+                        state.text_content_index_and_output[1].logprobs = output_logprobs
+                    else:
+                        # Extend in place to avoid rebuilding the full accumulated list on
+                        # every content delta, which would be O(n^2) over a long stream.
+                        existing_logprobs.extend(output_logprobs)
 
             # Handle refusals (model declines to answer)
             # This is always set by the OpenAI API, but not by others e.g. LiteLLM
@@ -936,6 +958,63 @@ class ChatCmplStreamHandler:
                             sequence_number=sequence_number.get_and_increment(),
                         )
 
+        # Content-filter refusal with no emitted output: synthesize a refusal so
+        # the completed response carries a ResponseOutputRefusal rather than an
+        # empty turn. Only when nothing else was produced (text / refusal / tool
+        # calls) — a content_filter that still emitted content is left as-is.
+        if (
+            saw_content_filter
+            and state.text_content_index_and_output is None
+            and state.refusal_content_index_and_output is None
+            and not state.function_calls
+        ):
+            # A content-filtered turn (e.g. Bedrock) can terminate with no
+            # emitted output. Its leading empty "" content delta is suppressed
+            # above so no text part opens, so we announce a fresh assistant
+            # message and place the refusal at content index 0. A reasoning item
+            # is a *separate* output item (it affects the message's output_index,
+            # via assistant_message_output_index, not its content_index) and is
+            # never appended to the assistant message's content — so the refusal,
+            # the sole content part, is at content_index 0 in both the stream and
+            # response.completed regardless of any reasoning item.
+            refusal_index = 0
+            refusal_message = "Response withheld by the provider's content filter."
+            state.refusal_content_index_and_output = (
+                refusal_index,
+                ResponseOutputRefusal(refusal=refusal_message, type="refusal"),
+            )
+            assistant_item = ResponseOutputMessage(
+                id=FAKE_RESPONSES_ID,
+                content=[],
+                role="assistant",
+                type="message",
+                status="in_progress",
+            )
+            if state.provider_data:
+                assistant_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+            yield ResponseOutputItemAddedEvent(
+                item=assistant_item,
+                output_index=output_layout.assistant_message_output_index(state),
+                type="response.output_item.added",
+                sequence_number=sequence_number.get_and_increment(),
+            )
+            yield ResponseContentPartAddedEvent(
+                content_index=refusal_index,
+                item_id=FAKE_RESPONSES_ID,
+                output_index=output_layout.assistant_message_output_index(state),
+                part=ResponseOutputRefusal(refusal="", type="refusal"),
+                type="response.content_part.added",
+                sequence_number=sequence_number.get_and_increment(),
+            )
+            yield ResponseRefusalDeltaEvent(
+                content_index=refusal_index,
+                delta=refusal_message,
+                item_id=FAKE_RESPONSES_ID,
+                output_index=output_layout.assistant_message_output_index(state),
+                type="response.refusal.delta",
+                sequence_number=sequence_number.get_and_increment(),
+            )
+
         for event in cls._finish_reasoning_item(state, sequence_number):
             yield event
 
@@ -1070,10 +1149,11 @@ class ChatCmplStreamHandler:
                     and usage.completion_tokens_details.reasoning_tokens
                     else 0
                 ),
-                input_tokens_details=InputTokensDetails(
+                input_tokens_details=_make_input_tokens_details(
                     cached_tokens=usage.prompt_tokens_details.cached_tokens
                     if usage.prompt_tokens_details and usage.prompt_tokens_details.cached_tokens
-                    else 0
+                    else 0,
+                    cache_write_tokens=_cache_write_tokens(usage.prompt_tokens_details),
                 ),
             )
             if usage

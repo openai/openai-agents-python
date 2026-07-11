@@ -103,7 +103,7 @@ class VoicePipeline:
                     await output._turn_done()
                     await output._done()
                 except Exception as e:
-                    logger.error(f"Error processing single turn: {e}")
+                    logger.error("Error processing single turn: %s", e)
                     await output._add_error(e)
                     raise e
 
@@ -129,7 +129,7 @@ class VoicePipeline:
                         async for intro_text in self.workflow.on_start():
                             await output._add_text(intro_text)
                     except Exception as e:
-                        logger.warning(f"on_start() failed: {e}")
+                        logger.warning("on_start() failed: %s", e)
 
                     transcription_session = await self._get_stt_model().create_session(
                         audio_input,
@@ -144,7 +144,7 @@ class VoicePipeline:
                             await output._add_text(text_event)
                         await output._turn_done()
                 except Exception as e:
-                    logger.error(f"Error processing turns: {e}")
+                    logger.error("Error processing turns: %s", e)
                     await output._add_error(e)
                     raise e
                 finally:

@@ -210,7 +210,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             if _debug.DONT_LOG_MODEL_DATA:
                 logger.debug("Session updated")
             else:
-                logger.debug(f"Session updated: {event}")
+                logger.debug("Session updated: %s", event)
         except TimeoutError as e:
             wrapped_err = STTWebsocketConnectionError(
                 "Timeout waiting for transcription_session.updated event"

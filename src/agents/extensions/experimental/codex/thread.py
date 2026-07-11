@@ -150,7 +150,7 @@ class Thread:
                         ) from exc
                     try:
                         parsed = _parse_event(item)
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         raise RuntimeError(f"Failed to parse event: {item}") from exc
                     if isinstance(parsed, ThreadStartedEvent):
                         # Capture the thread id so callers can resume later.

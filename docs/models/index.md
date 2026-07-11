@@ -13,6 +13,7 @@ Start with the simplest path that fits your setup:
 | --- | --- | --- |
 | Use OpenAI models only | Use the default OpenAI provider with the Responses model path | [OpenAI models](#openai-models) |
 | Use OpenAI Responses API over websocket transport | Keep the Responses model path and enable websocket transport | [Responses WebSocket transport](#responses-websocket-transport) |
+| Use OpenAI-hosted subagents | Use the experimental hosted multi-agent model | [Hosted multi-agent](#hosted-multi-agent-experimental) |
 | Use one non-OpenAI provider | Start with the built-in provider integration points | [Non-OpenAI models](#non-openai-models) |
 | Mix models or providers across agents | Select providers per run or per agent and review feature differences | [Mixing models in one workflow](#mixing-models-in-one-workflow) and [Mixing models across providers](#mixing-models-across-providers) |
 | Tune advanced OpenAI Responses request settings | Use `ModelSettings` on the OpenAI Responses path | [Advanced OpenAI Responses settings](#advanced-openai-responses-settings) |
@@ -22,16 +23,16 @@ Start with the simplest path that fits your setup:
 
 For most OpenAI-only apps, the recommended path is to use string model names with the default OpenAI provider and stay on the Responses model path.
 
-When you don't specify a model when initializing an `Agent`, the default model will be used. The default is currently [`gpt-5.4-mini`](https://developers.openai.com/api/docs/models/gpt-5.4-mini) with `reasoning.effort="none"` and `verbosity="low"` for low-latency agent workflows. If you have access, we recommend setting your agents to [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) for higher quality while keeping explicit `model_settings`.
+When you don't specify a model when initializing an `Agent`, the default model will be used. The default is currently [`gpt-5.4-mini`](https://developers.openai.com/api/docs/models/gpt-5.4-mini) with `reasoning.effort="none"` and `verbosity="low"` for low-latency agent workflows. If you have access, we recommend setting your agents to `gpt-5.6-sol` for higher quality while keeping explicit `model_settings`.
 
-If you want to switch to other models like [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5), there are two ways to configure your agents.
+If you want to switch to other models like `gpt-5.6-sol`, there are two ways to configure your agents.
 
 ### Default model
 
 First, if you want to consistently use a specific model for all agents that do not set a custom model, set the `OPENAI_DEFAULT_MODEL` environment variable before running your agents.
 
 ```bash
-export OPENAI_DEFAULT_MODEL=gpt-5.5
+export OPENAI_DEFAULT_MODEL=gpt-5.6-sol
 python3 my_awesome_agent.py
 ```
 
@@ -48,13 +49,13 @@ agent = Agent(
 result = await Runner.run(
     agent,
     "Hello",
-    run_config=RunConfig(model="gpt-5.5"),
+    run_config=RunConfig(model="gpt-5.6-sol"),
 )
 ```
 
 #### GPT-5 models
 
-When you use any GPT-5 model such as [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) in this way, the SDK applies default `ModelSettings`. It sets the ones that work the best for most use cases. To adjust the reasoning effort for the default model, pass your own `ModelSettings`:
+When you use any GPT-5 model such as `gpt-5.6-sol` in this way, the SDK applies default `ModelSettings`. It sets the ones that work the best for most use cases. To adjust the reasoning effort for the default model, pass your own `ModelSettings`:
 
 ```python
 from openai.types.shared import Reasoning
@@ -63,14 +64,37 @@ from agents import Agent, ModelSettings
 my_agent = Agent(
     name="My Agent",
     instructions="You're a helpful agent.",
-    # If OPENAI_DEFAULT_MODEL=gpt-5.5 is set, passing only model_settings works.
+    # If OPENAI_DEFAULT_MODEL=gpt-5.6-sol is set, passing only model_settings works.
     # It's also fine to pass a GPT-5 model name explicitly:
-    model="gpt-5.5",
+    model="gpt-5.6-sol",
     model_settings=ModelSettings(reasoning=Reasoning(effort="high"), verbosity="low")
 )
 ```
 
 For lower latency, using `reasoning.effort="none"` with GPT-5 models is recommended.
+
+GPT-5.6 also supports reasoning mode, persisted reasoning context, and the `"max"` effort level through the existing `reasoning` setting. These controls are available on the Responses API path:
+
+```python
+from openai.types.shared import Reasoning
+from agents import Agent, ModelSettings
+
+agent = Agent(
+    name="Deep research agent",
+    model="gpt-5.6-sol",
+    model_settings=ModelSettings(
+        reasoning=Reasoning(
+            mode="pro",
+            effort="max",
+            context="all_turns",
+        ),
+    ),
+)
+```
+
+`reasoning.mode` and `reasoning.context` are Responses-only settings. Chat Completions uses only `reasoning.effort`, and the supported effort levels depend on the model and API surface. Use the Responses API for GPT-5.6 `"max"` effort. The Chat Completions adapter ignores mode and context with a warning; set `strict_feature_validation=True` on the OpenAI provider to turn that warning into an error.
+
+When using `context="all_turns"`, preserve the conversation through `previous_response_id`, a server-side conversation, or by replaying prior reasoning items. For stateless `store=False` calls, include `reasoning.encrypted_content` in the response and replay those reasoning items on the next request.
 
 #### ComputerTool model selection
 
@@ -108,7 +132,7 @@ from agents import set_default_openai_responses_transport
 set_default_openai_responses_transport("websocket")
 ```
 
-This affects OpenAI Responses models resolved by the default OpenAI provider (including string model names such as `"gpt-5.5"`).
+This affects OpenAI Responses models resolved by the default OpenAI provider (including string model names such as `"gpt-5.6-sol"`).
 
 Transport selection happens when the SDK resolves a model name into a model instance. If you pass a concrete [`Model`][agents.models.interface.Model] object, its transport is already fixed: [`OpenAIResponsesWSModel`][agents.models.openai_responses.OpenAIResponsesWSModel] uses websocket, [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] uses HTTP, and [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] stays on Chat Completions. If you pass `RunConfig(model_provider=...)`, that provider controls transport selection instead of the global default.
 
@@ -208,6 +232,74 @@ If you use a custom OpenAI-compatible endpoint or proxy, websocket transport als
 -   For long reasoning turns or networks with latency spikes, customize websocket keepalive behavior with `responses_websocket_options`. Increase `ping_timeout` to tolerate delayed pong frames, or set `ping_timeout=None` to disable heartbeat timeouts while keeping pings enabled. Prefer HTTP/SSE transport when reliability is more important than websocket latency.
 -   By default the SDK disables the incoming message-size limit (`max_size=None`). For long-lived agent processes behind proxies or in memory-constrained containers, set `responses_websocket_options={"max_size": 8 * 1024 * 1024}` to bound per-message memory usage.
 
+### Hosted multi-agent (experimental)
+
+The OpenAI Responses API hosted multi-agent beta lets a GPT-5.6 root model create and coordinate server-hosted subagents. The Agents SDK can keep using its normal `Runner`: hosted orchestration stays on the service, while developer-defined function tools execute in your application.
+
+This integration is experimental and uses the Responses WebSocket transport so local function outputs can be returned to an active hosted agent with `response.inject`. It requires `openai[realtime]>=2.45.0`, including a beta build that exposes `client.beta.responses.connect`. The interface and beta item schemas may change before general availability.
+
+#### Configure the model
+
+Import the model from the experimental module and assign it to an SDK `Agent`:
+
+```python
+from agents import Agent
+from agents.extensions.experimental.hosted_multi_agent import OpenAIHostedMultiAgentModel
+
+agent = Agent(
+    name="Research coordinator",
+    instructions="Delegate independent research tasks, then synthesize the findings.",
+    model=OpenAIHostedMultiAgentModel(model="gpt-5.6-sol", config={"max_concurrent_subagents": 3}),
+)
+```
+
+Constructing `OpenAIHostedMultiAgentModel` enables `multi_agent.enabled` and sends the `OpenAI-Beta: responses_multi_agent=v1` WebSocket header. The model uses the default OpenAI client unless `openai_client` is provided. If `max_concurrent_subagents` is omitted, the service default is used.
+
+#### Local function tools
+
+All hosted agents share the model and tools configured for the request. The Responses API decides which hosted agent calls a function. The normal SDK Runner executes the function locally and injects a `function_call_output` with the same call ID into the active WebSocket response, which lets the service resume the original hosted caller. Function execution still passes through the Runner's normal guardrails, hooks, and failure conversion. SDK tool approval interruptions are not supported: any function tool whose `needs_approval` setting is not `False` is rejected before the request is sent.
+
+Use `get_hosted_agent_metadata()` when a tool needs caller-aware logging or authorization:
+
+```python
+from typing import Any
+
+from agents import function_tool
+from agents.extensions.experimental.hosted_multi_agent import get_hosted_agent_metadata
+from agents.tool_context import ToolContext
+
+@function_tool
+def lookup_document(ctx: ToolContext[Any], section: str) -> str:
+    metadata = get_hosted_agent_metadata(ctx)
+    caller = metadata.agent_name if metadata else "unknown"
+    print(f"tool caller: {caller}; call ID: {ctx.tool_call_id}")
+    return f"Contents for {section}"
+```
+
+Hosted agent names are observational metadata, not a local routing mechanism. Route outputs with the call ID supplied by the SDK. For side-effecting tools, use that call ID as an idempotency key and enforce any required authorization in application code before or during tool execution; do not use `needs_approval` with this model. Tool arguments and outputs cross the Responses API boundary.
+
+#### Output and streaming behavior
+
+Only a message attributed to `/root` with phase `final_answer` becomes a normal final message. The experimental adapter filters subagent messages and hosted orchestration records out of the high-level `RunResult`; the SDK never executes those records as local functions.
+
+Raw streaming continues to expose beta Responses events, including hosted output items and `response.inject.created` acknowledgements. The adapter divides one active provider response into SDK-visible logical model turns when a function call is ready, then resumes that same provider response after the Runner produces an output. Use `get_hosted_agent_metadata()` with a raw hosted item or a `ToolContext` to inspect attribution.
+
+#### Relationship to SDK orchestration
+
+Hosted multi-agent is separate from SDK handoffs and agents-as-tools:
+
+-   Hosted multi-agent creates subagents on the OpenAI service. Your application does not create or schedule those subagents.
+-   SDK handoffs change the active local SDK `Agent`. They are rejected when this experimental model is used because every hosted agent receives the same handoff tools, which would create conflicting ownership.
+-   Agents-as-tools remain available, but using them creates nested client-side and server-side orchestration. Evaluate the additional latency, cost, and tool exposure deliberately.
+
+#### Current limitations
+
+The experimental model rejects `reasoning.summary`, `max_tool_calls`, and caller-supplied `multi_agent` or `betas` overrides. The Responses `/compact` endpoint is not supported by the beta, although an explicit `context_management.compact_threshold` may be used because the service automatically compacts each hosted agent context independently.
+
+One `OpenAIHostedMultiAgentModel` instance owns at most one active hosted response at a time. If a run is abandoned while waiting for local function output, call `await model.close()` to release its WebSocket. Restoring an in-flight hosted response in a different process or event loop is not currently supported.
+
+See the [OpenAI Multi-agent guide](https://developers.openai.com/api/docs/guides/tools-multi-agent) for the underlying Responses API beta behavior. See [`examples/agent_patterns/hosted_multi_agent_beta.py`](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns/hosted_multi_agent_beta.py) for non-streaming and streaming SDK usage.
+
 ## Non-OpenAI models
 
 If you need a non-OpenAI provider, start with the SDK's built-in provider integration points. In many setups, this is enough without adding a third-party adapter. Examples for each pattern live in [examples/model_providers](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/).
@@ -279,7 +371,7 @@ triage_agent = Agent(
     name="Triage agent",
     instructions="Handoff to the appropriate agent based on the language of the request.",
     handoffs=[spanish_agent, english_agent],
-    model="gpt-5.5",
+    model="gpt-5.6-sol",
 )
 
 async def main():
@@ -315,7 +407,9 @@ When you are using the OpenAI Responses API, several request fields already have
 - `truncation`: Set `"auto"` to let the Responses API drop the oldest conversation items instead of failing when context would overflow.
 - `store`: Control whether the generated response is stored server-side for later retrieval. This matters for follow-up workflows that rely on response IDs, and for session compaction flows that may need to fall back to local input when `store=False`.
 - `context_management`: Configure server-side context handling such as Responses compaction with `compact_threshold`.
-- `prompt_cache_retention`: Keep cached prompt prefixes around longer, for example with `"24h"`.
+- `prompt_cache_retention`: Configure extended retention for earlier model families, for example
+  with `"24h"`.
+- `prompt_cache_options`: Select implicit or explicit prompt caching and, for GPT-5.6, configure a `"30m"` cache TTL.
 - `response_include`: Request richer response payloads such as `web_search_call.action.sources`, `file_search_call.results`, or `reasoning.encrypted_content`.
 - `top_logprobs`: Request top-token logprobs for output text. The SDK also adds `message.output_text.logprobs` automatically.
 - `retry`: Opt in to runner-managed retry settings for model calls. See [Runner-managed retries](#runner-managed-retries).
@@ -325,18 +419,48 @@ from agents import Agent, ModelSettings
 
 research_agent = Agent(
     name="Research agent",
-    model="gpt-5.5",
+    model="gpt-5.6-sol",
     model_settings=ModelSettings(
         parallel_tool_calls=False,
         truncation="auto",
         store=True,
         context_management=[{"type": "compaction", "compact_threshold": 200000}],
-        prompt_cache_retention="24h",
+        prompt_cache_options={"mode": "explicit", "ttl": "30m"},
         response_include=["web_search_call.action.sources"],
         top_logprobs=5,
     ),
 )
 ```
+
+With explicit prompt caching, add a breakpoint to the content part that ends the reusable prefix. The same `ModelSettings.prompt_cache_options` field is passed through on Responses and Chat Completions requests, and the Chat Completions converter preserves breakpoints on text, image, audio, and file content parts.
+
+```python
+from agents import Runner
+
+result = await Runner.run(
+    research_agent,
+    [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "Reusable background material...",
+                    "prompt_cache_breakpoint": {"mode": "explicit"},
+                },
+                {
+                    "type": "input_text",
+                    "text": "Analyze the latest question.",
+                },
+            ],
+        }
+    ],
+)
+```
+
+`prompt_cache_retention` remains available for earlier model families that use the legacy
+retention control. Do not combine a direct `ModelSettings` field with the same key in
+`extra_args`.
 
 When you set `store=False`, the Responses API does not keep that response available for later server-side retrieval. This is useful for stateless or zero-data-retention style flows, but it also means features that would otherwise reuse response IDs need to rely on locally managed state instead. For example, [`OpenAIResponsesCompactionSession`][agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession] switches its default `"auto"` compaction path to input-based compaction when the last response was not stored. See the [Sessions guide](../sessions/index.md#openai-responses-compaction-sessions).
 
@@ -371,7 +495,7 @@ from agents import Agent, ModelRetrySettings, ModelSettings, retry_policies
 
 agent = Agent(
     name="Assistant",
-    model="gpt-5.5",
+    model="gpt-5.6-sol",
     model_settings=ModelSettings(
         retry=ModelRetrySettings(
             max_retries=4,

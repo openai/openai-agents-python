@@ -6,6 +6,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from openai.types.responses import ResponseTextDeltaEvent
@@ -30,6 +31,17 @@ from agents import (
 from agents.agent import ToolsToFinalOutputResult
 from agents.items import TResponseInputItem
 from agents.tool import FunctionToolResult, function_tool
+from examples.financial_research_agent.agents.verifier_agent import (
+    VerificationIssue,
+    VerificationResult,
+)
+from examples.financial_research_agent.agents.writer_agent import FinancialReportData
+from examples.financial_research_agent.manager import (
+    FinancialResearchManager,
+    FinancialSearchEvidence,
+    FinancialSource,
+    _extract_financial_sources,
+)
 from examples.sandbox.basic import _import_docker_from_env
 from examples.sandbox.docker.docker_runner import (
     _format_tool_call,
@@ -40,6 +52,8 @@ from examples.sandbox.sandbox_agents_as_tools import (
     RolloutRiskReview,
     _structured_tool_output_extractor,
 )
+from examples.tools.web_search_filters import _normalized_source_urls
+from examples.web_search_utils import extract_url_citations, extract_web_search_source_urls
 
 from .fake_model import FakeModel
 from .test_responses import (
@@ -49,6 +63,220 @@ from .test_responses import (
     get_text_input_item,
     get_text_message,
 )
+
+
+def test_web_search_source_urls_reject_decoded_reserved_delimiters() -> None:
+    assert (
+        _normalized_source_urls(
+            ["https://developers.openai.com/api/docs/models/finding-the-right-model%3F.pls"]
+        )
+        == []
+    )
+
+
+def test_web_search_source_urls_are_canonical_and_domain_scoped() -> None:
+    assert _normalized_source_urls(
+        [
+            "https://developers.openai.com/api/docs/models/gpt-5.6-sol?utm_source=openai",
+            "https://developers.openai.com/api/docs/models/gpt-5.6-sol#pricing",
+            "https://subdomain.developers.openai.com/api/docs/models/gpt-5.6-terra/",
+            "https://developers.openai.com/assets/logo.svg",
+            "https://user@developers.openai.com/api/docs/models/gpt-5.6-sol",
+            "https://example.com/api/docs/models/gpt-5.6-sol",
+        ]
+    ) == [
+        "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+        "https://subdomain.developers.openai.com/api/docs/models/gpt-5.6-terra",
+    ]
+
+
+def test_web_search_metadata_distinguishes_citations_from_retrieved_sources() -> None:
+    items = [
+        {
+            "raw_item": {
+                "type": "web_search_call",
+                "action": {
+                    "type": "search",
+                    "sources": [
+                        {
+                            "type": "url",
+                            "url": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+                        },
+                        {
+                            "type": "url",
+                            "url": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+                        },
+                    ],
+                },
+            }
+        },
+        {
+            "raw_item": {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Use Sol for the most demanding work.",
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "title": "GPT-5.6 Sol",
+                                "url": (
+                                    "https://developers.openai.com/api/docs/models/gpt-5.6-sol"
+                                ),
+                            }
+                        ],
+                    }
+                ],
+            }
+        },
+    ]
+
+    assert extract_web_search_source_urls(items) == [
+        "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+        "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+    ]
+    assert [(citation.title, citation.url) for citation in extract_url_citations(items)] == [
+        (
+            "GPT-5.6 Sol",
+            "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+        )
+    ]
+
+
+def test_financial_search_evidence_preserves_citations_and_retrieved_sources() -> None:
+    sources = _extract_financial_sources(
+        [
+            {
+                "raw_item": {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "title": "Annual report",
+                                    "url": "https://example.com/annual-report",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            },
+            {
+                "raw_item": {
+                    "type": "web_search_call",
+                    "action": {
+                        "sources": [
+                            {"type": "url", "url": "https://example.com/annual-report"},
+                            {"type": "url", "url": "https://example.com/earnings"},
+                        ]
+                    },
+                }
+            },
+        ]
+    )
+
+    assert sources == [
+        FinancialSource(title="Annual report", url="https://example.com/annual-report"),
+        FinancialSource(
+            title="https://example.com/earnings",
+            url="https://example.com/earnings",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_financial_report_revises_once_after_failed_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = object.__new__(FinancialResearchManager)
+    original_report = FinancialReportData(
+        short_summary="Original",
+        markdown_report="Unsupported claim",
+        follow_up_questions=[],
+    )
+    revised_report = FinancialReportData(
+        short_summary="Revised",
+        markdown_report="Supported claim",
+        follow_up_questions=[],
+    )
+    rejected = VerificationResult(
+        verified=False,
+        issues=[
+            VerificationIssue(
+                claim="Unsupported claim",
+                category="unsupported",
+                explanation="No supplied evidence supports it.",
+                source_urls=[],
+            )
+        ],
+    )
+    accepted = VerificationResult(verified=True, issues=[])
+    write_report = AsyncMock(return_value=original_report)
+    verify_report = AsyncMock(side_effect=[rejected, accepted])
+    revise_report = AsyncMock(return_value=revised_report)
+    monkeypatch.setattr(manager, "_write_report", write_report)
+    monkeypatch.setattr(manager, "_verify_report", verify_report)
+    monkeypatch.setattr(manager, "_revise_report", revise_report)
+
+    report, verification = await manager._produce_verified_report("query", [])
+
+    assert report == revised_report
+    assert verification == accepted
+    write_report.assert_awaited_once_with("query", [])
+    revise_report.assert_awaited_once_with("query", original_report, [], rejected)
+    assert verify_report.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_financial_report_fails_after_second_rejected_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = object.__new__(FinancialResearchManager)
+    report = FinancialReportData(
+        short_summary="Summary",
+        markdown_report="Unsupported claim",
+        follow_up_questions=[],
+    )
+    rejected = VerificationResult(
+        verified=False,
+        issues=[
+            VerificationIssue(
+                claim="Unsupported claim",
+                category="unsupported",
+                explanation="No supplied evidence supports it.",
+                source_urls=[],
+            )
+        ],
+    )
+    monkeypatch.setattr(manager, "_write_report", AsyncMock(return_value=report))
+    monkeypatch.setattr(manager, "_verify_report", AsyncMock(return_value=rejected))
+    monkeypatch.setattr(manager, "_revise_report", AsyncMock(return_value=report))
+
+    with pytest.raises(RuntimeError, match="failed evidence verification after one revision"):
+        await manager._produce_verified_report("query", [])
+
+
+def test_financial_report_input_includes_cutoff_and_evidence() -> None:
+    manager = object.__new__(FinancialResearchManager)
+    manager.research_cutoff = "2026-07-11"
+    evidence = FinancialSearchEvidence(
+        query="company annual report",
+        reason="Ground annual metrics",
+        summary="Revenue increased.",
+        sources=[FinancialSource(title="Annual report", url="https://example.com/report")],
+        retrieved_at="2026-07-11",
+    )
+
+    payload = json.loads(manager._report_input("Analyze the company", [evidence]))
+
+    assert payload == {
+        "original_query": "Analyze the company",
+        "research_cutoff": "2026-07-11",
+        "evidence": [evidence.model_dump(mode="json")],
+    }
 
 
 def test_sandbox_basic_direct_run_imports_external_docker_sdk(

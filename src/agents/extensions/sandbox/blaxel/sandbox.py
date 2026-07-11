@@ -44,6 +44,7 @@ from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
+from ....sandbox.session.pty_output import collect_pty_output
 from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -52,7 +53,6 @@ from ....sandbox.session.pty_types import (
     clamp_pty_yield_time_ms,
     process_id_to_prune_from_meta,
     resolve_pty_write_yield_time_ms,
-    truncate_text_by_tokens,
 )
 from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
 from ....sandbox.session.sandbox_client import BaseSandboxClient
@@ -959,34 +959,14 @@ class BlaxelSandboxSession(BaseSandboxSession):
         yield_time_ms: int,
         max_output_tokens: int | None,
     ) -> tuple[bytes, int | None]:
-        deadline = time.monotonic() + (yield_time_ms / 1000)
-        output = bytearray()
-
-        while True:
-            async with entry.output_lock:
-                while entry.output_chunks:
-                    output.extend(entry.output_chunks.popleft())
-
-            if time.monotonic() >= deadline:
-                break
-            if entry.done:
-                async with entry.output_lock:
-                    while entry.output_chunks:
-                        output.extend(entry.output_chunks.popleft())
-                break
-
-            remaining_s = deadline - time.monotonic()
-            if remaining_s <= 0:
-                break
-            try:
-                await asyncio.wait_for(entry.output_notify.wait(), timeout=remaining_s)
-            except asyncio.TimeoutError:
-                break
-            entry.output_notify.clear()
-
-        text = output.decode("utf-8", errors="replace")
-        truncated, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
-        return truncated.encode("utf-8", errors="replace"), original_token_count
+        return await collect_pty_output(
+            output_chunks=entry.output_chunks,
+            output_lock=entry.output_lock,
+            output_notify=entry.output_notify,
+            is_done=lambda: entry.done,
+            yield_time_ms=yield_time_ms,
+            max_output_tokens=max_output_tokens,
+        )
 
     async def _finalize_pty_update(
         self,

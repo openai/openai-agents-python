@@ -1,13 +1,13 @@
 [project]
 name = "openai-agents"
-version = "0.18.0"
+version = "0.18.2"
 description = "OpenAI Agents SDK"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "OpenAI", email = "support@openai.com" }]
 dependencies = [
-    "openai>=2.36.0,<3",
+    "openai>=2.45.0,<3",
     "pydantic>=2.12.2, <3",
     "griffelib>=2, <3",
     "typing-extensions>=4.12.2, <5",
@@ -119,15 +119,23 @@ select = [
   "I",  # isort
   "B",  # flake8-bugbear
   "C4", # flake8-comprehensions
+  "DTZ005", # datetime.now() without a timezone
+  "G004", # logging statement uses f-string
+  "RUF006", # unowned asyncio tasks
+  "RUF012", # mutable class attributes without ClassVar
+  "RUF100", # unused noqa directives
   "UP", # pyupgrade
 ]
 isort = { combine-as-imports = true, known-first-party = ["agents"] }
+logger-objects = ["agents.logger.logger"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"examples/**/*.py" = ["E501"]
+"examples/**/*.py" = ["DTZ005", "E501", "G004", "RUF006", "RUF012", "RUF100"]
+"examples/**/*.ipynb" = ["RUF100"]
+"tests/**/*.py" = ["RUF006", "RUF012", "RUF100"]
 
 [tool.mypy]
 strict = true
@@ -210,8 +218,10 @@ format-command = "ruff format --stdin-filename {filename}"
 
 [tool.uv]
 exclude-newer = "7 days"
+exclude-newer-package = { openai = false }
 index-strategy = "first-index"
 
 [tool.uv.pip]
 exclude-newer = "7 days"
+exclude-newer-package = { openai = false }
 index-strategy = "first-index"

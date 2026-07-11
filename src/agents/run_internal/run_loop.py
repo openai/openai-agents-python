@@ -62,6 +62,7 @@ from ..models._response_terminal import (
     response_error_event_failure_error,
     response_terminal_failure_error,
 )
+from ..models._run_context import model_run_context, model_run_context_stream
 from ..result import RunResultStreaming
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
@@ -84,7 +85,7 @@ from ..tool import (
 from ..tracing import Span, SpanError, agent_span, get_current_trace, task_span, turn_span
 from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData, TaskSpanData
-from ..usage import Usage
+from ..usage import Usage, _response_usage_to_usage
 from ..util import _coro, _error_tracing
 from .agent_bindings import AgentBindings, bind_public_agent
 from .agent_runner_helpers import (
@@ -241,6 +242,7 @@ __all__ = [
     "check_for_final_output_from_tools",
     "get_model_tracing_impl",
     "validate_run_hooks",
+    "cleanup_models_after_run",
     "maybe_filter_model_input",
     "run_input_guardrails_with_queue",
     "start_streaming",
@@ -256,6 +258,15 @@ __all__ = [
     "get_model",
     "input_guardrail_tripwire_triggered_for_stream",
 ]
+
+
+async def cleanup_models_after_run(tool_use_tracker: AgentToolUseTracker) -> None:
+    """Notify every model resolved during the run that its owning run has ended."""
+    for model in tool_use_tracker.models:
+        try:
+            await model._cleanup_on_run_end(tool_use_tracker)
+        except Exception as error:
+            logger.warning("Failed to clean up model resources after run: %s", error)
 
 
 def _should_attach_generic_agent_error(exc: Exception) -> bool:
@@ -1201,6 +1212,7 @@ async def start_streaming(
     else:
         streamed_result.is_complete = True
     finally:
+        await cleanup_models_after_run(tool_use_tracker)
         _sync_conversation_tracking_from_tracker()
         if streamed_result._input_guardrails_task:
             try:
@@ -1218,7 +1230,7 @@ async def start_streaming(
                         raise InputGuardrailTripwireTriggered(first_trigger)
             except Exception as e:
                 logger.debug(
-                    f"Error in streamed_result finalize for agent {current_agent.name} - {e}"
+                    "Error in streamed_result finalize for agent %s - %s", current_agent.name, e
                 )
         try:
             await dispose_resolved_computers(run_context=context_wrapper)
@@ -1343,6 +1355,7 @@ async def run_single_turn_streamed(
 
     handoffs = await get_handoffs(execution_agent, context_wrapper)
     model = get_model(execution_agent, run_config)
+    tool_use_tracker.record_model(model)
     model_settings = get_model_settings(execution_agent, run_config)
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
@@ -1481,7 +1494,7 @@ async def run_single_turn_streamed(
         failed_retry_attempts_out=stream_failed_retry_attempts,
     )
 
-    async for event in retry_stream:
+    async for event in model_run_context_stream(retry_stream, tool_use_tracker):
         streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
 
         terminal_response: Response | None = None
@@ -1507,14 +1520,7 @@ async def run_single_turn_streamed(
                 terminal_response.output = list(streamed_response_output)
             usage = (
                 apply_retry_attempt_usage(
-                    Usage(
-                        requests=1,
-                        input_tokens=terminal_response.usage.input_tokens,
-                        output_tokens=terminal_response.usage.output_tokens,
-                        total_tokens=terminal_response.usage.total_tokens,
-                        input_tokens_details=terminal_response.usage.input_tokens_details,
-                        output_tokens_details=terminal_response.usage.output_tokens_details,
-                    ),
+                    _response_usage_to_usage(terminal_response.usage),
                     stream_failed_retry_attempts[0],
                 )
                 if terminal_response.usage
@@ -1827,6 +1833,7 @@ async def get_new_response(
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
 
     model = get_model(execution_agent, run_config)
+    tool_use_tracker.record_model(model)
     model_settings = get_model_settings(execution_agent, run_config)
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
@@ -1880,27 +1887,28 @@ async def get_new_response(
         if server_conversation_tracker is not None:
             server_conversation_tracker.rewind_input(filtered.input)
 
-    new_response = await get_response_with_retry(
-        get_response=lambda: model.get_response(
-            system_instructions=filtered.instructions,
-            input=filtered.input,
-            model_settings=model_settings,
-            tools=all_tools,
-            output_schema=output_schema,
-            handoffs=handoffs,
-            tracing=get_model_tracing_impl(
-                run_config.tracing_disabled, run_config.trace_include_sensitive_data
+    with model_run_context(tool_use_tracker):
+        new_response = await get_response_with_retry(
+            get_response=lambda: model.get_response(
+                system_instructions=filtered.instructions,
+                input=filtered.input,
+                model_settings=model_settings,
+                tools=all_tools,
+                output_schema=output_schema,
+                handoffs=handoffs,
+                tracing=get_model_tracing_impl(
+                    run_config.tracing_disabled, run_config.trace_include_sensitive_data
+                ),
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                prompt=prompt_config,
             ),
+            rewind=rewind_model_request,
+            retry_settings=model_settings.retry,
+            get_retry_advice=model.get_retry_advice,
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
-            prompt=prompt_config,
-        ),
-        rewind=rewind_model_request,
-        retry_settings=model_settings.retry,
-        get_retry_advice=model.get_retry_advice,
-        previous_response_id=previous_response_id,
-        conversation_id=conversation_id,
-    )
+        )
     if server_conversation_tracker is not None:
         # Retry helpers rewind sent-input tracking before replaying a failed request. Mark the
         # filtered input as delivered again once a retry succeeds so subsequent turns only send

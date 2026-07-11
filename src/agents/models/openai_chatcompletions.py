@@ -68,6 +68,7 @@ class OpenAIChatCompletionsModel(Model):
         self._buffer_streamed_tool_calls = buffer_streamed_tool_calls
         self._has_warned_unsupported_prompt = False
         self._has_warned_unsupported_conversation_state = False
+        self._has_warned_unsupported_reasoning_settings = False
 
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
@@ -93,6 +94,34 @@ class OpenAIChatCompletionsModel(Model):
                 message,
             )
             self._has_warned_unsupported_prompt = True
+
+    def _handle_unsupported_reasoning_settings(self, model_settings: ModelSettings) -> None:
+        reasoning = model_settings.reasoning
+        if reasoning is None:
+            return
+
+        unsupported = [
+            name for name in ("mode", "context") if getattr(reasoning, name, None) is not None
+        ]
+        if not unsupported:
+            return
+
+        unsupported_params = ", ".join(f"reasoning.{name}" for name in unsupported)
+        message = (
+            f"OpenAIChatCompletionsModel does not support {unsupported_params}. "
+            "These reasoning settings require the Responses API; Chat Completions only "
+            "uses reasoning.effort."
+        )
+        if self._strict_feature_validation:
+            raise UserError(message)
+
+        if not self._has_warned_unsupported_reasoning_settings:
+            logger.warning(
+                "%s Ignoring unsupported reasoning settings; enable strict feature validation "
+                "to raise an error instead.",
+                message,
+            )
+            self._has_warned_unsupported_reasoning_settings = True
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)
@@ -120,7 +149,7 @@ class OpenAIChatCompletionsModel(Model):
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            logger.debug(f"Background stream cleanup failed after cancellation: {exc}")
+            logger.debug("Background stream cleanup failed after cancellation: %s", exc)
 
     def _validate_official_openai_input_content_types(
         self, request_input: str | list[TResponseInputItem]
@@ -217,7 +246,7 @@ class OpenAIChatCompletionsModel(Model):
                     )
                 else:
                     finish_reason = first_choice.finish_reason if first_choice else "-"
-                    logger.debug(f"LLM resp had no message. finish_reason: {finish_reason}")
+                    logger.debug("LLM resp had no message. finish_reason: %s", finish_reason)
 
             usage = (
                 Usage(
@@ -359,7 +388,7 @@ class OpenAIChatCompletionsModel(Model):
                     except Exception as exc:
                         if yielded_terminal_event:
                             logger.debug(
-                                f"Ignoring stream cleanup error after terminal event: {exc}"
+                                "Ignoring stream cleanup error after terminal event: %s", exc
                             )
                         else:
                             raise
@@ -376,7 +405,7 @@ class OpenAIChatCompletionsModel(Model):
                     "input_tokens_details": (
                         final_response.usage.input_tokens_details.model_dump()
                         if final_response.usage.input_tokens_details
-                        else {"cached_tokens": 0}
+                        else {"cached_tokens": 0, "cache_write_tokens": 0}
                     ),
                     "output_tokens_details": (
                         final_response.usage.output_tokens_details.model_dump()
@@ -461,6 +490,7 @@ class OpenAIChatCompletionsModel(Model):
         prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
         self._handle_unsupported_prompt(prompt)
+        self._handle_unsupported_reasoning_settings(model_settings)
         self._validate_official_openai_input_content_types(input)
         converted_messages = Converter.items_to_messages(
             input,
@@ -514,11 +544,12 @@ class OpenAIChatCompletionsModel(Model):
                 ensure_ascii=False,
             )
             logger.debug(
-                f"{messages_json}\n"
-                f"Tools:\n{tools_json}\n"
-                f"Stream: {stream}\n"
-                f"Tool choice: {tool_choice}\n"
-                f"Response format: {response_format}\n"
+                "%s\nTools:\n%s\nStream: %s\nTool choice: %s\nResponse format: %s\n",
+                messages_json,
+                tools_json,
+                stream,
+                tool_choice,
+                response_format,
             )
 
         reasoning_effort = model_settings.reasoning.effort if model_settings.reasoning else None
@@ -549,13 +580,25 @@ class OpenAIChatCompletionsModel(Model):
             "verbosity": self._non_null_or_omit(model_settings.verbosity),
             "top_logprobs": self._non_null_or_omit(model_settings.top_logprobs),
             "prompt_cache_retention": self._non_null_or_omit(model_settings.prompt_cache_retention),
+            "prompt_cache_options": self._non_null_or_omit(model_settings.prompt_cache_options),
             "extra_headers": self._merge_headers(model_settings),
             "extra_query": model_settings.extra_query,
             "extra_body": model_settings.extra_body,
             "metadata": self._non_null_or_omit(model_settings.metadata),
         }
+        # The Chat Completions API requires logprobs=True whenever top_logprobs is set.
+        # Skip the key when the caller already supplies logprobs via extra_args, so that
+        # extra_args={"logprobs": ...} keeps passing through and setting both top_logprobs
+        # and extra_args["logprobs"] (a pre-existing workaround) does not collide with the
+        # duplicate-key check below.
+        if model_settings.top_logprobs is not None and "logprobs" not in (
+            model_settings.extra_args or {}
+        ):
+            create_kwargs["logprobs"] = True
         duplicate_extra_arg_keys = sorted(
-            set(create_kwargs).intersection(model_settings.extra_args or {})
+            key
+            for key in model_settings.extra_args or {}
+            if key in create_kwargs and not isinstance(create_kwargs[key], Omit)
         )
         if duplicate_extra_arg_keys:
             if len(duplicate_extra_arg_keys) == 1:

@@ -46,9 +46,13 @@ uv add openai-agents
 
 For voice support, install with the optional `voice` group: `uv add 'openai-agents[voice]'`. For Redis session support, install with the optional `redis` group: `uv add 'openai-agents[redis]'`.
 
-## Run your first Sandbox Agent
+## Run your first agents
 
-[Sandbox Agents](https://openai.github.io/openai-agents-python/sandbox_agents) are new in version 0.14.0. A sandbox agent is an agent that uses a computer environment to perform real work with a filesystem, in an environment you configure and control. Sandbox agents are useful when the agent needs to inspect files, run commands, apply patches, or carry workspace state across longer tasks.
+The SDK supports three primary ways to run agents. Set the `OPENAI_API_KEY` environment variable before running any of these examples.
+
+### Run a sandbox agent
+
+Use a [`SandboxAgent`](https://openai.github.io/openai-agents-python/sandbox_agents) when the agent needs to inspect files, run commands, apply patches, or preserve workspace state across longer tasks.
 
 ```python
 from agents import Runner
@@ -66,19 +70,14 @@ agent = SandboxAgent(
 result = Runner.run_sync(
     agent,
     "Inspect the repo README and summarize what this project does.",
-    # Run this agent on the local filesystem
     run_config=RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient())),
 )
 print(result.final_output)
-
-# Output: "This project provides a Python SDK for building multi-agent workflows."
 ```
 
-(_If running this, ensure you set the `OPENAI_API_KEY` environment variable_)
+### Run a text agent
 
-## Run an agent without a sandbox
-
-You can still use a regular `Agent` when your workflow does not need a filesystem workspace or sandbox lifecycle.
+Use a text `Agent` for workflows that do not need a persistent realtime connection or a sandbox workspace.
 
 ```python
 from agents import Agent, Runner
@@ -94,6 +93,34 @@ print(result.final_output)
 ```
 
 (_For Jupyter notebook users, see [hello_world_jupyter.ipynb](https://github.com/openai/openai-agents-python/blob/main/examples/basic/hello_world_jupyter.ipynb)_)
+
+### Run a realtime agent
+
+Use a [`RealtimeAgent`](https://openai.github.io/openai-agents-python/realtime/quickstart/) for low-latency, server-side voice and multimodal experiences over WebSocket.
+
+```python
+import asyncio
+from agents.realtime import RealtimeAgent, RealtimeRunner
+
+async def main() -> None:
+    agent = RealtimeAgent(name="Assistant", instructions="You are a helpful voice assistant. Keep responses short.")
+    runner = RealtimeRunner(starting_agent=agent)
+    session = await runner.run()
+
+    async with session:
+        await session.send_message("Say hello in one short sentence.")
+        async for event in session:
+            if event.type == "audio":
+                # Forward or play event.audio.data.
+                pass
+            elif event.type == "history_added":
+                print(event.item)
+            elif event.type == "agent_end":
+                break
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
 
 Explore the [examples](https://github.com/openai/openai-agents-python/tree/main/examples) directory to see the SDK in action, and read our [documentation](https://openai.github.io/openai-agents-python/) for more details.
 

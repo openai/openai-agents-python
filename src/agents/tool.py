@@ -1561,13 +1561,13 @@ def _build_handled_function_tool_error_handler(
             f"{log_label} {function_tool.name}" if include_tool_name_in_log_messages else log_label
         )
         if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug(f"{log_prefix} failed")
+            logger.debug("%s failed", log_prefix)
             return
 
         if include_input_json_in_logs:
-            logger.error(f"{log_prefix} failed: {input_json} {error}", exc_info=error)
+            logger.error("%s failed: %s %s", log_prefix, input_json, error, exc_info=error)
         else:
-            logger.error(f"{log_prefix} failed: {error}", exc_info=error)
+            logger.error("%s failed: %s", log_prefix, error, exc_info=error)
 
     return _on_handled_error
 
@@ -1601,9 +1601,9 @@ def _parse_function_tool_json_input(*, tool_name: str, input_json: str) -> dict[
 def _log_function_tool_invocation(*, tool_name: str, input_json: str) -> None:
     """Log the start of a tool invocation with the current redaction policy."""
     if _debug.DONT_LOG_TOOL_DATA:
-        logger.debug(f"Invoking tool {tool_name}")
+        logger.debug("Invoking tool %s", tool_name)
     else:
-        logger.debug(f"Invoking tool {tool_name} with input {input_json}")
+        logger.debug("Invoking tool %s with input %s", tool_name, input_json)
 
 
 def default_tool_error_function(ctx: RunContextWrapper[Any], error: Exception) -> str:
@@ -1992,7 +1992,7 @@ def function_tool(
             args, kwargs_dict = schema.to_call_args(parsed)
 
             if not _debug.DONT_LOG_TOOL_DATA:
-                logger.debug(f"Tool call args: {args}, kwargs: {kwargs_dict}")
+                logger.debug("Tool call args: %s, kwargs: %s", args, kwargs_dict)
 
             if not is_sync_function_tool:
                 if schema.takes_context:
@@ -2006,9 +2006,9 @@ def function_tool(
                     result = await asyncio.to_thread(the_func, *args, **kwargs_dict)
 
             if _debug.DONT_LOG_TOOL_DATA:
-                logger.debug(f"Tool {tool_name} completed.")
+                logger.debug("Tool %s completed.", tool_name)
             else:
-                logger.debug(f"Tool {tool_name} returned {result}")
+                logger.debug("Tool %s returned %s", tool_name, result)
 
             return result
 

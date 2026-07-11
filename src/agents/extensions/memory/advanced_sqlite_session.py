@@ -17,6 +17,20 @@ from ...memory import SQLiteSession
 from ...memory.session_settings import SessionSettings, resolve_session_limit
 
 
+def _content_preview(content: Any, max_length: int | None = None) -> str:
+    """Return a string preview of a stored user-message ``content``.
+
+    User-message ``content`` may be a plain string or a list of structured parts
+    (for example multimodal ``input_text``/``input_image`` items). Both shapes are
+    coerced to a string so callers always receive the documented preview type, then
+    truncated to ``max_length`` characters when a limit is provided.
+    """
+    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    if max_length is not None and len(text) > max_length:
+        return text[:max_length] + "..."
+    return text
+
+
 class AdvancedSQLiteSession(SQLiteSession):
     """Enhanced SQLite session with conversation branching and usage analytics."""
 
@@ -448,7 +462,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                     turn_anchor=turn_anchor,
                 )
         except Exception as e:
-            self._logger.error(f"Failed to store usage for session {self.session_id}: {e}")
+            self._logger.error("Failed to store usage for session %s: %s", self.session_id, e)
 
     def _capture_current_turn(self) -> tuple[int, str, int | None]:
         """Return (current_turn, branch_id, turn_anchor) in one locked read.
@@ -702,7 +716,7 @@ class AdvancedSQLiteSession(SQLiteSession):
 
             deleted_count = cursor.rowcount
             if deleted_count:
-                self._logger.info(f"Cleaned up {deleted_count} orphaned messages")
+                self._logger.info("Cleaned up %s orphaned messages", deleted_count)
             return deleted_count
 
     def _classify_message_type(self, item: TResponseInputItem) -> str:
@@ -857,7 +871,11 @@ class AdvancedSQLiteSession(SQLiteSession):
         await asyncio.to_thread(self._commit_branch_pointer, branch_name, generation)
 
         self._logger.debug(
-            f"Created branch '{branch_name}' from turn {turn_number} ('{turn_content}') in '{old_branch}'"  # noqa: E501
+            "Created branch '%s' from turn %s ('%s') in '%s'",
+            branch_name,
+            turn_number,
+            turn_content,
+            old_branch,
         )
         return branch_name
 
@@ -922,7 +940,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         # committed since `generation` was captured (its reset to 'main' wins).
         switched = await asyncio.to_thread(self._commit_branch_pointer, branch_id, generation)
         if switched:
-            self._logger.info(f"Switched from branch '{old_branch}' to '{branch_id}'")
+            self._logger.info("Switched from branch '%s' to '%s'", old_branch, branch_id)
 
     async def delete_branch(self, branch_id: str, force: bool = False) -> None:
         """Delete a branch and all its associated data.
@@ -1003,8 +1021,11 @@ class AdvancedSQLiteSession(SQLiteSession):
         )
 
         self._logger.info(
-            f"Deleted branch '{branch_id}': {structure_deleted} message entries, "
-            f"{usage_deleted} usage entries, {orphaned_messages_deleted} orphaned messages"
+            "Deleted branch '%s': %s message entries, %s usage entries, %s orphaned messages",
+            branch_id,
+            structure_deleted,
+            usage_deleted,
+            orphaned_messages_deleted,
         )
 
     async def list_branches(self) -> list[dict[str, Any]]:
@@ -1181,9 +1202,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                             turns.append(
                                 {
                                     "turn": turn_num,
-                                    "content": (
-                                        content[:100] + "..." if len(content) > 100 else content
-                                    ),
+                                    "content": _content_preview(content, 100),
                                     "full_content": content,
                                     "timestamp": created_at,
                                     "can_branch": True,
@@ -1239,7 +1258,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                             matches.append(
                                 {
                                     "turn": turn_num,
-                                    "content": content,
+                                    "content": _content_preview(content),
                                     "full_content": content,
                                     "timestamp": created_at,
                                     "can_branch": True,
@@ -1561,7 +1580,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                     try:
                         input_details_json = json.dumps(usage_data.input_tokens_details.__dict__)
                     except (TypeError, ValueError) as e:
-                        self._logger.warning(f"Failed to serialize input tokens details: {e}")
+                        self._logger.warning("Failed to serialize input tokens details: %s", e)
                         input_details_json = None
 
                 if (
@@ -1571,7 +1590,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                     try:
                         output_details_json = json.dumps(usage_data.output_tokens_details.__dict__)
                     except (TypeError, ValueError) as e:
-                        self._logger.warning(f"Failed to serialize output tokens details: {e}")
+                        self._logger.warning("Failed to serialize output tokens details: %s", e)
                         output_details_json = None
 
                 with closing(conn.cursor()) as cursor:

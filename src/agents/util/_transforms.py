@@ -13,9 +13,11 @@ def transform_string_function_style(name: str, *, warn_on_whitespace: bool = Tru
         warn_on_whitespace or transformed_name != whitespace_normalized_name
     ):
         logger.warning(
-            f"Tool name {name!r} contains invalid characters for function calling and has been "
-            f"transformed to {final_name!r}. Please use only letters, digits, and underscores "
-            "to avoid potential naming conflicts."
+            "Tool name %r contains invalid characters for function calling and has been "
+            "transformed to %r. Please use only letters, digits, and underscores to avoid "
+            "potential naming conflicts.",
+            name,
+            final_name,
         )
 
     return final_name

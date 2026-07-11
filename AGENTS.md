@@ -42,6 +42,12 @@ Skip `$pr-draft-summary` only for trivial or conversation-only tasks, repo-meta/
 
 Producing the PR draft block is part of the local final handoff. It is required for eligible local-only or uncommitted changes and does not authorize creating a branch, committing, pushing, or opening a pull request.
 
+### Git Worktree and Branch Safety
+
+Work in the user's current checkout and on the current branch by default. If the Codex task is already running in a selected Git worktree, use that worktree without requesting additional permission. Do not create or switch to another Git worktree, and do not create or switch branches, unless the user explicitly asks for or approves that exact action in the current conversation. A request to implement, investigate, review, test, or verify changes does not by itself authorize changing the active worktree or branch.
+
+If isolation or a different checkout is needed, explain why and ask the user before changing Git state. This requirement also applies when another rule or workflow recommends a linked worktree: stop and request approval instead of choosing or creating one automatically.
+
 ### ExecPlans
 
 Call out compatibility risk early in your plan only when the change affects behavior shipped in the latest release tag or a released or explicitly supported durable external state boundary, and confirm the approach before implementing changes that could impact users.
@@ -118,20 +124,21 @@ The OpenAI Agents Python repository provides the Python Agents SDK, examples, an
 
 ### Development Workflow
 
-1. Sync with `main` and create a feature branch:
+1. Stay in the user's current checkout and on the current branch unless the user explicitly asks for or approves a Git state change.
+2. If the user explicitly requests a feature/fix branch, create one with a descriptive name:
    ```bash
    git checkout -b feat/<short-description>
    ```
-2. If dependencies changed or you are setting up the repo, run `make sync`.
-3. Implement changes and add or update tests alongside code updates.
-4. Highlight compatibility or API risks in your plan before implementing changes that alter the latest released behavior or a released or explicitly supported durable external state boundary.
-5. Build docs when you touch documentation:
+3. If dependencies changed or you are setting up the repo, run `make sync`.
+4. Implement changes and add or update tests alongside code updates.
+5. Highlight compatibility or API risks in your plan before implementing changes that alter the latest released behavior or a released or explicitly supported durable external state boundary.
+6. Build docs when you touch documentation:
    ```bash
    make build-docs
    ```
-6. When `$code-change-verification` applies, run it to execute the full verification stack before marking work complete.
-7. Commit with concise, imperative messages; keep commits small and focused, then open a pull request.
-8. Before reporting eligible code changes as complete, invoke `$pr-draft-summary` as the final handoff step unless the task falls under the documented skip cases. Do not omit it based on perceived change size or because the work remains local or uncommitted.
+7. When `$code-change-verification` applies, run it to execute the full verification stack before marking work complete.
+8. Commit with concise, imperative messages; keep commits small and focused, then open a pull request.
+9. Before reporting eligible code changes as complete, invoke `$pr-draft-summary` as the final handoff step unless the task falls under the documented skip cases. Do not omit it based on perceived change size or because the work remains local or uncommitted.
 
 ### Testing & Automated Checks
 

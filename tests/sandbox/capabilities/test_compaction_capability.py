@@ -40,6 +40,20 @@ class TestCompactionCapability:
             ]
         }
 
+    def test_sampling_params_infers_gpt_5_6_sol_dynamic_threshold(self) -> None:
+        capability = Compaction()
+
+        sampling_params = capability.sampling_params({"model": "gpt-5.6-sol"})
+
+        assert sampling_params == {
+            "context_management": [
+                {
+                    "type": "compaction",
+                    "compact_threshold": 942_818,
+                }
+            ]
+        }
+
     def test_sampling_params_falls_back_for_unknown_model(self) -> None:
         capability = Compaction()
 

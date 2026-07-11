@@ -393,7 +393,7 @@ async def main() -> None:
         print("OPENAI_API_KEY must be set to run the HITL session scenario.")
         raise SystemExit(1)
 
-    model_override = os.environ.get("HITL_MODEL", "gpt-5.5")
+    model_override = os.environ.get("HITL_MODEL", "gpt-5.6-sol")
     if model_override:
         print(f"Model: {model_override}")
 

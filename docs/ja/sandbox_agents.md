@@ -6,27 +6,27 @@ search:
 
 !!! warning "ベータ機能"
 
-    サンドボックスエージェントはベータ版です。一般提供前に API の詳細、デフォルト値、サポートされる機能が変更される可能性があり、今後より高度な機能が追加されることが想定されます。
+    サンドボックスエージェントはベータ版です。一般提供までに API の詳細、デフォルト、サポートされる機能が変更される可能性があります。また、今後さらに高度な機能が追加される予定です。
 
-最新のエージェントは、ファイルシステム上の実際のファイルを操作できるときに最も効果を発揮します。Agents SDK の **サンドボックスエージェント** は、モデルに永続的なワークスペースを提供し、大規模なドキュメントセットの検索、ファイル編集、コマンド実行、成果物の生成、保存済みのサンドボックス状態からの作業再開を可能にします。
+最新のエージェントは、ファイルシステム上の実ファイルを操作できるときに最大限の力を発揮します。Agents SDK の **サンドボックスエージェント** は、大規模なドキュメント群の検索、ファイルの編集、コマンドの実行、成果物の生成、保存済みのサンドボックス状態からの作業再開が可能な永続ワークスペースをモデルに提供します。
 
-SDK は、ファイルのステージング、ファイルシステムツール、シェルアクセス、サンドボックスのライフサイクル、スナップショット、プロバイダー固有の連携を自分で組み合わせる必要なく、その実行ハーネスを提供します。通常の `Agent` と `Runner` のフローはそのままに、ワークスペース用の `Manifest`、サンドボックスネイティブツール用の機能、作業の実行場所を指定する `SandboxRunConfig` を追加します。
+SDK は、ファイルのステージング、ファイルシステムツール、シェルアクセス、サンドボックスのライフサイクル、スナップショット、プロバイダー固有の連携コードを自分で組み合わせることなく、この実行基盤を提供します。通常の `Agent` と `Runner` のフローを維持しながら、ワークスペース用の `Manifest`、サンドボックスネイティブツール用の機能、作業の実行場所を指定する `SandboxRunConfig` を追加できます。
 
 ## 前提条件
 
-- Python 3.10 以上
-- OpenAI Agents SDK に関する基本的な理解
-- サンドボックスクライアント。ローカル開発では、`UnixLocalSandboxClient` から始めてください。
+- Python 3.10 以降
+- OpenAI Agents SDK に関する基本的な知識
+- サンドボックスクライアント。ローカル開発では、まず `UnixLocalSandboxClient` を使用してください。
 
 ## インストール
 
-SDK をまだインストールしていない場合:
+SDK をまだインストールしていない場合は、次を実行します。
 
 ```bash
 pip install openai-agents
 ```
 
-Docker ベースのサンドボックスの場合:
+Docker ベースのサンドボックスの場合は、次を実行します。
 
 ```bash
 pip install "openai-agents[docker]"
@@ -34,7 +34,7 @@ pip install "openai-agents[docker]"
 
 ## ローカルサンドボックスエージェントの作成
 
-この例では、ローカルリポジトリを `repo/` 配下にステージングし、ローカルスキルを遅延ロードし、ランナーが実行用の Unix ローカルサンドボックスセッションを作成できるようにします。
+この例では、ローカルリポジトリを `repo/` 配下にステージングし、ローカルスキルを遅延読み込みして、実行時にランナーが Unix ローカルのサンドボックスセッションを作成できるようにします。
 
 ```python
 import asyncio
@@ -80,7 +80,7 @@ def build_agent(model: str) -> SandboxAgent[None]:
 
 async def main() -> None:
     result = await Runner.run(
-        build_agent("gpt-5.5"),
+        build_agent("gpt-5.6-sol"),
         "Open `repo/task.md`, fix the issue, run the targeted test, and summarize the change.",
         run_config=RunConfig(
             sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()),
@@ -94,24 +94,24 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-[examples/sandbox/docs/coding_task.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py) を参照してください。この例は小さなシェルベースのリポジトリを使用しているため、Unix ローカル実行間で決定論的に検証できます。
+[examples/sandbox/docs/coding_task.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py) を参照してください。この例では、Unix ローカルでの実行間で決定論的に検証できるように、シェルベースの小規模なリポジトリを使用しています。
 
 ## 主な選択肢
 
-基本的な実行が動作したら、次に多くの人が検討する選択肢は次のとおりです。
+基本的な実行が動作した後、多くの場合、次の選択肢を検討します。
 
-- `default_manifest`: 新しいサンドボックスセッション用のファイル、リポジトリ、ディレクトリ、マウント
-- `instructions`: 複数のプロンプトにわたって適用すべき短いワークフロールール
-- `base_instructions`: SDK のサンドボックスプロンプトを置き換えるための高度なエスケープハッチ
-- `capabilities`: ファイルシステム編集 / 画像検査、シェル、スキル、メモリ、コンパクションなどのサンドボックスネイティブツール
+- `default_manifest`: 新規サンドボックスセッション向けのファイル、リポジトリ、ディレクトリ、マウント
+- `instructions`: 複数のプロンプトにわたって適用する短いワークフロールール
+- `base_instructions`: SDK のサンドボックスプロンプトを置き換えるための高度な回避手段
+- `capabilities`: ファイルシステムの編集／画像検査、シェル、スキル、メモリ、コンパクションなどのサンドボックスネイティブツール
 - `run_as`: モデル向けツールで使用するサンドボックスのユーザー ID
-- `SandboxRunConfig.client`: サンドボックスバックエンド
-- `SandboxRunConfig.session`、`session_state`、または `snapshot`: 後続の実行が以前の作業に再接続する方法
+- `SandboxRunConfig.client`: サンドボックスのバックエンド
+- `SandboxRunConfig.session`、`session_state`、または `snapshot`: 後続の実行を以前の作業へ再接続する方法
 
 ## 次のステップ
 
-- [概念](sandbox/guide.md): マニフェスト、機能、権限、スナップショット、実行設定、構成パターンを理解します。
-- [サンドボックスクライアント](sandbox/clients.md): Unix ローカル、Docker、ホスト型プロバイダー、マウント戦略を選択します。
-- [エージェントメモリ](sandbox/memory.md): 以前のサンドボックス実行から得た知見を保存し、再利用します。
+- [概念](sandbox/guide.md): マニフェスト、機能、権限、スナップショット、実行設定、構成パターンについて理解します。
+- [サンドボックスクライアント](sandbox/clients.md): Unix ローカル、Docker、ホステッドプロバイダー、マウント戦略を選択します。
+- [エージェントメモリ](sandbox/memory.md): 過去のサンドボックス実行から得た知見を保持し、再利用します。
 
-シェルアクセスがたまに使うツールの 1 つにすぎない場合は、[ツールガイド](tools.md) のホスト型シェルから始めてください。ワークスペース分離、サンドボックスクライアントの選択、またはサンドボックスセッションの再開動作が設計に含まれる場合は、サンドボックスエージェントを選択してください。
+シェルアクセスを一時的なツールとしてのみ使用する場合は、[ツールガイド](tools.md)のホステッドシェルから始めてください。ワークスペースの分離、サンドボックスクライアントの選択、またはサンドボックスセッションの再開動作が設計に含まれる場合は、サンドボックスエージェントを使用してください。

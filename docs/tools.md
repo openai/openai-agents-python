@@ -93,7 +93,7 @@ crm_tools = tool_namespace(
 
 agent = Agent(
     name="Operations assistant",
-    model="gpt-5.5",
+    model="gpt-5.6-sol",
     instructions="Load the crm namespace before using CRM tools.",
     tools=[*crm_tools, ToolSearchTool()],
 )
@@ -134,7 +134,7 @@ csv_skill: ShellToolSkillReference = {
 
 agent = Agent(
     name="Container shell agent",
-    model="gpt-5.5",
+    model="gpt-5.6-sol",
     instructions="Use the mounted skill when helpful.",
     tools=[
         ShellTool(

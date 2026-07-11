@@ -45,6 +45,7 @@ from ..session import SandboxSession, SandboxSessionState
 from ..session.base_sandbox_session import BaseSandboxSession
 from ..session.dependencies import Dependencies
 from ..session.manager import Instrumentation
+from ..session.pty_output import collect_pty_output
 from ..session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -53,7 +54,6 @@ from ..session.pty_types import (
     clamp_pty_yield_time_ms,
     process_id_to_prune_from_meta,
     resolve_pty_write_yield_time_ms,
-    truncate_text_by_tokens,
 )
 from ..session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
 from ..session.workspace_payloads import coerce_write_payload
@@ -70,6 +70,7 @@ _DEFAULT_WORKSPACE_PREFIX = "sandbox-local-"
 _DEFAULT_MANIFEST_ROOT = cast(str, Manifest.model_fields["root"].default)
 _PTY_READ_CHUNK_BYTES = 16_384
 _PTY_CHILD_SIGNAL_DEFAULTS = (signal.SIGINT, signal.SIGQUIT)
+_PTY_FD_CLOSE_GRACE_SECONDS = 0.1
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     _pty_lock: asyncio.Lock
     _pty_processes: dict[int, _UnixPtyProcessEntry]
     _reserved_pty_process_ids: set[int]
+    _fd_close_tasks: set[asyncio.Task[None]]
 
     def __init__(self, *, state: UnixLocalSandboxSessionState) -> None:
         self.state = state
@@ -137,6 +139,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         self._pty_lock = asyncio.Lock()
         self._pty_processes = {}
         self._reserved_pty_process_ids = set()
+        self._fd_close_tasks = set()
 
     @classmethod
     def from_state(cls, state: UnixLocalSandboxSessionState) -> "UnixLocalSandboxSession":
@@ -192,9 +195,13 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             )
 
     async def _after_shutdown(self) -> None:
+        await self._wait_for_fd_close_tasks()
         # Best-effort: mark session not running. We intentionally do not delete the workspace
         # directory here; cleanup is handled by the Client.delete().
         self._running = False
+
+    async def _after_stop(self) -> None:
+        await self._wait_for_fd_close_tasks()
 
     async def _resolve_exposed_port(self, port: int) -> ExposedPortEndpoint:
         return ExposedPortEndpoint(host="127.0.0.1", port=port, tls=False)
@@ -476,36 +483,14 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         yield_time_ms: int,
         max_output_tokens: int | None,
     ) -> tuple[bytes, int | None]:
-        deadline = time.monotonic() + (yield_time_ms / 1000)
-        output = bytearray()
-
-        while True:
-            async with entry.output_lock:
-                while entry.output_chunks:
-                    output.extend(entry.output_chunks.popleft())
-
-            if time.monotonic() >= deadline:
-                break
-
-            if entry.output_closed.is_set():
-                async with entry.output_lock:
-                    while entry.output_chunks:
-                        output.extend(entry.output_chunks.popleft())
-                break
-
-            remaining_s = deadline - time.monotonic()
-            if remaining_s <= 0:
-                break
-
-            try:
-                await asyncio.wait_for(entry.output_notify.wait(), timeout=remaining_s)
-            except asyncio.TimeoutError:
-                break
-            entry.output_notify.clear()
-
-        text = output.decode("utf-8", errors="replace")
-        truncated_text, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
-        return truncated_text.encode("utf-8", errors="replace"), original_token_count
+        return await collect_pty_output(
+            output_chunks=entry.output_chunks,
+            output_lock=entry.output_lock,
+            output_notify=entry.output_notify,
+            is_done=entry.output_closed.is_set,
+            yield_time_ms=yield_time_ms,
+            max_output_tokens=max_output_tokens,
+        )
 
     async def _finalize_pty_update(
         self,
@@ -564,9 +549,9 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         if entry.tty:
             if primary_fd is not None:
                 # On macOS we have observed os.close() on the PTY master fd block while a
-                # background reader thread is still inside os.read(). Close it off-thread so
-                # session teardown remains best-effort and non-blocking.
-                asyncio.create_task(asyncio.to_thread(_close_fd_quietly, primary_fd))
+                # background reader thread is still inside os.read(). Keep the close task owned
+                # by the session without making PTY termination wait indefinitely for it.
+                self._schedule_fd_close(primary_fd)
             entry.output_closed.set()
             entry.output_notify.set()
             return
@@ -576,6 +561,16 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         await asyncio.gather(*entry.pump_tasks, return_exceptions=True)
         if entry.wait_task is not None:
             await asyncio.gather(entry.wait_task, return_exceptions=True)
+
+    def _schedule_fd_close(self, fd: int) -> None:
+        task = asyncio.create_task(asyncio.to_thread(_close_fd_quietly, fd))
+        self._fd_close_tasks.add(task)
+        task.add_done_callback(self._fd_close_tasks.discard)
+
+    async def _wait_for_fd_close_tasks(self) -> None:
+        tasks = tuple(self._fd_close_tasks)
+        if tasks:
+            await asyncio.wait(tasks, timeout=_PTY_FD_CLOSE_GRACE_SECONDS)
 
     def _confined_exec_command(
         self,
