@@ -226,6 +226,8 @@ def _flatten_nested_history_messages(
 def _extract_nested_history_transcript(
     item: TResponseInputItem,
 ) -> list[TResponseInputItem] | None:
+    if item.get("role") != "assistant":
+        return None
     content = item.get("content")
     if not isinstance(content, str):
         return None
