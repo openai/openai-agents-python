@@ -95,11 +95,12 @@ class FailingOnceStructureMetadataSession(AdvancedSQLiteSession):
         self,
         conn: Any,
         items: list[TResponseInputItem],
+        message_ids: list[int],
     ) -> None:
         if self.fail_structure_metadata_once:
             self.fail_structure_metadata_once = False
             raise RuntimeError("structure metadata failed")
-        super()._insert_structure_metadata(conn, items)
+        super()._insert_structure_metadata(conn, items, message_ids)
 
 
 class PartiallyFailingStructureMetadataSession(AdvancedSQLiteSession):
@@ -109,13 +110,9 @@ class PartiallyFailingStructureMetadataSession(AdvancedSQLiteSession):
         self,
         conn: Any,
         items: list[TResponseInputItem],
+        message_ids: list[int],
     ) -> None:
-        cursor = conn.execute(
-            f"SELECT id FROM {self.messages_table} WHERE session_id = ? ORDER BY id ASC LIMIT 1",
-            (self.session_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:
+        if not message_ids:
             raise RuntimeError("no inserted message id found")
 
         conn.execute(
@@ -125,7 +122,7 @@ class PartiallyFailingStructureMetadataSession(AdvancedSQLiteSession):
              user_turn_number, branch_turn_number, tool_name)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (self.session_id, row[0], self._current_branch_id, "user", 1, 1, 1, None),
+            (self.session_id, message_ids[0], self._current_branch_id, "user", 1, 1, 1, None),
         )
         raise RuntimeError("structure metadata failed after partial write")
 

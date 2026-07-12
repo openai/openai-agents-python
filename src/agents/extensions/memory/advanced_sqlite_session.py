@@ -135,6 +135,54 @@ class AdvancedSQLiteSession(SQLiteSession):
 
             conn.commit()
 
+    def _insert_items_and_capture_ids(
+        self, conn: sqlite3.Connection, items: list[TResponseInputItem]
+    ) -> list[int]:
+        """Insert items and return their assigned message IDs.
+
+        This method ensures that message IDs are deterministically captured within
+        the same transaction as insertion, eliminating TOCTOU race conditions.
+
+        Args:
+            conn: Database connection
+            items: List of items to insert
+
+        Returns:
+            List of message IDs corresponding to the inserted items, in the same order
+        """
+        # First ensure session exists
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO {self.sessions_table} (session_id) VALUES (?)
+        """,
+            (self.session_id,),
+        )
+
+        # Insert items one by one and capture their IDs using last_insert_rowid()
+        message_ids = []
+        with closing(conn.cursor()) as cursor:
+            for item in items:
+                cursor.execute(
+                    f"""
+                    INSERT INTO {self.messages_table} (session_id, message_data) VALUES (?, ?)
+                """,
+                    (self.session_id, json.dumps(item)),
+                )
+                # Capture the ID immediately after insertion
+                message_ids.append(cursor.lastrowid)
+
+        # Update session timestamp
+        conn.execute(
+            f"""
+            UPDATE {self.sessions_table}
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE session_id = ?
+        """,
+            (self.session_id,),
+        )
+
+        return message_ids
+
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Add items to the session.
 
@@ -149,8 +197,8 @@ class AdvancedSQLiteSession(SQLiteSession):
             with self._locked_connection() as conn:
                 try:
                     # Keep both writes in one transaction so metadata failures do not leave orphans.
-                    self._insert_items(conn, items)
-                    self._insert_structure_metadata(conn, items)
+                    message_ids = self._insert_items_and_capture_ids(conn, items)
+                    self._insert_structure_metadata(conn, items, message_ids)
                     conn.commit()
                 except Exception:
                     conn.rollback()
@@ -349,7 +397,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                 result = cursor.fetchone()
                 return result[0] if result else 0
 
-    async def _add_structure_metadata(self, items: list[TResponseInputItem]) -> None:
+    async def _add_structure_metadata(
+        self, items: list[TResponseInputItem], message_ids: list[int] | None = None
+    ) -> None:
         """Extract structure metadata with branch-aware turn tracking.
 
         This method:
@@ -360,12 +410,24 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         Args:
             items: The items to add to the session
+            message_ids: Optional list of message IDs corresponding to items.
+                         If None, raises ValueError as metadata cannot be added without IDs.
         """
+        if message_ids is None:
+            raise ValueError(
+                "_add_structure_metadata() requires explicit message_ids parameter. "
+                "Use add_items() to insert messages and metadata atomically."
+            )
+
+        if len(message_ids) != len(items):
+            raise ValueError(
+                f"Length mismatch: {len(message_ids)} message_ids but {len(items)} items"
+            )
 
         def _add_structure_sync():
             """Synchronous helper to add structure metadata to database."""
             with self._locked_connection() as conn:
-                self._insert_structure_metadata(conn, items)
+                self._insert_structure_metadata(conn, items, message_ids)
                 conn.commit()
 
         try:
@@ -385,17 +447,8 @@ class AdvancedSQLiteSession(SQLiteSession):
         self,
         conn: sqlite3.Connection,
         items: list[TResponseInputItem],
+        message_ids: list[int],
     ) -> None:
-        # Get the IDs of messages we just inserted, in order.
-        with closing(conn.cursor()) as cursor:
-            cursor.execute(
-                f"SELECT id FROM {self.messages_table} "
-                f"WHERE session_id = ? ORDER BY id DESC LIMIT ?",
-                (self.session_id, len(items)),
-            )
-            message_ids = [row[0] for row in cursor.fetchall()]
-            message_ids.reverse()
-
         if len(message_ids) != len(items):
             raise RuntimeError(
                 "Failed to resolve inserted message IDs while writing structure metadata"
