@@ -264,7 +264,7 @@ class SQLAlchemySession(SessionABC):
             return
 
         assert self._init_lock is not None
-        while not self._init_lock.acquire(blocking=False):
+        while not self._init_lock.acquire(blocking=False):  # noqa: ASYNC110
             # Poll without handing lock acquisition to a background thread so
             # cancellation cannot strand the shared init lock in the acquired state.
             await asyncio.sleep(0.01)

@@ -119,6 +119,7 @@ select = [
   "I",  # isort
   "B",  # flake8-bugbear
   "C4", # flake8-comprehensions
+  "ASYNC", # flake8-async
   "DTZ005", # datetime.now() without a timezone
   "G004", # logging statement uses f-string
   "RUF006", # unowned asyncio tasks
@@ -133,9 +134,9 @@ logger-objects = ["agents.logger.logger"]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"examples/**/*.py" = ["DTZ005", "E501", "G004", "RUF006", "RUF012", "RUF100"]
+"examples/**/*.py" = ["ASYNC", "DTZ005", "E501", "G004", "RUF006", "RUF012", "RUF100"]
 "examples/**/*.ipynb" = ["RUF100"]
-"tests/**/*.py" = ["RUF006", "RUF012", "RUF100"]
+"tests/**/*.py" = ["ASYNC", "RUF006", "RUF012", "RUF100"]
 
 [tool.mypy]
 strict = true
