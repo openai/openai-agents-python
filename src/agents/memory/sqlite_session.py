@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -12,6 +13,53 @@ from typing import ClassVar
 from ..items import TResponseInputItem
 from .session import SessionABC
 from .session_settings import SessionSettings, resolve_session_limit
+
+# SQL keywords that are not allowed as table names
+_SQL_KEYWORDS = frozenset(
+    {
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "DROP",
+        "CREATE",
+        "ALTER",
+        "TABLE",
+        "FROM",
+        "WHERE",
+        "JOIN",
+        "UNION",
+        "ORDER",
+        "GROUP",
+        "HAVING",
+        "LIMIT",
+        "OFFSET",
+    }
+)
+
+
+def _validate_table_name(table_name: str) -> None:
+    """Validate that a table name is a safe SQL identifier.
+
+    Args:
+        table_name: The table name to validate
+
+    Raises:
+        ValueError: If the table name is invalid
+    """
+    if not table_name:
+        raise ValueError("Table name cannot be empty")
+
+    # Check format: alphanumeric + underscore, must start with letter or underscore
+    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table_name):
+        raise ValueError(
+            f"Invalid table name '{table_name}': must contain only alphanumeric "
+            "characters and underscores, and start with a letter or underscore"
+        )
+
+    # Check for SQL keywords
+    if table_name.upper() in _SQL_KEYWORDS:
+        raise ValueError(f"Invalid table name '{table_name}': SQL keyword not allowed")
 
 
 class SQLiteSession(SessionABC):
@@ -46,6 +94,10 @@ class SQLiteSession(SessionABC):
             session_settings: Session configuration settings including default limit for
                 retrieving items. If None, uses default SessionSettings().
         """
+        # Validate table names to prevent SQL injection
+        _validate_table_name(sessions_table)
+        _validate_table_name(messages_table)
+
         self.session_id = session_id
         self.session_settings = session_settings or SessionSettings()
         self.db_path = db_path

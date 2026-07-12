@@ -1815,3 +1815,84 @@ async def test_output_tokens_details_persisted_when_input_details_missing():
     assert turn_usage["output_tokens_details"] == {"reasoning_tokens": 42}
     assert turn_usage["input_tokens_details"] is None
     session.close()
+
+
+async def test_table_name_validation_rejects_malicious_input():
+    """Regression test for SQL injection via malicious table names."""
+    # Test malicious table name with SQL injection attempt
+    with pytest.raises(ValueError, match="Invalid table name"):
+        AdvancedSQLiteSession(
+            session_id="injection_test",
+            messages_table="agent_messages; DROP TABLE agent_sessions--",
+        )
+
+    # Test malicious table name with UNION injection
+    with pytest.raises(ValueError, match="Invalid table name"):
+        AdvancedSQLiteSession(
+            session_id="injection_test",
+            messages_table="agent_messages UNION SELECT * FROM users",
+        )
+
+    # Test SQL keyword as table name
+    with pytest.raises(ValueError, match="SQL keyword not allowed"):
+        AdvancedSQLiteSession(
+            session_id="keyword_test",
+            sessions_table="SELECT",
+        )
+
+    # Test empty table name
+    with pytest.raises(ValueError, match="Table name cannot be empty"):
+        AdvancedSQLiteSession(
+            session_id="empty_test",
+            messages_table="",
+        )
+
+    # Test table name starting with number
+    with pytest.raises(ValueError, match="Invalid table name"):
+        AdvancedSQLiteSession(
+            session_id="number_test",
+            messages_table="123_messages",
+        )
+
+    # Test table name with special characters
+    with pytest.raises(ValueError, match="Invalid table name"):
+        AdvancedSQLiteSession(
+            session_id="special_test",
+            sessions_table="agent-sessions",
+        )
+
+
+async def test_table_name_validation_accepts_valid_input():
+    """Test that valid table names are accepted."""
+    # Test valid alphanumeric table names
+    session1 = AdvancedSQLiteSession(
+        session_id="valid_test1",
+        sessions_table="my_sessions",
+        messages_table="my_messages",
+        create_tables=True,
+    )
+    assert session1.sessions_table == "my_sessions"
+    assert session1.messages_table == "my_messages"
+    session1.close()
+
+    # Test valid table name starting with underscore
+    session2 = AdvancedSQLiteSession(
+        session_id="valid_test2",
+        sessions_table="_sessions",
+        messages_table="_messages",
+        create_tables=True,
+    )
+    assert session2.sessions_table == "_sessions"
+    assert session2.messages_table == "_messages"
+    session2.close()
+
+    # Test valid table name with numbers
+    session3 = AdvancedSQLiteSession(
+        session_id="valid_test3",
+        sessions_table="sessions_v2",
+        messages_table="messages_2024",
+        create_tables=True,
+    )
+    assert session3.sessions_table == "sessions_v2"
+    assert session3.messages_table == "messages_2024"
+    session3.close()
