@@ -4085,6 +4085,24 @@ class TestInputGuardrailFunctionality:
         with pytest.raises(ValueError, match="run_in_parallel=False"):
             await session.update_agent(agent)
 
+        # Check handoff validation
+        bad_agent = RealtimeAgent(name="bad_agent", input_guardrails=[blocking_guardrail])
+        bad_handoff = Handoff(
+            tool_name="switch",
+            tool_description="",
+            input_json_schema={},
+            on_invoke_handoff=AsyncMock(return_value=bad_agent),
+            input_filter=None,
+            agent_name=bad_agent.name,
+            is_enabled=True,
+        )
+        safe_agent_with_handoff = RealtimeAgent(name="safe_agent", handoffs=[bad_handoff])
+        session_with_handoff = RealtimeSession(mock_model, safe_agent_with_handoff, None)
+        with pytest.raises(ValueError, match="run_in_parallel=False"):
+            await session_with_handoff._handle_tool_call(
+                RealtimeModelToolCallEvent(name="switch", call_id="c1", arguments="{}")
+            )
+
 
 def test_realtime_input_guardrail_tripped_is_exported():
     """RealtimeInputGuardrailTripped should be importable from agents.realtime and in __all__."""

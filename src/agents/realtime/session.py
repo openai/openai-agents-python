@@ -225,22 +225,17 @@ class RealtimeSession(RealtimeModelListener):
         # user finishes speaking, sequential (blocking) input guardrails
         # (run_in_parallel=False) cannot prevent the model from starting
         # to generate a response and are unsupported.
-        agent_guardrails = getattr(self._current_agent, "input_guardrails", None)
+        self._validate_agent_input_guardrails(self._current_agent)
         run_config_guardrails = self._run_config.get("input_guardrails", [])
-        guardrails_to_check = []
-        if isinstance(agent_guardrails, list):
-            guardrails_to_check.extend(agent_guardrails)
         if isinstance(run_config_guardrails, list):
-            guardrails_to_check.extend(run_config_guardrails)
-
-        for guardrail in guardrails_to_check:
-            if hasattr(guardrail, "run_in_parallel") and guardrail.run_in_parallel is False:
-                raise ValueError(
-                    f"Input guardrail '{guardrail.get_name()}' has run_in_parallel=False, "
-                    "which is unsupported in RealtimeSession. All input guardrails in "
-                    "RealtimeSession must run in parallel (run_in_parallel=True) because "
-                    "the Realtime API generates responses concurrently."
-                )
+            for guardrail in run_config_guardrails:
+                if hasattr(guardrail, "run_in_parallel") and guardrail.run_in_parallel is False:
+                    raise ValueError(
+                        f"Input guardrail '{guardrail.get_name()}' has run_in_parallel=False, "
+                        "which is unsupported in RealtimeSession. All input guardrails in "
+                        "RealtimeSession must run in parallel (run_in_parallel=True) because "
+                        "the Realtime API generates responses concurrently."
+                    )
 
     @property
     def model(self) -> RealtimeModel:
@@ -354,16 +349,7 @@ class RealtimeSession(RealtimeModelListener):
     async def update_agent(self, agent: RealtimeAgent) -> None:
         """Update the active agent for this session and apply its settings to the model."""
         # Validate that no input guardrails have run_in_parallel=False.
-        agent_guardrails = getattr(agent, "input_guardrails", None)
-        if isinstance(agent_guardrails, list):
-            for guardrail in agent_guardrails:
-                if hasattr(guardrail, "run_in_parallel") and guardrail.run_in_parallel is False:
-                    raise ValueError(
-                        f"Input guardrail '{guardrail.get_name()}' has run_in_parallel=False, "
-                        "which is unsupported in RealtimeSession. All input guardrails in "
-                        "RealtimeSession must run in parallel (run_in_parallel=True) because "
-                        "the Realtime API generates responses concurrently."
-                    )
+        self._validate_agent_input_guardrails(agent)
 
         updated_settings = await self._get_updated_model_settings_from_agent(
             starting_settings=None,
@@ -377,6 +363,19 @@ class RealtimeSession(RealtimeModelListener):
         await self._model.send_event(
             RealtimeModelSendSessionUpdate(session_settings=updated_settings)
         )
+
+    def _validate_agent_input_guardrails(self, agent: RealtimeAgent) -> None:
+        """Validate that no input guardrails on the agent have run_in_parallel=False."""
+        agent_guardrails = getattr(agent, "input_guardrails", None)
+        if isinstance(agent_guardrails, list):
+            for guardrail in agent_guardrails:
+                if hasattr(guardrail, "run_in_parallel") and guardrail.run_in_parallel is False:
+                    raise ValueError(
+                        f"Input guardrail '{guardrail.get_name()}' has run_in_parallel=False, "
+                        "which is unsupported in RealtimeSession. All input guardrails in "
+                        "RealtimeSession must run in parallel (run_in_parallel=True) because "
+                        "the Realtime API generates responses concurrently."
+                    )
 
     async def on_event(self, event: RealtimeModelEvent) -> None:
         if self._closing or self._closed:
@@ -1071,6 +1070,8 @@ class RealtimeSession(RealtimeModelListener):
                     raise UserError(
                         f"Handoff {handoff.tool_name} returned invalid result: {type(result)}"
                     )
+
+                self._validate_agent_input_guardrails(result)
 
                 # Store previous agent for event
                 previous_agent = agent
