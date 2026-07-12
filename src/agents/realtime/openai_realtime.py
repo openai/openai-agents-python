@@ -57,6 +57,7 @@ from openai.types.realtime.realtime_conversation_item_user_message import (
 from openai.types.realtime.realtime_function_tool import (
     RealtimeFunctionTool as OpenAISessionFunction,
 )
+from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
 from openai.types.realtime.realtime_server_event import (
     RealtimeServerEvent as OpenAIRealtimeServerEvent,
 )
@@ -100,6 +101,7 @@ from .. import _debug
 from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper, TContext
+from ..usage import Usage, _make_input_tokens_details
 from ..version import __version__
 from ._tool_filtering import filter_enabled_tools, filter_statically_enabled_tools
 from ._tool_validation import validate_realtime_tool_names
@@ -134,6 +136,7 @@ from .model_events import (
     RealtimeModelTranscriptDeltaEvent,
     RealtimeModelTurnEndedEvent,
     RealtimeModelTurnStartedEvent,
+    RealtimeModelUsageEvent,
 )
 from .model_inputs import (
     RealtimeModelSendAudio,
@@ -146,6 +149,26 @@ from .model_inputs import (
 )
 
 FormatInput: TypeAlias = str | AudioPCM | AudioPCMU | AudioPCMA | Mapping[str, Any] | None
+
+
+def _convert_realtime_usage(response_usage: RealtimeResponseUsage) -> Usage:
+    input_tokens = response_usage.input_tokens or 0
+    output_tokens = response_usage.output_tokens or 0
+    total_tokens = response_usage.total_tokens
+    if total_tokens is None:
+        total_tokens = input_tokens + output_tokens
+    cached_tokens = (
+        response_usage.input_token_details.cached_tokens or 0
+        if response_usage.input_token_details is not None
+        else 0
+    )
+    return Usage(
+        requests=1,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        input_tokens_details=_make_input_tokens_details(cached_tokens=cached_tokens),
+    )
 
 
 # Avoid direct imports of non-exported names by referencing via module
@@ -1223,6 +1246,11 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             await self._emit_event(RealtimeModelTurnStartedEvent())
         elif parsed.type == "response.done":
             await self._mark_response_done()
+            response_usage = getattr(getattr(parsed, "response", None), "usage", None)
+            if response_usage is not None:
+                await self._emit_event(
+                    RealtimeModelUsageEvent(usage=_convert_realtime_usage(response_usage))
+                )
             await self._emit_event(RealtimeModelTurnEndedEvent())
         elif parsed.type == "session.created":
             await self._send_tracing_config(self._tracing_config)

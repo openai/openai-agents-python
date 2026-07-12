@@ -72,6 +72,7 @@ from .model_events import (
     RealtimeModelTranscriptDeltaEvent,
     RealtimeModelTurnEndedEvent,
     RealtimeModelTurnStartedEvent,
+    RealtimeModelUsageEvent,
 )
 from .model_inputs import (
     RealtimeModelInputTextContent,
@@ -171,6 +172,7 @@ __all__ = [
     "RealtimeModelTranscriptDeltaEvent",
     "RealtimeModelTurnEndedEvent",
     "RealtimeModelTurnStartedEvent",
+    "RealtimeModelUsageEvent",
     # Model Inputs
     "RealtimeModelInputTextContent",
     "RealtimeModelRawClientMessage",

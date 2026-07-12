@@ -6,6 +6,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 import pytest
+from openai.types.responses.response_usage import InputTokensDetails
 from pydantic import BaseModel, ConfigDict
 
 from agents.exceptions import ToolTimeoutError, UserError
@@ -52,6 +53,7 @@ from agents.realtime.model_events import (
     RealtimeModelTranscriptDeltaEvent,
     RealtimeModelTurnEndedEvent,
     RealtimeModelTurnStartedEvent,
+    RealtimeModelUsageEvent,
 )
 from agents.realtime.model_inputs import (
     RealtimeModelSendAudio,
@@ -74,6 +76,7 @@ from agents.tool_guardrails import (
     ToolInputGuardrailData,
     tool_input_guardrail,
 )
+from agents.usage import Usage
 
 
 class _DummyModel(RealtimeModel):
@@ -1171,6 +1174,54 @@ class TestEventHandling:
         end_session_event = await session._event_queue.get()
         assert isinstance(end_session_event, RealtimeAgentEndEvent)
         assert end_session_event.agent == mock_agent
+
+    @pytest.mark.asyncio
+    async def test_usage_event_accumulates_before_turn_end(self, mock_model, mock_agent):
+        session = RealtimeSession(
+            mock_model, mock_agent, None, run_config={"async_tool_calls": False}
+        )
+        first_usage = Usage(
+            requests=1,
+            input_tokens=10,
+            output_tokens=4,
+            total_tokens=14,
+            input_tokens_details=InputTokensDetails.model_validate(
+                {"cached_tokens": 3, "cache_write_tokens": 0}
+            ),
+        )
+        second_usage = Usage(
+            requests=1,
+            input_tokens=8,
+            output_tokens=2,
+            total_tokens=10,
+            input_tokens_details=InputTokensDetails.model_validate(
+                {"cached_tokens": 5, "cache_write_tokens": 0}
+            ),
+        )
+
+        await session.on_event(RealtimeModelUsageEvent(usage=first_usage))
+        await session.on_event(RealtimeModelUsageEvent(usage=second_usage))
+        await session.on_event(RealtimeModelTurnEndedEvent())
+
+        accumulated = session._context_wrapper.usage
+        assert accumulated.requests == 2
+        assert accumulated.input_tokens == 18
+        assert accumulated.output_tokens == 6
+        assert accumulated.total_tokens == 24
+        assert accumulated.input_tokens_details.cached_tokens == 8
+        assert len(accumulated.request_usage_entries) == 2
+        assert [entry.total_tokens for entry in accumulated.request_usage_entries] == [14, 10]
+
+        events = [session._event_queue.get_nowait() for _ in range(session._event_queue.qsize())]
+        assert [getattr(event, "type", None) for event in events] == [
+            "raw_model_event",
+            "raw_model_event",
+            "raw_model_event",
+            "agent_end",
+        ]
+        end_event = events[-1]
+        assert isinstance(end_event, RealtimeAgentEndEvent)
+        assert end_event.info.context.usage.total_tokens == 24
 
     @pytest.mark.asyncio
     async def test_transcription_completed_event_updates_history(self, mock_model, mock_agent):

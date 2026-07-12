@@ -12,11 +12,16 @@ from pydantic import TypeAdapter
 from agents import Agent, function_tool
 from agents.exceptions import UserError
 from agents.handoffs import handoff
+from agents.realtime.agent import RealtimeAgent
+from agents.realtime.events import RealtimeAgentEndEvent, RealtimeRawModelEvent
 from agents.realtime.model import RealtimeModelConfig
 from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
     RealtimeModelErrorEvent,
+    RealtimeModelRawServerEvent,
     RealtimeModelToolCallEvent,
+    RealtimeModelTurnEndedEvent,
+    RealtimeModelUsageEvent,
 )
 from agents.realtime.model_inputs import (
     RealtimeModelSendAudio,
@@ -27,6 +32,7 @@ from agents.realtime.model_inputs import (
     RealtimeModelSendUserInput,
 )
 from agents.realtime.openai_realtime import OpenAIRealtimeWebSocketModel, TransportConfig
+from agents.realtime.runner import RealtimeRunner
 
 
 class TestOpenAIRealtimeWebSocketModel:
@@ -416,6 +422,93 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
 
 class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
     """Test event parsing, validation, and error handling robustness."""
+
+    @pytest.mark.parametrize("status", ["completed", "cancelled", "failed", "incomplete"])
+    @pytest.mark.asyncio
+    async def test_response_done_emits_usage_before_turn_ended(self, model, status):
+        listener = AsyncMock()
+        model.add_listener(listener)
+
+        raw_event = {
+            "type": "response.done",
+            "event_id": "event_usage",
+            "response": {
+                "id": "response_usage",
+                "status": status,
+                "usage": {
+                    "input_tokens": 132,
+                    "output_tokens": 121,
+                    "total_tokens": 253,
+                    "input_token_details": {
+                        "text_tokens": 119,
+                        "audio_tokens": 13,
+                        "image_tokens": 0,
+                        "cached_tokens": 64,
+                        "cached_tokens_details": {
+                            "text_tokens": 64,
+                            "audio_tokens": 0,
+                            "image_tokens": 0,
+                        },
+                    },
+                    "output_token_details": {"text_tokens": 30, "audio_tokens": 91},
+                },
+            },
+        }
+
+        await model._handle_ws_event(raw_event)
+
+        events = [call.args[0] for call in listener.on_event.await_args_list]
+        assert [event.type for event in events] == ["raw_server_event", "usage", "turn_ended"]
+        assert isinstance(events[0], RealtimeModelRawServerEvent)
+        assert events[0].data is raw_event
+        assert isinstance(events[1], RealtimeModelUsageEvent)
+        assert events[1].usage.requests == 1
+        assert events[1].usage.input_tokens == 132
+        assert events[1].usage.output_tokens == 121
+        assert events[1].usage.total_tokens == 253
+        assert events[1].usage.input_tokens_details.cached_tokens == 64
+        assert isinstance(events[2], RealtimeModelTurnEndedEvent)
+
+    @pytest.mark.asyncio
+    async def test_response_done_normalizes_partial_usage(self, model):
+        listener = AsyncMock()
+        model.add_listener(listener)
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "event_id": "event_partial_usage",
+                "response": {
+                    "id": "response_partial_usage",
+                    "status": "completed",
+                    "usage": {"output_tokens": 7},
+                },
+            }
+        )
+
+        events = [call.args[0] for call in listener.on_event.await_args_list]
+        usage_event = next(event for event in events if isinstance(event, RealtimeModelUsageEvent))
+        assert usage_event.usage.requests == 1
+        assert usage_event.usage.input_tokens == 0
+        assert usage_event.usage.output_tokens == 7
+        assert usage_event.usage.total_tokens == 7
+        assert usage_event.usage.input_tokens_details.cached_tokens == 0
+
+    @pytest.mark.asyncio
+    async def test_response_done_without_usage_emits_only_terminal_events(self, model):
+        listener = AsyncMock()
+        model.add_listener(listener)
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "event_id": "event_without_usage",
+                "response": {"id": "response_without_usage", "status": "completed"},
+            }
+        )
+
+        events = [call.args[0] for call in listener.on_event.await_args_list]
+        assert [event.type for event in events] == ["raw_server_event", "turn_ended"]
 
     @pytest.mark.asyncio
     async def test_handle_malformed_json_logs_error_continues(self, model):
@@ -1934,6 +2027,105 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
 class TestTransportIntegration:
     """Integration tests for transport configuration using a local WebSocket server."""
+
+    @pytest.mark.asyncio
+    async def test_realtime_usage_flows_through_runner_session(self):
+        async def handler(websocket):
+            await websocket.recv()
+            responses: list[dict[str, Any]] = [
+                {
+                    "id": "response_1",
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "total_tokens": 15,
+                        "input_token_details": {"cached_tokens": 3},
+                    },
+                },
+                {
+                    "id": "response_2",
+                    "status": "cancelled",
+                    "usage": {
+                        "input_tokens": 8,
+                        "output_tokens": 2,
+                        "total_tokens": 10,
+                        "input_token_details": {"cached_tokens": 4},
+                    },
+                },
+                {"id": "response_3", "status": "completed"},
+            ]
+            for index, response in enumerate(responses, start=1):
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "response.created",
+                            "event_id": f"event_created_{index}",
+                            "response": {"id": response["id"], "status": "in_progress"},
+                        }
+                    )
+                )
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "response.done",
+                            "event_id": f"event_done_{index}",
+                            "response": response,
+                        }
+                    )
+                )
+            await websocket.wait_closed()
+
+        async with websockets.serve(handler, "127.0.0.1", 0) as server:
+            assert server.sockets
+            port = list(server.sockets)[0].getsockname()[1]
+            model = OpenAIRealtimeWebSocketModel()
+            runner = RealtimeRunner(RealtimeAgent(name="usage-agent"), model=model)
+            session = await runner.run(
+                model_config={
+                    "api_key": "test-key",
+                    "url": f"ws://127.0.0.1:{port}/v1/realtime",
+                }
+            )
+
+            end_totals: list[int] = []
+            raw_model_event_types: list[str] = []
+            async with session:
+                async for event in session:
+                    if isinstance(event, RealtimeRawModelEvent):
+                        raw_model_event_types.append(event.data.type)
+                    elif isinstance(event, RealtimeAgentEndEvent):
+                        end_totals.append(event.info.context.usage.total_tokens)
+                        if len(end_totals) == 3:
+                            break
+
+            usage = session._context_wrapper.usage
+            # Event info carries the session's live context, not a per-event snapshot. The
+            # transport can process every response before the consumer drains the queue.
+            assert end_totals == [25, 25, 25]
+            assert raw_model_event_types == [
+                "raw_server_event",
+                "turn_started",
+                "raw_server_event",
+                "usage",
+                "turn_ended",
+                "raw_server_event",
+                "turn_started",
+                "raw_server_event",
+                "usage",
+                "turn_ended",
+                "raw_server_event",
+                "turn_started",
+                "raw_server_event",
+                "turn_ended",
+            ]
+            assert usage.requests == 2
+            assert usage.input_tokens == 18
+            assert usage.output_tokens == 7
+            assert usage.total_tokens == 25
+            assert usage.input_tokens_details.cached_tokens == 7
+            assert len(usage.request_usage_entries) == 2
+            assert model._websocket is None
 
     @pytest.mark.asyncio
     async def test_connect_to_local_server(self):

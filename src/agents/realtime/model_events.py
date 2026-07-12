@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
+from ..usage import Usage
 from .items import RealtimeItem
 
 RealtimeConnectionStatus: TypeAlias = Literal["connecting", "connected", "disconnected"]
@@ -147,6 +148,15 @@ class RealtimeModelTurnEndedEvent:
 
 
 @dataclass
+class RealtimeModelUsageEvent:
+    """Usage reported for a terminal model response."""
+
+    usage: Usage
+
+    type: Literal["usage"] = "usage"
+
+
+@dataclass
 class RealtimeModelOtherEvent:
     """Used as a catchall for vendor-specific events."""
 
@@ -174,9 +184,6 @@ class RealtimeModelRawServerEvent:
     type: Literal["raw_server_event"] = "raw_server_event"
 
 
-# TODO (rm) Add usage events
-
-
 RealtimeModelEvent: TypeAlias = (
     RealtimeModelErrorEvent
     | RealtimeModelToolCallEvent
@@ -191,6 +198,7 @@ RealtimeModelEvent: TypeAlias = (
     | RealtimeModelConnectionStatusEvent
     | RealtimeModelTurnStartedEvent
     | RealtimeModelTurnEndedEvent
+    | RealtimeModelUsageEvent
     | RealtimeModelOtherEvent
     | RealtimeModelExceptionEvent
     | RealtimeModelRawServerEvent

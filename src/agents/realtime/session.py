@@ -515,6 +515,8 @@ class RealtimeSession(RealtimeModelListener):
                     info=self._event_info,
                 )
             )
+        elif event.type == "usage":
+            self._context_wrapper.usage.add(event.usage)
         elif event.type == "exception":
             # Store the exception to be raised in __aiter__
             self._stored_exception = event.exception
