@@ -225,7 +225,7 @@ class RealtimeSession(RealtimeModelListener):
         # user finishes speaking, sequential (blocking) input guardrails
         # (run_in_parallel=False) cannot prevent the model from starting
         # to generate a response and are unsupported.
-        agent_guardrails = self._current_agent.input_guardrails
+        agent_guardrails = getattr(self._current_agent, "input_guardrails", None)
         run_config_guardrails = self._run_config.get("input_guardrails", [])
         guardrails_to_check = []
         if isinstance(agent_guardrails, list):
@@ -354,7 +354,7 @@ class RealtimeSession(RealtimeModelListener):
     async def update_agent(self, agent: RealtimeAgent) -> None:
         """Update the active agent for this session and apply its settings to the model."""
         # Validate that no input guardrails have run_in_parallel=False.
-        agent_guardrails = agent.input_guardrails
+        agent_guardrails = getattr(agent, "input_guardrails", None)
         if isinstance(agent_guardrails, list):
             for guardrail in agent_guardrails:
                 if hasattr(guardrail, "run_in_parallel") and guardrail.run_in_parallel is False:
