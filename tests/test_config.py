@@ -7,6 +7,7 @@ import openai
 import pytest
 
 from agents import (
+    UserError,
     responses_websocket_session,
     set_default_openai_api,
     set_default_openai_client,
@@ -17,6 +18,7 @@ from agents.models import _openai_shared
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_provider import OpenAIProvider
 from agents.models.openai_responses import OpenAIResponsesModel, OpenAIResponsesWSModel
+from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider
 
 
 def test_cc_no_default_key_errors(monkeypatch):
@@ -36,6 +38,29 @@ def test_cc_set_default_openai_client():
     set_default_openai_client(client)
     chat_model = OpenAIProvider(use_responses=False).get_model("gpt-4")
     assert chat_model._client.api_key == "test_key"  # type: ignore
+
+
+def test_openai_provider_rejects_client_with_conflicting_connection_args():
+    client = openai.AsyncOpenAI(api_key="test_key")
+
+    with pytest.raises(UserError, match="Don't provide api_key, base_url, or websocket_base_url"):
+        OpenAIProvider(
+            openai_client=client,
+            api_key="different_key",
+            base_url="https://example.com/v1",
+            websocket_base_url="wss://example.com/v1",
+        )
+
+
+def test_openai_voice_provider_rejects_client_with_conflicting_connection_args():
+    client = openai.AsyncOpenAI(api_key="test_key")
+
+    with pytest.raises(UserError, match="Don't provide api_key or base_url"):
+        OpenAIVoiceModelProvider(
+            openai_client=client,
+            api_key="different_key",
+            base_url="https://example.com/v1",
+        )
 
 
 def test_resp_no_default_key_errors(monkeypatch):

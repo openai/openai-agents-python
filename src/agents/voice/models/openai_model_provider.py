@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
+from ...exceptions import UserError
 from ...models import _openai_shared
 from ...models.openai_agent_registration import (
     OpenAIAgentRegistrationConfig,
@@ -56,9 +57,8 @@ class OpenAIVoiceModelProvider(VoiceModelProvider):
             agent_registration: Optional agent registration configuration.
         """
         if openai_client is not None:
-            assert api_key is None and base_url is None, (
-                "Don't provide api_key or base_url if you provide openai_client"
-            )
+            if api_key is not None or base_url is not None:
+                raise UserError("Don't provide api_key or base_url if you provide openai_client")
             self._client: AsyncOpenAI | None = openai_client
         else:
             self._client = None
