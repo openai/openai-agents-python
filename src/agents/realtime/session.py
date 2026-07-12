@@ -71,6 +71,7 @@ from .model_events import (
 from .model_inputs import (
     RealtimeModelSendAudio,
     RealtimeModelSendInterrupt,
+    RealtimeModelSendRawMessage,
     RealtimeModelSendSessionUpdate,
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
@@ -1431,6 +1432,19 @@ class RealtimeSession(RealtimeModelListener):
                         # Interrupt the model, forcing a cancel of any in-progress response.
                         await self._model.send_event(
                             RealtimeModelSendInterrupt(force_response_cancel=True)
+                        )
+
+                        # Delete the offending transcribed input item from the conversation history
+                        # so that the model doesn't see or reply to it.
+                        await self._model.send_event(
+                            RealtimeModelSendRawMessage(
+                                message={
+                                    "type": "conversation.item.delete",
+                                    "other_data": {
+                                        "item_id": item_id,
+                                    },
+                                }
+                            )
                         )
 
                         # Send guardrail triggered message.

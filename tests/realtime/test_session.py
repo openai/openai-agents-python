@@ -57,6 +57,7 @@ from agents.realtime.model_events import (
 from agents.realtime.model_inputs import (
     RealtimeModelSendAudio,
     RealtimeModelSendInterrupt,
+    RealtimeModelSendRawMessage,
     RealtimeModelSendSessionUpdate,
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
@@ -3736,6 +3737,15 @@ class TestInputGuardrailFunctionality:
             if isinstance(event, RealtimeModelSendInterrupt)
         )
         assert interrupt_event.force_response_cancel is True
+
+        # Should have deleted the offending item from the history.
+        delete_event = next(
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendRawMessage)
+        )
+        assert delete_event.message["type"] == "conversation.item.delete"
+        assert delete_event.message["other_data"]["item_id"] == "item_1"
 
         # Should have sent the guardrail-triggered message to the model.
         assert len(mock_model.sent_messages) == 1
