@@ -277,6 +277,10 @@ are combined and de-duplicated per turn. They run once on the completed user tra
 `input_guardrail_tripped` event, forces `response.cancel`, and sends a follow-up user message that
 names the triggered guardrail.
 
+!!! note
+    Unlike the regular non-realtime runner, `RealtimeSession` runs all input guardrails in parallel. Since the Realtime API automatically starts generating responses concurrently when the user finishes speaking, sequential (blocking) input guardrails (`run_in_parallel=False`) cannot prevent the model from starting a response and are unsupported. Configuring an input guardrail with `run_in_parallel=False` in `RealtimeSession` will raise a `ValueError`.
+
+
 ```python
 from agents.guardrail import GuardrailFunctionOutput, InputGuardrail
 

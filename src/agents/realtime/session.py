@@ -220,6 +220,22 @@ class RealtimeSession(RealtimeModelListener):
         self._tool_call_tasks: set[asyncio.Task[Any]] = set()
         self._async_tool_calls: bool = bool(self._run_config.get("async_tool_calls", True))
 
+        # Validate that no input guardrails have run_in_parallel=False.
+        # Since the Realtime API automatically triggers response generation when the
+        # user finishes speaking, sequential (blocking) input guardrails
+        # (run_in_parallel=False) cannot prevent the model from starting
+        # to generate a response and are unsupported.
+        for guardrail in self._current_agent.input_guardrails + self._run_config.get(
+            "input_guardrails", []
+        ):
+            if not guardrail.run_in_parallel:
+                raise ValueError(
+                    f"Input guardrail '{guardrail.get_name()}' has run_in_parallel=False, "
+                    "which is unsupported in RealtimeSession. All input guardrails in "
+                    "RealtimeSession must run in parallel (run_in_parallel=True) because "
+                    "the Realtime API generates responses concurrently."
+                )
+
     @property
     def model(self) -> RealtimeModel:
         """Access the underlying model for adding listeners or other direct interaction."""
@@ -331,6 +347,16 @@ class RealtimeSession(RealtimeModelListener):
 
     async def update_agent(self, agent: RealtimeAgent) -> None:
         """Update the active agent for this session and apply its settings to the model."""
+        # Validate that no input guardrails have run_in_parallel=False.
+        for guardrail in agent.input_guardrails:
+            if not guardrail.run_in_parallel:
+                raise ValueError(
+                    f"Input guardrail '{guardrail.get_name()}' has run_in_parallel=False, "
+                    "which is unsupported in RealtimeSession. All input guardrails in "
+                    "RealtimeSession must run in parallel (run_in_parallel=True) because "
+                    "the Realtime API generates responses concurrently."
+                )
+
         updated_settings = await self._get_updated_model_settings_from_agent(
             starting_settings=None,
             agent=agent,

@@ -4050,6 +4050,41 @@ class TestInputGuardrailFunctionality:
         slow_can_resume.set()
         await self._wait_for_guardrail_tasks(session)
 
+    @pytest.mark.asyncio
+    async def test_sequential_input_guardrail_unsupported(self, mock_model):
+        """RealtimeSession must raise a ValueError if any input guardrail is configured
+        with run_in_parallel=False.
+        """
+
+        def guardrail_func(context, agent, input):
+            return GuardrailFunctionOutput(output_info={}, tripwire_triggered=False)
+
+        blocking_guardrail = InputGuardrail(
+            guardrail_function=guardrail_func,
+            name="blocking_guardrail",
+            run_in_parallel=False,
+        )
+
+        # Check constructor validation via agent
+        agent = RealtimeAgent(name="agent", input_guardrails=[blocking_guardrail])
+        with pytest.raises(ValueError, match="run_in_parallel=False"):
+            RealtimeSession(mock_model, agent, None, run_config={})
+
+        # Check constructor validation via run_config
+        safe_agent = RealtimeAgent(name="safe_agent")
+        with pytest.raises(ValueError, match="run_in_parallel=False"):
+            RealtimeSession(
+                mock_model,
+                safe_agent,
+                None,
+                run_config={"input_guardrails": [blocking_guardrail]},
+            )
+
+        # Check update_agent validation
+        session = RealtimeSession(mock_model, safe_agent, None, run_config={})
+        with pytest.raises(ValueError, match="run_in_parallel=False"):
+            await session.update_agent(agent)
+
 
 def test_realtime_input_guardrail_tripped_is_exported():
     """RealtimeInputGuardrailTripped should be importable from agents.realtime and in __all__."""
