@@ -141,19 +141,54 @@ class RealtimeModelTurnStartedEvent:
 
 
 @dataclass
-class RealtimeModelTurnEndedEvent:
-    """Triggered when the model finishes generating a response for a turn."""
+class RealtimeModelCachedTokensDetails:
+    """Modality breakdown for cached Realtime input tokens."""
 
-    type: Literal["turn_ended"] = "turn_ended"
+    text_tokens: int | None = None
+    audio_tokens: int | None = None
+    image_tokens: int | None = None
+
+
+@dataclass
+class RealtimeModelInputTokensDetails:
+    """Modality breakdown for Realtime input tokens."""
+
+    text_tokens: int | None = None
+    audio_tokens: int | None = None
+    image_tokens: int | None = None
+    cached_tokens: int | None = None
+    cached_tokens_details: RealtimeModelCachedTokensDetails | None = None
+
+
+@dataclass
+class RealtimeModelOutputTokensDetails:
+    """Modality breakdown for Realtime output tokens."""
+
+    text_tokens: int | None = None
+    audio_tokens: int | None = None
 
 
 @dataclass
 class RealtimeModelUsageEvent:
-    """Usage reported for a terminal model response."""
+    """Token usage reported for a completed Realtime model response."""
 
     usage: Usage
+    """Aggregate usage compatible with the shared SDK usage accounting."""
+
+    input_tokens_details: RealtimeModelInputTokensDetails | None = None
+    """Optional input-token modality details reported by the model provider."""
+
+    output_tokens_details: RealtimeModelOutputTokensDetails | None = None
+    """Optional output-token modality details reported by the model provider."""
 
     type: Literal["usage"] = "usage"
+
+
+@dataclass
+class RealtimeModelTurnEndedEvent:
+    """Triggered when the model finishes generating a response for a turn."""
+
+    type: Literal["turn_ended"] = "turn_ended"
 
 
 @dataclass
@@ -197,8 +232,8 @@ RealtimeModelEvent: TypeAlias = (
     | RealtimeModelItemDeletedEvent
     | RealtimeModelConnectionStatusEvent
     | RealtimeModelTurnStartedEvent
-    | RealtimeModelTurnEndedEvent
     | RealtimeModelUsageEvent
+    | RealtimeModelTurnEndedEvent
     | RealtimeModelOtherEvent
     | RealtimeModelExceptionEvent
     | RealtimeModelRawServerEvent
