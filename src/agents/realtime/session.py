@@ -225,10 +225,16 @@ class RealtimeSession(RealtimeModelListener):
         # user finishes speaking, sequential (blocking) input guardrails
         # (run_in_parallel=False) cannot prevent the model from starting
         # to generate a response and are unsupported.
-        for guardrail in self._current_agent.input_guardrails + self._run_config.get(
-            "input_guardrails", []
-        ):
-            if not guardrail.run_in_parallel:
+        agent_guardrails = self._current_agent.input_guardrails
+        run_config_guardrails = self._run_config.get("input_guardrails", [])
+        guardrails_to_check = []
+        if isinstance(agent_guardrails, list):
+            guardrails_to_check.extend(agent_guardrails)
+        if isinstance(run_config_guardrails, list):
+            guardrails_to_check.extend(run_config_guardrails)
+
+        for guardrail in guardrails_to_check:
+            if hasattr(guardrail, "run_in_parallel") and guardrail.run_in_parallel is False:
                 raise ValueError(
                     f"Input guardrail '{guardrail.get_name()}' has run_in_parallel=False, "
                     "which is unsupported in RealtimeSession. All input guardrails in "
@@ -348,14 +354,16 @@ class RealtimeSession(RealtimeModelListener):
     async def update_agent(self, agent: RealtimeAgent) -> None:
         """Update the active agent for this session and apply its settings to the model."""
         # Validate that no input guardrails have run_in_parallel=False.
-        for guardrail in agent.input_guardrails:
-            if not guardrail.run_in_parallel:
-                raise ValueError(
-                    f"Input guardrail '{guardrail.get_name()}' has run_in_parallel=False, "
-                    "which is unsupported in RealtimeSession. All input guardrails in "
-                    "RealtimeSession must run in parallel (run_in_parallel=True) because "
-                    "the Realtime API generates responses concurrently."
-                )
+        agent_guardrails = agent.input_guardrails
+        if isinstance(agent_guardrails, list):
+            for guardrail in agent_guardrails:
+                if hasattr(guardrail, "run_in_parallel") and guardrail.run_in_parallel is False:
+                    raise ValueError(
+                        f"Input guardrail '{guardrail.get_name()}' has run_in_parallel=False, "
+                        "which is unsupported in RealtimeSession. All input guardrails in "
+                        "RealtimeSession must run in parallel (run_in_parallel=True) because "
+                        "the Realtime API generates responses concurrently."
+                    )
 
         updated_settings = await self._get_updated_model_settings_from_agent(
             starting_settings=None,
