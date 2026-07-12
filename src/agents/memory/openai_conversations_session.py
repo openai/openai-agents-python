@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from openai import AsyncOpenAI
 
 from agents.models._openai_shared import get_default_openai_client
@@ -31,6 +33,7 @@ class OpenAIConversationsSession(SessionABC):
         session_settings: SessionSettings | None = None,
     ):
         self._session_id: str | None = conversation_id
+        self._session_id_lock = asyncio.Lock()
         self.session_settings = session_settings or SessionSettings()
         _openai_client = openai_client
         if _openai_client is None:
@@ -64,7 +67,9 @@ class OpenAIConversationsSession(SessionABC):
 
     async def _get_session_id(self) -> str:
         if self._session_id is None:
-            self._session_id = await start_openai_conversations_session(self._openai_client)
+            async with self._session_id_lock:
+                if self._session_id is None:
+                    self._session_id = await start_openai_conversations_session(self._openai_client)
         return self._session_id
 
     async def _clear_session_id(self) -> None:
