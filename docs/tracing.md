@@ -189,7 +189,7 @@ The following community and vendor integrations support the OpenAI Agents SDK tr
 
 ### External tracing processors list
 
--   [Weights & Biases](https://weave-docs.wandb.ai/guides/integrations/openai_agents)
+-   [W&B Weave](https://docs.wandb.ai/weave/guides/integrations/agents/openai-agents-sdk)
 -   [Arize-Phoenix](https://docs.arize.com/phoenix/tracing/integrations-tracing/openai-agents-sdk)
 -   [Future AGI](https://docs.futureagi.com/future-agi/products/observability/auto-instrumentation/openai_agents)
 -   [MLflow (self-hosted/OSS)](https://mlflow.org/docs/latest/tracing/integrations/openai-agent)
