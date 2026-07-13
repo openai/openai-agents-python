@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
+from ..usage import Usage
 from .items import RealtimeItem
 
 RealtimeConnectionStatus: TypeAlias = Literal["connecting", "connected", "disconnected"]
@@ -140,6 +141,50 @@ class RealtimeModelTurnStartedEvent:
 
 
 @dataclass
+class RealtimeModelCachedTokensDetails:
+    """Modality breakdown for cached Realtime input tokens."""
+
+    text_tokens: int | None = None
+    audio_tokens: int | None = None
+    image_tokens: int | None = None
+
+
+@dataclass
+class RealtimeModelInputTokensDetails:
+    """Modality breakdown for Realtime input tokens."""
+
+    text_tokens: int | None = None
+    audio_tokens: int | None = None
+    image_tokens: int | None = None
+    cached_tokens: int | None = None
+    cached_tokens_details: RealtimeModelCachedTokensDetails | None = None
+
+
+@dataclass
+class RealtimeModelOutputTokensDetails:
+    """Modality breakdown for Realtime output tokens."""
+
+    text_tokens: int | None = None
+    audio_tokens: int | None = None
+
+
+@dataclass
+class RealtimeModelUsageEvent:
+    """Token usage reported for a completed Realtime model response."""
+
+    usage: Usage
+    """Aggregate usage compatible with the shared SDK usage accounting."""
+
+    input_tokens_details: RealtimeModelInputTokensDetails | None = None
+    """Optional input-token modality details reported by the model provider."""
+
+    output_tokens_details: RealtimeModelOutputTokensDetails | None = None
+    """Optional output-token modality details reported by the model provider."""
+
+    type: Literal["usage"] = "usage"
+
+
+@dataclass
 class RealtimeModelTurnEndedEvent:
     """Triggered when the model finishes generating a response for a turn."""
 
@@ -174,9 +219,6 @@ class RealtimeModelRawServerEvent:
     type: Literal["raw_server_event"] = "raw_server_event"
 
 
-# TODO (rm) Add usage events
-
-
 RealtimeModelEvent: TypeAlias = (
     RealtimeModelErrorEvent
     | RealtimeModelToolCallEvent
@@ -190,6 +232,7 @@ RealtimeModelEvent: TypeAlias = (
     | RealtimeModelItemDeletedEvent
     | RealtimeModelConnectionStatusEvent
     | RealtimeModelTurnStartedEvent
+    | RealtimeModelUsageEvent
     | RealtimeModelTurnEndedEvent
     | RealtimeModelOtherEvent
     | RealtimeModelExceptionEvent

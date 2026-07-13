@@ -7,6 +7,7 @@ import openai
 import pytest
 
 from agents import (
+    UserError,
     responses_websocket_session,
     set_default_openai_api,
     set_default_openai_client,
@@ -95,6 +96,27 @@ def test_set_default_openai_responses_transport():
 def test_set_default_openai_responses_transport_rejects_invalid_value():
     with pytest.raises(ValueError, match="Expected one of: 'http', 'websocket'"):
         set_default_openai_responses_transport("ws")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "conflicting_kwargs",
+    [
+        {"api_key": "other_key"},
+        {"base_url": "https://example.com"},
+        {"websocket_base_url": "wss://example.com"},
+        {
+            "api_key": "other_key",
+            "base_url": "https://example.com",
+            "websocket_base_url": "wss://example.com",
+        },
+    ],
+)
+def test_openai_provider_rejects_client_with_conflicting_args(conflicting_kwargs):
+    # Regression test for #3808: this validation used a bare `assert`, which is
+    # stripped under `python -O`, silently ignoring the conflicting arguments.
+    client = openai.AsyncOpenAI(api_key="test_key")
+    with pytest.raises(UserError, match="Don't provide"):
+        OpenAIProvider(openai_client=client, **conflicting_kwargs)
 
 
 def test_openai_provider_transport_override_beats_default():

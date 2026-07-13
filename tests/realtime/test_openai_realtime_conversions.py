@@ -4,6 +4,7 @@ import pytest
 from openai.types.realtime.realtime_conversation_item_user_message import (
     RealtimeConversationItemUserMessage,
 )
+from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
 from openai.types.realtime.realtime_tracing_config import (
     TracingConfiguration,
 )
@@ -42,6 +43,68 @@ async def test_get_api_key_from_callable_async():
 def test_try_convert_raw_message_invalid_returns_none():
     msg = RealtimeModelSendRawMessage(message={"type": "invalid.event", "other_data": {}})
     assert _ConversionHelper.try_convert_raw_message(msg) is None
+
+
+def test_convert_response_usage_preserves_modality_details():
+    event = _ConversionHelper.convert_response_usage(
+        RealtimeResponseUsage.model_validate(
+            {
+                "total_tokens": 253,
+                "input_tokens": 132,
+                "output_tokens": 121,
+                "input_token_details": {
+                    "text_tokens": 119,
+                    "audio_tokens": 13,
+                    "image_tokens": 0,
+                    "cached_tokens": 64,
+                    "cached_tokens_details": {
+                        "text_tokens": 60,
+                        "audio_tokens": 4,
+                        "image_tokens": 0,
+                    },
+                },
+                "output_token_details": {"text_tokens": 30, "audio_tokens": 91},
+            }
+        )
+    )
+
+    assert event.usage.requests == 1
+    assert event.usage.input_tokens == 132
+    assert event.usage.output_tokens == 121
+    assert event.usage.total_tokens == 253
+    assert event.usage.input_tokens_details.cached_tokens == 64
+    assert event.input_tokens_details is not None
+    assert event.input_tokens_details.text_tokens == 119
+    assert event.input_tokens_details.audio_tokens == 13
+    assert event.input_tokens_details.image_tokens == 0
+    assert event.input_tokens_details.cached_tokens == 64
+    assert event.input_tokens_details.cached_tokens_details is not None
+    assert event.input_tokens_details.cached_tokens_details.text_tokens == 60
+    assert event.input_tokens_details.cached_tokens_details.audio_tokens == 4
+    assert event.input_tokens_details.cached_tokens_details.image_tokens == 0
+    assert event.output_tokens_details is not None
+    assert event.output_tokens_details.text_tokens == 30
+    assert event.output_tokens_details.audio_tokens == 91
+
+
+def test_convert_response_usage_preserves_missing_details_and_derives_total():
+    event = _ConversionHelper.convert_response_usage(
+        RealtimeResponseUsage.model_validate(
+            {
+                "input_tokens": 12,
+                "output_tokens": 3,
+                "input_token_details": {"audio_tokens": 0},
+            }
+        )
+    )
+
+    assert event.usage.total_tokens == 15
+    assert event.input_tokens_details is not None
+    assert event.input_tokens_details.audio_tokens == 0
+    assert event.input_tokens_details.text_tokens is None
+    assert event.input_tokens_details.cached_tokens is None
+    assert event.input_tokens_details.cached_tokens_details is None
+    assert event.output_tokens_details is None
 
 
 def test_convert_user_input_to_conversation_item_dict_and_str():

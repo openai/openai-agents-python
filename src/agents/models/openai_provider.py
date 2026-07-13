@@ -7,6 +7,7 @@ import weakref
 import httpx
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
+from ..exceptions import UserError
 from . import _openai_shared
 from .default_models import get_default_model
 from .interface import Model, ModelProvider
@@ -86,10 +87,11 @@ class OpenAIProvider(ModelProvider):
                 chunk semantics are not reliable enough for incremental processing.
         """
         if openai_client is not None:
-            assert api_key is None and base_url is None and websocket_base_url is None, (
-                "Don't provide api_key, base_url, or websocket_base_url if you provide "
-                "openai_client"
-            )
+            if api_key is not None or base_url is not None or websocket_base_url is not None:
+                raise UserError(
+                    "Don't provide api_key, base_url, or websocket_base_url if you provide "
+                    "openai_client"
+                )
             self._client: AsyncOpenAI | None = openai_client
         else:
             self._client = None

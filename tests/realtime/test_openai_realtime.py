@@ -17,6 +17,7 @@ from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
     RealtimeModelErrorEvent,
     RealtimeModelToolCallEvent,
+    RealtimeModelUsageEvent,
 )
 from agents.realtime.model_inputs import (
     RealtimeModelSendAudio,
@@ -491,6 +492,8 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
                 voice = event.get("response", {}).get("audio", {}).get("output", {}).get("voice")
                 if isinstance(voice, dict):
                     self._string_adapter.validate_python(voice)
+                if event["type"] == "response.done":
+                    return SimpleNamespace(type=event["type"], response=SimpleNamespace(usage=None))
                 return SimpleNamespace(type=event["type"])
 
         monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
@@ -549,6 +552,60 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
             "conversation.item.create",
             "response.create",
         ]
+
+    @pytest.mark.asyncio
+    async def test_response_done_emits_typed_usage_before_turn_ended(self, model):
+        class ResponseDoneAdapter:
+            def validate_python(self, event):
+                usage = {
+                    "total_tokens": 20,
+                    "input_tokens": 12,
+                    "output_tokens": 8,
+                    "input_token_details": {
+                        "text_tokens": 2,
+                        "audio_tokens": 10,
+                        "cached_tokens": 4,
+                    },
+                    "output_token_details": {"text_tokens": 1, "audio_tokens": 7},
+                }
+                from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
+
+                return SimpleNamespace(
+                    type=event["type"],
+                    response=SimpleNamespace(usage=RealtimeResponseUsage.model_validate(usage)),
+                )
+
+        model._server_event_type_adapter = ResponseDoneAdapter()
+        mock_listener = AsyncMock()
+        model.add_listener(mock_listener)
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "response": {"status": "cancelled"},
+            }
+        )
+
+        emitted = [call.args[0] for call in mock_listener.on_event.call_args_list]
+        assert [event.type for event in emitted] == ["raw_server_event", "usage", "turn_ended"]
+        assert isinstance(emitted[1], RealtimeModelUsageEvent)
+        assert emitted[1].input_tokens_details is not None
+        assert emitted[1].input_tokens_details.audio_tokens == 10
+
+    @pytest.mark.asyncio
+    async def test_response_done_without_usage_skips_usage_event(self, model):
+        class ResponseDoneAdapter:
+            def validate_python(self, event):
+                return SimpleNamespace(type=event["type"], response=SimpleNamespace(usage=None))
+
+        model._server_event_type_adapter = ResponseDoneAdapter()
+        mock_listener = AsyncMock()
+        model.add_listener(mock_listener)
+
+        await model._handle_ws_event({"type": "response.done", "response": {}})
+
+        emitted = [call.args[0] for call in mock_listener.on_event.call_args_list]
+        assert [event.type for event in emitted] == ["raw_server_event", "turn_ended"]
 
     @pytest.mark.asyncio
     async def test_handle_unknown_event_type_ignored(self, model):

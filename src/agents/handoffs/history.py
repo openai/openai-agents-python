@@ -24,6 +24,14 @@ __all__ = [
 
 _DEFAULT_CONVERSATION_HISTORY_START = "<CONVERSATION HISTORY>"
 _DEFAULT_CONVERSATION_HISTORY_END = "</CONVERSATION HISTORY>"
+_CONVERSATION_HISTORY_PREAMBLE = (
+    "For context, here is the conversation so far between the user and the previous agent:"
+)
+_LEGACY_CONVERSATION_HISTORY_PREAMBLE = "For context, here is the conversation so far:"
+_SUPPORTED_CONVERSATION_HISTORY_PREAMBLES = {
+    _CONVERSATION_HISTORY_PREAMBLE,
+    _LEGACY_CONVERSATION_HISTORY_PREAMBLE,
+}
 _conversation_history_start = _DEFAULT_CONVERSATION_HISTORY_START
 _conversation_history_end = _DEFAULT_CONVERSATION_HISTORY_END
 
@@ -145,7 +153,7 @@ def _build_summary_message(transcript: list[TResponseInputItem]) -> TResponseInp
 
     start_marker, end_marker = get_conversation_history_wrappers()
     content_lines = [
-        "For context, here is the conversation so far between the user and the previous agent:",
+        _CONVERSATION_HISTORY_PREAMBLE,
         start_marker,
         *summary_lines,
         end_marker,
@@ -226,16 +234,20 @@ def _flatten_nested_history_messages(
 def _extract_nested_history_transcript(
     item: TResponseInputItem,
 ) -> list[TResponseInputItem] | None:
+    if item.get("role") != "assistant":
+        return None
     content = item.get("content")
     if not isinstance(content, str):
         return None
     start_marker, end_marker = get_conversation_history_wrappers()
-    start_idx = content.find(start_marker)
-    end_idx = content.rfind(end_marker)
-    if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
+    preamble, separator, wrapped_content = content.partition("\n")
+    if not separator or preamble not in _SUPPORTED_CONVERSATION_HISTORY_PREAMBLES:
         return None
-    start_idx += len(start_marker)
-    body = content[start_idx:end_idx]
+    start_wrapper = f"{start_marker}\n"
+    end_wrapper = f"\n{end_marker}"
+    if not wrapped_content.startswith(start_wrapper) or not wrapped_content.endswith(end_wrapper):
+        return None
+    body = wrapped_content[len(start_wrapper) : -len(end_wrapper)]
     parsed: list[TResponseInputItem] = []
     for line in _split_summary_records(body):
         parsed_item = _parse_summary_line(line)

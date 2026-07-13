@@ -52,6 +52,7 @@ from agents.realtime.model_events import (
     RealtimeModelTranscriptDeltaEvent,
     RealtimeModelTurnEndedEvent,
     RealtimeModelTurnStartedEvent,
+    RealtimeModelUsageEvent,
 )
 from agents.realtime.model_inputs import (
     RealtimeModelSendAudio,
@@ -74,6 +75,7 @@ from agents.tool_guardrails import (
     ToolInputGuardrailData,
     tool_input_guardrail,
 )
+from agents.usage import Usage
 
 
 class _DummyModel(RealtimeModel):
@@ -1171,6 +1173,35 @@ class TestEventHandling:
         end_session_event = await session._event_queue.get()
         assert isinstance(end_session_event, RealtimeAgentEndEvent)
         assert end_session_event.agent == mock_agent
+
+    @pytest.mark.asyncio
+    async def test_usage_events_accumulate_in_session_context(self, mock_model, mock_agent):
+        session = RealtimeSession(
+            mock_model, mock_agent, None, run_config={"async_tool_calls": False}
+        )
+
+        first = RealtimeModelUsageEvent(
+            usage=Usage(requests=1, input_tokens=10, output_tokens=4, total_tokens=14)
+        )
+        second = RealtimeModelUsageEvent(
+            usage=Usage(requests=1, input_tokens=7, output_tokens=3, total_tokens=10)
+        )
+
+        await session.on_event(first)
+        await session.on_event(second)
+
+        assert session._event_queue.qsize() == 2
+        first_raw = await session._event_queue.get()
+        second_raw = await session._event_queue.get()
+        assert isinstance(first_raw, RealtimeRawModelEvent)
+        assert isinstance(second_raw, RealtimeRawModelEvent)
+        assert first_raw.data is first
+        assert second_raw.data is second
+        assert first_raw.info.context.usage.requests == 2
+        assert first_raw.info.context.usage.input_tokens == 17
+        assert first_raw.info.context.usage.output_tokens == 7
+        assert first_raw.info.context.usage.total_tokens == 24
+        assert len(first_raw.info.context.usage.request_usage_entries) == 2
 
     @pytest.mark.asyncio
     async def test_transcription_completed_event_updates_history(self, mock_model, mock_agent):

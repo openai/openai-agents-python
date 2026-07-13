@@ -57,6 +57,7 @@ from openai.types.realtime.realtime_conversation_item_user_message import (
 from openai.types.realtime.realtime_function_tool import (
     RealtimeFunctionTool as OpenAISessionFunction,
 )
+from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
 from openai.types.realtime.realtime_server_event import (
     RealtimeServerEvent as OpenAIRealtimeServerEvent,
 )
@@ -100,6 +101,7 @@ from .. import _debug
 from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper, TContext
+from ..usage import Usage
 from ..version import __version__
 from ._tool_filtering import filter_enabled_tools, filter_statically_enabled_tools
 from ._tool_validation import validate_realtime_tool_names
@@ -122,18 +124,22 @@ from .model_events import (
     RealtimeModelAudioDoneEvent,
     RealtimeModelAudioEvent,
     RealtimeModelAudioInterruptedEvent,
+    RealtimeModelCachedTokensDetails,
     RealtimeModelErrorEvent,
     RealtimeModelEvent,
     RealtimeModelExceptionEvent,
     RealtimeModelInputAudioTimeoutTriggeredEvent,
     RealtimeModelInputAudioTranscriptionCompletedEvent,
+    RealtimeModelInputTokensDetails,
     RealtimeModelItemDeletedEvent,
     RealtimeModelItemUpdatedEvent,
+    RealtimeModelOutputTokensDetails,
     RealtimeModelRawServerEvent,
     RealtimeModelToolCallEvent,
     RealtimeModelTranscriptDeltaEvent,
     RealtimeModelTurnEndedEvent,
     RealtimeModelTurnStartedEvent,
+    RealtimeModelUsageEvent,
 )
 from .model_inputs import (
     RealtimeModelSendAudio,
@@ -1223,6 +1229,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             await self._emit_event(RealtimeModelTurnStartedEvent())
         elif parsed.type == "response.done":
             await self._mark_response_done()
+            if parsed.response.usage is not None:
+                await self._emit_event(
+                    _ConversionHelper.convert_response_usage(parsed.response.usage)
+                )
             await self._emit_event(RealtimeModelTurnEndedEvent())
         elif parsed.type == "session.created":
             await self._send_tracing_config(self._tracing_config)
@@ -1661,6 +1671,58 @@ class OpenAIRealtimeSIPModel(OpenAIRealtimeWebSocketModel):
 
 
 class _ConversionHelper:
+    @classmethod
+    def convert_response_usage(cls, usage: RealtimeResponseUsage) -> RealtimeModelUsageEvent:
+        input_tokens = usage.input_tokens or 0
+        output_tokens = usage.output_tokens or 0
+        total_tokens = (
+            usage.total_tokens if usage.total_tokens is not None else input_tokens + output_tokens
+        )
+
+        input_details = usage.input_token_details
+        output_details = usage.output_token_details
+
+        aggregate_usage = Usage(
+            requests=1,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+        )
+        if input_details is not None:
+            aggregate_usage.input_tokens_details.cached_tokens = input_details.cached_tokens or 0
+
+        cached_details = input_details.cached_tokens_details if input_details is not None else None
+        return RealtimeModelUsageEvent(
+            usage=aggregate_usage,
+            input_tokens_details=(
+                RealtimeModelInputTokensDetails(
+                    text_tokens=input_details.text_tokens,
+                    audio_tokens=input_details.audio_tokens,
+                    image_tokens=input_details.image_tokens,
+                    cached_tokens=input_details.cached_tokens,
+                    cached_tokens_details=(
+                        RealtimeModelCachedTokensDetails(
+                            text_tokens=cached_details.text_tokens,
+                            audio_tokens=cached_details.audio_tokens,
+                            image_tokens=cached_details.image_tokens,
+                        )
+                        if cached_details is not None
+                        else None
+                    ),
+                )
+                if input_details is not None
+                else None
+            ),
+            output_tokens_details=(
+                RealtimeModelOutputTokensDetails(
+                    text_tokens=output_details.text_tokens,
+                    audio_tokens=output_details.audio_tokens,
+                )
+                if output_details is not None
+                else None
+            ),
+        )
+
     @classmethod
     def conversation_item_to_realtime_message_item(
         cls, item: ConversationItem, previous_item_id: str | None

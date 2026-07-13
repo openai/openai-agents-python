@@ -65,6 +65,7 @@ from .model_events import (
     RealtimeModelEvent,
     RealtimeModelInputAudioTranscriptionCompletedEvent,
     RealtimeModelToolCallEvent,
+    RealtimeModelUsageEvent,
 )
 from .model_inputs import (
     RealtimeModelSendAudio,
@@ -504,6 +505,9 @@ class RealtimeSession(RealtimeModelListener):
                     info=self._event_info,
                 )
             )
+        elif event.type == "usage":
+            assert isinstance(event, RealtimeModelUsageEvent)
+            self._context_wrapper.usage.add(event.usage)
         elif event.type == "turn_ended":
             # Clear guardrail state for next turn
             self._item_transcripts.clear()
