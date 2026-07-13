@@ -170,19 +170,33 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 self._last_unstored_response_id = None
         else:
             store = None
+        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
+
         resolved_mode = self._resolve_compaction_mode_for_response(
             response_id=self._response_id,
             store=store,
             requested_mode=requested_mode,
         )
 
+        # In auto mode, previous_response_id compaction relies on the server-side
+        # history for `response_id`. If the underlying session holds more history
+        # than its default (limit-bounded) view exposes, that server view may not
+        # represent everything; clearing and replacing the session with the
+        # server-derived summary would then silently drop the unrepresented items.
+        # Fall back to full-history input compaction in that case. An explicitly
+        # requested previous_response_id compaction is left opt-in and unchanged.
+        if (
+            (requested_mode or self.compaction_mode) == "auto"
+            and resolved_mode == "previous_response_id"
+            and not await self._underlying_view_covers_history()
+        ):
+            resolved_mode = "input"
+
         if resolved_mode == "previous_response_id" and not self._response_id:
             raise ValueError(
                 "OpenAIResponsesCompactionSession.run_compaction requires a response_id "
                 "when using previous_response_id compaction."
             )
-
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
 
         force = args.get("force", False) if args else False
         should_compact = force or self.should_trigger_compaction(
@@ -244,6 +258,17 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def _get_all_underlying_session_items(self) -> list[TResponseInputItem]:
         return await self.underlying_session.get_items(limit=_ALL_SESSION_ITEMS_LIMIT)
+
+    async def _underlying_view_covers_history(self) -> bool:
+        """Whether the underlying session's default view contains the full history.
+
+        Returns False when the session applies a limit that hides older items, in
+        which case previous_response_id compaction could drop the unrepresented
+        history when the session is cleared and replaced.
+        """
+        default_view = await self.underlying_session.get_items()
+        full_view = await self._get_all_underlying_session_items()
+        return len(default_view) >= len(full_view)
 
     async def _replace_underlying_session_items(
         self,
