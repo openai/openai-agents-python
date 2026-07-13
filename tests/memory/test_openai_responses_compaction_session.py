@@ -287,6 +287,52 @@ class TestOpenAIResponsesCompactionSession:
         assert [item["content"] for item in sent] == [f"m{i}" for i in range(12)]
 
     @pytest.mark.asyncio
+    async def test_run_compaction_auto_does_not_reuse_unsafe_response_id_after_input_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        # After auto falls back to input because the stored response_id did not
+        # represent the hidden history, that response_id must not be reused later.
+        # Once the session shrinks to fit the limit, a second compaction would
+        # otherwise switch back to previous_response_id and drop the older items
+        # that only the full-history summary preserved.
+        underlying = SQLiteSession(
+            "test",
+            db_path=str(tmp_path / "history.db"),
+            session_settings=SessionSettings(limit=3),
+        )
+        items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": f"m{i}"},
+            )
+            for i in range(12)
+        ]
+        await underlying.add_items(items)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "message", "role": "assistant", "content": "summary"}
+        ]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+        )
+
+        # First compaction: truncated view -> falls back to input.
+        await session.run_compaction({"response_id": "resp_A"})
+        assert "previous_response_id" not in mock_client.responses.compact.call_args.kwargs
+
+        # The session now holds only the small summary (fits within limit=3). A second
+        # compaction must still use input rather than reuse the unsafe response_id.
+        mock_client.responses.compact.reset_mock()
+        await session.run_compaction({"force": True})
+        assert "previous_response_id" not in mock_client.responses.compact.call_args.kwargs
+
+    @pytest.mark.asyncio
     async def test_run_compaction_auto_without_response_id_uses_input(self) -> None:
         mock_session = self.create_mock_session()
         items: list[TResponseInputItem] = [

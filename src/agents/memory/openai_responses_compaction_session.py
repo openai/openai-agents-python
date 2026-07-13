@@ -178,19 +178,19 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             requested_mode=requested_mode,
         )
 
-        # In auto mode, previous_response_id compaction relies on the server-side
-        # history for `response_id`. If the underlying session holds more history
-        # than its default (limit-bounded) view exposes, that server view may not
-        # represent everything; clearing and replacing the session with the
-        # server-derived summary would then silently drop the unrepresented items.
-        # Fall back to full-history input compaction in that case. An explicitly
-        # requested previous_response_id compaction is left opt-in and unchanged.
+        # A limit-bounded session view hides older items from previous_response_id
+        # compaction, which drops them when the session is cleared and replaced. Fall
+        # back to full-history input; an explicit previous_response_id stays opt-in.
         if (
             (requested_mode or self.compaction_mode) == "auto"
             and resolved_mode == "previous_response_id"
             and not await self._underlying_view_covers_history()
         ):
             resolved_mode = "input"
+            # This response_id never covered the full history, so don't let a later
+            # compaction reuse it once the session shrinks back within the limit.
+            if self._response_id is not None:
+                self._last_unstored_response_id = self._response_id
 
         if resolved_mode == "previous_response_id" and not self._response_id:
             raise ValueError(
@@ -260,11 +260,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         return await self.underlying_session.get_items(limit=_ALL_SESSION_ITEMS_LIMIT)
 
     async def _underlying_view_covers_history(self) -> bool:
-        """Whether the underlying session's default view contains the full history.
+        """Whether the default session view already holds every stored item.
 
-        Returns False when the session applies a limit that hides older items, in
-        which case previous_response_id compaction could drop the unrepresented
-        history when the session is cleared and replaced.
+        False when a session limit hides older items from the default view.
         """
         default_view = await self.underlying_session.get_items()
         full_view = await self._get_all_underlying_session_items()
