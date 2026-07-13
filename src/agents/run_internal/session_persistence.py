@@ -25,13 +25,19 @@ from ..memory import (
 from ..memory.openai_conversations_session import OpenAIConversationsSession
 from ..run_state import RunState
 from .items import (
+    NestedHistoryOwnedItem,
+    NestedHistoryOwnedItemRef,
     ReasoningItemIdPolicy,
     copy_input_items,
     deduplicate_input_items_preferring_latest,
+    digest_input_item,
     drop_orphan_function_calls,
     ensure_input_item_format,
+    ensure_nested_history_run_item_occurrence_key,
     fingerprint_input_item,
+    nested_history_run_item_occurrence_key,
     normalize_input_items_for_api,
+    reconcile_nested_history_owned_input_after_rewrite,
     run_item_to_input_item,
     strip_internal_input_item_metadata,
 )
@@ -41,6 +47,8 @@ from .run_steps import SingleStepResult
 __all__ = [
     "prepare_input_with_session",
     "persist_session_items_for_guardrail_trip",
+    "reconcile_nested_history_owned_session_item_refs",
+    "resolve_nested_history_owned_session_item_refs",
     "session_items_for_turn",
     "resumed_turn_items",
     "save_result_to_session",
@@ -49,6 +57,83 @@ __all__ = [
     "rewind_session_items",
     "wait_for_session_cleanup",
 ]
+
+
+def resolve_nested_history_owned_session_item_refs(
+    session_items: Sequence[RunItem],
+    current_input: str | Sequence[TResponseInputItem],
+    history_owned_items: Sequence[NestedHistoryOwnedItem],
+) -> list[NestedHistoryOwnedItemRef]:
+    """Locate explicitly owned nested-history occurrences in full session history."""
+    if not history_owned_items or isinstance(current_input, str):
+        return []
+
+    used_session_indexes: set[int] = set()
+    resolved: list[NestedHistoryOwnedItemRef] = []
+    for owned_item in history_owned_items:
+        if owned_item.input_index >= len(current_input):
+            continue
+        input_item = current_input[owned_item.input_index]
+        if digest_input_item(input_item) != owned_item.digest:
+            continue
+
+        occurrence_key = nested_history_run_item_occurrence_key(owned_item.run_item)
+        session_index = next(
+            (
+                index
+                for index, session_item in enumerate(session_items)
+                if index not in used_session_indexes
+                and owned_item.run_item is not None
+                and (
+                    session_item is owned_item.run_item
+                    or (
+                        occurrence_key is not None
+                        and nested_history_run_item_occurrence_key(session_item) == occurrence_key
+                    )
+                )
+            ),
+            None,
+        )
+        if session_index is None:
+            continue
+        session_input = run_item_to_input_item(session_items[session_index])
+        if session_input is None or digest_input_item(session_input) != owned_item.digest:
+            continue
+        used_session_indexes.add(session_index)
+        session_item = session_items[session_index]
+        ensure_nested_history_run_item_occurrence_key(session_item)
+        resolved.append(
+            NestedHistoryOwnedItemRef(
+                session_index=session_index,
+                digest=owned_item.digest,
+                input_index=owned_item.input_index,
+                run_item=session_item,
+                input_item=input_item,
+            )
+        )
+    return resolved
+
+
+def reconcile_nested_history_owned_session_item_refs(
+    session_items: Sequence[RunItem],
+    previous_refs: Sequence[NestedHistoryOwnedItemRef],
+    previous_input: str | Sequence[TResponseInputItem],
+    current_input: str | Sequence[TResponseInputItem],
+    history_owned_items: Sequence[NestedHistoryOwnedItem],
+) -> list[NestedHistoryOwnedItemRef]:
+    """Retain surviving ownership and add provenance introduced by a history rewrite."""
+    _, retained_refs = reconcile_nested_history_owned_input_after_rewrite(
+        previous_input,
+        current_input,
+        previous_refs,
+    )
+    new_refs = resolve_nested_history_owned_session_item_refs(
+        session_items,
+        current_input,
+        history_owned_items,
+    )
+    retained_set = set(retained_refs)
+    return retained_refs + [item_ref for item_ref in new_refs if item_ref not in retained_set]
 
 
 async def prepare_input_with_session(

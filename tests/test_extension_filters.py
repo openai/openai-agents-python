@@ -333,7 +333,7 @@ def test_nest_handoff_history_wraps_transcript() -> None:
     nested = nest_handoff_history(data)
 
     assert isinstance(nested.input_history, tuple)
-    assert len(nested.input_history) == 1
+    assert len(nested.input_history) == 3
     summary = _as_message(nested.input_history[0])
     assert summary["role"] == "assistant"
     summary_content = summary["content"]
@@ -343,7 +343,12 @@ def test_nest_handoff_history_wraps_transcript() -> None:
     assert end_marker in summary_content
     assert "Assist reply" in summary_content
     assert "Hello" in summary_content
+    raw_message = _as_message(nested.input_history[1])
+    assert "Handoff request" in str(raw_message["content"])
+    handoff_summary = _as_message(nested.input_history[2])
+    assert "transfer" in str(handoff_summary["content"])
     assert len(nested.pre_handoff_items) == 0
+    assert nested.input_items == ()
     assert nested.new_items == data.new_items
 
 
@@ -482,7 +487,7 @@ def test_nest_handoff_history_honors_custom_wrappers() -> None:
     try:
         nested = nest_handoff_history(data)
         assert isinstance(nested.input_history, tuple)
-        assert len(nested.input_history) == 1
+        assert len(nested.input_history) == 2
         summary = _as_message(nested.input_history[0])
         summary_content = summary["content"]
         assert isinstance(summary_content, str)
@@ -492,6 +497,7 @@ def test_nest_handoff_history_honors_custom_wrappers() -> None:
         )
         assert lines[1].startswith("<<START>>")
         assert summary_content.endswith("<<END>>")
+        assert "Second reply" in str(_as_message(nested.input_history[1])["content"])
 
         # Ensure the custom markers are parsed correctly when nesting again.
         second_nested = nest_handoff_history(nested)

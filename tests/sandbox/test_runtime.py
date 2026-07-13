@@ -25,6 +25,7 @@ from agents.guardrail import GuardrailFunctionOutput, InputGuardrail, OutputGuar
 from agents.items import ModelResponse, ToolCallOutputItem, TResponseInputItem
 from agents.model_settings import ModelSettings
 from agents.prompts import GenerateDynamicPromptData, Prompt
+from agents.result import RunResult, RunResultStreaming
 from agents.run import CallModelData, ModelInputData, RunConfig
 from agents.run_context import AgentHookContext, RunContextWrapper
 from agents.run_state import RunState, _build_agent_identity_map
@@ -784,6 +785,30 @@ class _ProcessContextSessionCapability(Capability):
                     "content": f"process_calls={self.process_calls}",
                 },
             ),
+        ]
+
+
+class _DropContextTextCapability(Capability):
+    type: str = "drop-context-text"
+    text: str
+
+    def __init__(self, text: str) -> None:
+        super().__init__(type="drop-context-text", **cast(Any, {"text": text}))
+
+    def process_context(self, context: list[TResponseInputItem]) -> list[TResponseInputItem]:
+        return [item for item in context if self.text not in json.dumps(item, default=str)]
+
+
+class _RebuildContextWithoutPrivateMetadataCapability(Capability):
+    type: str = "rebuild-context-without-private-metadata"
+
+    def __init__(self) -> None:
+        super().__init__(type="rebuild-context-without-private-metadata")
+
+    def process_context(self, context: list[TResponseInputItem]) -> list[TResponseInputItem]:
+        return [
+            cast(TResponseInputItem, dict(item)) if isinstance(item, dict) else item
+            for item in context
         ]
 
 
@@ -1827,6 +1852,95 @@ async def test_runner_rebuilds_sandbox_resources_for_handoff_target_agent() -> N
         "Worker workspace\n\n"
         f"{runtime_agent_preparation_module._filesystem_instructions(worker_manifest)}"
     )
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_context_rewrite_releases_removed_nested_history_ownership(streamed: bool) -> None:
+    triage_model = FakeModel()
+    worker_model = FakeModel(initial_output=[get_final_output_message("done")])
+    client = _ManifestSessionClient()
+    worker = SandboxAgent(
+        name="worker",
+        model=worker_model,
+        default_manifest=Manifest(),
+        capabilities=[_DropContextTextCapability("handoff message")],
+    )
+    triage = SandboxAgent(
+        name="triage",
+        model=triage_model,
+        default_manifest=Manifest(),
+        capabilities=[],
+        handoffs=[worker],
+    )
+    triage_model.turn_outputs = [
+        [get_final_output_message("handoff message"), get_handoff_tool_call(worker)]
+    ]
+    run_config = RunConfig(
+        sandbox=SandboxRunConfig(client=client),
+        nest_handoff_history=True,
+    )
+
+    result: RunResult | RunResultStreaming
+    if streamed:
+        result = Runner.run_streamed(triage, "route this", run_config=run_config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(triage, "route this", run_config=run_config)
+
+    replay_texts = [
+        _extract_user_text(cast(dict[str, object], item))
+        for item in result.to_input_list()
+        if isinstance(item, dict) and "content" in item
+    ]
+    assert replay_texts.count("handoff message") == 1
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_context_rebuild_retains_unambiguous_nested_history_ownership(
+    streamed: bool,
+) -> None:
+    triage_model = FakeModel()
+    worker_model = FakeModel(initial_output=[get_final_output_message("done")])
+    client = _ManifestSessionClient()
+    worker = SandboxAgent(
+        name="worker",
+        model=worker_model,
+        default_manifest=Manifest(),
+        capabilities=[_RebuildContextWithoutPrivateMetadataCapability()],
+    )
+    triage = SandboxAgent(
+        name="triage",
+        model=triage_model,
+        default_manifest=Manifest(),
+        capabilities=[],
+        handoffs=[worker],
+    )
+    triage_model.turn_outputs = [
+        [get_final_output_message("handoff message"), get_handoff_tool_call(worker)]
+    ]
+    run_config = RunConfig(
+        sandbox=SandboxRunConfig(client=client),
+        nest_handoff_history=True,
+    )
+
+    result: RunResult | RunResultStreaming
+    if streamed:
+        result = Runner.run_streamed(triage, "route this", run_config=run_config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(triage, "route this", run_config=run_config)
+
+    replay_texts = [
+        _extract_user_text(cast(dict[str, object], item))
+        for item in result.to_input_list()
+        if isinstance(item, dict) and "content" in item
+    ]
+    assert replay_texts.count("handoff message") == 1
+    assert result._nested_history_owned_session_item_refs
 
 
 @pytest.mark.asyncio

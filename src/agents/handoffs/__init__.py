@@ -80,7 +80,11 @@ class HandoffInputData:
         ```
         """
 
-        return dataclasses_replace(self, **kwargs)
+        cloned = dataclasses_replace(self, **kwargs)
+        owned_items = getattr(self, "_nested_history_owned_items", ())
+        if owned_items:
+            object.__setattr__(cloned, "_nested_history_owned_items", owned_items)
+        return cloned
 
 
 HandoffInputFilter: TypeAlias = Callable[[HandoffInputData], MaybeAwaitable[HandoffInputData]]

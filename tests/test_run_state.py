@@ -7,6 +7,7 @@ import io
 import json
 import logging
 from collections.abc import AsyncIterator, Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -67,7 +68,13 @@ from agents.items import (
 )
 from agents.run_context import RunContextWrapper
 from agents.run_internal.agent_runner_helpers import resolve_trace_settings
-from agents.run_internal.items import run_items_to_input_items
+from agents.run_internal.items import (
+    NestedHistoryOwnedItemRef,
+    digest_input_item,
+    ensure_nested_history_run_item_occurrence_key,
+    run_item_to_input_item,
+    run_items_to_input_items,
+)
 from agents.run_internal.run_loop import (
     NextStepInterruption,
     ProcessedResponse,
@@ -5403,6 +5410,170 @@ class TestRunStateSerializationEdgeCases:
         assert frozenset(SCHEMA_VERSION_SUMMARIES) == SUPPORTED_SCHEMA_VERSIONS
         assert CURRENT_SCHEMA_VERSION in SCHEMA_VERSION_SUMMARIES
         assert all(summary.strip() for summary in SCHEMA_VERSION_SUMMARIES.values())
+
+    @pytest.mark.asyncio
+    async def test_nested_history_ownership_round_trips_and_defaults_for_schema_1_12(self):
+        """New snapshots persist ownership while released 1.12 snapshots default safely."""
+        agent = Agent(name="TestAgent")
+        message_item = MessageOutputItem(agent=agent, raw_item=make_message_output(text="owned"))
+        input_item = run_item_to_input_item(message_item)
+        assert input_item is not None
+        digest = digest_input_item(input_item)
+        assert digest is not None
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input=[input_item],
+        )
+        state._session_items = [message_item]
+        state._generated_items = [message_item]
+        item_ref = NestedHistoryOwnedItemRef(
+            session_index=0,
+            digest=digest,
+            input_index=0,
+            run_item=message_item,
+            input_item=input_item,
+        )
+        state._nested_history_owned_session_item_refs = [item_ref]
+
+        serialized = state.to_json()
+        restored = await RunState.from_json(agent, serialized)
+
+        assert serialized["nested_history_owned_session_item_refs"] == [
+            {
+                "index": 0,
+                "digest": digest,
+                "input_index": 0,
+            }
+        ]
+        assert serialized["generated_session_item_indexes"] == [0]
+        assert restored._nested_history_owned_session_item_refs == [item_ref]
+        assert restored._generated_items[0] is restored._session_items[0]
+        assert isinstance(restored._original_input, list)
+        assert (
+            restored._nested_history_owned_session_item_refs[0].input_item
+            is (restored._original_input[0])
+        )
+
+        serialized["$schemaVersion"] = "1.12"
+        serialized.pop("nested_history_owned_session_item_refs")
+        serialized.pop("generated_session_item_indexes")
+        restored_1_12 = await RunState.from_json(agent, serialized)
+
+        assert restored_1_12._nested_history_owned_session_item_refs == []
+
+    @pytest.mark.asyncio
+    async def test_nested_history_ownership_remaps_after_skipped_session_item(self):
+        """A skipped unrelated item must not shift a surviving ownership reference."""
+        agent = Agent(name="TestAgent")
+        skipped_item = MessageOutputItem(
+            agent=agent,
+            raw_item=make_message_output(text="skip me"),
+        )
+        owned_item = MessageOutputItem(
+            agent=agent,
+            raw_item=make_message_output(text="owned"),
+        )
+        owned_input = run_item_to_input_item(owned_item)
+        assert owned_input is not None
+        digest = digest_input_item(owned_input)
+        assert digest is not None
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input=[owned_input],
+        )
+        state._generated_items = [owned_item]
+        state._session_items = [skipped_item, owned_item]
+        state._nested_history_owned_session_item_refs = [
+            NestedHistoryOwnedItemRef(
+                session_index=1,
+                digest=digest,
+                input_index=0,
+                run_item=owned_item,
+                input_item=owned_input,
+            )
+        ]
+        serialized = state.to_json()
+        serialized["session_items"][0]["agent"]["name"] = "UnknownAgent"
+
+        restored = await RunState.from_json(agent, serialized)
+
+        assert len(restored._session_items) == 1
+        assert restored._generated_items[0] is restored._session_items[0]
+        assert restored._nested_history_owned_session_item_refs[0].session_index == 0
+        assert (
+            restored._nested_history_owned_session_item_refs[0].run_item
+            is (restored._session_items[0])
+        )
+
+    @pytest.mark.asyncio
+    async def test_copied_generated_item_round_trips_to_its_session_occurrence(self):
+        """The generated/session sidecar must recognize an explicitly copied occurrence."""
+        agent = Agent(name="TestAgent")
+        session_item = MessageOutputItem(
+            agent=agent,
+            raw_item=make_message_output(text="copied"),
+        )
+        ensure_nested_history_run_item_occurrence_key(session_item)
+        generated_copy = deepcopy(session_item)
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+        )
+        state._generated_items = [generated_copy]
+        state._session_items = [session_item]
+
+        serialized = state.to_json()
+        restored = await RunState.from_json(agent, serialized)
+
+        assert serialized["generated_session_item_indexes"] == [0]
+        assert "_agents_nested_history_occurrence_key" not in json.dumps(serialized)
+        assert restored._generated_items[0] is restored._session_items[0]
+
+    @pytest.mark.asyncio
+    async def test_equal_generated_replacement_does_not_claim_session_occurrence(self):
+        """Equal payloads without explicit lineage must serialize as distinct occurrences."""
+        agent = Agent(name="TestAgent")
+        session_item = MessageOutputItem(
+            agent=agent,
+            raw_item=make_message_output(text="same"),
+        )
+        generated_replacement = MessageOutputItem(
+            agent=agent,
+            raw_item=deepcopy(session_item.raw_item),
+        )
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+        )
+        state._generated_items = [generated_replacement]
+        state._session_items = [session_item]
+
+        serialized = state.to_json()
+        restored = await RunState.from_json(agent, serialized)
+
+        assert serialized["generated_session_item_indexes"] == [None]
+        assert restored._generated_items[0] is not restored._session_items[0]
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_copied_generated_item_does_not_claim_equal_session_occurrence(self):
+        """An equal partial copy must remain separate when its session occurrence is ambiguous."""
+        agent = Agent(name="TestAgent")
+        first = MessageOutputItem(agent=agent, raw_item=make_message_output(text="same"))
+        second = MessageOutputItem(agent=agent, raw_item=make_message_output(text="same"))
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+        )
+        state._generated_items = [deepcopy(second)]
+        state._session_items = [first, second]
+
+        serialized = state.to_json()
+        restored = await RunState.from_json(agent, serialized)
+
+        assert serialized["generated_session_item_indexes"] == [None]
+        assert all(restored._generated_items[0] is not item for item in restored._session_items)
 
     @pytest.mark.asyncio
     async def test_from_json_accepts_schema_version_1_5_without_sandbox_payload(self):

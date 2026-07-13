@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, cast
 
 import pytest
@@ -456,6 +457,122 @@ def test_fingerprint_input_item_returns_none_when_serialization_fails(
     monkeypatch.setattr(cast(Any, run_items).json, "dumps", _raise_json_error)
 
     assert run_items.fingerprint_input_item({"type": "message", "role": "user"}) is None
+
+
+def test_digest_input_item_is_fixed_size_and_content_opaque() -> None:
+    item = cast(
+        TResponseInputItem,
+        {"type": "message", "role": "assistant", "content": "sensitive-history-content"},
+    )
+
+    digest = run_items.digest_input_item(item)
+
+    assert digest is not None
+    assert len(digest) == 64
+    assert "sensitive-history-content" not in digest
+
+
+def test_nested_history_digest_treats_default_assistant_status_as_equivalent() -> None:
+    without_status = cast(
+        TResponseInputItem,
+        {"type": "message", "role": "assistant", "content": "same"},
+    )
+    with_completed_status = cast(
+        TResponseInputItem,
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": "same",
+            "status": "completed",
+        },
+    )
+
+    assert run_items.digest_input_item(without_status) == run_items.digest_input_item(
+        with_completed_status
+    )
+
+
+def test_resumed_input_normalizes_clean_nested_history_items() -> None:
+    item = cast(TResponseInputItem, {"role": "assistant", "content": "same"})
+
+    resumed = run_items.normalize_resumed_input([item])
+
+    assert isinstance(resumed, list)
+    assert resumed == [item]
+
+
+def test_filter_nested_history_owned_refs_requires_the_exact_input_occurrence() -> None:
+    item = cast(TResponseInputItem, {"role": "assistant", "content": "same"})
+    equal_item = cast(TResponseInputItem, dict(item))
+    digest = run_items.digest_input_item(item)
+    assert digest is not None
+    item_ref = run_items.NestedHistoryOwnedItemRef(
+        session_index=1,
+        digest=digest,
+        input_index=0,
+        input_item=item,
+    )
+
+    assert run_items.filter_nested_history_owned_item_refs_for_input([equal_item], [item_ref]) == []
+    assert run_items.filter_nested_history_owned_item_refs_for_input(
+        [equal_item, item],
+        [item_ref],
+    ) == [dataclasses.replace(item_ref, input_index=1)]
+
+
+def test_reconcile_nested_history_rewrite_rejects_ambiguous_equal_occurrences() -> None:
+    item = cast(TResponseInputItem, {"role": "assistant", "content": "same"})
+    equal_item = cast(TResponseInputItem, dict(item))
+    digest = run_items.digest_input_item(item)
+    assert digest is not None
+    item_ref = run_items.NestedHistoryOwnedItemRef(
+        session_index=0,
+        digest=digest,
+        input_index=0,
+        input_item=item,
+    )
+
+    rewritten, retained = run_items.reconcile_nested_history_owned_input_after_rewrite(
+        [item, equal_item],
+        [
+            cast(TResponseInputItem, dict(item)),
+            cast(TResponseInputItem, dict(equal_item)),
+        ],
+        [item_ref],
+    )
+
+    assert retained == []
+    assert rewritten == [item, equal_item]
+
+
+def test_reconcile_nested_history_rewrite_keeps_fully_owned_equal_occurrences() -> None:
+    items = [
+        cast(TResponseInputItem, {"role": "assistant", "content": "same"}),
+        cast(TResponseInputItem, {"role": "assistant", "content": "same"}),
+    ]
+    digest = run_items.digest_input_item(items[0])
+    assert digest is not None
+    item_refs = [
+        run_items.NestedHistoryOwnedItemRef(
+            session_index=index,
+            digest=digest,
+            input_index=index,
+            input_item=items[index],
+        )
+        for index in range(2)
+    ]
+
+    rewritten, retained = run_items.reconcile_nested_history_owned_input_after_rewrite(
+        items,
+        [
+            cast(TResponseInputItem, dict(items[0])),
+            cast(TResponseInputItem, dict(items[1])),
+        ],
+        item_refs,
+    )
+
+    assert retained == item_refs
+    assert [item_ref.input_item for item_ref in retained] == rewritten
 
 
 def test_strip_metadata_and_reasoning_id_helpers_keep_non_matching_items() -> None:

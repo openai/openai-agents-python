@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
 from ..items import (
@@ -12,6 +13,7 @@ from ..items import (
 )
 
 if TYPE_CHECKING:
+    from ..run_internal.items import NestedHistoryOwnedItem
     from . import HandoffHistoryMapper, HandoffInputData
 
 __all__ = [
@@ -83,41 +85,210 @@ def nest_handoff_history(
 ) -> HandoffInputData:
     """Summarize the previous transcript for the next agent."""
 
-    normalized_history = _normalize_input_history(handoff_input_data.input_history)
-    flattened_history = _flatten_nested_history_messages(normalized_history)
+    nested, _ = _nest_handoff_history_with_provenance(
+        handoff_input_data,
+        history_mapper=history_mapper,
+    )
+    return nested
 
-    # Convert items to plain inputs for the transcript summary.
-    pre_items_as_inputs: list[TResponseInputItem] = []
-    filtered_pre_items: list[RunItem] = []
+
+def _nest_handoff_history_with_provenance(
+    handoff_input_data: HandoffInputData,
+    *,
+    history_mapper: HandoffHistoryMapper | None = None,
+) -> tuple[HandoffInputData, tuple[NestedHistoryOwnedItem, ...]]:
+    """Return nested input and exact provenance for items moved into default history."""
+
+    normalized_history = _normalize_input_history(handoff_input_data.input_history)
+    flattened_history = [
+        _strip_transcript_item_metadata(item)
+        for item in _flatten_nested_history_messages(normalized_history)
+    ]
+
+    # Partition items between summary segments and lossless model input while retaining order.
+    normalized_pre_items: list[tuple[TResponseInputItem, bool, RunItem]] = []
     for run_item in handoff_input_data.pre_handoff_items:
         if isinstance(run_item, ToolApprovalItem):
             continue
         plain_input = _run_item_to_plain_input(run_item)
-        pre_items_as_inputs.append(plain_input)
-        if _should_forward_pre_item(plain_input):
-            filtered_pre_items.append(run_item)
+        forward_verbatim = _should_forward_pre_item(plain_input)
+        normalized_pre_items.append((plain_input, forward_verbatim, run_item))
 
-    new_items_as_inputs: list[TResponseInputItem] = []
-    filtered_input_items: list[RunItem] = []
+    normalized_new_items: list[tuple[TResponseInputItem, bool, RunItem]] = []
     for run_item in handoff_input_data.new_items:
         if isinstance(run_item, ToolApprovalItem):
             continue
         plain_input = _run_item_to_plain_input(run_item)
-        new_items_as_inputs.append(plain_input)
-        if _should_forward_new_item(plain_input):
-            filtered_input_items.append(run_item)
+        forward_verbatim = _should_forward_new_item(plain_input)
+        normalized_new_items.append((plain_input, forward_verbatim, run_item))
 
-    transcript = flattened_history + pre_items_as_inputs + new_items_as_inputs
+    normalized_items = normalized_pre_items + normalized_new_items
 
-    mapper = history_mapper or default_handoff_history_mapper
-    history_items = mapper(transcript)
+    owned_items: list[NestedHistoryOwnedItem] = []
+    if history_mapper is not None:
+        transcript = flattened_history + [item for item, _, _ in normalized_items]
+        history_items = history_mapper(transcript)
+    else:
+        history_items, owned_items = _build_ordered_default_history(
+            flattened_history,
+            normalized_items,
+        )
 
-    return handoff_input_data.clone(
-        input_history=tuple(deepcopy(item) for item in history_items),
-        pre_handoff_items=tuple(filtered_pre_items),
-        # new_items stays unchanged for session history.
-        input_items=tuple(filtered_input_items),
+    copied_history = [deepcopy(item) for item in history_items]
+    owned_items = [
+        replace(
+            owned_item,
+            input_item=copied_history[owned_item.input_index],
+        )
+        for owned_item in owned_items
+    ]
+
+    nested = handoff_input_data.clone(
+        input_history=tuple(copied_history),
+        pre_handoff_items=(),
+        # The mapped history is the exact model input. New items stay unchanged for session
+        # history.
+        input_items=(),
     )
+    object.__setattr__(nested, "_nested_history_owned_items", tuple(owned_items))
+
+    return nested, tuple(owned_items)
+
+
+def _get_nested_history_owned_items(
+    handoff_input_data: HandoffInputData,
+    *,
+    source_data: HandoffInputData | None = None,
+) -> tuple[NestedHistoryOwnedItem, ...]:
+    """Match clean nested input occurrences to their source run items."""
+    from ..run_internal.items import (
+        NestedHistoryOwnedItem,
+        digest_input_item,
+    )
+
+    if isinstance(handoff_input_data.input_history, str):
+        return ()
+
+    declared_items = tuple(
+        item
+        for item in getattr(handoff_input_data, "_nested_history_owned_items", ())
+        if isinstance(item, NestedHistoryOwnedItem)
+    )
+    if not declared_items:
+        return ()
+
+    current_by_source_id: dict[int, RunItem] = {}
+    if source_data is not None:
+        current_items = (
+            *handoff_input_data.pre_handoff_items,
+            *handoff_input_data.new_items,
+        )
+        source_items = (*source_data.pre_handoff_items, *source_data.new_items)
+        mapped_items = _map_run_item_occurrences(current_items, source_items)
+        current_by_source_id = {
+            id(source_item): current_item
+            for current_item, source_item in zip(current_items, mapped_items, strict=True)
+            if source_item is not None
+        }
+
+    input_digests = [digest_input_item(item) for item in handoff_input_data.input_history]
+    input_digest_counts: dict[str, int] = {}
+    for digest in input_digests:
+        if digest is not None:
+            input_digest_counts[digest] = input_digest_counts.get(digest, 0) + 1
+    owned_digest_counts: dict[str, int] = {}
+    for owned_item in declared_items:
+        owned_digest_counts[owned_item.digest] = owned_digest_counts.get(owned_item.digest, 0) + 1
+
+    retained: list[NestedHistoryOwnedItem] = []
+    used_input_indexes: set[int] = set()
+    for owned_item in declared_items:
+        input_index = next(
+            (
+                index
+                for index, item in enumerate(handoff_input_data.input_history)
+                if index not in used_input_indexes
+                and owned_item.input_item is not None
+                and item is owned_item.input_item
+                and input_digests[index] == owned_item.digest
+            ),
+            None,
+        )
+        if input_index is None:
+            candidate_indexes = [
+                index
+                for index, digest in enumerate(input_digests)
+                if index not in used_input_indexes and digest == owned_item.digest
+            ]
+            all_equal_occurrences_owned = (
+                input_digest_counts.get(owned_item.digest, 0)
+                == owned_digest_counts[owned_item.digest]
+            )
+            if len(candidate_indexes) == 1 or all_equal_occurrences_owned:
+                input_index = (
+                    owned_item.input_index
+                    if owned_item.input_index in candidate_indexes
+                    else candidate_indexes[0]
+                    if candidate_indexes
+                    else None
+                )
+        if input_index is None:
+            continue
+        used_input_indexes.add(input_index)
+        input_item = handoff_input_data.input_history[input_index]
+        source_run_item = (
+            current_by_source_id.get(id(owned_item.run_item), owned_item.run_item)
+            if owned_item.run_item is not None
+            else None
+        )
+        retained.append(
+            replace(
+                owned_item,
+                run_item=source_run_item,
+                input_index=input_index,
+                input_item=input_item,
+            )
+        )
+    return tuple(retained)
+
+
+def _map_run_item_occurrences(
+    current_items: tuple[RunItem, ...],
+    source_items: tuple[RunItem, ...],
+) -> list[RunItem | None]:
+    """Map copied filtered items back to original handoff occurrences when possible."""
+    if not source_items:
+        return [None] * len(current_items)
+
+    from ..run_internal.items import nested_history_run_item_occurrence_key
+
+    used_source_indexes: set[int] = set()
+    mapped: list[RunItem | None] = []
+    for current_item in current_items:
+        source_index = next(
+            (
+                index
+                for index, source_item in enumerate(source_items)
+                if index not in used_source_indexes and source_item is current_item
+            ),
+            None,
+        )
+        current_key = nested_history_run_item_occurrence_key(current_item)
+        if source_index is None and current_key is not None:
+            candidate_indexes = [
+                index
+                for index, source_item in enumerate(source_items)
+                if index not in used_source_indexes
+                and nested_history_run_item_occurrence_key(source_item) == current_key
+            ]
+            if candidate_indexes:
+                source_index = candidate_indexes[0]
+        if source_index is None:
+            mapped.append(None)
+            continue
+        used_source_indexes.add(source_index)
+        mapped.append(source_items[source_index])
+    return mapped
 
 
 def default_handoff_history_mapper(
@@ -138,7 +309,51 @@ def _normalize_input_history(
 
 
 def _run_item_to_plain_input(run_item: RunItem) -> TResponseInputItem:
-    return deepcopy(run_item.to_input_item())
+    from ..run_internal.items import run_item_to_input_item
+
+    input_item = run_item_to_input_item(run_item)
+    if input_item is None:
+        raise TypeError(f"Unsupported nested handoff run item: {run_item.type}")
+    return deepcopy(input_item)
+
+
+def _build_ordered_default_history(
+    flattened_history: list[TResponseInputItem],
+    normalized_items: list[tuple[TResponseInputItem, bool, RunItem]],
+) -> tuple[list[TResponseInputItem], list[NestedHistoryOwnedItem]]:
+    from ..run_internal.items import (
+        NestedHistoryOwnedItem,
+        digest_input_item,
+        ensure_nested_history_run_item_occurrence_key,
+    )
+
+    history_items: list[TResponseInputItem] = []
+    owned_items: list[NestedHistoryOwnedItem] = []
+    pending_summary = list(flattened_history)
+
+    for plain_input, forward_verbatim, run_item in normalized_items:
+        if not forward_verbatim:
+            pending_summary.append(plain_input)
+            continue
+        if pending_summary or not history_items:
+            history_items.extend(default_handoff_history_mapper(pending_summary))
+            pending_summary = []
+        digest = digest_input_item(plain_input)
+        if digest is not None:
+            ensure_nested_history_run_item_occurrence_key(run_item)
+            owned_items.append(
+                NestedHistoryOwnedItem(
+                    run_item=run_item,
+                    input_index=len(history_items),
+                    digest=digest,
+                )
+            )
+        history_items.append(plain_input)
+
+    if pending_summary or not history_items:
+        history_items.extend(default_handoff_history_mapper(pending_summary))
+
+    return history_items, owned_items
 
 
 def _build_summary_message(transcript: list[TResponseInputItem]) -> TResponseInputItem:
@@ -167,6 +382,7 @@ def _build_summary_message(transcript: list[TResponseInputItem]) -> TResponseInp
 
 
 def _format_transcript_item(item: TResponseInputItem) -> str:
+    item = _strip_transcript_item_metadata(item)
     role = item.get("role")
     if isinstance(role, str):
         content = item.get("content")
@@ -334,7 +550,7 @@ def _parse_summary_json_item(value: str) -> TResponseInputItem | None:
     if not isinstance(parsed, dict):
         return None
     parsed.pop("provider_data", None)
-    return cast(TResponseInputItem, parsed)
+    return _strip_transcript_item_metadata(cast(TResponseInputItem, parsed))
 
 
 def _parse_legacy_typed_item(item_type: str, content: str) -> TResponseInputItem | None:
@@ -348,7 +564,14 @@ def _parse_legacy_typed_item(item_type: str, content: str) -> TResponseInputItem
         return None
     parsed.pop("provider_data", None)
     parsed["type"] = item_type
-    return cast(TResponseInputItem, parsed)
+    return _strip_transcript_item_metadata(cast(TResponseInputItem, parsed))
+
+
+def _strip_transcript_item_metadata(item: TResponseInputItem) -> TResponseInputItem:
+    """Remove SDK-only fields before nested transcript formatting or replay."""
+    from ..run_internal.items import strip_internal_input_item_metadata
+
+    return strip_internal_input_item_metadata(item)
 
 
 def _split_role_and_name(role_text: str) -> tuple[str, str | None]:

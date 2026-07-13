@@ -835,13 +835,13 @@ async def test_structured_output():
 
     assert result.final_output == Foo(bar="baz")
     assert len(result.raw_responses) == 4, "should have four model responses"
-    assert len(result.to_input_list()) == 10, (
-        "should have input: conversation summary, function call, function call result, message, "
-        "handoff, handoff output, preamble message, tool call, tool call result, final output"
+    assert len(result.to_input_list()) == 11, (
+        "should preserve ordered history segments plus function calls, messages, handoff items, "
+        "and the final output without replaying the carried-forward message twice"
     )
-    assert len(result.to_input_list(mode="normalized")) == 6, (
+    assert len(result.to_input_list(mode="normalized")) == 7, (
         "should have normalized replay input: conversation summary, carried-forward message, "
-        "preamble message, tool call, tool call result, final output"
+        "handoff summary, preamble message, tool call, tool call result, final output"
     )
 
     assert result.last_agent == agent_1, "should have handed off to agent_1"
@@ -1621,13 +1621,13 @@ async def test_streaming_events():
 
     assert result.final_output == Foo(bar="baz")
     assert len(result.raw_responses) == 4, "should have four model responses"
-    assert len(result.to_input_list()) == 9, (
-        "should have input: conversation summary, function call, function call result, message, "
-        "handoff, handoff output, tool call, tool call result, final output"
+    assert len(result.to_input_list()) == 10, (
+        "should preserve ordered history segments plus function calls, messages, handoff items, "
+        "and the final output without replaying the carried-forward message twice"
     )
-    assert len(result.to_input_list(mode="normalized")) == 5, (
+    assert len(result.to_input_list(mode="normalized")) == 6, (
         "should have normalized replay input: conversation summary, carried-forward message, "
-        "tool call, tool call result, final output"
+        "handoff summary, tool call, tool call result, final output"
     )
 
     assert result.last_agent == agent_1, "should have handed off to agent_1"

@@ -5,9 +5,12 @@ for synthetic run items or IDs used during tool execution. Internal use only.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
+from uuid import uuid4
 
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel
@@ -20,6 +23,7 @@ from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE
 REJECTION_MESSAGE = DEFAULT_APPROVAL_REJECTION_MESSAGE
 TOOL_CALL_SESSION_DESCRIPTION_KEY = "_agents_tool_description"
 TOOL_CALL_SESSION_TITLE_KEY = "_agents_tool_title"
+_NESTED_HISTORY_RUN_ITEM_OCCURRENCE_KEY = "_agents_nested_history_occurrence_key"
 _TOOL_CALL_TO_OUTPUT_TYPE: dict[str, str] = {
     "program": "program_output",
     "function_call": "function_call_output",
@@ -45,6 +49,8 @@ _PROGRAM_OWNED_HOSTED_ITEM_TYPES = frozenset(
 )
 
 __all__ = [
+    "NestedHistoryOwnedItemRef",
+    "NestedHistoryOwnedItem",
     "ReasoningItemIdPolicy",
     "REJECTION_MESSAGE",
     "TOOL_CALL_SESSION_DESCRIPTION_KEY",
@@ -58,6 +64,13 @@ __all__ = [
     "normalize_input_items_for_api",
     "normalize_resumed_input",
     "fingerprint_input_item",
+    "digest_input_item",
+    "ensure_nested_history_run_item_occurrence_key",
+    "nested_history_run_item_occurrence_key",
+    "reconcile_nested_history_owned_input_after_rewrite",
+    "filter_nested_history_owned_item_refs_for_input",
+    "rebase_nested_history_owned_item_refs",
+    "resolve_nested_history_owned_item_indexes",
     "deduplicate_input_items",
     "deduplicate_input_items_preferring_latest",
     "strip_internal_input_item_metadata",
@@ -67,6 +80,44 @@ __all__ = [
     "extract_mcp_request_id",
     "extract_mcp_request_id_from_run",
 ]
+
+
+@dataclass(frozen=True)
+class NestedHistoryOwnedItem:
+    """A run item and the exact nested-input occurrence that represents it."""
+
+    run_item: RunItem | None
+    input_index: int
+    digest: str
+    input_item: TResponseInputItem | None = field(default=None, compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class NestedHistoryOwnedItemRef:
+    """Durable coordinates plus the live object for one owned session occurrence."""
+
+    session_index: int
+    digest: str
+    input_index: int
+    run_item: RunItem | None = field(default=None, compare=False, repr=False)
+    input_item: TResponseInputItem | None = field(default=None, compare=False, repr=False)
+
+
+def nested_history_run_item_occurrence_key(run_item: RunItem | None) -> str | None:
+    """Return the private copy-lineage key for a run item, when one exists."""
+    if run_item is None:
+        return None
+    key = getattr(run_item, _NESTED_HISTORY_RUN_ITEM_OCCURRENCE_KEY, None)
+    return key if isinstance(key, str) and key else None
+
+
+def ensure_nested_history_run_item_occurrence_key(run_item: RunItem) -> str:
+    """Bind an ephemeral key that survives object copies but never enters model payloads."""
+    key = nested_history_run_item_occurrence_key(run_item)
+    if key is None:
+        key = uuid4().hex
+        setattr(run_item, _NESTED_HISTORY_RUN_ITEM_OCCURRENCE_KEY, key)
+    return key
 
 
 ReasoningItemIdPolicy = Literal["preserve", "omit"]
@@ -310,6 +361,223 @@ def fingerprint_input_item(item: Any, *, ignore_ids_for_matching: bool = False) 
         return json.dumps(payload, sort_keys=True, default=str)
     except Exception:
         return None
+
+
+def digest_input_item(item: Any) -> str | None:
+    """Return a fixed-size digest of an input item for durable occurrence tracking."""
+    coerced = _coerce_to_dict(item)
+    if coerced is not None:
+        coerced = cast(
+            dict[str, Any],
+            strip_internal_input_item_metadata(cast(TResponseInputItem, coerced)),
+        )
+        if coerced.get("role") == "assistant" and coerced.get("status") in {None, "completed"}:
+            coerced.pop("status", None)
+        item = coerced
+
+    fingerprint = fingerprint_input_item(item)
+    if fingerprint is None:
+        return None
+    return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+
+
+def filter_nested_history_owned_item_refs_for_input(
+    input: str | Sequence[TResponseInputItem],
+    owned_item_refs: Sequence[NestedHistoryOwnedItemRef],
+) -> list[NestedHistoryOwnedItemRef]:
+    """Keep ownership whose exact clean input occurrence is still present."""
+    if isinstance(input, str) or not owned_item_refs:
+        return []
+
+    retained: list[NestedHistoryOwnedItemRef] = []
+    used_input_indexes: set[int] = set()
+    for item_ref in owned_item_refs:
+        input_index = next(
+            (
+                index
+                for index, item in enumerate(input)
+                if index not in used_input_indexes
+                and item_ref.input_item is not None
+                and item is item_ref.input_item
+                and digest_input_item(item) == item_ref.digest
+            ),
+            None,
+        )
+        if input_index is None and item_ref.input_item is None:
+            candidate_index = item_ref.input_index
+            if (
+                0 <= candidate_index < len(input)
+                and candidate_index not in used_input_indexes
+                and digest_input_item(input[candidate_index]) == item_ref.digest
+            ):
+                input_index = candidate_index
+        if input_index is None:
+            continue
+        used_input_indexes.add(input_index)
+        retained.append(replace(item_ref, input_index=input_index, input_item=input[input_index]))
+    return retained
+
+
+def reconcile_nested_history_owned_input_after_rewrite(
+    previous_input: str | Sequence[TResponseInputItem],
+    rewritten_input: str | Sequence[TResponseInputItem],
+    owned_item_refs: Sequence[NestedHistoryOwnedItemRef],
+) -> tuple[str | list[TResponseInputItem], list[NestedHistoryOwnedItemRef]]:
+    """Rebind ownership after an unambiguous input rewrite."""
+    if isinstance(rewritten_input, str) or not owned_item_refs:
+        return (
+            rewritten_input if isinstance(rewritten_input, str) else list(rewritten_input),
+            [],
+        )
+    if isinstance(previous_input, str):
+        return list(rewritten_input), []
+
+    rewritten = list(rewritten_input)
+    previous = list(previous_input)
+    previous_digests = [digest_input_item(item) for item in previous]
+    rewritten_digests = [digest_input_item(item) for item in rewritten]
+    recoverable_ref_counts: dict[str, int] = {}
+    for item_ref in owned_item_refs:
+        if item_ref.input_item is not None and any(
+            item is item_ref.input_item and previous_digests[index] == item_ref.digest
+            for index, item in enumerate(previous)
+        ):
+            recoverable_ref_counts[item_ref.digest] = (
+                recoverable_ref_counts.get(item_ref.digest, 0) + 1
+            )
+    used_indexes: set[int] = set()
+    retained: list[NestedHistoryOwnedItemRef] = []
+
+    for item_ref in owned_item_refs:
+        identity_match = next(
+            (
+                index
+                for index, item in enumerate(rewritten)
+                if index not in used_indexes
+                and item_ref.input_item is not None
+                and item is item_ref.input_item
+                and rewritten_digests[index] == item_ref.digest
+            ),
+            None,
+        )
+        if identity_match is not None:
+            used_indexes.add(identity_match)
+            retained.append(
+                replace(
+                    item_ref,
+                    input_index=identity_match,
+                    input_item=rewritten[identity_match],
+                )
+            )
+            continue
+
+        previous_match = next(
+            (
+                index
+                for index, item in enumerate(previous)
+                if item is item_ref.input_item and previous_digests[index] == item_ref.digest
+            ),
+            None,
+        )
+        candidate_indexes = [
+            index
+            for index, digest in enumerate(rewritten_digests)
+            if index not in used_indexes and digest == item_ref.digest
+        ]
+        previous_count = previous_digests.count(item_ref.digest)
+        rewritten_count = rewritten_digests.count(item_ref.digest)
+        all_equal_occurrences_owned = (
+            previous_count == rewritten_count == recoverable_ref_counts.get(item_ref.digest, 0)
+        )
+        if (
+            previous_match is None
+            or not candidate_indexes
+            or not ((previous_count == 1 and rewritten_count == 1) or all_equal_occurrences_owned)
+        ):
+            continue
+
+        candidate_index = candidate_indexes[0]
+        used_indexes.add(candidate_index)
+        retained.append(
+            replace(
+                item_ref,
+                input_index=candidate_index,
+                input_item=rewritten[candidate_index],
+            )
+        )
+
+    return rewritten, retained
+
+
+def resolve_nested_history_owned_item_indexes(
+    run_items: Sequence[RunItem],
+    owned_item_refs: Sequence[NestedHistoryOwnedItemRef],
+) -> set[int]:
+    """Resolve ownership references without dropping a different item after list mutation."""
+    if not owned_item_refs:
+        return set()
+
+    resolved: set[int] = set()
+    for item_ref in owned_item_refs:
+        occurrence_key = nested_history_run_item_occurrence_key(item_ref.run_item)
+        candidate_indexes: list[int] = []
+        if 0 <= item_ref.session_index < len(run_items):
+            candidate_indexes.append(item_ref.session_index)
+        candidate_indexes.extend(
+            index
+            for index, item in enumerate(run_items)
+            if index != item_ref.session_index
+            and item_ref.run_item is not None
+            and (
+                item is item_ref.run_item
+                or (
+                    occurrence_key is not None
+                    and nested_history_run_item_occurrence_key(item) == occurrence_key
+                )
+            )
+        )
+        for index in candidate_indexes:
+            if index in resolved or item_ref.run_item is None:
+                continue
+            if run_items[index] is not item_ref.run_item and not (
+                occurrence_key is not None
+                and nested_history_run_item_occurrence_key(run_items[index]) == occurrence_key
+            ):
+                continue
+            input_item = run_item_to_input_item(run_items[index])
+            if input_item is not None and digest_input_item(input_item) == item_ref.digest:
+                resolved.add(index)
+                break
+
+    return resolved
+
+
+def rebase_nested_history_owned_item_refs(
+    input: str | Sequence[TResponseInputItem],
+    run_items: Sequence[RunItem],
+    owned_item_refs: Sequence[NestedHistoryOwnedItemRef],
+) -> list[NestedHistoryOwnedItemRef]:
+    """Rebase surviving ownership onto exact live input and session occurrences."""
+    retained_refs = filter_nested_history_owned_item_refs_for_input(input, owned_item_refs)
+    rebased: list[NestedHistoryOwnedItemRef] = []
+    used_indexes: set[int] = set()
+    for item_ref in retained_refs:
+        occurrence_key = nested_history_run_item_occurrence_key(item_ref.run_item)
+        for index, run_item in enumerate(run_items):
+            if index in used_indexes or item_ref.run_item is None:
+                continue
+            if run_item is not item_ref.run_item and not (
+                occurrence_key is not None
+                and nested_history_run_item_occurrence_key(run_item) == occurrence_key
+            ):
+                continue
+            input_item = run_item_to_input_item(run_item)
+            if input_item is None or digest_input_item(input_item) != item_ref.digest:
+                continue
+            used_indexes.add(index)
+            rebased.append(replace(item_ref, session_index=index, run_item=run_item))
+            break
+    return rebased
 
 
 def _dedupe_key(item: TResponseInputItem) -> str | None:
