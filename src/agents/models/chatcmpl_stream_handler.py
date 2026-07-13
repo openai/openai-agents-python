@@ -1119,10 +1119,15 @@ class ChatCmplStreamHandler:
             )
             if state.provider_data:
                 assistant_msg.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+
+            content_parts: list[tuple[int, ResponseOutputText | ResponseOutputRefusal]] = []
             if state.text_content_index_and_output:
-                assistant_msg.content.append(state.text_content_index_and_output[1])
+                content_parts.append(state.text_content_index_and_output)
             if state.refusal_content_index_and_output:
-                assistant_msg.content.append(state.refusal_content_index_and_output[1])
+                content_parts.append(state.refusal_content_index_and_output)
+            assistant_msg.content.extend(
+                part for _, part in sorted(content_parts, key=lambda item: item[0])
+            )
             outputs.append(assistant_msg)
 
             # send a ResponseOutputItemDone for the assistant message
