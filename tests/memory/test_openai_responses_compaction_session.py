@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import warnings as warnings_module
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -22,6 +23,7 @@ from agents.memory.openai_responses_compaction_session import (
     is_openai_model_name,
     select_compaction_candidate_items,
 )
+from agents.memory.sqlite_session import SQLiteSession
 from agents.run_internal.items import (
     TOOL_CALL_SESSION_DESCRIPTION_KEY,
     TOOL_CALL_SESSION_TITLE_KEY,
@@ -193,6 +195,48 @@ class TestOpenAIResponsesCompactionSession:
         assert call_kwargs.get("model") == "gpt-4.1"
         assert "previous_response_id" not in call_kwargs
         assert call_kwargs.get("input") == items
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_uses_full_history_when_underlying_session_has_limit(
+        self, tmp_path: Path
+    ) -> None:
+        # A limited underlying session must not cause compaction to lose older history:
+        # the compact call has to receive the full stored history, not just the latest
+        # `limit` items, otherwise everything before the window is silently dropped when
+        # the session is cleared and replaced with the compacted summary.
+        underlying = SQLiteSession(
+            "test",
+            db_path=str(tmp_path / "history.db"),
+            session_settings=SessionSettings(limit=3),
+        )
+        items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": f"m{i}"},
+            )
+            for i in range(8)
+        ]
+        await underlying.add_items(items)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "message", "role": "assistant", "content": "compacted"}
+        ]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        await session.run_compaction({"force": True})
+
+        mock_client.responses.compact.assert_called_once()
+        sent = mock_client.responses.compact.call_args.kwargs.get("input")
+        assert [item["content"] for item in sent] == [f"m{i}" for i in range(8)]
 
     @pytest.mark.asyncio
     async def test_run_compaction_auto_without_response_id_uses_input(self) -> None:
