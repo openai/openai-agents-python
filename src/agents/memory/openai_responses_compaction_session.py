@@ -133,6 +133,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._response_id: str | None = None
         self._deferred_response_id: str | None = None
         self._last_unstored_response_id: str | None = None
+        self._last_prepared_input_limit: int | None = None
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -254,19 +255,28 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         )
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        # The Runner reads history through get_items(limit=...) to build each turn's
+        # model input, so this is the window the resulting response actually saw. Record
+        # it so compaction can tell whether the response covered the full history or only
+        # a limited slice (the limit can come from a per-run RunConfig, not just the
+        # underlying session's own settings).
+        self._last_prepared_input_limit = limit
         return await self.underlying_session.get_items(limit)
 
     async def _get_all_underlying_session_items(self) -> list[TResponseInputItem]:
         return await self.underlying_session.get_items(limit=_ALL_SESSION_ITEMS_LIMIT)
 
     async def _underlying_view_covers_history(self) -> bool:
-        """Whether the default session view already holds every stored item.
+        """Whether the last prepared input window held every stored item.
 
-        False when a session limit hides older items from the default view.
+        False when a session or per-run limit hid older items from the window the model
+        saw, so its response_id does not represent the full history.
         """
-        default_view = await self.underlying_session.get_items()
+        prepared_view = await self.underlying_session.get_items(
+            limit=self._last_prepared_input_limit
+        )
         full_view = await self._get_all_underlying_session_items()
-        return len(default_view) >= len(full_view)
+        return len(prepared_view) >= len(full_view)
 
     async def _replace_underlying_session_items(
         self,

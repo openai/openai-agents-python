@@ -333,6 +333,46 @@ class TestOpenAIResponsesCompactionSession:
         assert "previous_response_id" not in mock_client.responses.compact.call_args.kwargs
 
     @pytest.mark.asyncio
+    async def test_run_compaction_auto_falls_back_when_run_limit_truncates_input(
+        self, tmp_path: Path
+    ) -> None:
+        # The limit can come from the run (e.g. RunConfig session settings) rather than
+        # the underlying session's own settings: the Runner reads history through
+        # get_items(limit=N) to build the model input. Even with an unlimited store, if
+        # that window did not cover the full history the response_id is not
+        # representative, so auto must use input rather than previous_response_id.
+        underlying = SQLiteSession("test", db_path=str(tmp_path / "history.db"))
+        items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": f"m{i}"},
+            )
+            for i in range(12)
+        ]
+        await underlying.add_items(items)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "message", "role": "assistant", "content": "summary"}
+        ]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+        )
+
+        # Simulate the Runner building model input with a per-run limit of 3.
+        await session.get_items(limit=3)
+
+        await session.run_compaction({"response_id": "resp_A", "force": True})
+
+        mock_client.responses.compact.assert_called_once()
+        assert "previous_response_id" not in mock_client.responses.compact.call_args.kwargs
+
+    @pytest.mark.asyncio
     async def test_run_compaction_auto_without_response_id_uses_input(self) -> None:
         mock_session = self.create_mock_session()
         items: list[TResponseInputItem] = [
