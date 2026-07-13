@@ -332,6 +332,54 @@ model = OpenAIChatCompletionsModel(model="Model_Name", openai_client=client)
 agent= Agent(name="Helping Agent", instructions="You are a Helping Agent", model=model)
 ```
 
+### Example: DaoXE multi-protocol gateway
+
+[DaoXE](https://daoxe.com) is a multi-model multi-protocol API gateway. With the OpenAI Agents SDK, use the OpenAI-compatible Chat Completions path by pointing `AsyncOpenAI` at `https://daoxe.com/v1` (DaoXE also exposes Responses and Anthropic Messages endpoints for other clients).
+
+Use an account-scoped model ID from your DaoXE dashboard or `GET /v1/models` — do not hardcode a public catalog. DaoXE is not available in mainland China.
+
+```python
+import os
+
+from openai import AsyncOpenAI
+
+from agents import (
+    Agent,
+    OpenAIChatCompletionsModel,
+    Runner,
+    set_tracing_disabled,
+)
+
+set_tracing_disabled(disabled=True)
+
+client = AsyncOpenAI(
+    api_key=os.environ["DAOXE_API_KEY"],
+    base_url="https://daoxe.com/v1",
+)
+
+agent = Agent(
+    name="Assistant",
+    instructions="You are a helpful assistant.",
+    model=OpenAIChatCompletionsModel(
+        # Paste a live model ID from your DaoXE account / GET /v1/models
+        model=os.environ["DAOXE_MODEL"],
+        openai_client=client,
+    ),
+)
+
+result = Runner.run_sync(agent, "Say hello in one short sentence.")
+print(result.final_output)
+```
+
+Environment variables:
+
+```bash
+export DAOXE_API_KEY="your-daoxe-api-key"
+export DAOXE_MODEL="your-account-model-id"
+```
+
+Public starter examples: [seven7763/DaoXE-AI](https://github.com/seven7763/DaoXE-AI).
+
 !!! note
 
     In these examples, we use the Chat Completions API/model, because many LLM providers still do not support the Responses API. If your LLM provider does support it, we recommend using Responses.
