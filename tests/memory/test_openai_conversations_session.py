@@ -483,6 +483,47 @@ class TestOpenAIConversationsSessionConcurrentAccess:
         assert len(writes) == 2
         assert {call.kwargs["conversation_id"] for call in writes} == {session.session_id}
 
+    @pytest.mark.asyncio
+    async def test_concurrent_first_write_recovers_after_creation_failure(self, mock_openai_client):
+        """Test that a waiting writer recovers when the first initializer fails."""
+        first_create_started = asyncio.Event()
+        release_first_create = asyncio.Event()
+        creation_count = 0
+
+        async def create_conversation(*, items):
+            nonlocal creation_count
+            creation_count += 1
+            if creation_count == 1:
+                first_create_started.set()
+                await release_first_create.wait()
+                raise RuntimeError("Conversation creation failed")
+            return MagicMock(id="surviving_conversation")
+
+        mock_openai_client.conversations.create.side_effect = create_conversation
+        session = OpenAIConversationsSession(openai_client=mock_openai_client)
+        failed_items: list[TResponseInputItem] = [{"role": "user", "content": "Failed writer"}]
+        surviving_items: list[TResponseInputItem] = [
+            {"role": "user", "content": "Surviving writer"}
+        ]
+
+        failed_write = asyncio.create_task(session.add_items(failed_items))
+        await first_create_started.wait()
+        surviving_write = asyncio.create_task(session.add_items(surviving_items))
+        await asyncio.sleep(0)
+
+        mock_openai_client.conversations.create.assert_called_once_with(items=[])
+        release_first_create.set()
+
+        with pytest.raises(RuntimeError, match="Conversation creation failed"):
+            await failed_write
+        await surviving_write
+
+        assert mock_openai_client.conversations.create.call_count == 2
+        mock_openai_client.conversations.items.create.assert_called_once_with(
+            conversation_id="surviving_conversation", items=surviving_items
+        )
+        assert session.session_id == "surviving_conversation"
+
 
 # ============================================================================
 # SessionSettings Tests
