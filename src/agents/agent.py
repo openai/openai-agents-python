@@ -805,8 +805,52 @@ class Agent(AgentBase, Generic[TContext]):
                         """Execute the user callback while capturing exceptions."""
                         try:
                             maybe_result = stream_handler(payload)
-                            if inspect.isawaitable(maybe_result):
-                                await maybe_result
+                        except asyncio.CancelledError:
+                            logger.exception(
+                                "Error while handling on_stream event for agent tool %s.",
+                                self.name,
+                            )
+                            return
+                        except Exception:
+                            logger.exception(
+                                "Error while handling on_stream event for agent tool %s.",
+                                self.name,
+                            )
+                            return
+
+                        if not inspect.isawaitable(maybe_result):
+                            return
+
+                        try:
+                            handler_task = asyncio.ensure_future(maybe_result)
+                        except Exception:
+                            logger.exception(
+                                "Error while handling on_stream event for agent tool %s.",
+                                self.name,
+                            )
+                            return
+
+                        try:
+                            done, _ = await asyncio.wait(
+                                {handler_task}, return_when=asyncio.FIRST_COMPLETED
+                            )
+                            finished_task = done.pop()
+                            if finished_task.cancelled():
+                                logger.error(
+                                    "Error while handling on_stream event for agent tool %s: "
+                                    "callback was cancelled.",
+                                    self.name,
+                                )
+                                return
+                            finished_task.result()
+                        except asyncio.CancelledError:
+                            if not handler_task.done():
+                                handler_task.cancel()
+                            try:
+                                await handler_task
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                            raise
                         except Exception:
                             logger.exception(
                                 "Error while handling on_stream event for agent tool %s.",
@@ -829,6 +873,13 @@ class Agent(AgentBase, Generic[TContext]):
                     dispatch_task = asyncio.create_task(dispatch_stream_events())
                     stream_iteration_cancelled = False
 
+                    async def cancel_dispatch_task() -> None:
+                        dispatch_task.cancel()
+                        try:
+                            await dispatch_task
+                        except asyncio.CancelledError:
+                            pass
+
                     try:
                         from .stream_events import AgentUpdatedStreamEvent
 
@@ -849,15 +900,15 @@ class Agent(AgentBase, Generic[TContext]):
                             raise
                     finally:
                         if stream_iteration_cancelled:
-                            dispatch_task.cancel()
+                            await cancel_dispatch_task()
+                        else:
                             try:
+                                await event_queue.put(None)
+                                await event_queue.join()
                                 await dispatch_task
                             except asyncio.CancelledError:
-                                pass
-                        else:
-                            await event_queue.put(None)
-                            await event_queue.join()
-                            await dispatch_task
+                                await cancel_dispatch_task()
+                                raise
                     run_result = run_result_streaming
                 else:
                     run_result = await Runner.run(

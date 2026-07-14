@@ -2190,6 +2190,79 @@ async def test_agent_as_tool_streaming_reraises_parent_cancellation_without_wait
 
 
 @pytest.mark.asyncio
+async def test_agent_as_tool_streaming_parent_cancellation_stops_handler_during_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="streamer")
+    stream_event = RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
+    handler_started = asyncio.Event()
+    handler_cancelled = asyncio.Event()
+    stream_finished = asyncio.Event()
+    release_handler = asyncio.Event()
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = ""
+            self.current_agent = agent
+
+        async def stream_events(self):
+            try:
+                yield stream_event
+            finally:
+                stream_finished.set()
+
+    monkeypatch.setattr(
+        Runner, "run_streamed", classmethod(lambda *args, **kwargs: DummyStreamingResult())
+    )
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        assert payload["event"] is stream_event
+        handler_started.set()
+        try:
+            await release_handler.wait()
+        except asyncio.CancelledError:
+            handler_cancelled.set()
+            raise
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_cancelled_drain",
+        arguments='{"input": "go"}',
+        call_id="call-cancelled-drain",
+        name="stream_tool",
+        type="function_call",
+    )
+    tool = agent.as_tool(
+        tool_name="stream_tool",
+        tool_description="Streams events",
+        on_stream=on_stream,
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+
+    async def _invoke_tool() -> Any:
+        return await tool.on_invoke_tool(tool_context, '{"input": "go"}')
+
+    invoke_task: asyncio.Task[Any] = asyncio.create_task(_invoke_tool())
+    await asyncio.wait_for(handler_started.wait(), timeout=1.0)
+    await asyncio.wait_for(stream_finished.wait(), timeout=1.0)
+    invoke_task.cancel()
+
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(invoke_task, timeout=1.0)
+        await asyncio.wait_for(handler_cancelled.wait(), timeout=1.0)
+    finally:
+        release_handler.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await invoke_task
+
+
+@pytest.mark.asyncio
 async def test_agent_as_tool_streaming_extractor_can_access_agent_tool_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2453,6 +2526,74 @@ async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
     output = await tool.on_invoke_tool(tool_context, '{"input": "go"}')
 
     assert output == "ok"
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_streaming_handler_cancellation_does_not_stall_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="cancelled_handler_agent")
+    first_event = RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
+    second_event = RawResponsesStreamEvent(
+        data=cast(Any, {"type": "output_text_delta", "delta": "hi"})
+    )
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+            self.current_agent = agent
+
+        async def stream_events(self):
+            yield first_event
+            yield second_event
+
+    monkeypatch.setattr(
+        Runner, "run_streamed", classmethod(lambda *args, **kwargs: DummyStreamingResult())
+    )
+
+    handled_events: list[RawResponsesStreamEvent] = []
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        event = payload["event"]
+        assert isinstance(event, RawResponsesStreamEvent)
+        handled_events.append(event)
+        if event is first_event:
+            raise asyncio.CancelledError("callback-local cancellation")
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_cancelled_handler",
+        arguments='{"input": "go"}',
+        call_id="call-cancelled-handler",
+        name="cancelled_handler_tool",
+        type="function_call",
+    )
+    tool = agent.as_tool(
+        tool_name="cancelled_handler_tool",
+        tool_description="Handler cancellation is isolated",
+        on_stream=on_stream,
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="cancelled_handler_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+
+    async def _invoke_tool() -> Any:
+        return await tool.on_invoke_tool(tool_context, '{"input": "go"}')
+
+    invoke_task: asyncio.Task[Any] = asyncio.create_task(_invoke_tool())
+    try:
+        output = await asyncio.wait_for(asyncio.shield(invoke_task), timeout=1.0)
+    finally:
+        if not invoke_task.done():
+            invoke_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await invoke_task
+
+    assert output == "ok"
+    assert handled_events == [first_event, second_event]
 
 
 @pytest.mark.asyncio
