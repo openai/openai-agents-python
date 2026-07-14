@@ -8,7 +8,7 @@ import dataclasses
 import json
 import threading
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, Literal, cast
@@ -33,6 +33,8 @@ from openai.types.responses.response_output_item import (
     LocalShellCall,
     McpApprovalRequest,
     McpListTools,
+    Program,
+    ProgramOutput,
 )
 from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypeVar
@@ -75,11 +77,16 @@ from .items import (
     ToolSearchCallItem,
     ToolSearchOutputItem,
     TResponseInputItem,
+    TResponseOutputItem,
     coerce_tool_search_call_raw_item,
     coerce_tool_search_output_raw_item,
 )
 from .logger import logger
 from .run_context import RunContextWrapper
+from .run_internal.tool_caller import (
+    ensure_programmatic_tool_call_parent,
+    ensure_tool_caller_allowed,
+)
 from .sandbox.capabilities.capability import Capability
 from .sandbox.session.base_sandbox_session import BaseSandboxSession
 from .tool import (
@@ -89,7 +96,9 @@ from .tool import (
     FunctionTool,
     HostedMCPTool,
     LocalShellTool,
+    ProgrammaticToolCallingTool,
     ShellTool,
+    ToolCaller,
     ToolOrigin,
 )
 from .tool_guardrails import (
@@ -130,7 +139,7 @@ ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.12"
+CURRENT_SCHEMA_VERSION = "1.13"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
 SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
@@ -149,6 +158,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.10": "Allows serialized RunState snapshots to disable max_turns with null.",
     "1.11": "Persists SDK-only custom data on tool output items across resume flows.",
     "1.12": "Persists input cache-write token usage across resume flows.",
+    "1.13": "Persists programmatic tool calls, outputs, and caller relationships.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -1718,6 +1728,8 @@ async def _deserialize_processed_response(
     scope_id: str | None = None,
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
+    program_call_ids: Collection[str] = (),
+    completed_program_call_ids: Collection[str] = (),
 ) -> ProcessedResponse:
     """Deserialize a ProcessedResponse from JSON data.
 
@@ -1749,6 +1761,9 @@ async def _deserialize_processed_response(
     apply_patch_tools_map = _build_named_tool_map(all_tools, ApplyPatchTool)
     mcp_tools_map = _build_named_tool_map(all_tools, HostedMCPTool)
     handoffs_map = _build_handoffs_map(current_agent)
+    programmatic_tool_present = any(
+        isinstance(tool, ProgrammaticToolCallingTool) for tool in all_tools
+    )
 
     from .run_internal.run_steps import (
         ProcessedResponse,
@@ -1761,6 +1776,26 @@ async def _deserialize_processed_response(
         ToolRunMCPApprovalRequest,
         ToolRunShellCall,
     )
+
+    def _ensure_restored_tool_call_allowed(
+        *,
+        tool_call: Any,
+        allowed_callers: Sequence[ToolCaller] | None,
+        tool_name: str,
+    ) -> None:
+        ensure_programmatic_tool_call_parent(
+            tool_call=tool_call,
+            programmatic_tool_present=programmatic_tool_present,
+            program_call_ids=program_call_ids,
+            completed_program_call_ids=completed_program_call_ids,
+            agent_name=current_agent.name,
+        )
+        ensure_tool_caller_allowed(
+            tool_call=tool_call,
+            allowed_callers=allowed_callers,
+            tool_name=tool_name,
+            agent_name=current_agent.name,
+        )
 
     def _deserialize_actions(
         entries: list[dict[str, Any]],
@@ -1805,6 +1840,15 @@ async def _deserialize_processed_response(
                 tool_call = call_parser(tool_call_data)
             except Exception:
                 continue
+            if isinstance(tool, Handoff):
+                permission_tool_name = getattr(tool, "tool_name", getattr(tool, "name", "handoff"))
+            else:
+                permission_tool_name = getattr(tool, "name", str(tool_name))
+            _ensure_restored_tool_call_allowed(
+                tool_call=tool_call,
+                allowed_callers=getattr(tool, "allowed_callers", None),
+                tool_name=permission_tool_name,
+            )
             deserialized.append(action_factory(tool_call, tool))
         return deserialized
 
@@ -1874,6 +1918,13 @@ async def _deserialize_processed_response(
                     tool_call = ResponseFunctionToolCall(**tool_call_data)
                 except Exception:
                     continue
+                _ensure_restored_tool_call_allowed(
+                    tool_call=tool_call,
+                    allowed_callers=function_tool.allowed_callers,
+                    tool_name=(
+                        get_function_tool_qualified_name(function_tool) or function_tool.name
+                    ),
+                )
 
                 nested_state_data = entry.get("agent_run_state")
                 deserialized.append(
@@ -2015,6 +2066,11 @@ async def _deserialize_processed_response(
         mcp_tool = mcp_tools_map.get(mcp_tool_name) if mcp_tool_name else None
 
         if mcp_tool:
+            _ensure_restored_tool_call_allowed(
+                tool_call=request_item,
+                allowed_callers=mcp_tool.tool_config.get("allowed_callers"),
+                tool_name=mcp_tool.name,
+            )
             mcp_approval_requests.append(
                 ToolRunMCPApprovalRequest(
                     request_item=request_item,
@@ -2058,6 +2114,12 @@ def _deserialize_tool_call_raw_item(normalized_raw_item: Mapping[str, Any]) -> A
     if tool_type == "function_call":
         try:
             return ResponseFunctionToolCall(**normalized_raw_item)
+        except Exception:
+            return normalized_raw_item
+
+    if tool_type == "program":
+        try:
+            return Program(**normalized_raw_item)
         except Exception:
             return normalized_raw_item
 
@@ -2197,8 +2259,15 @@ def _deserialize_tool_approval_item(
 
 def _deserialize_tool_call_output_raw_item(
     raw_item: Mapping[str, Any],
-) -> FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput | dict[str, Any] | None:
-    """Deserialize a tool call output raw item; return None when validation fails."""
+) -> (
+    FunctionCallOutput
+    | ComputerCallOutput
+    | LocalShellCallOutput
+    | ProgramOutput
+    | dict[str, Any]
+    | None
+):
+    """Deserialize a tool call output raw item, preserving program output mappings."""
     if not isinstance(raw_item, Mapping):
         return cast(
             FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput | dict[str, Any],
@@ -2214,6 +2283,11 @@ def _deserialize_tool_call_output_raw_item(
         return _COMPUTER_OUTPUT_ADAPTER.validate_python(normalized_raw_item)
     if output_type == "local_shell_call_output":
         return _LOCAL_SHELL_OUTPUT_ADAPTER.validate_python(normalized_raw_item)
+    if output_type == "program_output":
+        try:
+            return ProgramOutput(**normalized_raw_item)
+        except Exception:
+            return normalized_raw_item
     if output_type in {"shell_call_output", "apply_patch_call_output", "custom_tool_call_output"}:
         return normalized_raw_item
 
@@ -2243,6 +2317,120 @@ def _parse_guardrail_entry(
         tripwire_triggered=bool(output_data.get("tripwireTriggered")),
     )
     return name, guardrail_output, entry_dict
+
+
+def _raw_item_uses_programmatic_tool_calling(value: Any) -> bool:
+    """Return whether a known raw run item uses the programmatic calling protocol."""
+    if not isinstance(value, Mapping):
+        return False
+    if value.get("type") in {"program", "program_output"}:
+        return True
+    caller = value.get("caller")
+    return (
+        isinstance(caller, Mapping)
+        and caller.get("type") == "program"
+        and isinstance(caller.get("caller_id"), str)
+    )
+
+
+def _run_state_raw_items(state_json: Mapping[str, Any]) -> list[Any]:
+    """Collect raw items from durable RunState locations."""
+    raw_items: list[Any] = []
+
+    original_input = state_json.get("original_input")
+    if isinstance(original_input, list):
+        raw_items.extend(original_input)
+
+    for response_key in ("model_responses", "last_model_response"):
+        responses = state_json.get(response_key)
+        if isinstance(responses, Mapping):
+            responses = [responses]
+        if not isinstance(responses, list):
+            continue
+        for response in responses:
+            if isinstance(response, Mapping) and isinstance(response.get("output"), list):
+                raw_items.extend(response["output"])
+
+    for item_list_key in ("generated_items", "session_items"):
+        items = state_json.get(item_list_key)
+        if not isinstance(items, list):
+            continue
+        raw_items.extend(item.get("raw_item") for item in items if isinstance(item, Mapping))
+
+    processed_response = state_json.get("last_processed_response")
+    if isinstance(processed_response, Mapping):
+        for item_list_key in ("new_items", "interruptions"):
+            items = processed_response.get(item_list_key)
+            if isinstance(items, list):
+                raw_items.extend(
+                    item.get("raw_item") for item in items if isinstance(item, Mapping)
+                )
+        for action_key in (
+            "functions",
+            "computer_actions",
+            "custom_tool_actions",
+            "local_shell_actions",
+            "shell_actions",
+            "apply_patch_actions",
+            "handoffs",
+        ):
+            actions = processed_response.get(action_key)
+            if isinstance(actions, list):
+                raw_items.extend(
+                    action.get("tool_call") for action in actions if isinstance(action, Mapping)
+                )
+
+    current_step = state_json.get("current_step")
+    if isinstance(current_step, Mapping):
+        step_data = current_step.get("data")
+        if isinstance(step_data, Mapping) and isinstance(step_data.get("interruptions"), list):
+            raw_items.extend(
+                item.get("raw_item")
+                for item in step_data["interruptions"]
+                if isinstance(item, Mapping)
+            )
+
+    return raw_items
+
+
+def _run_state_uses_programmatic_tool_calling(state_json: Mapping[str, Any]) -> bool:
+    """Inspect only durable run-item locations for programmatic calling data."""
+    return any(
+        _raw_item_uses_programmatic_tool_calling(item) for item in _run_state_raw_items(state_json)
+    )
+
+
+def _run_state_program_call_ids(
+    state_json: Mapping[str, Any],
+) -> tuple[set[str], set[str]]:
+    """Return all and completed program call IDs from durable RunState items."""
+    program_call_ids: set[str] = set()
+    completed_program_call_ids: set[str] = set()
+    server_manages_conversation = bool(
+        state_json.get("conversation_id")
+        or state_json.get("previous_response_id")
+        or state_json.get("auto_previous_response_id")
+    )
+    for item in _run_state_raw_items(state_json):
+        if not isinstance(item, Mapping):
+            continue
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            call_id = None
+        if item.get("type") == "program" and call_id is not None:
+            program_call_ids.add(call_id)
+        elif item.get("type") == "program_output" and call_id is not None:
+            if server_manages_conversation:
+                program_call_ids.add(call_id)
+            if item.get("status") == "completed":
+                completed_program_call_ids.add(call_id)
+        if server_manages_conversation:
+            caller = item.get("caller")
+            if isinstance(caller, Mapping):
+                caller_id = caller.get("caller_id")
+                if caller.get("type") == "program" and isinstance(caller_id, str) and caller_id:
+                    program_call_ids.add(caller_id)
+    return program_call_ids, completed_program_call_ids
 
 
 def _parse_tool_guardrail_entry(
@@ -2424,6 +2612,14 @@ async def _build_run_state_from_json(
             f"Supported versions are: {supported_versions}. "
             f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
         )
+    if schema_version != CURRENT_SCHEMA_VERSION and _run_state_uses_programmatic_tool_calling(
+        state_json
+    ):
+        raise UserError(
+            "Run state contains Programmatic Tool Calling data but uses schema version "
+            f"{schema_version}. Programmatic Tool Calling requires schema version "
+            f"{CURRENT_SCHEMA_VERSION}."
+        )
 
     agent_identity_map = _build_agent_identity_map(initial_agent)
     agent_map = _build_agent_map(initial_agent)
@@ -2532,6 +2728,7 @@ async def _build_run_state_from_json(
 
     last_processed_response_data = state_json.get("last_processed_response")
     if last_processed_response_data and state._context is not None:
+        program_call_ids, completed_program_call_ids = _run_state_program_call_ids(state_json)
         state._last_processed_response = await _deserialize_processed_response(
             last_processed_response_data,
             current_agent,
@@ -2541,6 +2738,8 @@ async def _build_run_state_from_json(
             scope_id=state._agent_tool_state_scope_id,
             context_deserializer=context_deserializer,
             strict_context=strict_context,
+            program_call_ids=program_call_ids,
+            completed_program_call_ids=completed_program_call_ids,
         )
     else:
         state._last_processed_response = None
@@ -3106,24 +3305,41 @@ def _deserialize_model_responses(responses_data: list[dict[str, Any]]) -> list[M
     for resp_data in responses_data:
         usage = deserialize_usage(resp_data.get("usage", {}))
 
-        output: list[Any] = [
-            _deserialize_message_output_item(item)
-            if isinstance(item, Mapping) and item.get("type") == "message"
-            else item
-            for item in resp_data["output"]
-        ]
+        output: list[Any] = []
+        for item in resp_data["output"]:
+            if not isinstance(item, Mapping):
+                output.append(item)
+            elif item.get("type") == "message":
+                output.append(_deserialize_message_output_item(item))
+            elif item.get("type") == "program":
+                output.append(_deserialize_tool_call_raw_item(item))
+            elif item.get("type") == "program_output":
+                output.append(_deserialize_tool_call_output_raw_item(item))
+            else:
+                output.append(item)
 
         response_id = resp_data.get("response_id")
         request_id = resp_data.get("request_id")
 
-        result.append(
-            ModelResponse(
+        if any(
+            isinstance(item, Mapping) and item.get("type") in {"program", "program_output"}
+            for item in output
+        ):
+            model_response = ModelResponse(
+                usage=usage,
+                output=[],
+                response_id=response_id,
+                request_id=request_id,
+            )
+            model_response.output = cast(list[TResponseOutputItem], output)
+        else:
+            model_response = ModelResponse(
                 usage=usage,
                 output=output,
                 response_id=response_id,
                 request_id=request_id,
             )
-        )
+        result.append(model_response)
 
     return result
 
@@ -3323,6 +3539,9 @@ def _deserialize_items(
                 raw_item_mcp_response = _MCP_APPROVAL_RESPONSE_ADAPTER.validate_python(
                     normalized_raw_item
                 )
+                caller = normalized_raw_item.get("caller")
+                if caller is not None:
+                    cast(dict[str, Any], raw_item_mcp_response)["caller"] = caller
                 result.append(MCPApprovalResponseItem(agent=agent, raw_item=raw_item_mcp_response))
 
             elif item_type == "tool_approval_item":

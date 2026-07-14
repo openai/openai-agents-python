@@ -109,6 +109,55 @@ def _status_error_without_code(status_code: int, body_code: str = "server_error"
     )
 
 
+@pytest.mark.asyncio
+async def test_programmatic_request_disables_hidden_provider_retries() -> None:
+    provider_retry_flags: list[bool] = []
+
+    async def get_response() -> ModelResponse:
+        provider_retry_flags.append(should_disable_provider_managed_retries())
+        return ModelResponse(output=[get_text_message("ok")], usage=Usage(), response_id="resp")
+
+    result = await get_response_with_retry(
+        get_response=get_response,
+        rewind=lambda: asyncio.sleep(0),
+        retry_settings=None,
+        get_retry_advice=lambda _request: None,
+        previous_response_id=None,
+        conversation_id=None,
+        replay_unsafe_request=True,
+    )
+
+    assert result.response_id == "resp"
+    assert provider_retry_flags == [True]
+
+
+@pytest.mark.asyncio
+async def test_programmatic_request_requires_replay_approval_for_runner_retry() -> None:
+    calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        raise _connection_error()
+
+    with pytest.raises(APIConnectionError):
+        await get_response_with_retry(
+            get_response=get_response,
+            rewind=lambda: asyncio.sleep(0),
+            retry_settings=ModelRetrySettings(
+                max_retries=1,
+                backoff={"initial_delay": 0},
+                policy=retry_policies.network_error(),
+            ),
+            get_retry_advice=lambda _request: None,
+            previous_response_id=None,
+            conversation_id=None,
+            replay_unsafe_request=True,
+        )
+
+    assert calls == 1
+
+
 def test_get_openai_retry_advice_returns_none_for_non_retryable_status() -> None:
     advice = get_openai_retry_advice(
         ModelRetryAdviceRequest(

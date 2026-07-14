@@ -88,7 +88,7 @@ class Converter:
         else:
             ensure_tool_choice_supports_backend(
                 tool_choice,
-                backend_name="OpenAI Responses models",
+                backend_name="Chat Completions-compatible models",
             )
             return {
                 "type": "function",

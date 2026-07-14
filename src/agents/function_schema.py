@@ -40,6 +40,8 @@ class FuncSchema:
     strict_json_schema: bool = True
     """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
     as it increases the likelihood of correct JSON input."""
+    return_annotation: Any = inspect.Signature.empty
+    """The resolved return annotation, including `Annotated` metadata when present."""
 
     def to_call_args(self, data: BaseModel) -> tuple[list[Any], dict[str, Any]]:
         """
@@ -474,4 +476,5 @@ def function_schema(
         signature=sig,
         takes_context=takes_context,
         strict_json_schema=strict_json_schema,
+        return_annotation=type_hints_with_extras.get("return", sig.return_annotation),
     )

@@ -1327,6 +1327,12 @@ class AgentRunner:
                                 else getattr(item.raw_item, "call_id", None)
                                 for item in turn_result.new_step_items
                                 if item.type == "tool_call_output_item"
+                                and (
+                                    item.raw_item.get("type")
+                                    if isinstance(item.raw_item, dict)
+                                    else getattr(item.raw_item, "type", None)
+                                )
+                                != "program_output"
                             }
                             for item in generated_items:
                                 if item.type != "tool_call_item":

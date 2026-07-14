@@ -73,6 +73,100 @@ def test_drop_orphan_function_calls_preserves_non_mapping_entries() -> None:
     )
 
 
+def test_replay_pruning_drops_orphan_program_call_chain() -> None:
+    generated_items = cast(
+        list[TResponseInputItem],
+        [
+            {
+                "type": "program",
+                "call_id": "program_orphan",
+                "code": "return await tools.lookup({});",
+                "fingerprint": "fingerprint:orphan",
+            },
+            {
+                "type": "function_call",
+                "call_id": "function_orphan",
+                "name": "lookup",
+                "arguments": "{}",
+                "caller": {"type": "program", "caller_id": "program_orphan"},
+            },
+        ],
+    )
+
+    prepared = run_items.prepare_model_input_items([], generated_items)
+    resumed = run_items.normalize_resumed_input(generated_items)
+
+    assert prepared == []
+    assert resumed == []
+
+
+def test_drop_orphan_function_calls_preserves_active_program_call_chain() -> None:
+    payload = cast(
+        list[TResponseInputItem],
+        [
+            {
+                "type": "program",
+                "call_id": "program_active",
+                "code": "return await tools.lookup({});",
+                "fingerprint": "fingerprint:active",
+            },
+            {
+                "type": "function_call",
+                "call_id": "function_completed",
+                "name": "lookup",
+                "arguments": "{}",
+                "caller": {"type": "program", "caller_id": "program_active"},
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "function_completed",
+                "output": "done",
+                "caller": {"type": "program", "caller_id": "program_active"},
+            },
+        ],
+    )
+
+    filtered = run_items.drop_orphan_function_calls(payload)
+
+    assert filtered == payload
+
+
+@pytest.mark.parametrize(
+    "hosted_item_type",
+    [
+        "file_search_call",
+        "web_search_call",
+        "code_interpreter_call",
+        "image_generation_call",
+        "mcp_list_tools",
+        "mcp_call",
+        "mcp_approval_request",
+        "mcp_approval_response",
+    ],
+)
+def test_replay_pruning_preserves_program_owned_hosted_items(hosted_item_type: str) -> None:
+    payload = cast(
+        list[TResponseInputItem],
+        [
+            {
+                "type": "program",
+                "call_id": "program_pending",
+                "code": "return await tools.lookup({});",
+                "fingerprint": "fingerprint:pending",
+            },
+            {
+                "type": hosted_item_type,
+                "id": "hosted_item",
+                "caller": {"type": "program", "caller_id": "program_pending"},
+            },
+        ],
+    )
+
+    assert run_items.drop_orphan_function_calls(payload) == payload
+    assert run_items.prepare_model_input_items([], payload) == payload
+    assert run_items.normalize_resumed_input(payload) == payload
+
+
 def test_drop_orphan_function_calls_drops_reasoning_preceding_dropped_tool_call() -> None:
     # Regression: reasoning items tied to a now-dropped orphan tool call would otherwise be
     # forwarded to the API and trigger

@@ -3142,12 +3142,14 @@ async def test_execute_tools_runs_hosted_mcp_callback_when_present():
         on_approval_request=lambda request: {"approve": True},
     )
     agent = make_agent(tools=[mcp_tool])
-    request_item = McpApprovalRequest(
+    program_caller = {"type": "program", "caller_id": "program-1"}
+    request_item = McpApprovalRequest.model_construct(
         id="mcp-approval-1",
         type="mcp_approval_request",
         server_label="test_mcp_server",
         arguments="{}",
         name="list_repo_languages",
+        caller=program_caller,
     )
     processed_response = make_processed_response(
         new_items=[MCPApprovalRequestItem(raw_item=request_item, agent=agent)],
@@ -3162,7 +3164,11 @@ async def test_execute_tools_runs_hosted_mcp_callback_when_present():
     result = await run_execute_with_processed_response(agent, processed_response)
 
     assert not isinstance(result.next_step, NextStepInterruption)
-    assert any(isinstance(item, MCPApprovalResponseItem) for item in result.new_step_items)
+    responses = [
+        item for item in result.new_step_items if isinstance(item, MCPApprovalResponseItem)
+    ]
+    assert responses
+    assert responses[0].raw_item.get("caller") == program_caller
     assert not result.processed_response or not result.processed_response.interruptions
 
 
@@ -3333,12 +3339,14 @@ async def test_resolve_interrupted_turn_uses_public_agent_for_resumed_hosted_mcp
     public_agent = make_agent(tools=[mcp_tool])
     execution_agent = public_agent.clone()
     set_public_agent(execution_agent, public_agent)
-    request_item = McpApprovalRequest(
+    program_caller = {"type": "program", "caller_id": "program-resume"}
+    request_item = McpApprovalRequest.model_construct(
         id="mcp-approval-resume-public-agent",
         type="mcp_approval_request",
         server_label="test_mcp_server",
         arguments="{}",
         name="list_repo_languages",
+        caller=program_caller,
     )
     approval_item = ToolApprovalItem(
         agent=public_agent,
@@ -3376,6 +3384,7 @@ async def test_resolve_interrupted_turn_uses_public_agent_for_resumed_hosted_mcp
     ]
     assert responses
     assert all(item.agent is public_agent for item in responses)
+    assert all(item.raw_item.get("caller") == program_caller for item in responses)
 
 
 @pytest.mark.asyncio

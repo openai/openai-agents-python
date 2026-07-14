@@ -21,7 +21,7 @@ from openai.types.responses.response_input_param import ComputerCallOutput
 from .._tool_identity import get_mapping_or_attr, get_tool_trace_name_for_tool
 from ..agent import Agent
 from ..exceptions import ModelBehaviorError
-from ..items import RunItem, ToolCallOutputItem
+from ..items import ItemHelpers, RunItem, ToolCallOutputItem
 from ..logger import logger
 from ..run_config import RunConfig
 from ..run_context import RunContextWrapper
@@ -478,6 +478,7 @@ class ShellAction:
                     return shell_rejection_item(
                         agent,
                         shell_call.call_id,
+                        tool_call=call.tool_call,
                         rejection_message=rejection_message,
                     )
 
@@ -588,6 +589,7 @@ class ShellAction:
                 "output": structured_output,
                 "status": status,
             }
+            ItemHelpers.copy_tool_call_caller(call.tool_call, raw_item)
             if max_output_length is not None:
                 raw_item["max_output_length"] = max_output_length
             if raw_entries:
@@ -668,7 +670,16 @@ class CustomToolAction:
                         tool_name=custom_tool.name,
                         call_id=call_id,
                     )
-                    return cls._tool_output_item(agent, call_id, rejection_message)
+                    return cls._tool_output_item(
+                        agent,
+                        call_id,
+                        rejection_message,
+                        raw_item=cls._raw_tool_output_item(
+                            call_id,
+                            rejection_message,
+                            tool_call=call.tool_call,
+                        ),
+                    )
 
                 if approval_status is not True:
                     return approval_item
@@ -704,7 +715,11 @@ class CustomToolAction:
                     )
                 logger.error("Custom tool failed: %s", exc, exc_info=True)
 
-            raw_item = cls._raw_tool_output_item(call_id, output_text)
+            raw_item = cls._raw_tool_output_item(
+                call_id,
+                output_text,
+                tool_call=call.tool_call,
+            )
             custom_data = await maybe_extract_custom_data(
                 custom_tool.custom_data_extractor,
                 CustomToolCustomDataContext(
@@ -746,12 +761,20 @@ class CustomToolAction:
         return output if isinstance(output, str) else str(output)
 
     @staticmethod
-    def _raw_tool_output_item(call_id: str, output: str) -> dict[str, Any]:
-        return {
+    def _raw_tool_output_item(
+        call_id: str,
+        output: str,
+        *,
+        tool_call: Any | None = None,
+    ) -> dict[str, Any]:
+        raw_item = {
             "type": "custom_tool_call_output",
             "call_id": call_id,
             "output": output,
         }
+        if tool_call is not None:
+            ItemHelpers.copy_tool_call_caller(tool_call, raw_item)
+        return raw_item
 
     @classmethod
     def _tool_output_item(
@@ -835,6 +858,7 @@ class ApplyPatchAction:
                     return apply_patch_rejection_item(
                         agent,
                         call_id,
+                        tool_call=call.tool_call,
                         output_type="apply_patch_call_output",
                         rejection_message=rejection_message,
                     )
@@ -903,6 +927,7 @@ class ApplyPatchAction:
                 "call_id": call_id,
                 "status": status,
             }
+            ItemHelpers.copy_tool_call_caller(call.tool_call, raw_item)
             if output_text:
                 raw_item["output"] = output_text
 

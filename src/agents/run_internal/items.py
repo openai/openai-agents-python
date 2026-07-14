@@ -21,6 +21,7 @@ REJECTION_MESSAGE = DEFAULT_APPROVAL_REJECTION_MESSAGE
 TOOL_CALL_SESSION_DESCRIPTION_KEY = "_agents_tool_description"
 TOOL_CALL_SESSION_TITLE_KEY = "_agents_tool_title"
 _TOOL_CALL_TO_OUTPUT_TYPE: dict[str, str] = {
+    "program": "program_output",
     "function_call": "function_call_output",
     "custom_tool_call": "custom_tool_call_output",
     "shell_call": "shell_call_output",
@@ -29,6 +30,19 @@ _TOOL_CALL_TO_OUTPUT_TYPE: dict[str, str] = {
     "local_shell_call": "local_shell_call_output",
     "tool_search_call": "tool_search_output",
 }
+_PROGRAM_OWNED_HOSTED_ITEM_TYPES = frozenset(
+    {
+        "hosted_tool_call",
+        "file_search_call",
+        "web_search_call",
+        "code_interpreter_call",
+        "image_generation_call",
+        "mcp_list_tools",
+        "mcp_call",
+        "mcp_approval_request",
+        "mcp_approval_response",
+    }
+)
 
 __all__ = [
     "ReasoningItemIdPolicy",
@@ -101,15 +115,38 @@ def drop_orphan_function_calls(
     pruning_indexes: set[int] | None = None,
 ) -> list[TResponseInputItem]:
     """
-    Remove tool call items that do not have corresponding outputs so resumptions or retries do not
-    replay stale tool calls. Reasoning items that immediately precede a tool call dropped by this
-    pass are also removed, since the Responses API rejects reasoning items that are not followed
-    by their associated model-emitted item (``Item 'rs_...' of type 'reasoning' was provided
-    without its required following item``).
+    Remove tool and program call items that do not have corresponding outputs so resumptions or
+    retries do not replay stale calls. Program-owned items are removed with an orphan program,
+    while programs with retained hosted calls or tool outputs remain available for continuation.
+    Reasoning items that immediately precede a call dropped by this pass are also removed, since
+    the Responses API rejects reasoning items that are not followed by their associated
+    model-emitted item (``Item 'rs_...' of type 'reasoning' was provided without its required
+    following item``).
     """
 
     completed_call_ids = _completed_call_ids_by_type(items)
     matched_anonymous_tool_search_calls = _matched_anonymous_tool_search_call_indexes(items)
+    active_program_call_ids: set[str] = set()
+    orphan_program_call_ids: set[str] = set()
+
+    for index, entry in enumerate(items):
+        if pruning_indexes is not None and index not in pruning_indexes:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "program":
+            continue
+        call_id = entry.get("call_id")
+        if not isinstance(call_id, str):
+            continue
+        if call_id in completed_call_ids["program_output"]:
+            continue
+        if any(
+            _get_program_caller_id(candidate) == call_id
+            and _is_retained_program_owned_item(candidate, candidate_index, pruning_indexes)
+            for candidate_index, candidate in enumerate(items)
+        ):
+            active_program_call_ids.add(call_id)
+        else:
+            orphan_program_call_ids.add(call_id)
 
     dropped_indexes: set[int] = set()
     filtered: list[TResponseInputItem] = []
@@ -121,14 +158,24 @@ def drop_orphan_function_calls(
         if not isinstance(entry_type, str):
             filtered.append(entry)
             continue
+        if pruning_indexes is not None and index not in pruning_indexes:
+            filtered.append(entry)
+            continue
+        program_caller_id = _get_program_caller_id(entry)
+        if program_caller_id is not None and program_caller_id in orphan_program_call_ids:
+            dropped_indexes.add(index)
+            continue
         output_type = _TOOL_CALL_TO_OUTPUT_TYPE.get(entry_type)
         if output_type is None:
             filtered.append(entry)
             continue
-        if pruning_indexes is not None and index not in pruning_indexes:
+        call_id = entry.get("call_id")
+        if program_caller_id is not None and _is_pending_hosted_shell_call(entry):
             filtered.append(entry)
             continue
-        call_id = entry.get("call_id")
+        if entry_type == "program" and call_id in active_program_call_ids:
+            filtered.append(entry)
+            continue
         if isinstance(call_id, str) and call_id in completed_call_ids.get(output_type, set()):
             filtered.append(entry)
             continue
@@ -359,7 +406,10 @@ def function_rejection_item(
         drop_agent_tool_run_result(tool_call, scope_id=scope_id)
     return ToolCallOutputItem(
         output=rejection_message,
-        raw_item=ItemHelpers.tool_call_output_item(tool_call, rejection_message),
+        raw_item=ItemHelpers.tool_call_output_item(
+            tool_call,
+            rejection_message,
+        ),
         agent=agent,
         tool_origin=tool_origin,
     )
@@ -369,6 +419,7 @@ def shell_rejection_item(
     agent: Any,
     call_id: str,
     *,
+    tool_call: Any | None = None,
     rejection_message: str = REJECTION_MESSAGE,
 ) -> ToolCallOutputItem:
     """Build a ToolCallOutputItem representing a rejected shell call."""
@@ -382,6 +433,8 @@ def shell_rejection_item(
         "call_id": call_id,
         "output": [rejection_output],
     }
+    if tool_call is not None:
+        ItemHelpers.copy_tool_call_caller(tool_call, rejection_raw_item)
     return ToolCallOutputItem(agent=agent, output=rejection_message, raw_item=rejection_raw_item)
 
 
@@ -389,6 +442,7 @@ def apply_patch_rejection_item(
     agent: Any,
     call_id: str,
     *,
+    tool_call: Any | None = None,
     output_type: Literal["apply_patch_call_output", "custom_tool_call_output"] = (
         "apply_patch_call_output"
     ),
@@ -402,6 +456,8 @@ def apply_patch_rejection_item(
     }
     if output_type == "apply_patch_call_output":
         rejection_raw_item["status"] = "failed"
+    if tool_call is not None:
+        ItemHelpers.copy_tool_call_caller(tool_call, rejection_raw_item)
     return ToolCallOutputItem(
         agent=agent,
         output=rejection_message,
@@ -474,6 +530,44 @@ def _completed_call_ids_by_type(payload: list[TResponseInputItem]) -> dict[str, 
         if isinstance(call_id, str):
             completed[item_type].add(call_id)
     return completed
+
+
+def _get_program_caller_id(entry: TResponseInputItem) -> str | None:
+    """Return the owning program call id for a program-issued item."""
+    if not isinstance(entry, dict):
+        return None
+    caller = entry.get("caller")
+    if not isinstance(caller, dict) or caller.get("type") != "program":
+        return None
+    caller_id = caller.get("caller_id")
+    return caller_id if isinstance(caller_id, str) else None
+
+
+def _is_pending_hosted_shell_call(entry: TResponseInputItem) -> bool:
+    """Return whether a hosted shell call can remain pending without an output item."""
+    if not isinstance(entry, dict) or entry.get("type") != "shell_call":
+        return False
+    status = entry.get("status")
+    return status is None or status == "in_progress"
+
+
+def _is_retained_program_owned_item(
+    entry: TResponseInputItem,
+    index: int,
+    pruning_indexes: set[int] | None,
+) -> bool:
+    """Return whether a program-owned item keeps its parent program active."""
+    if pruning_indexes is not None:
+        return index not in pruning_indexes
+    if _is_pending_hosted_shell_call(entry):
+        return True
+    if not isinstance(entry, dict):
+        return False
+    entry_type = cast(dict[str, Any], entry).get("type")
+    return (
+        entry_type in _PROGRAM_OWNED_HOSTED_ITEM_TYPES
+        or entry_type in _TOOL_CALL_TO_OUTPUT_TYPE.values()
+    )
 
 
 def _matched_anonymous_tool_search_call_indexes(payload: list[TResponseInputItem]) -> set[int]:

@@ -63,12 +63,14 @@ from ..tool import (
     HostedMCPTool,
     ImageGenerationTool,
     LocalShellTool,
+    ProgrammaticToolCallingTool,
     ShellTool,
     ShellToolEnvironment,
     Tool,
     ToolSearchTool,
     WebSearchTool,
     has_required_tool_search_surface,
+    validate_responses_programmatic_tool_calling_configuration,
     validate_responses_tool_search_configuration,
 )
 from ..tracing import SpanError, response_span
@@ -1637,6 +1639,11 @@ class Converter:
             return "auto"
         elif tool_choice == "none":
             return "none"
+        elif tool_choice == "programmatic_tool_calling":
+            return cast(
+                response_create_params.ToolChoice,
+                {"type": "programmatic_tool_calling"},
+            )
         elif tool_choice == "file_search":
             return {
                 "type": "file_search",
@@ -1897,6 +1904,11 @@ class Converter:
             tools,
             allow_opaque_search_surface=allow_opaque_tool_search_surface,
         )
+        validate_responses_programmatic_tool_calling_configuration(
+            tools,
+            tool_choice=tool_choice,
+            allow_opaque_tool_search_surface=allow_opaque_tool_search_surface,
+        )
 
         computer_tools = [tool for tool in tools if isinstance(tool, ComputerTool)]
         if len(computer_tools) > 1:
@@ -1975,6 +1987,10 @@ class Converter:
         }
         if include_defer_loading and tool.defer_loading:
             function_tool_param["defer_loading"] = True
+        if tool.allowed_callers is not None:
+            function_tool_param["allowed_callers"] = tool.allowed_callers
+        if tool.output_json_schema is not None:
+            function_tool_param["output_schema"] = tool.output_json_schema
         return function_tool_param, None
 
     @classmethod
@@ -2057,16 +2073,21 @@ class Converter:
         elif isinstance(tool, ApplyPatchTool):
             tool_config = getattr(tool, "tool_config", None)
             if tool_config is not None:
-                return _require_responses_tool_param(tool_config), None
-            return ApplyPatchToolParam(type="apply_patch"), None
+                converted_tool_config = dict(tool_config)
+            else:
+                converted_tool_config = dict(ApplyPatchToolParam(type="apply_patch"))
+            if tool.allowed_callers is not None:
+                converted_tool_config["allowed_callers"] = tool.allowed_callers
+            return _require_responses_tool_param(converted_tool_config), None
         elif isinstance(tool, ShellTool):
+            shell_tool_config: dict[str, Any] = {
+                "type": "shell",
+                "environment": cls._convert_shell_environment(tool.environment),
+            }
+            if tool.allowed_callers is not None:
+                shell_tool_config["allowed_callers"] = tool.allowed_callers
             return (
-                _require_responses_tool_param(
-                    {
-                        "type": "shell",
-                        "environment": cls._convert_shell_environment(tool.environment),
-                    }
-                ),
+                _require_responses_tool_param(shell_tool_config),
                 None,
             )
         elif isinstance(tool, ImageGenerationTool):
@@ -2084,6 +2105,8 @@ class Converter:
             if tool.parameters is not None:
                 tool_search_tool_param["parameters"] = tool.parameters
             return tool_search_tool_param, None
+        elif isinstance(tool, ProgrammaticToolCallingTool):
+            return _require_responses_tool_param({"type": "programmatic_tool_calling"}), None
         else:
             raise UserError(f"Unknown tool type: {type(tool)}, tool")
 

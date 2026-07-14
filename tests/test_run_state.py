@@ -26,14 +26,20 @@ from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
     ResponseComputerToolCall,
 )
-from openai.types.responses.response_output_item import LocalShellCall, McpApprovalRequest
+from openai.types.responses.response_function_tool_call import CallerProgram
+from openai.types.responses.response_output_item import (
+    LocalShellCall,
+    McpApprovalRequest,
+    Program,
+    ProgramOutput,
+)
 from openai.types.responses.response_usage import InputTokensDetails
 from openai.types.responses.tool_param import Mcp
 from pydantic import BaseModel
 
 from agents import Agent, Model, ModelSettings, RunConfig, Runner, handoff, trace
 from agents.computer import Computer
-from agents.exceptions import UserError
+from agents.exceptions import ModelBehaviorError, UserError
 from agents.guardrail import (
     GuardrailFunctionOutput,
     InputGuardrail,
@@ -45,6 +51,7 @@ from agents.handoffs import Handoff
 from agents.items import (
     HandoffOutputItem,
     ItemHelpers,
+    MCPApprovalResponseItem,
     MessageOutputItem,
     ModelResponse,
     ReasoningItem,
@@ -97,6 +104,7 @@ from agents.tool import (
     FunctionTool,
     HostedMCPTool,
     LocalShellTool,
+    ProgrammaticToolCallingTool,
     ShellTool,
     function_tool,
     tool_namespace,
@@ -1810,7 +1818,7 @@ class TestSerializationRoundTrip:
         serialized = json.loads(str_data)
         new_state = await RunState.from_string(agent, str_data)
 
-        assert serialized["$schemaVersion"] == "1.12"
+        assert serialized["$schemaVersion"] == CURRENT_SCHEMA_VERSION
         assert serialized["context"]["usage"]["input_tokens_details"] == [
             {"cached_tokens": 3, "cache_write_tokens": 7}
         ]
@@ -4148,12 +4156,18 @@ class TestRunStateSerializationEdgeCases:
                 "type": "mcp_approval_response",
                 "approval_request_id": "req123",
                 "approve": True,
+                "caller": {"type": "program", "caller_id": "program123"},
             },
         }
 
         result_response = _deserialize_items([item_data_response], {"TestAgent": agent})
         assert len(result_response) == 1
         assert result_response[0].type == "mcp_approval_response_item"
+        assert isinstance(result_response[0], MCPApprovalResponseItem)
+        assert result_response[0].raw_item.get("caller") == {
+            "type": "program",
+            "caller_id": "program123",
+        }
 
     async def test_deserialize_tool_approval_item(self):
         """Test deserialization of tool_approval_item."""
@@ -4973,6 +4987,396 @@ class TestRunStateSerializationEdgeCases:
         assert restored._context is not None
         assert restored._context.context == {"foo": "bar"}
 
+    @pytest.mark.asyncio
+    async def test_programmatic_tool_calling_round_trip_uses_current_schema(self):
+        agent = Agent(name="TestAgent")
+        state: RunState[Any, Agent[Any]] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        program = Program(
+            id="program_item",
+            call_id="call_program",
+            code="lookup()",
+            fingerprint="fingerprint",
+            type="program",
+        )
+        function_call = ResponseFunctionToolCall(
+            id="function_item",
+            call_id="call_function",
+            name="lookup",
+            arguments="{}",
+            caller=CallerProgram(type="program", caller_id="call_program"),
+            type="function_call",
+        )
+        program_output = ProgramOutput(
+            id="program_output_item",
+            call_id="call_program",
+            result="done",
+            status="completed",
+            type="program_output",
+        )
+        state._model_responses = [
+            ModelResponse(
+                output=[program, function_call, program_output],
+                usage=Usage(),
+                response_id="response_1",
+            )
+        ]
+        state._generated_items = [
+            ToolCallItem(agent=agent, raw_item=program),
+            ToolCallItem(agent=agent, raw_item=function_call),
+            ToolCallOutputItem(agent=agent, raw_item=program_output, output="done"),
+        ]
+
+        json_data = state.to_json()
+        assert json_data["$schemaVersion"] == CURRENT_SCHEMA_VERSION
+
+        restored = await RunState.from_json(agent, json_data)
+        assert isinstance(restored._model_responses[0].output[0], Program)
+        assert isinstance(restored._model_responses[0].output[2], ProgramOutput)
+        restored_call = cast(ResponseFunctionToolCall, restored._model_responses[0].output[1])
+        assert restored_call["caller"] if isinstance(restored_call, dict) else restored_call.caller
+        assert isinstance(restored._generated_items[0].raw_item, Program)
+        assert isinstance(restored._generated_items[2].raw_item, ProgramOutput)
+
+    @pytest.mark.asyncio
+    async def test_programmatic_tool_calling_round_trip_preserves_mapping_items(self):
+        agent = Agent(name="TestAgent")
+        state: RunState[Any, Agent[Any]] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        program = {
+            "id": "program_item",
+            "call_id": "call_program",
+            "code": "lookup()",
+            "type": "program",
+        }
+        program_output = {
+            "id": "program_output_item",
+            "call_id": "call_program",
+            "result": "done",
+            "type": "program_output",
+        }
+        model_response = ModelResponse(output=[], usage=Usage(), response_id="response_1")
+        model_response.output = cast(list[TResponseOutputItem], [program, program_output])
+        state._model_responses = [model_response]
+        state._generated_items = [
+            ToolCallItem(agent=agent, raw_item=program),
+            ToolCallOutputItem(agent=agent, raw_item=program_output, output="done"),
+        ]
+
+        restored = await RunState.from_json(agent, state.to_json())
+
+        assert cast(list[Any], restored._model_responses[0].output) == [program, program_output]
+        assert restored._generated_items[0].raw_item == program
+        assert restored._generated_items[1].raw_item == program_output
+
+    @pytest.mark.asyncio
+    async def test_programmatic_tool_calling_rechecks_allowed_callers_on_resume(self):
+        @function_tool(allowed_callers=["programmatic"])
+        def saved_lookup() -> str:
+            return "saved"
+
+        saved_agent = Agent(
+            name="TestAgent",
+            tools=[ProgrammaticToolCallingTool(), saved_lookup],
+        )
+        state: RunState[Any, Agent[Any]] = make_state(
+            saved_agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        program = Program(
+            id="program_item",
+            call_id="call_program",
+            code="saved_lookup()",
+            fingerprint="fingerprint",
+            type="program",
+        )
+        function_call = ResponseFunctionToolCall(
+            id="function_item",
+            call_id="call_function",
+            name="saved_lookup",
+            arguments="{}",
+            caller=CallerProgram(type="program", caller_id="call_program"),
+            type="function_call",
+        )
+        state._model_responses = [
+            ModelResponse(output=[program], usage=Usage(), response_id="response_1")
+        ]
+        state._last_processed_response = make_processed_response(
+            functions=[
+                ToolRunFunction(
+                    tool_call=function_call,
+                    function_tool=saved_lookup,
+                )
+            ]
+        )
+
+        @function_tool(name_override="saved_lookup")
+        def rebound_lookup() -> str:
+            return "rebound"
+
+        rebound_agent = Agent(
+            name="TestAgent",
+            tools=[ProgrammaticToolCallingTool(), rebound_lookup],
+        )
+        with pytest.raises(ModelBehaviorError, match="caller programmatic"):
+            await RunState.from_json(
+                rebound_agent,
+                state.to_json(),
+                context_override={},
+            )
+
+    @pytest.mark.asyncio
+    async def test_programmatic_tool_calling_requires_configured_tool_on_resume(self):
+        @function_tool(allowed_callers=["programmatic"])
+        def saved_lookup() -> str:
+            return "saved"
+
+        saved_agent = Agent(
+            name="TestAgent",
+            tools=[ProgrammaticToolCallingTool(), saved_lookup],
+        )
+        state: RunState[Any, Agent[Any]] = make_state(
+            saved_agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        program = Program(
+            id="program_item",
+            call_id="call_program",
+            code="saved_lookup()",
+            fingerprint="fingerprint",
+            type="program",
+        )
+        function_call = ResponseFunctionToolCall(
+            id="function_item",
+            call_id="call_function",
+            name="saved_lookup",
+            arguments="{}",
+            caller=CallerProgram(type="program", caller_id="call_program"),
+            type="function_call",
+        )
+        state._model_responses = [
+            ModelResponse(output=[program], usage=Usage(), response_id="response_1")
+        ]
+        state._last_processed_response = make_processed_response(
+            functions=[ToolRunFunction(tool_call=function_call, function_tool=saved_lookup)]
+        )
+
+        @function_tool(name_override="saved_lookup", allowed_callers=["programmatic"])
+        def rebound_lookup() -> str:
+            return "rebound"
+
+        rebound_agent = Agent(name="TestAgent", tools=[rebound_lookup])
+        with pytest.raises(ModelBehaviorError, match="programmatic_tool_calling tool"):
+            await RunState.from_json(rebound_agent, state.to_json(), context_override={})
+
+    @pytest.mark.asyncio
+    async def test_programmatic_tool_calling_rejects_missing_parent_on_resume(self):
+        @function_tool(allowed_callers=["programmatic"])
+        def saved_lookup() -> str:
+            return "saved"
+
+        agent = Agent(
+            name="TestAgent",
+            tools=[ProgrammaticToolCallingTool(), saved_lookup],
+        )
+        state: RunState[Any, Agent[Any]] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        function_call = ResponseFunctionToolCall(
+            id="function_item",
+            call_id="call_function",
+            name="saved_lookup",
+            arguments="{}",
+            caller=CallerProgram(type="program", caller_id="missing_program"),
+            type="function_call",
+        )
+        state._last_processed_response = make_processed_response(
+            functions=[ToolRunFunction(tool_call=function_call, function_tool=saved_lookup)]
+        )
+
+        with pytest.raises(ModelBehaviorError, match="parent program item"):
+            await RunState.from_json(agent, state.to_json(), context_override={})
+
+    @pytest.mark.asyncio
+    async def test_programmatic_tool_calling_rejects_completed_parent_on_resume(self):
+        @function_tool(allowed_callers=["programmatic"])
+        def saved_lookup() -> str:
+            return "saved"
+
+        agent = Agent(
+            name="TestAgent",
+            tools=[ProgrammaticToolCallingTool(), saved_lookup],
+        )
+        state: RunState[Any, Agent[Any]] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        program = Program(
+            id="program_item",
+            call_id="call_program",
+            code="saved_lookup()",
+            fingerprint="fingerprint",
+            type="program",
+        )
+        program_output = ProgramOutput(
+            id="program_output_item",
+            call_id="call_program",
+            result="done",
+            status="completed",
+            type="program_output",
+        )
+        function_call = ResponseFunctionToolCall(
+            id="function_item",
+            call_id="call_function",
+            name="saved_lookup",
+            arguments="{}",
+            caller=CallerProgram(type="program", caller_id="call_program"),
+            type="function_call",
+        )
+        state._model_responses = [
+            ModelResponse(
+                output=[program, program_output],
+                usage=Usage(),
+                response_id="response_1",
+            )
+        ]
+        state._last_processed_response = make_processed_response(
+            functions=[ToolRunFunction(tool_call=function_call, function_tool=saved_lookup)]
+        )
+
+        with pytest.raises(ModelBehaviorError, match="already completed"):
+            await RunState.from_json(agent, state.to_json(), context_override={})
+
+    @pytest.mark.asyncio
+    async def test_programmatic_mcp_approval_rechecks_allowed_callers_on_resume(self):
+        saved_mcp_tool = HostedMCPTool(
+            tool_config=cast(
+                Mcp,
+                {
+                    "type": "mcp",
+                    "server_label": "docs_server",
+                    "server_url": "https://example.com/mcp",
+                    "allowed_callers": ["programmatic"],
+                },
+            )
+        )
+        saved_agent = Agent(
+            name="TestAgent",
+            tools=[ProgrammaticToolCallingTool(), saved_mcp_tool],
+        )
+        state: RunState[Any, Agent[Any]] = make_state(
+            saved_agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        program = Program(
+            id="program_item",
+            call_id="call_program",
+            code="tools.docs_server.lookup()",
+            fingerprint="fingerprint",
+            type="program",
+        )
+        approval_request = McpApprovalRequest.model_construct(
+            id="approval_item",
+            arguments="{}",
+            name="lookup",
+            server_label="docs_server",
+            type="mcp_approval_request",
+            caller=CallerProgram(type="program", caller_id="call_program"),
+        )
+        state._model_responses = [
+            ModelResponse(output=[program], usage=Usage(), response_id="response_1")
+        ]
+        state._last_processed_response = make_processed_response(
+            mcp_approval_requests=[
+                ToolRunMCPApprovalRequest(
+                    request_item=approval_request,
+                    mcp_tool=saved_mcp_tool,
+                )
+            ]
+        )
+
+        rebound_mcp_tool = HostedMCPTool(
+            tool_config=cast(
+                Mcp,
+                {
+                    "type": "mcp",
+                    "server_label": "docs_server",
+                    "server_url": "https://example.com/mcp",
+                    "allowed_callers": ["direct"],
+                },
+            )
+        )
+        rebound_agent = Agent(
+            name="TestAgent",
+            tools=[ProgrammaticToolCallingTool(), rebound_mcp_tool],
+        )
+        with pytest.raises(ModelBehaviorError, match="caller programmatic"):
+            await RunState.from_json(
+                rebound_agent,
+                state.to_json(),
+                context_override={},
+            )
+
+    @pytest.mark.asyncio
+    async def test_previous_schema_rejects_programmatic_tool_calling_items(self):
+        agent = Agent(name="TestAgent")
+        state: RunState[Any, Agent[Any]] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        state._model_responses = [
+            ModelResponse(
+                output=[
+                    Program(
+                        id="program_item",
+                        call_id="call_program",
+                        code="lookup()",
+                        fingerprint="fingerprint",
+                        type="program",
+                    )
+                ],
+                usage=Usage(),
+                response_id="response_1",
+            )
+        ]
+        json_data = state.to_json()
+        json_data["$schemaVersion"] = "1.12"
+
+        with pytest.raises(UserError, match="Programmatic Tool Calling requires schema version"):
+            await RunState.from_json(agent, json_data)
+
+    @pytest.mark.asyncio
+    async def test_previous_schema_ignores_program_like_arbitrary_context(self):
+        agent = Agent(name="TestAgent")
+        state = make_state(
+            agent,
+            context=RunContextWrapper(
+                context={"payload": {"type": "program", "call_id": "not-a-run-item"}}
+            ),
+            original_input="test",
+        )
+        json_data = state.to_json()
+        json_data["$schemaVersion"] = "1.12"
+
+        restored = await RunState.from_json(agent, json_data)
+        assert restored._context is not None
+        assert restored._context.context == {
+            "payload": {"type": "program", "call_id": "not-a-run-item"}
+        }
+
     def test_supported_schema_versions_match_released_boundary(self):
         """The support set should include released versions plus the current unreleased writer."""
         assert SUPPORTED_SCHEMA_VERSIONS == frozenset(
@@ -4989,6 +5393,7 @@ class TestRunStateSerializationEdgeCases:
                 "1.9",
                 "1.10",
                 "1.11",
+                "1.12",
                 CURRENT_SCHEMA_VERSION,
             }
         )

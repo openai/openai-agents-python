@@ -353,7 +353,10 @@ def _should_disable_provider_managed_retries(
     *,
     attempt: int,
     stateful_request: bool,
+    replay_unsafe_request: bool,
 ) -> bool:
+    if replay_unsafe_request:
+        return True
     if (
         retry_settings is not None
         and retry_settings.max_retries is not None
@@ -411,12 +414,15 @@ async def get_response_with_retry(
     get_retry_advice: GetRetryAdviceCallable,
     previous_response_id: str | None,
     conversation_id: str | None,
+    replay_unsafe_request: bool = False,
 ) -> ModelResponse:
     request_attempt = 1
     policy_attempt = 1
     failed_policy_attempts = 0
     compatibility_retries_taken = 0
-    disable_websocket_pre_event_retry = _should_disable_websocket_pre_event_retry(retry_settings)
+    disable_websocket_pre_event_retry = replay_unsafe_request or (
+        _should_disable_websocket_pre_event_retry(retry_settings)
+    )
     stateful_request = _is_stateful_request(
         previous_response_id=previous_response_id,
         conversation_id=conversation_id,
@@ -432,6 +438,7 @@ async def get_response_with_retry(
                         retry_settings,
                         attempt=request_attempt,
                         stateful_request=stateful_request,
+                        replay_unsafe_request=replay_unsafe_request,
                     )
                 ),
                 websocket_pre_event_retries_disabled(disable_websocket_pre_event_retry),
@@ -443,9 +450,11 @@ async def get_response_with_retry(
             )
             return response
         except Exception as error:
-            if _is_conversation_locked_error(
-                error
-            ) and _should_preserve_conversation_locked_compatibility(retry_settings):
+            if (
+                not replay_unsafe_request
+                and _is_conversation_locked_error(error)
+                and _should_preserve_conversation_locked_compatibility(retry_settings)
+            ):
                 # Preserve the historical conversation_locked retry path for backward
                 # compatibility, including when callers enable retry policies for unrelated
                 # failures. Callers can explicitly opt out of this compatibility behavior with
@@ -480,7 +489,7 @@ async def get_response_with_retry(
                 retry_policy=retry_settings.policy if retry_settings else None,
                 retry_backoff=retry_settings.backoff if retry_settings else None,
                 stream=False,
-                replay_unsafe_request=stateful_request,
+                replay_unsafe_request=stateful_request or replay_unsafe_request,
                 emitted_retry_unsafe_event=False,
                 provider_advice=provider_advice,
             )
@@ -511,12 +520,15 @@ async def stream_response_with_retry(
     previous_response_id: str | None,
     conversation_id: str | None,
     failed_retry_attempts_out: list[int] | None = None,
+    replay_unsafe_request: bool = False,
 ) -> AsyncIterator[TResponseStreamEvent]:
     request_attempt = 1
     policy_attempt = 1
     failed_policy_attempts = 0
     compatibility_retries_taken = 0
-    disable_websocket_pre_event_retry = _should_disable_websocket_pre_event_retry(retry_settings)
+    disable_websocket_pre_event_retry = replay_unsafe_request or (
+        _should_disable_websocket_pre_event_retry(retry_settings)
+    )
     stateful_request = _is_stateful_request(
         previous_response_id=previous_response_id,
         conversation_id=conversation_id,
@@ -530,6 +542,7 @@ async def stream_response_with_retry(
                 retry_settings,
                 attempt=request_attempt,
                 stateful_request=stateful_request,
+                replay_unsafe_request=replay_unsafe_request,
             )
             # Pull stream events under the retry-disable context, but yield them outside it so
             # unrelated model calls made by the consumer do not inherit this setting.
@@ -562,9 +575,11 @@ async def stream_response_with_retry(
                 raise
             if not isinstance(error, Exception):
                 raise
-            if _is_conversation_locked_error(
-                error
-            ) and _should_preserve_conversation_locked_compatibility(retry_settings):
+            if (
+                not replay_unsafe_request
+                and _is_conversation_locked_error(error)
+                and _should_preserve_conversation_locked_compatibility(retry_settings)
+            ):
                 if compatibility_retries_taken < COMPATIBILITY_CONVERSATION_LOCKED_RETRIES:
                     compatibility_retries_taken += 1
                     delay = 1.0 * (2 ** (compatibility_retries_taken - 1))
@@ -597,7 +612,7 @@ async def stream_response_with_retry(
                 retry_policy=retry_settings.policy if retry_settings else None,
                 retry_backoff=retry_settings.backoff if retry_settings else None,
                 stream=True,
-                replay_unsafe_request=stateful_request,
+                replay_unsafe_request=stateful_request or replay_unsafe_request,
                 emitted_retry_unsafe_event=emitted_retry_unsafe_event,
                 provider_advice=provider_advice,
             )

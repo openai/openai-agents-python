@@ -75,8 +75,10 @@ from ..tool import (
     Tool,
     ToolOrigin,
     _computer_tool_uses_run_scoped_initializer,
+    _consume_function_tool_default_failure,
+    _invoke_function_tool_with_metadata,
+    _is_programmatic_tool_call,
     get_function_tool_origin,
-    invoke_function_tool,
     maybe_invoke_function_tool_failure_error_function,
     resolve_computer,
 )
@@ -178,6 +180,14 @@ class _FunctionToolFailure:
     error: BaseException
     order: int
     source: _FunctionToolFailureSource = "direct"
+
+
+@dataclasses.dataclass(frozen=True)
+class _ToolOutputGuardrailExecutionResult:
+    """A tool output plus whether it was synthesized by a rejecting guardrail."""
+
+    output: Any
+    is_rejection: bool = False
 
 
 @dataclasses.dataclass
@@ -1265,6 +1275,7 @@ def process_hosted_mcp_approvals(
             )
             if approved is False and rejection_message is not None:
                 raw_item["reason"] = rejection_message
+            ItemHelpers.copy_tool_call_caller(mcp_run.request_item, raw_item)
             response_item = MCPApprovalResponseItem(raw_item=raw_item, agent=agent)
             append_item(response_item)
             continue
@@ -1321,6 +1332,7 @@ def collect_manual_mcp_approvals(
             )
             if approval_status is False and rejection_message is not None:
                 approval_response_raw["reason"] = rejection_message
+            ItemHelpers.copy_tool_call_caller(request_item, approval_response_raw)
             approved.append(MCPApprovalResponseItem(raw_item=approval_response_raw, agent=agent))
             continue
 
@@ -1368,6 +1380,14 @@ def should_keep_hosted_mcp_item(
     )
 
 
+def _uses_programmatic_output_schema(
+    function_tool: FunctionTool,
+    tool_call: Any,
+) -> bool:
+    """Return whether this call must satisfy its advertised program output schema."""
+    return function_tool.output_json_schema is not None and _is_programmatic_tool_call(tool_call)
+
+
 class _FunctionToolBatchExecutor:
     """Own the mutable state needed to execute and arbitrate a function-tool batch."""
 
@@ -1396,6 +1416,7 @@ class _FunctionToolBatchExecutor:
         self.task_states: dict[asyncio.Task[Any], _FunctionToolTaskState] = {}
         self.teardown_cancelled_tasks: set[asyncio.Task[Any]] = set()
         self.results_by_tool_run: dict[int, Any] = {}
+        self.schema_bypassed_tool_runs: set[int] = set()
         self.custom_data_by_tool_run: dict[int, dict[str, Any]] = {}
         self.pending_tasks: set[asyncio.Task[Any]] = set()
         self.propagating_failure: BaseException | None = None
@@ -1765,6 +1786,7 @@ class _FunctionToolBatchExecutor:
             tool_input_guardrail_results=self.tool_input_guardrail_results,
         )
         if rejected_message is not None:
+            self.schema_bypassed_tool_runs.add(id(task_state.tool_run))
             return rejected_message
 
         await asyncio.gather(
@@ -1805,12 +1827,15 @@ class _FunctionToolBatchExecutor:
         tool_context: ToolContext[Any],
         agent_hooks: Any,
     ) -> Any:
+        bypass_output_schema = False
         try:
-            real_result = await invoke_function_tool(
+            invocation_result = await _invoke_function_tool_with_metadata(
                 function_tool=func_tool,
                 context=tool_context,
                 arguments=tool_call.arguments,
             )
+            real_result = invocation_result.output
+            bypass_output_schema = invocation_result.is_sdk_generated_error
         except asyncio.CancelledError as e:
             if outer_task in self.teardown_cancelled_tasks:
                 raise
@@ -1822,6 +1847,10 @@ class _FunctionToolBatchExecutor:
             )
             if result is None:
                 raise
+
+            bypass_output_schema = _consume_function_tool_default_failure(
+                tool_context
+            ) and not _uses_programmatic_output_schema(func_tool, tool_call)
 
             trace_error = get_trace_tool_error(
                 trace_include_sensitive_data=self.config.trace_include_sensitive_data,
@@ -1837,14 +1866,23 @@ class _FunctionToolBatchExecutor:
 
         task_state.in_post_invoke_phase = True
 
-        final_result = await _execute_tool_output_guardrails(
+        output_guardrail_result = await _execute_tool_output_guardrails(
             func_tool=func_tool,
             tool_context=tool_context,
             agent=self.public_agent,
             real_result=real_result,
             tool_output_guardrail_results=self.tool_output_guardrail_results,
         )
-        raw_output_item = ItemHelpers.tool_call_output_item(tool_call, final_result)
+        final_result = output_guardrail_result.output
+        bypass_output_schema = bypass_output_schema or (output_guardrail_result.is_rejection)
+        if bypass_output_schema:
+            self.schema_bypassed_tool_runs.add(id(task_state.tool_run))
+        raw_output_item = ItemHelpers.tool_call_output_item(
+            tool_call,
+            final_result,
+            output_json_schema=None if bypass_output_schema else func_tool.output_json_schema,
+            output_type_adapter=None if bypass_output_schema else func_tool._output_type_adapter,
+        )
         extracted_custom_data = await maybe_extract_custom_data(
             func_tool.custom_data_extractor,
             FunctionToolCustomDataContext(
@@ -1956,12 +1994,26 @@ class _FunctionToolBatchExecutor:
                 continue
 
             nested_run_result, nested_interruptions = self._resolve_nested_tool_run_result(tool_run)
+            bypass_output_schema = id(tool_run) in self.schema_bypassed_tool_runs
 
             run_item: RunItem | None
             if not nested_interruptions:
                 run_item = ToolCallOutputItem(
                     output=result,
-                    raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
+                    raw_item=ItemHelpers.tool_call_output_item(
+                        tool_run.tool_call,
+                        result,
+                        output_json_schema=(
+                            None
+                            if bypass_output_schema
+                            else tool_run.function_tool.output_json_schema
+                        ),
+                        output_type_adapter=(
+                            None
+                            if bypass_output_schema
+                            else tool_run.function_tool._output_type_adapter
+                        ),
+                    ),
                     agent=self.public_agent,
                     tool_origin=get_function_tool_origin(tool_run.function_tool),
                     custom_data=self.custom_data_by_tool_run.get(id(tool_run)),
@@ -2388,10 +2440,10 @@ async def _execute_tool_output_guardrails(
     agent: Agent[Any],
     real_result: Any,
     tool_output_guardrail_results: list[ToolOutputGuardrailResult],
-) -> Any:
+) -> _ToolOutputGuardrailExecutionResult:
     """Execute output guardrails for a tool call and return the final result."""
     if not func_tool.tool_output_guardrails:
-        return real_result
+        return _ToolOutputGuardrailExecutionResult(real_result)
 
     final_result = real_result
     for output_guardrail in func_tool.tool_output_guardrails:
@@ -2413,10 +2465,12 @@ async def _execute_tool_output_guardrails(
         if gr_out.behavior["type"] == "raise_exception":
             raise ToolOutputGuardrailTripwireTriggered(guardrail=output_guardrail, output=gr_out)
         elif gr_out.behavior["type"] == "reject_content":
-            final_result = gr_out.behavior["message"]
-            break
+            return _ToolOutputGuardrailExecutionResult(
+                gr_out.behavior["message"],
+                is_rejection=True,
+            )
 
-    return final_result
+    return _ToolOutputGuardrailExecutionResult(final_result)
 
 
 def _normalize_exit_code(value: Any) -> int | None:
