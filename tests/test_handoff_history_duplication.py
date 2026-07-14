@@ -1278,6 +1278,46 @@ async def test_nested_history_ownership_survives_result_new_items_copy() -> None
     assert sum(_input_item_text(item) == "same" for item in replay_input) == 1
 
 
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_nested_history_ownership_survives_result_input_copy(streamed: bool) -> None:
+    """Copying public result input must not replay its owned session occurrence twice."""
+    first_model = FakeModel()
+    second_model = FakeModel()
+    second_agent = Agent(name="second", model=second_model)
+    first_agent = Agent(name="first", model=first_model, handoffs=[second_agent])
+    first_model.add_multiple_turn_outputs(
+        [[get_text_message("same"), get_handoff_tool_call(second_agent)]]
+    )
+    second_model.add_multiple_turn_outputs([[get_text_message("done")]])
+
+    result: RunResult | RunResultStreaming
+    if streamed:
+        result = Runner.run_streamed(
+            first_agent,
+            input="start",
+            run_config=RunConfig(nest_handoff_history=True),
+        )
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(
+            first_agent,
+            input="start",
+            run_config=RunConfig(nest_handoff_history=True),
+        )
+
+    assert isinstance(result.input, list)
+    result.input = deepcopy(result.input)
+
+    replay_input = result.to_input_list()
+    state = result.to_state()
+
+    assert sum(_input_item_text(item) == "same" for item in replay_input) == 1
+    assert state._nested_history_owned_session_item_refs
+    state.to_json()
+
+
 @pytest.mark.asyncio
 async def test_nested_history_ownership_revalidates_after_input_removal() -> None:
     """Removing an owned input occurrence must restore its session copy during replay."""
@@ -1796,11 +1836,17 @@ async def test_nested_history_resume_to_final_preserves_status_less_ownership(
 
 
 @pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.parametrize(
+    "legacy_snapshot",
+    [False, True],
+    ids=["current_schema", "schema_1_12"],
+)
 @pytest.mark.asyncio
 async def test_first_nested_handoff_after_restored_approval_keeps_pre_items_once(
     streamed: bool,
+    legacy_snapshot: bool,
 ) -> None:
-    """A restored run must preserve shared generated/session item occurrences."""
+    """Current and released snapshots must restore shared generated/session occurrences."""
 
     @function_tool(needs_approval=True)
     def approval_tool() -> str:
@@ -1855,7 +1901,12 @@ async def test_first_nested_handoff_after_restored_approval_keeps_pre_items_once
     assert len(interrupted.interruptions) == 1
     state = interrupted.to_state()
     state.approve(interrupted.interruptions[0])
-    restored = await RunState.from_string(first_agent, state.to_string())
+    state_json = state.to_json()
+    if legacy_snapshot:
+        state_json["$schemaVersion"] = "1.12"
+        state_json.pop("nested_history_owned_session_item_refs")
+        state_json.pop("generated_session_item_indexes")
+    restored = await RunState.from_json(first_agent, state_json)
     resumed: RunResult | RunResultStreaming
 
     if streamed:

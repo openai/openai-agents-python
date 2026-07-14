@@ -35,6 +35,7 @@ from .run_internal.items import (
     digest_input_item,
     filter_nested_history_owned_item_refs_for_input,
     rebase_nested_history_owned_item_refs,
+    reconcile_nested_history_owned_input_after_rewrite,
     resolve_nested_history_owned_item_indexes,
     run_items_to_input_items,
 )
@@ -75,6 +76,36 @@ class AgentToolInvocation:
     """The raw JSON arguments for the nested invocation."""
 
 
+def _reconciled_result_owned_item_refs(
+    result: RunResultBase,
+    public_input: str | list[TResponseInputItem],
+) -> list[NestedHistoryOwnedItemRef]:
+    """Rebind ownership only after a complete positional public-input copy."""
+    owned_item_refs = getattr(result, "_nested_history_owned_session_item_refs", [])
+    identity_refs = filter_nested_history_owned_item_refs_for_input(public_input, owned_item_refs)
+    if len(identity_refs) == len(owned_item_refs):
+        return identity_refs
+
+    previous_input = getattr(result, "_original_input", None)
+    if (
+        not isinstance(previous_input, list)
+        or not isinstance(public_input, list)
+        or len(previous_input) != len(public_input)
+        or any(
+            digest_input_item(previous_item) != digest_input_item(public_item)
+            for previous_item, public_item in zip(previous_input, public_input, strict=True)
+        )
+    ):
+        return identity_refs
+
+    _, reconciled_refs = reconcile_nested_history_owned_input_after_rewrite(
+        previous_input,
+        public_input,
+        owned_item_refs,
+    )
+    return reconciled_refs
+
+
 def _populate_state_from_result(
     state: RunState[Any],
     result: RunResultBase,
@@ -95,10 +126,11 @@ def _populate_state_from_result(
     else:
         state._generated_items = result.new_items
     state._session_items = list(result.new_items)
+    reconciled_refs = _reconciled_result_owned_item_refs(result, result.input)
     live_refs = rebase_nested_history_owned_item_refs(
         result.input,
         state._session_items,
-        getattr(result, "_nested_history_owned_session_item_refs", []),
+        reconciled_refs,
     )
     if isinstance(state._original_input, list):
         state._nested_history_owned_session_item_refs = [
@@ -352,7 +384,7 @@ class RunResultBase(abc.ABC):
         when handoff filtering rewrote model history, while remaining identical for ordinary runs.
         """
         public_input = self.input
-        owned_item_refs = self._nested_history_owned_session_item_refs
+        owned_item_refs = _reconciled_result_owned_item_refs(self, public_input)
         original_items = ItemHelpers.input_to_new_input_list(public_input)
         reasoning_item_id_policy = getattr(self, "_reasoning_item_id_policy", None)
         replay_items = _input_items_for_result(

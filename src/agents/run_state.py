@@ -2647,6 +2647,23 @@ def _deserialize_tool_output_guardrail_results(
     return deserialized
 
 
+def _legacy_generated_session_item_indexes(
+    schema_version: str,
+    serialized_generated_items: Any,
+    serialized_session_items: Any,
+) -> list[int] | None:
+    """Recover shared occurrences only from a complete positional pre-1.13 mirror."""
+    if schema_version == CURRENT_SCHEMA_VERSION:
+        return None
+    if not isinstance(serialized_generated_items, list) or not isinstance(
+        serialized_session_items, list
+    ):
+        return None
+    if serialized_generated_items != serialized_session_items:
+        return None
+    return list(range(len(serialized_generated_items)))
+
+
 async def _build_run_state_from_json(
     initial_agent: Agent[Any],
     state_json: dict[str, Any],
@@ -2826,6 +2843,12 @@ async def _build_run_state_from_json(
     }
 
     generated_session_indexes = state_json.get("generated_session_item_indexes")
+    if generated_session_indexes is None and "session_items" in state_json:
+        generated_session_indexes = _legacy_generated_session_item_indexes(
+            schema_version,
+            serialized_generated_items,
+            serialized_session_items,
+        )
     if generated_session_indexes is not None:
         mapping_is_valid = not (
             not isinstance(serialized_generated_items, list)
