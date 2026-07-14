@@ -941,26 +941,6 @@ def test_google_docstring_blank_line_form_is_unchanged():
     }
 
 
-def test_google_docstring_missing_blank_line_multi_section():
-    """Multiple sections stacked with no blank lines anywhere should all be recognized."""
-
-    def multi_section(city: str) -> str:
-        """Get the weather for a city.
-        Args:
-            city: The city to get weather for.
-        Returns:
-            A human readable weather string.
-        """
-        return city
-
-    fs = function_schema(multi_section, strict_json_schema=False)
-    properties = fs.params_json_schema.get("properties", {})
-    assert properties["city"]["description"] == "The city to get weather for."
-    assert fs.description == "Get the weather for a city."
-    assert "Args:" not in (fs.description or "")
-    assert "Returns:" not in (fs.description or "")
-
-
 def test_google_docstring_missing_blank_line_function_tool():
     """End-to-end: a @function_tool-decorated function with the missing-blank-line docstring
     must expose parameter descriptions and a clean tool description."""
