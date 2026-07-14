@@ -5461,7 +5461,7 @@ class TestRunStateSerializationEdgeCases:
         restored_1_12 = await RunState.from_json(agent, serialized)
 
         assert restored_1_12._nested_history_owned_session_item_refs == []
-        assert restored_1_12._generated_items[0] is restored_1_12._session_items[0]
+        assert restored_1_12._generated_items[0] is not restored_1_12._session_items[0]
 
     @pytest.mark.asyncio
     async def test_nested_history_ownership_remaps_after_skipped_session_item(self):
@@ -5556,6 +5556,13 @@ class TestRunStateSerializationEdgeCases:
 
         assert serialized["generated_session_item_indexes"] == [None]
         assert restored._generated_items[0] is not restored._session_items[0]
+
+        serialized["$schemaVersion"] = "1.12"
+        serialized.pop("nested_history_owned_session_item_refs")
+        serialized.pop("generated_session_item_indexes")
+        restored_1_12 = await RunState.from_json(agent, serialized)
+
+        assert restored_1_12._generated_items[0] is not restored_1_12._session_items[0]
 
     @pytest.mark.asyncio
     async def test_ambiguous_copied_generated_item_does_not_claim_equal_session_occurrence(self):

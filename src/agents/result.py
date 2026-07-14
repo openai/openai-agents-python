@@ -35,7 +35,6 @@ from .run_internal.items import (
     digest_input_item,
     filter_nested_history_owned_item_refs_for_input,
     rebase_nested_history_owned_item_refs,
-    reconcile_nested_history_owned_input_after_rewrite,
     resolve_nested_history_owned_item_indexes,
     run_items_to_input_items,
 )
@@ -80,30 +79,27 @@ def _reconciled_result_owned_item_refs(
     result: RunResultBase,
     public_input: str | list[TResponseInputItem],
 ) -> list[NestedHistoryOwnedItemRef]:
-    """Rebind ownership only after a complete positional public-input copy."""
+    """Retain ownership only for the exact public-input occurrences."""
     owned_item_refs = getattr(result, "_nested_history_owned_session_item_refs", [])
-    identity_refs = filter_nested_history_owned_item_refs_for_input(public_input, owned_item_refs)
-    if len(identity_refs) == len(owned_item_refs):
-        return identity_refs
-
-    previous_input = getattr(result, "_original_input", None)
-    if (
-        not isinstance(previous_input, list)
-        or not isinstance(public_input, list)
-        or len(previous_input) != len(public_input)
-        or any(
-            digest_input_item(previous_item) != digest_input_item(public_item)
-            for previous_item, public_item in zip(previous_input, public_input, strict=True)
-        )
-    ):
-        return identity_refs
-
-    _, reconciled_refs = reconcile_nested_history_owned_input_after_rewrite(
-        previous_input,
+    return filter_nested_history_owned_item_refs_for_input(
         public_input,
         owned_item_refs,
     )
-    return reconciled_refs
+
+
+def _state_snapshot_owned_item_refs(
+    result: RunResultBase,
+    state_input: str | list[TResponseInputItem],
+) -> list[NestedHistoryOwnedItemRef]:
+    """Rebind validated ownership coordinates to the input snapshot stored in RunState."""
+    if isinstance(state_input, str):
+        return []
+    return [
+        replace(item_ref, input_item=state_input[item_ref.input_index])
+        for item_ref in getattr(result, "_nested_history_owned_session_item_refs", [])
+        if 0 <= item_ref.input_index < len(state_input)
+        and digest_input_item(state_input[item_ref.input_index]) == item_ref.digest
+    ]
 
 
 def _populate_state_from_result(
@@ -126,21 +122,13 @@ def _populate_state_from_result(
     else:
         state._generated_items = result.new_items
     state._session_items = list(result.new_items)
-    reconciled_refs = _reconciled_result_owned_item_refs(result, result.input)
+    snapshot_refs = _state_snapshot_owned_item_refs(result, state._original_input)
     live_refs = rebase_nested_history_owned_item_refs(
-        result.input,
+        state._original_input,
         state._session_items,
-        reconciled_refs,
+        snapshot_refs,
     )
-    if isinstance(state._original_input, list):
-        state._nested_history_owned_session_item_refs = [
-            replace(item_ref, input_item=state._original_input[item_ref.input_index])
-            for item_ref in live_refs
-            if item_ref.input_index < len(state._original_input)
-            and digest_input_item(state._original_input[item_ref.input_index]) == item_ref.digest
-        ]
-    else:
-        state._nested_history_owned_session_item_refs = []
+    state._nested_history_owned_session_item_refs = live_refs
     state._model_responses = result.raw_responses
     state._input_guardrail_results = result.input_guardrail_results
     state._output_guardrail_results = result.output_guardrail_results
