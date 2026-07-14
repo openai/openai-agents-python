@@ -145,6 +145,53 @@ def _suppress_griffe_logging():
         logger.setLevel(previous_level)
 
 
+# Recognized Google-style section headers, mirroring griffe's case-insensitive section keys.
+# A header only counts when the whole line is exactly ``Header:`` (griffe anchors these at
+# column 0), so inline mentions such as "see Args: below" never match.
+_GOOGLE_SECTION_HEADER_RE = re.compile(
+    r"^(args|arguments|params|parameters|keyword args|keyword arguments|other args"
+    r"|other arguments|other params|other parameters|raises|exceptions|returns|yields"
+    r"|receives|examples|attributes|warns|warnings):\s*$",
+    re.IGNORECASE,
+)
+
+
+def _ensure_blank_line_before_google_sections(doc: str) -> str:
+    """Insert a blank line before a Google-style section header that directly follows
+    non-indented text (for example a summary line).
+
+    griffe's Google parser silently skips a section header when there is no blank line above
+    it and the following line is indented (it logs "Missing blank line above section"). That
+    drops every parameter description and leaks the raw ``Args:`` block into the description.
+    numpy/sphinx parsing already tolerates the missing blank line, so this normalizes the
+    Google case to match. The string is returned unchanged when no insertion is needed, which
+    keeps well-formed docstrings byte-identical.
+    """
+    lines = doc.splitlines()
+    output: list[str] = []
+    inserted = False
+    for index, line in enumerate(lines):
+        if (
+            index > 0
+            and _GOOGLE_SECTION_HEADER_RE.match(line)
+            # Preceding line is non-blank top-level text (summary), not an indented section body.
+            and output
+            and output[-1].strip()
+            and not output[-1].startswith((" ", "\t"))
+            # Following line is an indented block, matching griffe's "indented line below" gate.
+            and index + 1 < len(lines)
+            and lines[index + 1].startswith((" ", "\t"))
+        ):
+            output.append("")
+            inserted = True
+        output.append(line)
+
+    if not inserted:
+        # Preserve the original object (splitlines/join would drop a trailing newline).
+        return doc
+    return "\n".join(output)
+
+
 def generate_func_documentation(
     func: Callable[..., Any], style: DocstringStyle | None = None
 ) -> FuncDocumentation:
@@ -165,8 +212,13 @@ def generate_func_documentation(
     if not doc:
         return FuncDocumentation(name=name, description=None, param_descriptions=None)
 
+    # Resolve the style against the original docstring before any normalization.
+    resolved_style = style or _detect_docstring_style(doc)
+    if resolved_style == "google":
+        doc = _ensure_blank_line_before_google_sections(doc)
+
     with _suppress_griffe_logging():
-        docstring = Docstring(doc, lineno=1, parser=style or _detect_docstring_style(doc))
+        docstring = Docstring(doc, lineno=1, parser=resolved_style)
         parsed = docstring.parse()
 
     description: str | None = next(
