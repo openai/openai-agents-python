@@ -3972,6 +3972,173 @@ class TestRunStateSerializationEdgeCases:
         result_shell = _deserialize_items([item_data_shell], {"TestAgent": agent})
         assert len(result_shell) == 1
 
+    async def test_deserialize_tool_call_output_preserves_unrecognized_raw_item(self):
+        """An unrecognized tool-output raw item is preserved and stays resume-safe.
+
+        Previously it was silently dropped, orphaning its paired tool call (which the
+        Responses API rejects on resume). A typeless-but-clearly-function output has its
+        canonical type restored so replay's orphan pruning still pairs it with the call.
+        """
+        from agents.run_internal.items import drop_orphan_function_calls
+
+        agent = Agent(name="TestAgent")
+
+        items_data = [
+            {
+                "type": "tool_call_item",
+                "agent": {"name": "TestAgent"},
+                "raw_item": {
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "f",
+                    "arguments": "{}",
+                },
+            },
+            {
+                "type": "tool_call_output_item",
+                "agent": {"name": "TestAgent"},
+                # No recognized "type" on the raw item -> previously dropped.
+                "raw_item": {"call_id": "c1", "output": "the result"},
+                "output": "the result",
+            },
+        ]
+
+        result = _deserialize_items(items_data, {"TestAgent": agent})
+
+        assert [item.type for item in result] == ["tool_call_item", "tool_call_output_item"]
+        output_item = result[1]
+        output_raw = cast(dict[str, Any], output_item.raw_item)
+        assert output_raw["call_id"] == "c1"
+        # Canonical type restored so the pairing survives orphan pruning.
+        assert output_raw["type"] == "function_call_output"
+        assert output_item.output == "the result"
+
+        # End-to-end: the paired function_call is not dropped as an orphan on resume.
+        input_items = [item.to_input_item() for item in result]
+        kept_types = [entry.get("type") for entry in drop_orphan_function_calls(list(input_items))]
+        assert "function_call" in kept_types
+        assert "function_call_output" in kept_types
+
+    async def test_deserialize_tool_call_output_preserves_unknown_typed_raw_item(self):
+        """An output with an unknown (future hosted-tool) type is preserved as-is.
+
+        Its paired call is also an unknown type, so both survive orphan pruning without
+        any type guessing.
+        """
+        from agents.run_internal.items import drop_orphan_function_calls
+
+        agent = Agent(name="TestAgent")
+
+        items_data = [
+            {
+                "type": "tool_call_item",
+                "agent": {"name": "TestAgent"},
+                "raw_item": {"type": "some_future_call", "call_id": "c2", "output": "x"},
+            },
+            {
+                "type": "tool_call_output_item",
+                "agent": {"name": "TestAgent"},
+                "raw_item": {
+                    "type": "some_future_call_output",
+                    "call_id": "c2",
+                    "output": "done",
+                },
+                "output": "done",
+            },
+        ]
+
+        result = _deserialize_items(items_data, {"TestAgent": agent})
+        assert [item.type for item in result] == ["tool_call_item", "tool_call_output_item"]
+        # Unknown type preserved verbatim, not coerced.
+        assert cast(dict[str, Any], result[1].raw_item)["type"] == "some_future_call_output"
+
+        input_items = [item.to_input_item() for item in result]
+        kept_types = [entry.get("type") for entry in drop_orphan_function_calls(list(input_items))]
+        assert "some_future_call" in kept_types
+        assert "some_future_call_output" in kept_types
+
+    async def test_deserialize_tool_call_output_restores_type_for_structured_output(self):
+        """A typeless function output with a structured (list) value still resumes cleanly.
+
+        FunctionCallOutput.output is ``str | list`` (structured text/image/file), so the
+        canonical type must be restored for list outputs too, not just strings.
+        """
+        from agents.run_internal.items import drop_orphan_function_calls
+
+        agent = Agent(name="TestAgent")
+
+        items_data = [
+            {
+                "type": "tool_call_item",
+                "agent": {"name": "TestAgent"},
+                "raw_item": {
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "f",
+                    "arguments": "{}",
+                },
+            },
+            {
+                "type": "tool_call_output_item",
+                "agent": {"name": "TestAgent"},
+                "raw_item": {
+                    # No "type"; structured list output.
+                    "call_id": "c1",
+                    "output": [{"type": "input_text", "text": "structured"}],
+                },
+                "output": "structured",
+            },
+        ]
+
+        result = _deserialize_items(items_data, {"TestAgent": agent})
+        assert cast(dict[str, Any], result[1].raw_item)["type"] == "function_call_output"
+
+        input_items = [item.to_input_item() for item in result]
+        kept_types = [entry.get("type") for entry in drop_orphan_function_calls(list(input_items))]
+        assert "function_call" in kept_types
+        assert "function_call_output" in kept_types
+
+    async def test_deserialize_tool_call_output_type_matches_paired_call(self):
+        """A typeless output is repaired to the paired call's type, not a guessed one.
+
+        A local_shell output whose payload looks like a function output (a string keyed by
+        call_id) must be typed local_shell_call_output, so orphan pruning keeps its
+        local_shell_call rather than dropping it.
+        """
+        from agents.run_internal.items import drop_orphan_function_calls
+
+        agent = Agent(name="TestAgent")
+
+        items_data = [
+            {
+                "type": "tool_call_item",
+                "agent": {"name": "TestAgent"},
+                "raw_item": {
+                    "type": "local_shell_call",
+                    "id": "s1",
+                    "call_id": "c1",
+                    "action": {"type": "exec", "command": ["ls"]},
+                    "status": "completed",
+                },
+            },
+            {
+                "type": "tool_call_output_item",
+                "agent": {"name": "TestAgent"},
+                # Typeless; payload shape is indistinguishable from a function output.
+                "raw_item": {"call_id": "c1", "output": "listing"},
+                "output": "listing",
+            },
+        ]
+
+        result = _deserialize_items(items_data, {"TestAgent": agent})
+        # Repaired to the paired call's output type, NOT function_call_output.
+        assert cast(dict[str, Any], result[1].raw_item)["type"] == "local_shell_call_output"
+
+        input_items = [item.to_input_item() for item in result]
+        kept_types = [entry.get("type") for entry in drop_orphan_function_calls(list(input_items))]
+        assert "local_shell_call" in kept_types
+        assert "local_shell_call_output" in kept_types
+
     async def test_deserialize_reasoning_item(self):
         """Test deserialization of reasoning_item."""
         agent = Agent(name="TestAgent")
@@ -5291,32 +5458,33 @@ class TestRunStateSerializationEdgeCases:
 
     @pytest.mark.asyncio
     async def test_deserialize_items_union_adapter_fallback(self):
-        """Test _deserialize_items with union adapter fallback for missing/None output type."""
+        """A tool output raw item with missing/unknown type falls back to the raw mapping."""
         agent = Agent(name="TestAgent")
         agent_map = {"TestAgent": agent}
 
-        # Create an item with missing type field to trigger the union adapter fallback
-        # The fallback is used when output_type is None or not one of the known types
-        # The union adapter will try to validate but may fail, which is caught and logged
+        # Create an item with missing type field to trigger the union adapter fallback.
+        # The fallback is used when output_type is None or not one of the known types.
         item_data = {
             "type": "tool_call_output_item",
             "agent": {"name": "TestAgent"},
             "raw_item": {
-                # No "type" field - this will trigger the else branch and union adapter fallback
-                # The union adapter will attempt validation but may fail
+                # No "type" field - this triggers the else branch and union adapter fallback.
+                # Validation fails, so we fall back to the original mapping.
                 "call_id": "call123",
                 "output": "result",
             },
             "output": "result",
         }
 
-        # This should use the union adapter fallback
-        # The validation may fail, but the code path is executed
-        # The exception will be caught and the item will be skipped
         result = _deserialize_items([item_data], agent_map)
-        # The item will be skipped due to validation failure, so result will be empty
-        # But the union adapter code path (lines 1081-1084) is still covered
-        assert len(result) == 0
+        # The item is preserved (not dropped), so its paired tool call is not orphaned.
+        assert len(result) == 1
+        assert result[0].type == "tool_call_output_item"
+        raw = cast(dict[str, Any], result[0].raw_item)
+        assert raw["call_id"] == "call123"
+        # No paired call is present in this payload, so the type is left as-is (there is no
+        # call to orphan). Type repair only happens when the paired call is known.
+        assert "type" not in raw
 
 
 class TestToolApprovalItem:

@@ -2196,8 +2196,14 @@ def _deserialize_tool_approval_item(
 
 def _deserialize_tool_call_output_raw_item(
     raw_item: Mapping[str, Any],
-) -> FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput | dict[str, Any] | None:
-    """Deserialize a tool call output raw item; return None when validation fails."""
+    expected_type: str | None = None,
+) -> FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput | dict[str, Any]:
+    """Deserialize a tool call output raw item, falling back to the original mapping.
+
+    ``expected_type`` is the output type implied by the paired tool call (e.g.
+    ``function_call_output`` for a ``function_call``); it is used to repair a persisted
+    output that lost its ``type`` so replay's orphan pruning can still pair it.
+    """
     if not isinstance(raw_item, Mapping):
         return cast(
             FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput | dict[str, Any],
@@ -2222,7 +2228,15 @@ def _deserialize_tool_call_output_raw_item(
             _TOOL_CALL_OUTPUT_UNION_ADAPTER.validate_python(normalized_raw_item),
         )
     except ValidationError:
-        return None
+        # Mirror _deserialize_tool_call_raw_item: keep the original mapping instead of
+        # dropping the output item, which would orphan its paired tool call on resume.
+        # If the mapping lost its type, restore the type implied by the paired call so
+        # replay's orphan pruning (which pairs by output type) can still match it. The
+        # type comes from the actual call, never guessed from the output shape, so a
+        # non-function output is not mislabeled as a function output.
+        if expected_type is not None and "type" not in normalized_raw_item:
+            normalized_raw_item["type"] = expected_type
+        return normalized_raw_item
 
 
 def _parse_guardrail_entry(
@@ -3145,6 +3159,25 @@ def _deserialize_items(
 
     result: list[RunItem] = []
 
+    # Map each tool call's call_id to the output type it expects, so a persisted output
+    # that lost its "type" can be repaired to the type implied by its actual call (rather
+    # than guessed from the output shape, which cannot distinguish tool families).
+    from .run_internal.items import _TOOL_CALL_TO_OUTPUT_TYPE
+
+    output_type_by_call_id: dict[str, str] = {}
+    for entry in items_data:
+        if not isinstance(entry, Mapping) or entry.get("type") != "tool_call_item":
+            continue
+        entry_raw = entry.get("raw_item")
+        if not isinstance(entry_raw, Mapping):
+            continue
+        call_type = entry_raw.get("type")
+        call_id = entry_raw.get("call_id")
+        if isinstance(call_type, str) and isinstance(call_id, str):
+            mapped_output_type = _TOOL_CALL_TO_OUTPUT_TYPE.get(call_type)
+            if mapped_output_type is not None:
+                output_type_by_call_id[call_id] = mapped_output_type
+
     def _resolve_agent_info(
         item_data: Mapping[str, Any], item_type: str
     ) -> tuple[Agent[Any] | None, str | None]:
@@ -3228,9 +3261,14 @@ def _deserialize_items(
             elif item_type == "tool_call_output_item":
                 # For tool call outputs, validate and convert the raw dict
                 # Try to determine the type based on the dict structure
-                raw_item_output = _deserialize_tool_call_output_raw_item(normalized_raw_item)
-                if raw_item_output is None:
-                    continue
+                expected_output_type: str | None = None
+                if isinstance(normalized_raw_item, Mapping):
+                    call_id_value = normalized_raw_item.get("call_id")
+                    if isinstance(call_id_value, str):
+                        expected_output_type = output_type_by_call_id.get(call_id_value)
+                raw_item_output = _deserialize_tool_call_output_raw_item(
+                    normalized_raw_item, expected_output_type
+                )
                 stored_custom_data = item_data.get("custom_data")
                 custom_data = (
                     stored_custom_data
