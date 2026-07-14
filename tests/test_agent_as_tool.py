@@ -2456,6 +2456,73 @@ async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
 
 
 @pytest.mark.asyncio
+async def test_agent_as_tool_streaming_handler_cancelled_error_does_not_hang(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CancelledError raised inside an on_stream callback should not hang the tool."""
+    agent = Agent(name="cancelled_error_agent")
+
+    first_event = RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
+    second_event = RawResponsesStreamEvent(
+        data=cast(Any, {"type": "output_text_delta", "delta": "hi"})
+    )
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+            self.current_agent = agent
+
+        async def stream_events(self):
+            yield first_event
+            yield second_event
+
+    monkeypatch.setattr(
+        Runner, "run_streamed", classmethod(lambda *args, **kwargs: DummyStreamingResult())
+    )
+    monkeypatch.setattr(
+        Runner,
+        "run",
+        classmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no run"))),
+    )
+
+    handled_events: list[Any] = []
+
+    async def cancelling_handler(event: AgentToolStreamEvent) -> None:
+        handled_events.append(event["event"])
+        if event["event"] is first_event:
+            raise asyncio.CancelledError("callback-local cancellation")
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_cancel",
+        arguments='{"input": "go"}',
+        call_id="call-cancel",
+        name="cancel_tool",
+        type="function_call",
+    )
+
+    tool = agent.as_tool(
+        tool_name="cancel_tool",
+        tool_description="Handler raises CancelledError",
+        on_stream=cancelling_handler,
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="cancel_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+
+    output = await asyncio.wait_for(
+        tool.on_invoke_tool(tool_context, '{"input": "go"}'),
+        timeout=0.5,
+    )
+
+    assert output == "ok"
+    assert handled_events == [first_event, second_event]
+
+
+@pytest.mark.asyncio
 async def test_agent_as_tool_without_stream_uses_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

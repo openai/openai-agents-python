@@ -803,10 +803,25 @@ class Agent(AgentBase, Generic[TContext]):
 
                     async def _run_handler(payload: AgentToolStreamEvent) -> None:
                         """Execute the user callback while capturing exceptions."""
+                        task = asyncio.current_task()
                         try:
                             maybe_result = stream_handler(payload)
                             if inspect.isawaitable(maybe_result):
                                 await maybe_result
+                        except asyncio.CancelledError:
+                            # A CancelledError raised by the callback itself should not
+                            # terminate the dispatcher task. Re-raise only when the
+                            # dispatcher task itself is being cancelled (parent
+                            # cancellation), which is detectable via task.cancelling()
+                            # on Python 3.11+. On older versions we preserve the
+                            # original behavior of propagating cancellation.
+                            if task is not None and getattr(task, "cancelling", lambda: 0)() > 0:
+                                raise
+                            logger.warning(
+                                "on_stream callback raised CancelledError for agent tool %s; "
+                                "treating it as a callback-local error and continuing.",
+                                self.name,
+                            )
                         except Exception:
                             logger.exception(
                                 "Error while handling on_stream event for agent tool %s.",
