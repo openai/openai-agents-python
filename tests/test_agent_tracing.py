@@ -194,6 +194,66 @@ async def test_task_and_turn_spans_export_aggregate_usage():
 
 
 @pytest.mark.asyncio
+async def test_task_and_turn_spans_can_be_disabled():
+    @function_tool
+    def foo_tool() -> str:
+        return "foo result"
+
+    model = FakeModel(tracing_enabled=True)
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("foo_tool", "{}", call_id="call-1")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="test_agent", model=model, tools=[foo_tool])
+
+    result = await Runner.run(
+        agent,
+        input="first_test",
+        run_config=RunConfig(tracing={"include_task_and_turn_spans": False}),
+    )
+
+    spans = fetch_ordered_spans()
+    agent_spans = [span for span in spans if span.span_data.type == "agent"]
+    generation_spans = [span for span in spans if span.span_data.type == "generation"]
+    function_spans = [span for span in spans if span.span_data.type == "function"]
+
+    assert result.final_output == "done"
+    assert not [span for span in spans if span.span_data.type in {"task", "turn"}]
+    assert len(agent_spans) == 1
+    assert agent_spans[0].parent_id is None
+    assert len(generation_spans) == 2
+    assert len(function_spans) == 1
+    assert [span.parent_id for span in generation_spans + function_spans] == [
+        agent_spans[0].span_id,
+        agent_spans[0].span_id,
+        agent_spans[0].span_id,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_task_and_turn_spans_can_be_explicitly_enabled():
+    agent = Agent(
+        name="test_agent",
+        model=FakeModel(
+            tracing_enabled=True,
+            initial_output=[get_text_message("done")],
+        ),
+    )
+
+    await Runner.run(
+        agent,
+        input="first_test",
+        run_config=RunConfig(tracing={"include_task_and_turn_spans": True}),
+    )
+
+    span_types = [span.span_data.type for span in fetch_ordered_spans()]
+    assert span_types.count("task") == 1
+    assert span_types.count("turn") == 1
+
+
+@pytest.mark.asyncio
 async def test_task_span_resets_current_span_if_run_setup_fails(monkeypatch: pytest.MonkeyPatch):
     agent = Agent(
         name="test_agent",
@@ -870,6 +930,37 @@ async def test_wrapped_streaming_run_creates_root_task_span():
     assert turn_spans[0]["parent_id"] == agent_spans[0].span_id
     assert len(generation_spans) == 1
     assert generation_spans[0].parent_id == turn_spans[0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_wrapped_streaming_run_can_disable_task_and_turn_spans():
+    agent = Agent(
+        name="test_agent",
+        model=FakeModel(
+            tracing_enabled=True,
+            initial_output=[get_text_message("done")],
+        ),
+    )
+
+    with trace(workflow_name="test_workflow"):
+        result = Runner.run_streamed(
+            agent,
+            input="first_test",
+            run_config=RunConfig(tracing={"include_task_and_turn_spans": False}),
+        )
+        async for _ in result.stream_events():
+            pass
+
+    spans = fetch_ordered_spans()
+    agent_spans = [span for span in spans if span.span_data.type == "agent"]
+    generation_spans = [span for span in spans if span.span_data.type == "generation"]
+
+    assert result.final_output == "done"
+    assert not [span for span in spans if span.span_data.type in {"task", "turn"}]
+    assert len(agent_spans) == 1
+    assert agent_spans[0].parent_id is None
+    assert len(generation_spans) == 1
+    assert generation_spans[0].parent_id == agent_spans[0].span_id
 
 
 @pytest.mark.asyncio

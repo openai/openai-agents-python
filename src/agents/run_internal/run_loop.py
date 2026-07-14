@@ -83,6 +83,7 @@ from ..tool import (
     get_function_tool_origin,
 )
 from ..tracing import Span, SpanError, agent_span, get_current_trace, task_span, turn_span
+from ..tracing.config import include_task_and_turn_spans
 from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData, TaskSpanData
 from ..usage import Usage, _response_usage_to_usage
@@ -486,8 +487,9 @@ async def start_streaming(
         )
 
     current_trace = streamed_result.trace or get_current_trace()
+    use_task_and_turn_spans = include_task_and_turn_spans(run_config.tracing)
     current_task_span: Span[TaskSpanData] | None = (
-        task_span(name=current_trace.name) if current_trace else None
+        task_span(name=current_trace.name) if current_trace and use_task_and_turn_spans else None
     )
     if current_task_span:
         current_task_span.start(mark_as_current=True)
@@ -1012,11 +1014,16 @@ async def start_streaming(
                     current_agent.name,
                 )
                 turn_usage_start = snapshot_usage(context_wrapper.usage)
-                current_turn_span = turn_span(
-                    turn=current_turn,
-                    agent_name=current_agent.name,
+                current_turn_span = (
+                    turn_span(
+                        turn=current_turn,
+                        agent_name=current_agent.name,
+                    )
+                    if use_task_and_turn_spans
+                    else None
                 )
-                current_turn_span.start(mark_as_current=True)
+                if current_turn_span:
+                    current_turn_span.start(mark_as_current=True)
                 try:
                     if (
                         session is not None
@@ -1050,11 +1057,12 @@ async def start_streaming(
                         error_handlers=error_handlers,
                     )
                 finally:
-                    attach_usage_to_span(
-                        current_turn_span,
-                        usage_delta(turn_usage_start, context_wrapper.usage),
-                    )
-                    current_turn_span.finish(reset_current=True)
+                    if current_turn_span:
+                        attach_usage_to_span(
+                            current_turn_span,
+                            usage_delta(turn_usage_start, context_wrapper.usage),
+                        )
+                        current_turn_span.finish(reset_current=True)
                 logger.debug(
                     "Turn %s complete, next_step type=%s",
                     current_turn,

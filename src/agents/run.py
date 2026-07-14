@@ -121,6 +121,7 @@ from .sandbox.runtime import SandboxRuntime
 from .tool import dispose_resolved_computers
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Span, SpanError, agent_span, get_current_trace, task_span, turn_span
+from .tracing.config import include_task_and_turn_spans
 from .tracing.context import TraceCtxManager, create_trace_for_run
 from .tracing.span_data import AgentSpanData, TaskSpanData
 from .util import _error_tracing
@@ -643,8 +644,12 @@ class AgentRunner:
                 run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
                 run_state.set_trace(get_current_trace())
 
-            current_task_span: Span[TaskSpanData] = task_span(name=trace_workflow_name)
-            current_task_span.start(mark_as_current=True)
+            use_task_and_turn_spans = include_task_and_turn_spans(run_config.tracing)
+            current_task_span: Span[TaskSpanData] | None = (
+                task_span(name=trace_workflow_name) if use_task_and_turn_spans else None
+            )
+            if current_task_span:
+                current_task_span.start(mark_as_current=True)
             task_usage_start = snapshot_usage(context_wrapper.usage)
 
             try:
@@ -758,11 +763,12 @@ class AgentRunner:
                     )
                     session_input_items_for_persistence = []
             except BaseException:
-                attach_usage_to_span(
-                    current_task_span,
-                    usage_delta(task_usage_start, context_wrapper.usage),
-                )
-                current_task_span.finish(reset_current=True)
+                if current_task_span:
+                    attach_usage_to_span(
+                        current_task_span,
+                        usage_delta(task_usage_start, context_wrapper.usage),
+                    )
+                    current_task_span.finish(reset_current=True)
                 raise
 
             try:
@@ -1165,11 +1171,16 @@ class AgentRunner:
                     )
 
                     turn_usage_start = snapshot_usage(context_wrapper.usage)
-                    current_turn_span = turn_span(
-                        turn=current_turn,
-                        agent_name=current_agent.name,
+                    current_turn_span = (
+                        turn_span(
+                            turn=current_turn,
+                            agent_name=current_agent.name,
+                        )
+                        if use_task_and_turn_spans
+                        else None
                     )
-                    current_turn_span.start(mark_as_current=True)
+                    if current_turn_span:
+                        current_turn_span.start(mark_as_current=True)
                     try:
                         if current_turn <= 1:
                             try:
@@ -1273,11 +1284,12 @@ class AgentRunner:
                                 error_handlers=error_handlers,
                             )
                     finally:
-                        attach_usage_to_span(
-                            current_turn_span,
-                            usage_delta(turn_usage_start, context_wrapper.usage),
-                        )
-                        current_turn_span.finish(reset_current=True)
+                        if current_turn_span:
+                            attach_usage_to_span(
+                                current_turn_span,
+                                usage_delta(turn_usage_start, context_wrapper.usage),
+                            )
+                            current_turn_span.finish(reset_current=True)
 
                     # Start hooks should only run on the first turn unless reset by a handoff.
                     last_saved_input_snapshot_for_rewind = None
