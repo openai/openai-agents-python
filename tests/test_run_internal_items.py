@@ -353,6 +353,50 @@ def test_fingerprint_input_item_handles_edge_cases(monkeypatch: pytest.MonkeyPat
     assert '"id"' not in opaque_fingerprint
 
 
+def test_fingerprint_ignores_ids_for_pydantic_model_items() -> None:
+    """A Pydantic-model input item and its dict form must fingerprint identically when
+    ``ignore_ids_for_matching`` is set.
+
+    ``fingerprint_input_item`` is used with ``ignore_ids_for_matching=True`` for sessions such as
+    ``OpenAIConversationsSession`` (where item ids are server-assigned and must be ignored when
+    matching). Items can reach this helper either as dicts (e.g. re-fetched from the session via
+    ``model_dump``) or as Pydantic-model objects (e.g. Responses API output re-passed as input).
+    The id must be stripped in both cases, otherwise the two representations of the same logical
+    item produce different fingerprints and rewind/dedup matching silently fails.
+    """
+    model_item = ResponseFunctionToolCall(
+        id="fc_server_assigned",
+        call_id="call_abc",
+        name="get_weather",
+        arguments='{"city": "SF"}',
+        type="function_call",
+    )
+    # Same logical item as it comes back from the session (dict) but with a different id.
+    dict_item = cast(
+        TResponseInputItem,
+        {
+            "id": "fc_different_id",
+            "call_id": "call_abc",
+            "name": "get_weather",
+            "arguments": '{"city": "SF"}',
+            "type": "function_call",
+        },
+    )
+
+    model_fingerprint = run_items.fingerprint_input_item(model_item, ignore_ids_for_matching=True)
+    dict_fingerprint = run_items.fingerprint_input_item(dict_item, ignore_ids_for_matching=True)
+
+    assert model_fingerprint is not None
+    assert dict_fingerprint is not None
+    assert '"id"' not in model_fingerprint
+    assert model_fingerprint == dict_fingerprint
+
+    # Ids must still be retained when matching is not id-agnostic.
+    model_fingerprint_with_id = run_items.fingerprint_input_item(model_item)
+    assert model_fingerprint_with_id is not None
+    assert '"id"' in model_fingerprint_with_id
+
+
 def test_fingerprint_input_item_returns_none_when_serialization_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

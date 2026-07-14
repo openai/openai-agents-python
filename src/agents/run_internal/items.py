@@ -243,6 +243,8 @@ def fingerprint_input_item(item: Any, *, ignore_ids_for_matching: bool = False) 
                     dict[str, Any],
                     strip_internal_input_item_metadata(cast(TResponseInputItem, payload)),
                 )
+                if ignore_ids_for_matching:
+                    payload.pop("id", None)
         elif isinstance(item, dict):
             payload = cast(
                 dict[str, Any],
