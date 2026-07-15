@@ -576,15 +576,23 @@ async def initialize_computer_tools(
     *,
     tools: list[Tool],
     context_wrapper: RunContextWrapper[Any],
-) -> None:
-    """Resolve computer tools ahead of model invocation so each run gets its own instance."""
+) -> list[Tool]:
+    """Resolve computer tools and return run-local copies for model invocation."""
     computer_tools = [tool for tool in tools if isinstance(tool, ComputerTool)]
     if not computer_tools:
-        return
+        return tools
 
-    await asyncio.gather(
+    resolved_computers = await asyncio.gather(
         *(resolve_computer(tool=tool, run_context=context_wrapper) for tool in computer_tools)
     )
+    resolved_by_tool = dict(zip(computer_tools, resolved_computers, strict=True))
+
+    return [
+        dataclasses.replace(tool, computer=resolved_by_tool[tool])
+        if isinstance(tool, ComputerTool)
+        else tool
+        for tool in tools
+    ]
 
 
 def get_mapping_or_attr(target: Any, key: str) -> Any:

@@ -3261,8 +3261,10 @@ async def test_session_persists_only_new_step_items(monkeypatch: pytest.MonkeyPa
     async def fake_run_output_guardrails(*_: Any, **__: Any) -> list[Any]:
         return []
 
-    async def noop_initialize_computer_tools(*_: Any, **__: Any) -> None:
-        return None
+    async def noop_initialize_computer_tools(
+        *args: Any, tools: list[Any], **kwargs: Any
+    ) -> list[Any]:
+        return tools
 
     monkeypatch.setattr("agents.run.save_result_to_session", save_wrapper)
     monkeypatch.setattr(

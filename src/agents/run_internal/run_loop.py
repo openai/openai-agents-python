@@ -861,7 +861,9 @@ async def start_streaming(
                 break
 
             all_tools = await get_all_tools(execution_agent, context_wrapper)
-            await initialize_computer_tools(tools=all_tools, context_wrapper=context_wrapper)
+            all_tools = await initialize_computer_tools(
+                tools=all_tools, context_wrapper=context_wrapper
+            )
 
             if current_span is None:
                 handoff_names = [
