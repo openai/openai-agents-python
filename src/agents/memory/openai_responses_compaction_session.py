@@ -163,6 +163,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             self._response_id = args["response_id"]
         requested_mode = args.get("compaction_mode") if args else None
         input_history_limit = args.get("input_history_limit") if args else None
+        input_covered_full_history = args.get("input_covered_full_history") if args else None
         if args and "store" in args:
             store = args["store"]
             if store is False and self._response_id:
@@ -185,7 +186,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if (
             (requested_mode or self.compaction_mode) == "auto"
             and resolved_mode == "previous_response_id"
-            and not await self._underlying_view_covers_history(input_history_limit)
+            and not await self._input_covers_history(
+                input_covered_full_history, input_history_limit
+            )
         ):
             resolved_mode = "input"
             # This response_id never covered the full history, so don't let a later
@@ -272,6 +275,18 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         full_view = await self._get_all_underlying_session_items()
         return len(prepared_view) >= len(full_view)
 
+    async def _input_covers_history(
+        self, input_covered_full_history: bool | None, input_history_limit: int | None
+    ) -> bool:
+        """Whether the response's input saw the full stored history.
+
+        Prefers the pre-save answer the Runner computed for this specific response; falls back
+        to a live comparison against the limit for callers that don't carry it.
+        """
+        if input_covered_full_history is not None:
+            return input_covered_full_history
+        return await self._underlying_view_covers_history(input_history_limit)
+
     async def _replace_underlying_session_items(
         self,
         *,
@@ -342,7 +357,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self,
         response_id: str,
         store: bool | None = None,
-        input_history_limit: int | None = None,
+        input_covered_full_history: bool | None = None,
     ) -> None:
         if self._deferred_response_id is not None:
             return
@@ -357,7 +372,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if (
             self.compaction_mode == "auto"
             and resolved_mode == "previous_response_id"
-            and not await self._underlying_view_covers_history(input_history_limit)
+            and not await self._input_covers_history(input_covered_full_history, None)
         ):
             resolved_mode = "input"
         should_compact = self.should_trigger_compaction(

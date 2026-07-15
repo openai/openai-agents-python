@@ -135,6 +135,14 @@ class OpenAIResponsesCompactionArgs(TypedDict, total=False):
     instead of inferring it from shared session state. ``None`` means no limit was applied.
     """
 
+    input_covered_full_history: bool | None
+    """Whether this response's input window held the full stored history.
+
+    Resolved by the Runner against the pre-save store (the state the response was actually
+    prepared from), so a turn that grows the session past its limit doesn't look truncated.
+    When present it is authoritative; ``None`` falls back to ``input_history_limit``.
+    """
+
 
 @runtime_checkable
 class OpenAIResponsesCompactionAwareSession(Session, Protocol):

@@ -359,17 +359,30 @@ async def save_result_to_session(
             run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
         return saved_run_items_count
 
+    # Whether this response's input window held the full stored history, measured against the
+    # PRE-save store -- the state the response was actually prepared from. Computed before
+    # add_items so this turn's freshly-saved items don't make an untruncated response look
+    # truncated (which would needlessly force full-history input compaction instead of the
+    # cheaper server-side previous_response_id path). Carried with the response so it is never
+    # inferred from shared session state, which breaks under interleaved runs and fresh
+    # wrappers on resume that skip input preparation.
+    input_covered_full_history: bool | None = None
+    if response_id and is_openai_responses_compaction_aware_session(session):
+        history_limit = resolve_session_history_limit(session, session_settings)
+        if history_limit is None:
+            input_covered_full_history = True
+        else:
+            # Fewer stored items than the window means the window held them all; a full
+            # window may still hide older items, so treat that as truncated.
+            prepared_view = await session.get_items(limit=history_limit)
+            input_covered_full_history = len(prepared_view) < history_limit
+
     await session.add_items(items_to_save)
 
     if run_state:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
 
     if response_id and is_openai_responses_compaction_aware_session(session):
-        # Carry the window used to prepare this response's input alongside the response
-        # itself, so compaction can tell whether it saw the full stored history instead of
-        # inferring it from shared session state (which breaks under interleaved runs and
-        # fresh wrappers on resume that skip input preparation).
-        input_history_limit = resolve_session_history_limit(session, session_settings)
         has_local_tool_outputs = any(
             isinstance(item, ToolCallOutputItem | HandoffOutputItem) for item in new_items
         )
@@ -377,7 +390,9 @@ async def save_result_to_session(
             defer_compaction = getattr(session, "_defer_compaction", None)
             if callable(defer_compaction):
                 result = defer_compaction(
-                    response_id, store=store, input_history_limit=input_history_limit
+                    response_id,
+                    store=store,
+                    input_covered_full_history=input_covered_full_history,
                 )
                 if inspect.isawaitable(result):
                     await result
@@ -401,7 +416,7 @@ async def save_result_to_session(
         compaction_args: OpenAIResponsesCompactionArgs = {
             "response_id": response_id,
             "force": force_compaction,
-            "input_history_limit": input_history_limit,
+            "input_covered_full_history": input_covered_full_history,
         }
         if store is not None:
             compaction_args["store"] = store
