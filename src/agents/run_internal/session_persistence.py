@@ -384,10 +384,11 @@ async def save_result_to_session(
         if history_limit is None:
             input_covered_full_history = True
         else:
-            # Fewer stored items than the window means the window held them all; a full
-            # window may still hide older items, so treat that as truncated.
-            prepared_view = await session.get_items(limit=history_limit)
-            input_covered_full_history = len(prepared_view) < history_limit
+            # The window held everything only if the store has no item beyond it. Read one
+            # extra item so an exact fill (covered) is distinguished from a real overflow
+            # (truncated), rather than treating a full window as always truncated.
+            prepared_view = await session.get_items(limit=history_limit + 1)
+            input_covered_full_history = len(prepared_view) <= history_limit
 
     await session.add_items(items_to_save)
 

@@ -721,6 +721,60 @@ class TestOpenAIResponsesCompactionSession:
         assert "input" not in compact_kwargs
 
     @pytest.mark.asyncio
+    async def test_compaction_reuses_previous_response_id_at_exact_limit(
+        self, tmp_path: Path
+    ) -> None:
+        # Pre-save history that exactly fills the limit was fully seen by the response, so an
+        # exact-fill window counts as covered (not truncated) and compaction can reuse
+        # previous_response_id even when this turn grows the store past the limit.
+        underlying = SQLiteSession("exact", db_path=str(tmp_path / "history.db"))
+        items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": f"m{i}"},
+            )
+            for i in range(5)
+        ]
+        await underlying.add_items(items)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "message", "role": "assistant", "content": "summary"}
+        ]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="exact",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _context: True,
+        )
+
+        new_items = [
+            cast(
+                Any,
+                _DummyMessageRunItem({"type": "message", "role": "assistant", "content": f"n{i}"}),
+            )
+            for i in range(3)
+        ]
+        # Pre-save history (5 items) exactly fills limit=5; this turn pushes the store to 8.
+        await save_result_to_session(
+            session,
+            [],
+            new_items,
+            None,
+            response_id="resp_A",
+            store=True,
+            session_settings=SessionSettings(limit=5),
+        )
+
+        mock_client.responses.compact.assert_called_once()
+        compact_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert compact_kwargs.get("previous_response_id") == "resp_A"
+        assert "input" not in compact_kwargs
+
+    @pytest.mark.asyncio
     async def test_compaction_honors_underlying_session_limit(self, tmp_path: Path) -> None:
         # The limit can live on the underlying store rather than the wrapper or the RunConfig;
         # get_items(None) delegates to the underlying, whose own limit truncates the input. A
