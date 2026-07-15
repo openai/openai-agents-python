@@ -5,6 +5,7 @@ This example demonstrates how to:
 2. Review the envelope with an external governance checkpoint before execution.
 3. Use the SDK's human-in-the-loop interruption/resume flow for approval-bound actions.
 4. Recompute the action hash at execution time so approval is bound to the same action.
+5. Persist the checkpoint decision so delayed approvals can resume in a new process.
 """
 
 import asyncio
@@ -34,6 +35,7 @@ class GovernanceDecision(TypedDict):
 
 
 RESULT_PATH = Path(".cache/agent_patterns/external_governance_approval/result.json")
+DECISION_PATH = RESULT_PATH.with_name("decisions.json")
 EXTERNAL_GOVERNANCE_URL = os.environ.get("EXTERNAL_GOVERNANCE_URL")
 decisions_by_action_hash: dict[str, GovernanceDecision] = {}
 
@@ -124,6 +126,34 @@ async def review_with_external_governance(
     }
 
 
+def load_decision_cache() -> dict[str, GovernanceDecision]:
+    """Load persisted checkpoint decisions for approval resume flows."""
+    if not DECISION_PATH.exists():
+        return {}
+    with DECISION_PATH.open() as f:
+        return json.load(f)
+
+
+def persist_decision(decision: GovernanceDecision) -> None:
+    """Persist a decision so a resumed run can fail closed or execute with proof."""
+    decisions_by_action_hash[decision["action_hash"]] = decision
+    DECISION_PATH.parent.mkdir(parents=True, exist_ok=True)
+    cache = load_decision_cache()
+    cache[decision["action_hash"]] = decision
+    with DECISION_PATH.open("w") as f:
+        json.dump(cache, f, indent=2)
+
+
+def find_decision(action_hash: str) -> GovernanceDecision | None:
+    """Find a decision in memory or in the persisted approval cache."""
+    if action_hash in decisions_by_action_hash:
+        return decisions_by_action_hash[action_hash]
+    decision = load_decision_cache().get(action_hash)
+    if decision is not None:
+        decisions_by_action_hash[action_hash] = decision
+    return decision
+
+
 def contains_high_risk_data(envelope: GovernanceActionEnvelope) -> bool:
     """Classify whether a proposed export should require approval."""
     return (
@@ -141,7 +171,7 @@ async def needs_export_approval(_ctx: Any, params: dict[str, Any], _call_id: str
         contains_pii=bool(params["contains_pii"]),
     )
     decision = await review_with_external_governance(envelope)
-    decisions_by_action_hash[decision["action_hash"]] = decision
+    persist_decision(decision)
 
     print("\nExternal governance decision")
     print(f"  verdict: {decision['verdict']}")
@@ -166,10 +196,13 @@ async def export_customer_records(
         record_limit=record_limit,
         contains_pii=contains_pii,
     )
-    decision = decisions_by_action_hash.get(envelope["action_hash"])
+    decision = find_decision(envelope["action_hash"])
 
     if decision is None:
-        raise RuntimeError("No governance decision was recorded for this action.")
+        raise RuntimeError(
+            "No persisted governance decision was recorded for this action; "
+            "failing closed."
+        )
     if decision["verdict"] == "deny":
         raise RuntimeError(f"Blocked by external governance: {decision['reason']}")
 
