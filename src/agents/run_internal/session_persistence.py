@@ -56,14 +56,26 @@ def resolve_session_history_limit(
 ) -> int | None:
     """Return the effective history-window limit for a turn.
 
-    Combines the session's own settings with any per-run ``RunConfig`` override, matching
-    how ``prepare_input_with_session`` builds the model input. ``None`` means no limit is
-    applied and the full stored history is used.
+    Combines the session's own settings with any per-run ``RunConfig`` override, matching how
+    ``prepare_input_with_session`` builds the model input. When no explicit limit applies, a
+    wrapping session (e.g. the compaction session) can still be truncated by an underlying
+    session's own limit -- ``get_items(None)`` delegates to it -- so the delegate chain is
+    consulted. ``None`` means the full stored history is used.
     """
     resolved_settings = getattr(session, "session_settings", None) or SessionSettings()
     if session_settings is not None:
         resolved_settings = resolved_settings.resolve(session_settings)
-    return resolved_settings.limit
+    if resolved_settings.limit is not None:
+        return resolved_settings.limit
+
+    delegate = getattr(session, "underlying_session", None)
+    while delegate is not None:
+        delegate_settings: SessionSettings | None = getattr(delegate, "session_settings", None)
+        delegate_limit = delegate_settings.limit if delegate_settings is not None else None
+        if delegate_limit is not None:
+            return delegate_limit
+        delegate = getattr(delegate, "underlying_session", None)
+    return None
 
 
 async def prepare_input_with_session(

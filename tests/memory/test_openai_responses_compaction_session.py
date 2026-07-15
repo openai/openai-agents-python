@@ -721,6 +721,54 @@ class TestOpenAIResponsesCompactionSession:
         assert "input" not in compact_kwargs
 
     @pytest.mark.asyncio
+    async def test_compaction_honors_underlying_session_limit(self, tmp_path: Path) -> None:
+        # The limit can live on the underlying store rather than the wrapper or the RunConfig;
+        # get_items(None) delegates to the underlying, whose own limit truncates the input. A
+        # normal Runner save must still detect that truncation and compact from full history
+        # instead of a previous_response_id that never saw the hidden older items.
+        underlying = SQLiteSession(
+            "wrapped",
+            db_path=str(tmp_path / "history.db"),
+            session_settings=SessionSettings(limit=3),
+        )
+        items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": f"m{i}"},
+            )
+            for i in range(12)
+        ]
+        await underlying.add_items(items)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "message", "role": "assistant", "content": "summary"}
+        ]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="wrapped",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _context: True,
+        )
+
+        new_items = [
+            cast(
+                Any,
+                _DummyMessageRunItem({"type": "message", "role": "assistant", "content": "latest"}),
+            )
+        ]
+        # No RunConfig limit and no wrapper limit -- only the underlying store is limited.
+        await save_result_to_session(session, [], new_items, None, response_id="resp_A", store=True)
+
+        mock_client.responses.compact.assert_called_once()
+        compact_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in compact_kwargs
+        assert len(compact_kwargs["input"]) >= len(items)
+
+    @pytest.mark.asyncio
     async def test_run_compaction_auto_without_response_id_uses_input(self) -> None:
         mock_session = self.create_mock_session()
         items: list[TResponseInputItem] = [
