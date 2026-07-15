@@ -14,6 +14,28 @@ _EMPTY_SCHEMA = {
     "required": [],
 }
 
+# Upper bound on how many schema nodes strict conversion will expand. Real schemas are far
+# smaller; the limit only trips on pathological input such as a `$ref` fan-out that would
+# otherwise expand exponentially -- a denial-of-service vector for untrusted schemas (for
+# example, tool schemas advertised by a third-party MCP server).
+_MAX_SCHEMA_NODES = 100_000
+
+
+class _NodeBudget:
+    """Tracks the remaining schema-node expansion budget across the recursion."""
+
+    def __init__(self, limit: int) -> None:
+        self.remaining = limit
+
+    def spend(self) -> None:
+        self.remaining -= 1
+        if self.remaining < 0:
+            raise UserError(
+                "JSON schema is too large to convert to a strict schema. This can happen when a "
+                "schema expands `$ref`s exponentially, which may indicate a malformed or malicious "
+                "schema."
+            )
+
 
 def ensure_strict_json_schema(
     schema: dict[str, Any],
@@ -23,7 +45,9 @@ def ensure_strict_json_schema(
     """
     if schema == {}:
         return copy.deepcopy(_EMPTY_SCHEMA)
-    return _ensure_strict_json_schema(schema, path=(), root=schema)
+    return _ensure_strict_json_schema(
+        schema, path=(), root=schema, budget=_NodeBudget(_MAX_SCHEMA_NODES)
+    )
 
 
 # Adapted from https://github.com/openai/openai-python/blob/main/src/openai/lib/_pydantic.py
@@ -32,20 +56,32 @@ def _ensure_strict_json_schema(
     *,
     path: tuple[str, ...],
     root: dict[str, object],
+    budget: _NodeBudget | None = None,
 ) -> dict[str, Any]:
     if not is_dict(json_schema):
         raise TypeError(f"Expected {json_schema} to be a dictionary; path={path}")
 
+    # Bound the total number of nodes we expand so a malicious `$ref` fan-out cannot expand
+    # exponentially and exhaust CPU and memory.
+    if budget is None:
+        budget = _NodeBudget(_MAX_SCHEMA_NODES)
+    budget.spend()
+
     defs = json_schema.get("$defs")
     if is_dict(defs):
         for def_name, def_schema in defs.items():
-            _ensure_strict_json_schema(def_schema, path=(*path, "$defs", def_name), root=root)
+            _ensure_strict_json_schema(
+                def_schema, path=(*path, "$defs", def_name), root=root, budget=budget
+            )
 
     definitions = json_schema.get("definitions")
     if is_dict(definitions):
         for definition_name, definition_schema in definitions.items():
             _ensure_strict_json_schema(
-                definition_schema, path=(*path, "definitions", definition_name), root=root
+                definition_schema,
+                path=(*path, "definitions", definition_name),
+                root=root,
+                budget=budget,
             )
 
     typ = json_schema.get("type")
@@ -69,7 +105,9 @@ def _ensure_strict_json_schema(
     if is_dict(properties):
         json_schema["required"] = list(properties.keys())
         json_schema["properties"] = {
-            key: _ensure_strict_json_schema(prop_schema, path=(*path, "properties", key), root=root)
+            key: _ensure_strict_json_schema(
+                prop_schema, path=(*path, "properties", key), root=root, budget=budget
+            )
             for key, prop_schema in properties.items()
         }
 
@@ -77,13 +115,17 @@ def _ensure_strict_json_schema(
     # { 'type': 'array', 'items': {...} }
     items = json_schema.get("items")
     if is_dict(items):
-        json_schema["items"] = _ensure_strict_json_schema(items, path=(*path, "items"), root=root)
+        json_schema["items"] = _ensure_strict_json_schema(
+            items, path=(*path, "items"), root=root, budget=budget
+        )
 
     # unions
     any_of = json_schema.get("anyOf")
     if is_list(any_of):
         json_schema["anyOf"] = [
-            _ensure_strict_json_schema(variant, path=(*path, "anyOf", str(i)), root=root)
+            _ensure_strict_json_schema(
+                variant, path=(*path, "anyOf", str(i)), root=root, budget=budget
+            )
             for i, variant in enumerate(any_of)
         ]
 
@@ -96,7 +138,9 @@ def _ensure_strict_json_schema(
         if not is_list(existing_any_of):
             existing_any_of = []
         json_schema["anyOf"] = existing_any_of + [
-            _ensure_strict_json_schema(variant, path=(*path, "oneOf", str(i)), root=root)
+            _ensure_strict_json_schema(
+                variant, path=(*path, "oneOf", str(i)), root=root, budget=budget
+            )
             for i, variant in enumerate(one_of)
         ]
         json_schema.pop("oneOf")
@@ -106,12 +150,16 @@ def _ensure_strict_json_schema(
     if is_list(all_of):
         if len(all_of) == 1:
             json_schema.update(
-                _ensure_strict_json_schema(all_of[0], path=(*path, "allOf", "0"), root=root)
+                _ensure_strict_json_schema(
+                    all_of[0], path=(*path, "allOf", "0"), root=root, budget=budget
+                )
             )
             json_schema.pop("allOf")
         else:
             json_schema["allOf"] = [
-                _ensure_strict_json_schema(entry, path=(*path, "allOf", str(i)), root=root)
+                _ensure_strict_json_schema(
+                    entry, path=(*path, "allOf", str(i)), root=root, budget=budget
+                )
                 for i, entry in enumerate(all_of)
             ]
 
@@ -144,7 +192,7 @@ def _ensure_strict_json_schema(
         json_schema.update({**resolved, **json_schema})
         # Since the schema expanded from `$ref` might not have `additionalProperties: false` applied
         # we call `_ensure_strict_json_schema` again to fix the inlined schema and ensure it's valid
-        return _ensure_strict_json_schema(json_schema, path=path, root=root)
+        return _ensure_strict_json_schema(json_schema, path=path, root=root, budget=budget)
 
     return json_schema
 
