@@ -816,21 +816,26 @@ class E2BSandboxSession(BaseSandboxSession):
             )
         self._workspace_root_ready = True
 
+    async def _workspace_root_exists(self) -> bool:
+        result = await self._exec_internal(
+            "test",
+            "-d",
+            self._workspace_root_path(),
+            timeout=self.state.timeouts.fast_op_s,
+        )
+        return result.ok()
+
     def _mark_workspace_root_ready_from_probe(self) -> None:
         super()._mark_workspace_root_ready_from_probe()
         self._workspace_root_ready = True
 
     async def _prepare_backend_workspace(self) -> None:
         try:
-            if self._workspace_state_preserved_on_start():
-                # Reconnected sandboxes may have durable workspace contents; the base start flow
-                # probes before this provider creates the root for future exec calls.
-                if not self._workspace_root_ready:
-                    await self._prepare_workspace_root_for_exec()
-            else:
-                # Fresh or recreated sandboxes need the workspace root created before snapshot
-                # hydration or full manifest materialization can write into it.
+            preserved = self._workspace_state_preserved_on_start()
+            if not preserved and not await self._workspace_root_exists():
+                # The Files API can create roots that the sandbox command user cannot create.
                 await self._ensure_workspace_root()
+            if not preserved or not self._workspace_root_ready:
                 await self._prepare_workspace_root_for_exec()
         except WorkspaceStartError:
             raise
@@ -1172,6 +1177,11 @@ class E2BSandboxSession(BaseSandboxSession):
             path = await self._check_mkdir_with_exec(path, parents=parents, user=user)
         else:
             path = await self._validate_path_access(path, for_write=True)
+
+        # Startup prepares the workspace root through the command API before manifest
+        # application. Avoid making the already-ready root depend on the Files API too.
+        if path == self._workspace_root_path() and self._workspace_root_ready:
+            return
 
         if user is None and not parents:
             parent = path.parent
