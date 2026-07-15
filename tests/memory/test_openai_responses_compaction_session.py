@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agents import Agent, Runner
-from agents.items import TResponseInputItem
+from agents.items import ToolCallOutputItem, TResponseInputItem
 from agents.memory import (
     OpenAIResponsesCompactionSession,
     Session,
@@ -24,6 +24,7 @@ from agents.memory.openai_responses_compaction_session import (
     select_compaction_candidate_items,
 )
 from agents.memory.sqlite_session import SQLiteSession
+from agents.run_internal.agent_runner_helpers import save_turn_items_if_needed
 from agents.run_internal.items import (
     TOOL_CALL_SESSION_DESCRIPTION_KEY,
     TOOL_CALL_SESSION_TITLE_KEY,
@@ -486,6 +487,182 @@ class TestOpenAIResponsesCompactionSession:
         compact_kwargs = mock_client.responses.compact.call_args.kwargs
         assert "previous_response_id" not in compact_kwargs
         # The full stored history is compacted, not just the truncated per-run window.
+        assert len(compact_kwargs["input"]) >= len(items)
+
+    @pytest.mark.asyncio
+    async def test_save_turn_items_if_needed_carries_run_limit(self, tmp_path: Path) -> None:
+        # The final-output and run-again paths persist through save_turn_items_if_needed,
+        # which must also carry the per-run window so a limited run does not compact via
+        # previous_response_id and drop the older history.
+        underlying = SQLiteSession("turn", db_path=str(tmp_path / "history.db"))
+        items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": f"m{i}"},
+            )
+            for i in range(12)
+        ]
+        await underlying.add_items(items)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "message", "role": "assistant", "content": "summary"}
+        ]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="turn",
+            underlying_session=underlying,
+            client=mock_client,
+        )
+
+        new_items = [
+            cast(
+                Any,
+                _DummyMessageRunItem({"type": "message", "role": "assistant", "content": "latest"}),
+            )
+        ]
+        await save_turn_items_if_needed(
+            session=session,
+            run_state=None,
+            session_persistence_enabled=True,
+            input_guardrail_results=[],
+            items=new_items,
+            response_id="resp_A",
+            store=True,
+            session_settings=SessionSettings(limit=3),
+        )
+
+        mock_client.responses.compact.assert_called_once()
+        compact_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in compact_kwargs
+        assert len(compact_kwargs["input"]) >= len(items)
+
+    @pytest.mark.asyncio
+    async def test_deferred_compaction_under_limit_uses_full_history(self, tmp_path: Path) -> None:
+        # A turn whose output includes a local tool result DEFERS compaction. When the run's
+        # window is limited, the deferred compaction — fired on the next turn — must still
+        # compact the full stored history via input, not a previous_response_id that only saw
+        # the limited window.
+        underlying = SQLiteSession("deferred", db_path=str(tmp_path / "history.db"))
+        items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": f"m{i}"},
+            )
+            for i in range(12)
+        ]
+        await underlying.add_items(items)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "message", "role": "assistant", "content": "summary"}
+        ]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="deferred",
+            underlying_session=underlying,
+            client=mock_client,
+        )
+
+        agent = Agent(name="assistant", model=FakeModel())
+        tool_output = cast(
+            Any,
+            ToolCallOutputItem(
+                agent=agent,
+                raw_item={"type": "function_call_output", "call_id": "c1", "output": "done"},
+                output="done",
+            ),
+        )
+        # Turn 1: the local tool output defers compaction rather than running it now.
+        await save_result_to_session(
+            session,
+            [],
+            [tool_output],
+            None,
+            response_id="resp_1",
+            store=True,
+            session_settings=SessionSettings(limit=3),
+        )
+        assert not mock_client.responses.compact.called
+
+        # Turn 2: the deferred compaction fires and must not drop the older history.
+        new_msg = [
+            cast(
+                Any,
+                _DummyMessageRunItem({"type": "message", "role": "assistant", "content": "latest"}),
+            )
+        ]
+        await save_result_to_session(
+            session,
+            [],
+            new_msg,
+            None,
+            response_id="resp_2",
+            store=True,
+            session_settings=SessionSettings(limit=3),
+        )
+
+        mock_client.responses.compact.assert_called_once()
+        compact_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in compact_kwargs
+        assert len(compact_kwargs["input"]) >= len(items)
+
+    @pytest.mark.asyncio
+    async def test_save_stream_items_carries_run_limit(self, tmp_path: Path) -> None:
+        # The streaming persistence path carries the per-run window too, so a limited
+        # streamed run compacts the full stored history rather than a previous_response_id
+        # that only saw the window.
+        from agents.run_internal.run_loop import _save_stream_items
+
+        underlying = SQLiteSession("stream", db_path=str(tmp_path / "history.db"))
+        items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": f"m{i}"},
+            )
+            for i in range(12)
+        ]
+        await underlying.add_items(items)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "message", "role": "assistant", "content": "summary"}
+        ]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="stream",
+            underlying_session=underlying,
+            client=mock_client,
+        )
+
+        streamed_result = SimpleNamespace(_input_guardrails_task=None, _state=None)
+        new_items = [
+            cast(
+                Any,
+                _DummyMessageRunItem({"type": "message", "role": "assistant", "content": "latest"}),
+            )
+        ]
+        await _save_stream_items(
+            session=session,
+            server_conversation_tracker=None,
+            streamed_result=cast(Any, streamed_result),
+            run_state=None,
+            items=new_items,
+            response_id="resp_A",
+            update_persisted_count=False,
+            store=True,
+            session_settings=SessionSettings(limit=3),
+        )
+
+        mock_client.responses.compact.assert_called_once()
+        compact_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in compact_kwargs
         assert len(compact_kwargs["input"]) >= len(items)
 
     @pytest.mark.asyncio

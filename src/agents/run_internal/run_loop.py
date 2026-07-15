@@ -57,7 +57,7 @@ from ..items import (
 )
 from ..lifecycle import RunHooks
 from ..logger import logger
-from ..memory import Session
+from ..memory import Session, SessionSettings
 from ..models._response_terminal import (
     response_error_event_failure_error,
     response_terminal_failure_error,
@@ -319,6 +319,7 @@ async def _save_resumed_stream_items(
     items: list[RunItem],
     response_id: str | None,
     store: bool | None = None,
+    session_settings: SessionSettings | None = None,
 ) -> None:
     if not await _should_persist_stream_items(
         session=session,
@@ -333,6 +334,7 @@ async def _save_resumed_stream_items(
         response_id=response_id,
         reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
         store=store,
+        session_settings=session_settings,
     )
     if run_state is not None:
         run_state._current_turn_persisted_item_count = (
@@ -350,6 +352,7 @@ async def _save_stream_items(
     response_id: str | None,
     update_persisted_count: bool,
     store: bool | None = None,
+    session_settings: SessionSettings | None = None,
 ) -> None:
     if not await _should_persist_stream_items(
         session=session,
@@ -364,6 +367,7 @@ async def _save_stream_items(
         run_state,
         response_id=response_id,
         store=store,
+        session_settings=session_settings,
     )
     if update_persisted_count and streamed_result._state is not None:
         streamed_result._current_turn_persisted_item_count = (
@@ -635,6 +639,7 @@ async def start_streaming(
                 items=items,
                 response_id=response_id,
                 store=store_setting,
+                session_settings=run_config.session_settings,
             )
 
         async def _save_stream_items_with_count(
@@ -649,6 +654,7 @@ async def start_streaming(
                 response_id=response_id,
                 update_persisted_count=True,
                 store=store_setting,
+                session_settings=run_config.session_settings,
             )
 
         async def _save_stream_items_without_count(
@@ -663,6 +669,7 @@ async def start_streaming(
                 response_id=response_id,
                 update_persisted_count=False,
                 store=store_setting,
+                session_settings=run_config.session_settings,
             )
     except BaseException:
         if current_task_span:

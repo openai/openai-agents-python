@@ -12,7 +12,7 @@ from ..agent_tool_state import set_agent_tool_state_scope
 from ..exceptions import UserError
 from ..guardrail import InputGuardrailResult
 from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
-from ..memory import Session
+from ..memory import Session, SessionSettings
 from ..models.openai_agent_registration import add_openai_harness_id_to_metadata
 from ..result import RunResult
 from ..run_config import RunConfig
@@ -473,6 +473,7 @@ async def save_turn_items_if_needed(
     items: list[RunItem],
     response_id: str | None,
     store: bool | None = None,
+    session_settings: SessionSettings | None = None,
 ) -> None:
     """Persist turn items when persistence is enabled and guardrails allow it."""
     if not session_persistence_enabled:
@@ -488,6 +489,7 @@ async def save_turn_items_if_needed(
         run_state,
         response_id=response_id,
         store=store,
+        session_settings=session_settings,
     )
 
 

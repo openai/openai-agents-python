@@ -1415,6 +1415,7 @@ class AgentRunner:
                                 items=session_items_for_turn(turn_result),
                                 response_id=turn_result.model_response.response_id,
                                 store=store_setting,
+                                session_settings=run_config.session_settings,
                             )
                             result._original_input = copy_input_items(original_input)
                             return _finalize_result(result)
@@ -1496,6 +1497,7 @@ class AgentRunner:
                                 items=session_items_for_turn(turn_result),
                                 response_id=turn_result.model_response.response_id,
                                 store=store_setting,
+                                session_settings=run_config.session_settings,
                             )
                             continue
                         else:
