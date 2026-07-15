@@ -18,6 +18,7 @@ from ..run_context import RunContextWrapper, TContext
 from ..tool import Tool
 from ..tracing import SpanError
 from ..util import _error_tracing
+from ..util._tool_errors import get_trace_tool_error
 
 __all__ = [
     "validate_run_hooks",
@@ -56,7 +57,16 @@ async def maybe_filter_model_input(
     input_items: list[TResponseInputItem],
     system_instructions: str | None,
 ) -> ModelInputData:
-    """Apply optional call_model_input_filter to modify model input."""
+    """Apply optional call_model_input_filter to modify model input.
+
+    Security note:
+        Exceptions raised by user-supplied ``call_model_input_filter`` code
+        are attached to the current span via ``SpanError(message="Error in
+        call_model_input_filter", data={"error": ...})``. The error string is
+        routed through ``get_trace_tool_error`` so that when
+        ``run_config.trace_include_sensitive_data`` is False, the span payload
+        contains only the redaction constant rather than the raw ``str(e)``.
+    """
     effective_instructions = system_instructions
     effective_input: list[TResponseInputItem] = input_items
 
@@ -79,8 +89,12 @@ async def maybe_filter_model_input(
             raise UserError("call_model_input_filter must return a ModelInputData instance")
         return updated
     except Exception as e:
+        trace_error = get_trace_tool_error(
+            trace_include_sensitive_data=run_config.trace_include_sensitive_data,
+            error_message=str(e),
+        )
         _error_tracing.attach_error_to_current_span(
-            SpanError(message="Error in call_model_input_filter", data={"error": str(e)})
+            SpanError(message="Error in call_model_input_filter", data={"error": trace_error})
         )
         raise
 

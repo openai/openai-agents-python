@@ -88,6 +88,7 @@ from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData, TaskSpanData
 from ..usage import Usage, _response_usage_to_usage
 from ..util import _coro, _error_tracing
+from ..util._tool_errors import get_trace_tool_error
 from .agent_bindings import AgentBindings, bind_public_agent
 from .agent_runner_helpers import (
     apply_resumed_conversation_settings,
@@ -467,7 +468,16 @@ async def start_streaming(
     is_resumed_state: bool = False,
     sandbox_runtime: SandboxRuntime[TContext] | None = None,
 ):
-    """Run the streaming loop for a run result."""
+    """Run the streaming loop for a run result.
+
+    Security note:
+        Generic exceptions escaping the streamed run loop are attached to the
+        active span via ``SpanError(message="Error in agent run",
+        data={"error": ...})``. The error string is routed through
+        ``get_trace_tool_error`` so that when
+        ``run_config.trace_include_sensitive_data`` is False, the span payload
+        contains only the redaction constant rather than the raw ``str(e)``.
+    """
     if streamed_result.trace:
         streamed_result.trace.start(mark_as_current=True)
     if run_state is not None:
@@ -1184,11 +1194,15 @@ async def start_streaming(
                         break
             except Exception as e:
                 if current_span and _should_attach_generic_agent_error(e):
+                    trace_error = get_trace_tool_error(
+                        trace_include_sensitive_data=run_config.trace_include_sensitive_data,
+                        error_message=str(e),
+                    )
                     _error_tracing.attach_error_to_span(
                         current_span,
                         SpanError(
                             message="Error in agent run",
-                            data={"error": str(e)},
+                            data={"error": trace_error},
                         ),
                     )
                 raise
@@ -1207,11 +1221,15 @@ async def start_streaming(
         raise
     except Exception as e:
         if current_span and _should_attach_generic_agent_error(e):
+            trace_error = get_trace_tool_error(
+                trace_include_sensitive_data=run_config.trace_include_sensitive_data,
+                error_message=str(e),
+            )
             _error_tracing.attach_error_to_span(
                 current_span,
                 SpanError(
                     message="Error in agent run",
-                    data={"error": str(e)},
+                    data={"error": trace_error},
                 ),
             )
         streamed_result.is_complete = True

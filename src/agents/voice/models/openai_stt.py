@@ -14,6 +14,7 @@ from ... import _debug
 from ...exceptions import AgentsException
 from ...logger import logger
 from ...tracing import Span, SpanError, TranscriptionSpanData, transcription_span
+from ...util._tool_errors import get_trace_tool_error
 from ..exceptions import STTWebsocketConnectionError
 from ..imports import np, npt, websockets
 from ..input import AudioInput, StreamedAudioInput
@@ -409,6 +410,14 @@ class OpenAISTTModel(STTModel):
 
         Returns:
             The transcribed text.
+
+        Security note:
+            Exceptions raised by the OpenAI audio client are attached to the
+            transcription span via ``SpanError(message=..., data={})``. The
+            ``message`` string is routed through ``get_trace_tool_error`` so
+            that when ``trace_include_sensitive_data`` is False, the span's
+            ``error.message`` contains only the redaction constant rather than
+            the raw ``str(e)``.
         """
         with transcription_span(
             model=self.model,
@@ -433,7 +442,11 @@ class OpenAISTTModel(STTModel):
                 return response.text
             except Exception as e:
                 span.span_data.output = ""
-                span.set_error(SpanError(message=str(e), data={}))
+                trace_error = get_trace_tool_error(
+                    trace_include_sensitive_data=trace_include_sensitive_data,
+                    error_message=str(e),
+                )
+                span.set_error(SpanError(message=trace_error, data={}))
                 raise e
 
     async def create_session(
