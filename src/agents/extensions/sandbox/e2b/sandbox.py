@@ -702,6 +702,7 @@ class E2BSandboxSession(BaseSandboxSession):
     state: E2BSandboxSessionState
     _sandbox: _E2BSandboxAPI
     _workspace_root_ready: bool
+    _skip_next_workspace_root_mkdir: bool
     _pty_lock: asyncio.Lock
     _pty_processes: dict[int, _E2BPtyProcessEntry]
     _reserved_pty_process_ids: set[int]
@@ -715,6 +716,7 @@ class E2BSandboxSession(BaseSandboxSession):
         self.state = state
         self._sandbox = _as_sandbox_api(sandbox)
         self._workspace_root_ready = state.workspace_root_ready
+        self._skip_next_workspace_root_mkdir = False
         self._pty_lock = asyncio.Lock()
         self._pty_processes = {}
         self._reserved_pty_process_ids = set()
@@ -837,6 +839,9 @@ class E2BSandboxSession(BaseSandboxSession):
                 await self._ensure_workspace_root()
             if not preserved or not self._workspace_root_ready:
                 await self._prepare_workspace_root_for_exec()
+                # The manifest applier always creates its root first. The command above has
+                # already done that, so let that one startup-only mkdir avoid the Files API.
+                self._skip_next_workspace_root_mkdir = True
         except WorkspaceStartError:
             raise
         except Exception as e:
@@ -847,6 +852,9 @@ class E2BSandboxSession(BaseSandboxSession):
         # helpers only when the helper cache now points at a different backend.
         if self._runtime_helper_cache_key != self._current_runtime_helper_cache_key():
             await self._ensure_runtime_helpers()
+
+    async def _after_start_failed(self) -> None:
+        self._skip_next_workspace_root_mkdir = False
 
     async def _shutdown_backend(self) -> None:
         # Best-effort kill of the remote sandbox.
@@ -1173,15 +1181,20 @@ class E2BSandboxSession(BaseSandboxSession):
         parents: bool = False,
         user: str | User | None = None,
     ) -> None:
+        workspace_root = self._workspace_root_path()
+        if user is None and self.normalize_path(path, for_write=True) == workspace_root:
+            if self._skip_next_workspace_root_mkdir:
+                self._skip_next_workspace_root_mkdir = False
+                return
+            # Keep the public root mkdir usable when the remote root disappeared. Remote path
+            # validation cannot run then because its helper command uses the workspace as `cwd`.
+            await self._ensure_dir(workspace_root, reason="mkdir_failed")
+            return
+
         if user is not None:
             path = await self._check_mkdir_with_exec(path, parents=parents, user=user)
         else:
             path = await self._validate_path_access(path, for_write=True)
-
-        # Startup prepares the workspace root through the command API before manifest
-        # application. Avoid making the already-ready root depend on the Files API too.
-        if path == self._workspace_root_path() and self._workspace_root_ready:
-            return
 
         if user is None and not parents:
             parent = path.parent

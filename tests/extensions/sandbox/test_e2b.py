@@ -949,6 +949,20 @@ async def test_e2b_start_skips_files_api_when_workspace_root_exists() -> None:
 
 
 @pytest.mark.asyncio
+async def test_e2b_mkdir_recreates_workspace_root_when_readiness_is_stale() -> None:
+    session, sandbox = _session(workspace_root_ready=False)
+    sandbox.commands.exec_root_ready = True
+
+    await session.start()
+    sandbox.commands.exec_root_ready = False
+    command_calls_before_recovery = list(sandbox.commands.calls)
+    await session.mkdir("/workspace", parents=True)
+
+    assert sandbox.files.make_dir_calls == [("/workspace", 10)]
+    assert sandbox.commands.calls == command_calls_before_recovery
+
+
+@pytest.mark.asyncio
 async def test_e2b_start_installs_runtime_helpers() -> None:
     session, sandbox = _session(workspace_root_ready=False)
 
