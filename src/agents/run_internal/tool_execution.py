@@ -74,6 +74,7 @@ from ..tool import (
     ShellCommandOutput,
     Tool,
     ToolOrigin,
+    _computer_tool_uses_run_scoped_initializer,
     get_function_tool_origin,
     invoke_function_tool,
     maybe_invoke_function_tool_failure_error_function,
@@ -582,6 +583,10 @@ async def initialize_computer_tools(
     if not computer_tools:
         return tools
 
+    run_scoped_tools = {
+        tool for tool in computer_tools if _computer_tool_uses_run_scoped_initializer(tool)
+    }
+
     resolved_computers = await asyncio.gather(
         *(resolve_computer(tool=tool, run_context=context_wrapper) for tool in computer_tools)
     )
@@ -589,7 +594,7 @@ async def initialize_computer_tools(
 
     return [
         dataclasses.replace(tool, computer=resolved_by_tool[tool])
-        if isinstance(tool, ComputerTool)
+        if isinstance(tool, ComputerTool) and tool in run_scoped_tools
         else tool
         for tool in tools
     ]

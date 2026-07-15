@@ -2107,6 +2107,11 @@ def _get_computer_initializer(tool: ComputerTool[Any]) -> ComputerConfig | None:
     return None
 
 
+def _computer_tool_uses_run_scoped_initializer(tool: ComputerTool[Any]) -> bool:
+    """Return whether the tool creates a computer for each run context."""
+    return _get_computer_initializer(tool) is not None
+
+
 def _track_resolved_computer(
     *,
     tool: ComputerTool[Any],

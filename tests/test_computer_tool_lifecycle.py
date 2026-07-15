@@ -6,6 +6,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+from openai.types.responses.response_computer_tool_call import (
+    ActionScreenshot,
+    ResponseComputerToolCall,
+)
 
 from agents import (
     Agent,
@@ -13,6 +17,7 @@ from agents import (
     ComputerTool,
     RunConfig,
     RunContextWrapper,
+    RunHooks,
     Runner,
     dispose_resolved_computers,
     resolve_computer,
@@ -137,6 +142,53 @@ async def test_runner_disposes_computer_after_run() -> None:
     resolved_tool = cast(ComputerTool[Any], model.last_turn_args["tools"][0])
     assert resolved_tool is not tool
     assert resolved_tool.computer is created
+
+
+@pytest.mark.asyncio
+async def test_runner_preserves_concrete_computer_tool_identity_for_hooks() -> None:
+    class IdentityHooks(RunHooks[Any]):
+        def __init__(self) -> None:
+            self.started: list[Any] = []
+            self.ended: list[Any] = []
+
+        async def on_tool_start(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
+        ) -> None:
+            self.started.append(tool)
+
+        async def on_tool_end(
+            self,
+            context: RunContextWrapper[Any],
+            agent: Agent[Any],
+            tool: Any,
+            result: object,
+        ) -> None:
+            self.ended.append(tool)
+
+    tool = ComputerTool(computer=FakeComputer("concrete"))
+    model = FakeModel(
+        initial_output=[
+            ResponseComputerToolCall(
+                id="computer-call",
+                type="computer_call",
+                action=ActionScreenshot(type="screenshot"),
+                call_id="computer-call",
+                pending_safety_checks=[],
+                status="completed",
+            )
+        ]
+    )
+    model.set_next_output([_make_message("done")])
+    agent = Agent(name="ComputerAgent", model=model, tools=[tool])
+    hooks = IdentityHooks()
+
+    result = await Runner.run(agent, "hello", hooks=hooks)
+
+    assert result.final_output == "done"
+    assert model.first_turn_args is not None
+    assert model.first_turn_args["tools"][0] is tool
+    assert hooks.started == [tool]
+    assert hooks.ended == [tool]
 
 
 @pytest.mark.asyncio
