@@ -820,7 +820,7 @@ class E2BSandboxSession(BaseSandboxSession):
         result = await self._exec_internal(
             "test",
             "-d",
-            self._workspace_root_path(),
+            sandbox_path_str(self._workspace_root_path()),
             timeout=self.state.timeouts.fast_op_s,
         )
         return result.ok()
