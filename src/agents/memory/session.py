@@ -127,6 +127,14 @@ class OpenAIResponsesCompactionArgs(TypedDict, total=False):
     force: bool
     """Whether to force compaction even if the threshold is not met."""
 
+    input_history_limit: int | None
+    """The history-window limit used to prepare this response's model input.
+
+    Carries the effective per-run limit (session or RunConfig) alongside the specific
+    response so compaction can tell whether that response saw the full stored history,
+    instead of inferring it from shared session state. ``None`` means no limit was applied.
+    """
+
 
 @runtime_checkable
 class OpenAIResponsesCompactionAwareSession(Session, Protocol):

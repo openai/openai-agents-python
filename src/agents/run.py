@@ -894,6 +894,7 @@ class AgentRunner:
                                             run_state._reasoning_item_id_policy
                                         ),
                                         store=store_setting,
+                                        session_settings=run_config.session_settings,
                                     )
                                 )
 
@@ -1006,6 +1007,7 @@ class AgentRunner:
                                         run_state,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
+                                        session_settings=run_config.session_settings,
                                     )
                                 result._original_input = copy_input_items(original_input)
                                 return _finalize_result(result)
@@ -1349,6 +1351,7 @@ class AgentRunner:
                                             run_state._reasoning_item_id_policy
                                         ),
                                         store=store_setting,
+                                        session_settings=run_config.session_settings,
                                     )
                                     run_state._current_turn_persisted_item_count += saved_count
                                 else:
@@ -1359,6 +1362,7 @@ class AgentRunner:
                                         run_state,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
+                                        session_settings=run_config.session_settings,
                                     )
 
                     # After the first resumed turn, treat subsequent turns as fresh
@@ -1430,6 +1434,7 @@ class AgentRunner:
                                         run_state,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
+                                        session_settings=run_config.session_settings,
                                     )
                             append_model_response_if_new(
                                 model_responses, turn_result.model_response

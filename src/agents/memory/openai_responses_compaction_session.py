@@ -133,7 +133,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._response_id: str | None = None
         self._deferred_response_id: str | None = None
         self._last_unstored_response_id: str | None = None
-        self._last_prepared_input_limit: int | None = None
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -163,6 +162,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if args and args.get("response_id"):
             self._response_id = args["response_id"]
         requested_mode = args.get("compaction_mode") if args else None
+        input_history_limit = args.get("input_history_limit") if args else None
         if args and "store" in args:
             store = args["store"]
             if store is False and self._response_id:
@@ -185,7 +185,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if (
             (requested_mode or self.compaction_mode) == "auto"
             and resolved_mode == "previous_response_id"
-            and not await self._underlying_view_covers_history()
+            and not await self._underlying_view_covers_history(input_history_limit)
         ):
             resolved_mode = "input"
             # This response_id never covered the full history, so don't let a later
@@ -255,26 +255,20 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         )
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
-        # The Runner reads history through get_items(limit=...) to build each turn's
-        # model input, so this is the window the resulting response actually saw. Record
-        # it so compaction can tell whether the response covered the full history or only
-        # a limited slice (the limit can come from a per-run RunConfig, not just the
-        # underlying session's own settings).
-        self._last_prepared_input_limit = limit
         return await self.underlying_session.get_items(limit)
 
     async def _get_all_underlying_session_items(self) -> list[TResponseInputItem]:
         return await self.underlying_session.get_items(limit=_ALL_SESSION_ITEMS_LIMIT)
 
-    async def _underlying_view_covers_history(self) -> bool:
-        """Whether the last prepared input window held every stored item.
+    async def _underlying_view_covers_history(self, input_history_limit: int | None) -> bool:
+        """Whether a response's prepared input window held every stored item.
 
-        False when a session or per-run limit hid older items from the window the model
-        saw, so its response_id does not represent the full history.
+        ``input_history_limit`` is the window used to prepare that specific response's input,
+        carried alongside the response instead of inferred from shared session state. Returns
+        False when a session or per-run limit hid older items from the window the model saw, so
+        its response_id does not represent the full history.
         """
-        prepared_view = await self.underlying_session.get_items(
-            limit=self._last_prepared_input_limit
-        )
+        prepared_view = await self.underlying_session.get_items(limit=input_history_limit)
         full_view = await self._get_all_underlying_session_items()
         return len(prepared_view) >= len(full_view)
 
@@ -344,7 +338,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             replacement_error,
         )
 
-    async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
+    async def _defer_compaction(
+        self,
+        response_id: str,
+        store: bool | None = None,
+        input_history_limit: int | None = None,
+    ) -> None:
         if self._deferred_response_id is not None:
             return
         compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
@@ -353,6 +352,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             store=store,
             requested_mode=None,
         )
+        # Mirror run_compaction: a limited view means previous_response_id would drop older
+        # items on replace, so the deferred turn also compacts from full-history input.
+        if (
+            self.compaction_mode == "auto"
+            and resolved_mode == "previous_response_id"
+            and not await self._underlying_view_covers_history(input_history_limit)
+        ):
+            resolved_mode = "input"
         should_compact = self.should_trigger_compaction(
             {
                 "response_id": response_id,

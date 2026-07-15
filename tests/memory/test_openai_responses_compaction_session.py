@@ -28,9 +28,22 @@ from agents.run_internal.items import (
     TOOL_CALL_SESSION_DESCRIPTION_KEY,
     TOOL_CALL_SESSION_TITLE_KEY,
 )
+from agents.run_internal.session_persistence import save_result_to_session
 from tests.fake_model import FakeModel
 from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
 from tests.utils.simple_session import SimpleListSession
+
+
+class _DummyMessageRunItem:
+    """Minimal RunItem stand-in that persists a single message input item."""
+
+    type = "message_output_item"
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self._payload = payload
+
+    def to_input_item(self) -> dict[str, Any]:
+        return self._payload
 
 
 class TestIsOpenAIModelName:
@@ -337,8 +350,8 @@ class TestOpenAIResponsesCompactionSession:
         self, tmp_path: Path
     ) -> None:
         # The limit can come from the run (e.g. RunConfig session settings) rather than
-        # the underlying session's own settings: the Runner reads history through
-        # get_items(limit=N) to build the model input. Even with an unlimited store, if
+        # the underlying session's own settings. The Runner carries that window alongside
+        # the specific response as input_history_limit. Even with an unlimited store, if
         # that window did not cover the full history the response_id is not
         # representative, so auto must use input rather than previous_response_id.
         underlying = SQLiteSession("test", db_path=str(tmp_path / "history.db"))
@@ -364,13 +377,116 @@ class TestOpenAIResponsesCompactionSession:
             client=mock_client,
         )
 
-        # Simulate the Runner building model input with a per-run limit of 3.
-        await session.get_items(limit=3)
-
-        await session.run_compaction({"response_id": "resp_A", "force": True})
+        # The response only saw the latest 3 of the 12 stored items, carried alongside it.
+        await session.run_compaction(
+            {"response_id": "resp_A", "force": True, "input_history_limit": 3}
+        )
 
         mock_client.responses.compact.assert_called_once()
         assert "previous_response_id" not in mock_client.responses.compact.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_uses_per_response_limit_under_interleaved_get_items(
+        self, tmp_path: Path
+    ) -> None:
+        # One session instance can be shared by concurrent runs. The window a response saw
+        # travels with that response as input_history_limit, so an interleaved get_items()
+        # from another run cannot make this response look like it covered the full history.
+        # Regression: tracking the last get_items() limit on the session let a concurrent
+        # get_items(limit=None) flip this response to previous_response_id and drop the older
+        # items on replace.
+        underlying = SQLiteSession("test", db_path=str(tmp_path / "history.db"))
+        items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": f"m{i}"},
+            )
+            for i in range(12)
+        ]
+        await underlying.add_items(items)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "message", "role": "assistant", "content": "summary"}
+        ]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+        )
+
+        # Response A saw only the latest 3 items; a second run then reads the full history.
+        await session.get_items(limit=3)
+        await session.get_items(limit=None)
+
+        # Compacting A must still use full-history input, not previous_response_id.
+        await session.run_compaction(
+            {"response_id": "resp_A", "force": True, "input_history_limit": 3}
+        )
+
+        mock_client.responses.compact.assert_called_once()
+        compact_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in compact_kwargs
+        assert len(compact_kwargs["input"]) == len(items)
+
+    @pytest.mark.asyncio
+    async def test_save_result_to_session_carries_run_limit_to_fresh_wrapper_on_resume(
+        self, tmp_path: Path
+    ) -> None:
+        # On RunState resume the compaction wrapper is recreated fresh and resume skips input
+        # preparation, so it never observes the run's get_items(limit=N). The Runner instead
+        # carries the window with the response through save_result_to_session, so a fresh
+        # wrapper still compacts from full-history input rather than a previous_response_id
+        # that only covered the truncated per-run window.
+        underlying = SQLiteSession("resume", db_path=str(tmp_path / "history.db"))
+        items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": f"m{i}"},
+            )
+            for i in range(12)
+        ]
+        await underlying.add_items(items)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "message", "role": "assistant", "content": "summary"}
+        ]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        # Fresh wrapper, as recreated on resume: get_items is never called to prepare input.
+        session = OpenAIResponsesCompactionSession(
+            session_id="resume",
+            underlying_session=underlying,
+            client=mock_client,
+        )
+
+        new_items = [
+            cast(
+                Any,
+                _DummyMessageRunItem({"type": "message", "role": "assistant", "content": "latest"}),
+            )
+        ]
+        # A RunConfig applied a per-run limit of 3 that the store itself does not carry.
+        await save_result_to_session(
+            session,
+            [],
+            new_items,
+            None,
+            response_id="resp_A",
+            store=True,
+            session_settings=SessionSettings(limit=3),
+        )
+
+        mock_client.responses.compact.assert_called_once()
+        compact_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in compact_kwargs
+        # The full stored history is compacted, not just the truncated per-run window.
+        assert len(compact_kwargs["input"]) >= len(items)
 
     @pytest.mark.asyncio
     async def test_run_compaction_auto_without_response_id_uses_input(self) -> None:

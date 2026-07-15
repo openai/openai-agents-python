@@ -51,6 +51,21 @@ __all__ = [
 ]
 
 
+def resolve_session_history_limit(
+    session: Session, session_settings: SessionSettings | None
+) -> int | None:
+    """Return the effective history-window limit for a turn.
+
+    Combines the session's own settings with any per-run ``RunConfig`` override, matching
+    how ``prepare_input_with_session`` builds the model input. ``None`` means no limit is
+    applied and the full stored history is used.
+    """
+    resolved_settings = getattr(session, "session_settings", None) or SessionSettings()
+    if session_settings is not None:
+        resolved_settings = resolved_settings.resolve(session_settings)
+    return resolved_settings.limit
+
+
 async def prepare_input_with_session(
     input: str | list[TResponseInputItem],
     session: Session | None,
@@ -78,12 +93,9 @@ async def prepare_input_with_session(
     if session is None:
         return input, []
 
-    resolved_settings = getattr(session, "session_settings", None) or SessionSettings()
-    if session_settings is not None:
-        resolved_settings = resolved_settings.resolve(session_settings)
-
-    if resolved_settings.limit is not None:
-        history = await session.get_items(limit=resolved_settings.limit)
+    resolved_limit = resolve_session_history_limit(session, session_settings)
+    if resolved_limit is not None:
+        history = await session.get_items(limit=resolved_limit)
     else:
         history = await session.get_items()
     is_openai_conversation_session = isinstance(session, OpenAIConversationsSession)
@@ -253,6 +265,7 @@ async def save_result_to_session(
     response_id: str | None = None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
+    session_settings: SessionSettings | None = None,
 ) -> int:
     """
     Persist a turn to the session store, keeping track of what was already saved so retries
@@ -352,13 +365,20 @@ async def save_result_to_session(
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
 
     if response_id and is_openai_responses_compaction_aware_session(session):
+        # Carry the window used to prepare this response's input alongside the response
+        # itself, so compaction can tell whether it saw the full stored history instead of
+        # inferring it from shared session state (which breaks under interleaved runs and
+        # fresh wrappers on resume that skip input preparation).
+        input_history_limit = resolve_session_history_limit(session, session_settings)
         has_local_tool_outputs = any(
             isinstance(item, ToolCallOutputItem | HandoffOutputItem) for item in new_items
         )
         if has_local_tool_outputs:
             defer_compaction = getattr(session, "_defer_compaction", None)
             if callable(defer_compaction):
-                result = defer_compaction(response_id, store=store)
+                result = defer_compaction(
+                    response_id, store=store, input_history_limit=input_history_limit
+                )
                 if inspect.isawaitable(result):
                     await result
             logger.debug(
@@ -381,6 +401,7 @@ async def save_result_to_session(
         compaction_args: OpenAIResponsesCompactionArgs = {
             "response_id": response_id,
             "force": force_compaction,
+            "input_history_limit": input_history_limit,
         }
         if store is not None:
             compaction_args["store"] = store
@@ -397,6 +418,7 @@ async def save_resumed_turn_items(
     response_id: str | None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
+    session_settings: SessionSettings | None = None,
 ) -> int:
     """Persist resumed turn items and return the updated persisted count."""
     if session is None or not items:
@@ -409,6 +431,7 @@ async def save_resumed_turn_items(
         response_id=response_id,
         reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
+        session_settings=session_settings,
     )
     return persisted_count + saved_count
 
