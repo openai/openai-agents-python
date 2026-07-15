@@ -60,4 +60,4 @@ See the [`input_guardrails.py`](./input_guardrails.py) and [`output_guardrails.p
 
 You can pause runs for manual approval before executing sensitive tools. This is useful for operations like sending money, deleting data, or running destructive commands.
 
-See [`human_in_the_loop.py`](./human_in_the_loop.py) for the base approval flow and [`human_in_the_loop_custom_rejection.py`](./human_in_the_loop_custom_rejection.py) for run-level tool error formatting when approvals are rejected.
+See [`human_in_the_loop.py`](./human_in_the_loop.py) for the base approval flow, [`human_in_the_loop_custom_rejection.py`](./human_in_the_loop_custom_rejection.py) for run-level tool error formatting when approvals are rejected, and [`external_governance_approval.py`](./external_governance_approval.py) for reviewing an action envelope with an external governance checkpoint before resuming an approval-bound tool call.
