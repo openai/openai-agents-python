@@ -370,6 +370,38 @@ async def test_streamed_run_preserves_request_usage_entries_after_retry() -> Non
 
 
 @pytest.mark.asyncio
+async def test_streamed_model_retry_preserves_session_input() -> None:
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+    session = SimpleListSession()
+
+    result = Runner.run_streamed(agent, input="test", session=session)
+    async for _ in result.stream_events():
+        pass
+
+    saved_items = await session.get_items()
+    assert [item.get("role") for item in saved_items] == ["user", "assistant"]
+
+
+@pytest.mark.asyncio
 async def test_streamed_run_preserves_request_usage_entries_after_conversation_locked_retry() -> (
     None
 ):

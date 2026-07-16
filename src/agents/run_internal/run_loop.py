@@ -1486,7 +1486,11 @@ async def run_single_turn_streamed(
     model_settings = model_settings_with_prompt_cache_key(model_settings, prompt_cache_key)
 
     async def rewind_model_request() -> None:
-        items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
+        items_to_rewind = []
+        # Streaming persists local session input before the request, so a model retry must not
+        # remove that committed turn.
+        if not streamed_result._stream_input_persisted and session_items_to_rewind is not None:
+            items_to_rewind = session_items_to_rewind
         await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
         if server_conversation_tracker is not None:
             server_conversation_tracker.rewind_input(filtered.input)
