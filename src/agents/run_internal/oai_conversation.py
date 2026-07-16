@@ -150,8 +150,7 @@ class OpenAIServerConversationTracker:
     primed_from_state: bool = False
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None
 
-    # Mapping from normalized prepared items back to their original source objects so that
-    # mark_input_as_sent() can mark the right object identities after the model call succeeds.
+    # Ensure prepared_item_sources maps the integer id() to a tuple of (prepared_item, source_item)
     prepared_item_sources: dict[int, tuple[TResponseInputItem, TResponseInputItem]] = field(
         default_factory=list
     )
@@ -531,9 +530,12 @@ class OpenAIServerConversationTracker:
         return prepared_initial_items + filtered_generated_items
 
     def _register_prepared_item_source(
-        self, prepared_item: TResponseInputItem, source_item: TResponseInputItem
+        self, prepared_item: TResponseInputItem, source_item: TResponseInputItem | None = None
     ) -> None:
-        self.prepared_item_sources.[id(prepared_item)] = (prepared_item, source_item)
+        if source_item is None:
+            source_item = prepared_item
+
+        self.prepared_item_sources[id(prepared_item)] = (prepared_item, source_item)
 
         fingerprint = _fingerprint_for_tracker(prepared_item)
         if fingerprint:
@@ -548,7 +550,7 @@ class OpenAIServerConversationTracker:
             # Strict identity check to ensure this is not a stale recycled ID
             if prepared is item:
                 return source
-        
+
         fingerprint = _fingerprint_for_tracker(item)
         if not fingerprint:
             return item
@@ -583,7 +585,7 @@ class OpenAIServerConversationTracker:
                 source_items.pop(index)
                 break
 
-        # If resolved via fallback (rebuilt/filtered item), clean up the stale ID mappinp
+        # If resolved via fallback (rebuilt/filtered item), clean up the stale ID mapping
         # to prevent elements accumulating across turns.
         if direct_source is None:
             stale_keys = [
