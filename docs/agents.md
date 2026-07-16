@@ -95,8 +95,10 @@ You can also generate the prompt dynamically at run time:
 
 ```python
 from dataclasses import dataclass
+import asyncio
 
 from agents import Agent, GenerateDynamicPromptData, Runner
+
 
 @dataclass
 class PromptContext:
@@ -114,11 +116,22 @@ async def build_prompt(data: GenerateDynamicPromptData):
 
 
 agent = Agent(name="Prompted assistant", prompt=build_prompt)
-result = await Runner.run(
-    agent,
-    "Say hello",
-    context=PromptContext(prompt_id="pmpt_123", poem_style="limerick"),
-)
+
+
+async def main():
+    result = await Runner.run(
+        agent,
+        "Say hello",
+        context=PromptContext(
+            prompt_id="pmpt_123",
+            poem_style="limerick",
+        ),
+    )
+    print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ## Context
