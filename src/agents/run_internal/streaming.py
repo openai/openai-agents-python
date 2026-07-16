@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from ..items import (
+    CompactionItem,
     HandoffCallItem,
     HandoffOutputItem,
     MCPApprovalRequestItem,
@@ -14,6 +15,8 @@ from ..items import (
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
 )
 from ..logger import logger
 from ..stream_events import RunItemStreamEvent, StreamEvent
@@ -36,6 +39,10 @@ def stream_step_items_to_queue(
             event = RunItemStreamEvent(item=item, name="handoff_occured")
         elif isinstance(item, ToolCallItem):
             event = RunItemStreamEvent(item=item, name="tool_called")
+        elif isinstance(item, ToolSearchCallItem):
+            event = RunItemStreamEvent(item=item, name="tool_search_called")
+        elif isinstance(item, ToolSearchOutputItem):
+            event = RunItemStreamEvent(item=item, name="tool_search_output_created")
         elif isinstance(item, ToolCallOutputItem):
             event = RunItemStreamEvent(item=item, name="tool_output")
         elif isinstance(item, ReasoningItem):
@@ -48,6 +55,8 @@ def stream_step_items_to_queue(
             event = RunItemStreamEvent(item=item, name="mcp_list_tools")
         elif isinstance(item, ToolApprovalItem):
             event = None  # approvals represent interruptions, not streamed items
+        elif isinstance(item, CompactionItem):
+            event = None  # compaction items are session bookkeeping, not streamed items
         else:
             logger.warning("Unexpected item type: %s", type(item))
             event = None

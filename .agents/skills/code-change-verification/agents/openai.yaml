@@ -1,0 +1,4 @@
+interface:
+  display_name: "Code Change Verification"
+  short_description: "Run the required local verification stack"
+  default_prompt: "Use $code-change-verification to run the required local verification stack and report any failures."

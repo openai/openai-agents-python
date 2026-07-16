@@ -51,7 +51,7 @@ class CustomAgentHooks(AgentHooks):
         )
 
     async def on_tool_end(
-        self, context: RunContextWrapper, agent: Agent, tool: Tool, result: str
+        self, context: RunContextWrapper, agent: Agent, tool: Tool, result: object
     ) -> None:
         self.event_counter += 1
         print(

@@ -21,6 +21,8 @@ from agents import (
     function_tool,
 )
 from agents.guardrail import input_guardrail, output_guardrail
+from agents.result import RunResultStreaming
+from agents.run_internal.guardrails import run_input_guardrails, run_input_guardrails_with_queue
 
 from .fake_model import FakeModel
 from .test_responses import get_function_tool_call, get_text_message
@@ -40,6 +42,18 @@ def get_sync_guardrail(triggers: bool, output_info: Any | None = None):
         )
 
     return sync_guardrail
+
+
+@pytest.mark.asyncio
+async def test_run_input_guardrails_returns_empty_for_no_guardrails() -> None:
+    result = await run_input_guardrails(
+        agent=Agent(name="test"),
+        guardrails=[],
+        input="test",
+        context=RunContextWrapper(context=None),
+    )
+
+    assert result == []
 
 
 @pytest.mark.asyncio
@@ -228,6 +242,7 @@ async def test_input_guardrail_decorators():
     )
     assert not result.output.tripwire_triggered
     assert result.output.output_info == "test_1"
+    assert guardrail.get_name() == "decorated_input_guardrail"
 
     guardrail = decorated_named_input_guardrail
     result = await guardrail.run(
@@ -266,6 +281,7 @@ async def test_output_guardrail_decorators():
     )
     assert not result.output.tripwire_triggered
     assert result.output.output_info == "test_3"
+    assert guardrail.get_name() == "decorated_output_guardrail"
 
     guardrail = decorated_named_output_guardrail
     result = await guardrail.run(
@@ -655,6 +671,143 @@ async def test_parallel_guardrail_may_not_prevent_tool_execution_streaming():
     assert tool_was_executed is True, (
         "Expected tool to execute before slow parallel guardrail triggered"
     )
+    assert model.first_turn_args is not None, "Model should have been called in parallel mode"
+
+
+@pytest.mark.asyncio
+async def test_parallel_guardrail_trip_before_tool_execution_stops_streaming_turn():
+    tool_was_executed = False
+    model_started = asyncio.Event()
+    guardrail_tripped = asyncio.Event()
+
+    @function_tool
+    def dangerous_tool() -> str:
+        nonlocal tool_was_executed
+        tool_was_executed = True
+        return "tool_executed"
+
+    @input_guardrail(run_in_parallel=True)
+    async def tripwire_before_tool_execution(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await asyncio.wait_for(model_started.wait(), timeout=1)
+        guardrail_tripped.set()
+        return GuardrailFunctionOutput(
+            output_info="parallel_trip_before_tool_execution",
+            tripwire_triggered=True,
+        )
+
+    model = FakeModel()
+    original_stream_response = model.stream_response
+
+    async def delayed_stream_response(*args, **kwargs):
+        model_started.set()
+        await asyncio.wait_for(guardrail_tripped.wait(), timeout=1)
+        await asyncio.sleep(SHORT_DELAY)
+        async for event in original_stream_response(*args, **kwargs):
+            yield event
+
+    agent = Agent(
+        name="streaming_guardrail_hardening_agent",
+        instructions="Call the dangerous_tool immediately",
+        tools=[dangerous_tool],
+        input_guardrails=[tripwire_before_tool_execution],
+        model=model,
+    )
+    model.set_next_output([get_function_tool_call("dangerous_tool", arguments="{}")])
+    model.set_next_output([get_text_message("done")])
+
+    with patch.object(model, "stream_response", side_effect=delayed_stream_response):
+        result = Runner.run_streamed(agent, "trigger guardrail")
+
+        with pytest.raises(InputGuardrailTripwireTriggered):
+            async for _event in result.stream_events():
+                pass
+
+    assert model_started.is_set() is True
+    assert guardrail_tripped.is_set() is True
+    assert tool_was_executed is False
+    assert model.first_turn_args is not None, "Model should have been called in parallel mode"
+
+
+@pytest.mark.asyncio
+async def test_parallel_guardrail_trip_with_slow_cancel_sibling_stops_streaming_turn():
+    tool_was_executed = False
+    model_started = asyncio.Event()
+    guardrail_tripped = asyncio.Event()
+    slow_cancel_started = asyncio.Event()
+    slow_cancel_finished = asyncio.Event()
+
+    @function_tool
+    def dangerous_tool() -> str:
+        nonlocal tool_was_executed
+        tool_was_executed = True
+        return "tool_executed"
+
+    @input_guardrail(run_in_parallel=True)
+    async def tripwire_before_tool_execution(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await asyncio.wait_for(model_started.wait(), timeout=1)
+        guardrail_tripped.set()
+        return GuardrailFunctionOutput(
+            output_info="parallel_trip_before_tool_execution_with_slow_cancel",
+            tripwire_triggered=True,
+        )
+
+    @input_guardrail(run_in_parallel=True)
+    async def slow_to_cancel_guardrail(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        try:
+            await asyncio.Event().wait()
+            return GuardrailFunctionOutput(
+                output_info="slow_to_cancel_guardrail_completed",
+                tripwire_triggered=False,
+            )
+        except asyncio.CancelledError:
+            slow_cancel_started.set()
+            await asyncio.sleep(SHORT_DELAY)
+            slow_cancel_finished.set()
+            raise
+
+    model = FakeModel()
+    original_stream_response = model.stream_response
+
+    async def delayed_stream_response(*args, **kwargs):
+        model_started.set()
+        await asyncio.wait_for(guardrail_tripped.wait(), timeout=1)
+        await asyncio.wait_for(slow_cancel_started.wait(), timeout=1)
+        async for event in original_stream_response(*args, **kwargs):
+            yield event
+
+    agent = Agent(
+        name="streaming_guardrail_slow_cancel_agent",
+        instructions="Call the dangerous_tool immediately",
+        tools=[dangerous_tool],
+        input_guardrails=[tripwire_before_tool_execution, slow_to_cancel_guardrail],
+        model=model,
+    )
+    model.set_next_output([get_function_tool_call("dangerous_tool", arguments="{}")])
+    model.set_next_output([get_text_message("done")])
+
+    with patch.object(model, "stream_response", side_effect=delayed_stream_response):
+        result = Runner.run_streamed(agent, "trigger guardrail")
+
+        with pytest.raises(InputGuardrailTripwireTriggered) as excinfo:
+            async for _event in result.stream_events():
+                pass
+
+    exc = excinfo.value
+    assert exc.run_data is not None
+    assert [res.output.output_info for res in exc.run_data.input_guardrail_results] == [
+        "parallel_trip_before_tool_execution_with_slow_cancel"
+    ]
+    assert model_started.is_set() is True
+    assert guardrail_tripped.is_set() is True
+    assert slow_cancel_started.is_set() is True
+    assert slow_cancel_finished.is_set() is True
+    assert tool_was_executed is False
     assert model.first_turn_args is not None, "Model should have been called in parallel mode"
 
 
@@ -1501,3 +1654,136 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger_streaming():
     assert model.first_turn_args is None, (
         "Model should not have been called when guardrail triggered"
     )
+
+
+@pytest.mark.asyncio
+async def test_streaming_input_guardrail_exception_awaits_cancelled_siblings():
+    slow_started = asyncio.Event()
+    slow_cleanup_finished = False
+
+    async def slow_guardrail(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        nonlocal slow_cleanup_finished
+        slow_started.set()
+        try:
+            await asyncio.sleep(LONG_DELAY)
+            return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+        except asyncio.CancelledError:
+            await asyncio.sleep(SHORT_DELAY)
+            slow_cleanup_finished = True
+            raise
+
+    async def raising_guardrail(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await slow_started.wait()
+        raise RuntimeError("guardrail failed")
+
+    agent = Agent(name="test_agent", model=FakeModel())
+    context = RunContextWrapper(context=None)
+    streamed_result = RunResultStreaming(
+        "test input",
+        [],
+        [],
+        None,
+        [],
+        [],
+        [],
+        [],
+        context,
+        agent,
+        0,
+        None,
+        None,
+        None,
+    )
+
+    with pytest.raises(RuntimeError, match="guardrail failed"):
+        await run_input_guardrails_with_queue(
+            agent=agent,
+            guardrails=[
+                InputGuardrail(guardrail_function=slow_guardrail),
+                InputGuardrail(guardrail_function=raising_guardrail),
+            ],
+            input="test input",
+            context=context,
+            streamed_result=streamed_result,
+            parent_span=None,
+        )
+
+    assert slow_cleanup_finished is True
+
+
+@pytest.mark.asyncio
+async def test_input_guardrail_raise_cancels_siblings():
+    """When one input guardrail raises a non-tripwire exception, sibling tasks
+    must be cancelled and awaited so they don't keep running past the function's return."""
+    from agents.run_internal.guardrails import run_input_guardrails
+
+    sibling_started = asyncio.Event()
+    sibling_completed = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+
+    async def slow_sibling_started_first(ctx, agent, input):
+        sibling_started.set()
+        try:
+            await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+        sibling_completed.set()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    async def raise_after_sibling_starts(ctx, agent, input):
+        await sibling_started.wait()
+        raise RuntimeError("boom")
+
+    g_slow = InputGuardrail(guardrail_function=slow_sibling_started_first)
+    g_raise = InputGuardrail(guardrail_function=raise_after_sibling_starts)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await run_input_guardrails(
+            Agent(name="t"), [g_slow, g_raise], "x", RunContextWrapper(context=None)
+        )
+
+    # By the time run_input_guardrails returns (via raise), the sibling must already
+    # have been cancelled and awaited. No additional sleep should be needed.
+    assert sibling_cancelled.is_set(), "Sibling task should have been cancelled"
+    assert not sibling_completed.is_set(), "Sibling task should not have completed"
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_raise_cancels_siblings():
+    """When one output guardrail raises a non-tripwire exception, sibling tasks
+    must be cancelled and awaited so they don't keep running past the function's return."""
+    from agents.run_internal.guardrails import run_output_guardrails
+
+    sibling_started = asyncio.Event()
+    sibling_completed = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+
+    async def slow_sibling_started_first(ctx, agent, agent_output):
+        sibling_started.set()
+        try:
+            await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+        sibling_completed.set()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    async def raise_after_sibling_starts(ctx, agent, agent_output):
+        await sibling_started.wait()
+        raise RuntimeError("boom")
+
+    g_slow = OutputGuardrail(guardrail_function=slow_sibling_started_first)
+    g_raise = OutputGuardrail(guardrail_function=raise_after_sibling_starts)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await run_output_guardrails(
+            [g_slow, g_raise], Agent(name="t"), "out", RunContextWrapper(context=None)
+        )
+
+    assert sibling_cancelled.is_set(), "Sibling task should have been cancelled"
+    assert not sibling_completed.is_set(), "Sibling task should not have completed"

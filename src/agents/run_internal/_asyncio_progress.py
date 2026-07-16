@@ -51,7 +51,7 @@ def _get_sleep_deadline_from_awaitable(
         return float(when())
 
     delay = frame.f_locals.get("delay")
-    if isinstance(delay, (int, float)):
+    if isinstance(delay, int | float):
         return loop.time() if delay <= 0 else loop.time() + float(delay)
     return None
 

@@ -13,6 +13,7 @@ from openai.types.responses import ResponseFunctionToolCall
 
 from ..agent import Agent
 from ..items import ItemHelpers, RunItem, ToolApprovalItem, ToolCallOutputItem, TResponseInputItem
+from ..tool import ToolOrigin
 from .items import ReasoningItemIdPolicy, run_item_to_input_item
 
 # --------------------------
@@ -28,6 +29,7 @@ def append_approval_error_output(
     tool_name: str,
     call_id: str | None,
     message: str,
+    tool_origin: ToolOrigin | None = None,
 ) -> None:
     """Emit a synthetic tool output so users see why an approval failed."""
     error_tool_call = _build_function_tool_call_for_approval_error(tool_call, tool_name, call_id)
@@ -36,6 +38,7 @@ def append_approval_error_output(
             output=message,
             raw_item=ItemHelpers.tool_call_output_item(error_tool_call, message),
             agent=agent,
+            tool_origin=tool_origin,
         )
     )
 
@@ -77,10 +80,23 @@ def _build_function_tool_call_for_approval_error(
     """Coerce raw tool call payloads into a normalized function_call for approval errors."""
     if isinstance(tool_call, ResponseFunctionToolCall):
         return tool_call
-    return ResponseFunctionToolCall(
-        type="function_call",
-        name=tool_name,
-        call_id=call_id or "unknown",
-        status="completed",
-        arguments="{}",
-    )
+    namespace = None
+    if isinstance(tool_call, dict):
+        candidate = tool_call.get("namespace")
+        if isinstance(candidate, str) and candidate:
+            namespace = candidate
+    else:
+        candidate = getattr(tool_call, "namespace", None)
+        if isinstance(candidate, str) and candidate:
+            namespace = candidate
+
+    kwargs: dict[str, Any] = {
+        "type": "function_call",
+        "name": tool_name,
+        "call_id": call_id or "unknown",
+        "status": "completed",
+        "arguments": "{}",
+    }
+    if namespace is not None:
+        kwargs["namespace"] = namespace
+    return ResponseFunctionToolCall(**kwargs)

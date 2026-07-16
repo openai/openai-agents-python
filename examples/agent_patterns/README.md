@@ -2,6 +2,10 @@
 
 This folder contains examples of different common patterns for agents.
 
+## Hosted multi-agent (experimental)
+
+The Responses API can coordinate server-hosted GPT-5.6 subagents while the normal SDK Runner executes developer-defined function tools locally. See [`hosted_multi_agent_beta.py`](./hosted_multi_agent_beta.py) for non-streaming and streaming examples using the experimental model module.
+
 ## Deterministic flows
 
 A common tactic is to break down a task into a series of smaller steps. Each task can be performed by an agent, and the output of one agent is used as input to the next. For example, if your task was to generate a story, you could break it down into the following steps:
@@ -18,8 +22,7 @@ See the [`deterministic.py`](./deterministic.py) file for an example of this.
 
 In many situations, you have specialized sub-agents that handle specific tasks. You can use handoffs to route the task to the right agent.
 
-For example, you might have a frontline agent that receives a request, and then hands off to a specialized agent based on the language of the request.
-See the [`routing.py`](./routing.py) file for an example of this.
+For example, you might have a frontline agent that receives a request, and then hands off to a specialized agent based on the language of the request. See the [`routing.py`](./routing.py) file for an example of this.
 
 ## Agents as tools
 
@@ -27,9 +30,7 @@ The mental model for handoffs is that the new agent "takes over". It sees the pr
 
 For example, you could model the translation task above as tool calls instead: rather than handing over to the language-specific agent, you could call the agent as a tool, and then use the result in the next step. This enables things like translating multiple languages at once.
 
-See the [`agents_as_tools.py`](./agents_as_tools.py) file for an example of this.
-See the [`agents_as_tools_streaming.py`](./agents_as_tools_streaming.py) file for a streaming variant that taps into nested agent events via `on_stream`.
-See the [`agents_as_tools_structured.py`](./agents_as_tools_structured.py) file for a structured-input variant using `Agent.as_tool()` parameters.
+See the [`agents_as_tools.py`](./agents_as_tools.py) file for an example of this. See the [`agents_as_tools_streaming.py`](./agents_as_tools_streaming.py) file for a streaming variant that taps into nested agent events via `on_stream`. See the [`agents_as_tools_structured.py`](./agents_as_tools_structured.py) file for a structured-input variant using `Agent.as_tool()` parameters.
 
 ## LLM-as-a-judge
 

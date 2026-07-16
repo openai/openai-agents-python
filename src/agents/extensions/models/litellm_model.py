@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from copy import copy
 from typing import Any, Literal, cast, overload
 
-from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
+from openai.types.responses.response_usage import OutputTokensDetails
 
 from agents.exceptions import ModelBehaviorError
 
@@ -41,17 +41,22 @@ from ...handoffs import Handoff
 from ...items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ...logger import logger
 from ...model_settings import ModelSettings
+from ...models._openai_retry import get_openai_retry_advice
+from ...models._retry_runtime import should_disable_provider_managed_retries
+from ...models._trace import model_config_for_trace
 from ...models.chatcmpl_converter import Converter
 from ...models.chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
 from ...models.fake_id import FAKE_RESPONSES_ID
 from ...models.interface import Model, ModelTracing
 from ...models.openai_responses import Converter as OpenAIResponsesConverter
+from ...models.reasoning_content_replay import ShouldReplayReasoningContent
+from ...retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ...tool import Tool
 from ...tracing import generation_span
 from ...tracing.span_data import GenerationSpanData
 from ...tracing.spans import Span
-from ...usage import Usage
+from ...usage import Usage, _cache_write_tokens, _make_input_tokens_details
 from ...util._json import _to_dump_compatible
 
 
@@ -133,7 +138,7 @@ class InternalToolCall(ChatCompletionMessageFunctionToolCall):
 
 
 class LitellmModel(Model):
-    """This class enables using any model via LiteLLM. LiteLLM allows you to acess OpenAPI,
+    """This class enables using any model via LiteLLM. LiteLLM allows you to access OpenAPI,
     Anthropic, Gemini, Mistral, and many other models.
     See supported models here: [litellm models](https://docs.litellm.ai/docs/providers).
     """
@@ -143,10 +148,56 @@ class LitellmModel(Model):
         model: str,
         base_url: str | None = None,
         api_key: str | None = None,
+        should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
     ):
         self.model = model
         self.base_url = base_url
         self.api_key = api_key
+        self.should_replay_reasoning_content = should_replay_reasoning_content
+
+    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
+        # LiteLLM exceptions mirror OpenAI-style status/header fields.
+        # Reuse the same normalization to expose retry-after and explicit retry/no-retry hints.
+        return get_openai_retry_advice(request)
+
+    def _get_reasoning_effort(self, model_settings: ModelSettings) -> Any | None:
+        """
+        Resolve the top-level LiteLLM reasoning_effort argument for the chat-completions path.
+
+        LiteLLM's public acompletion() surface accepts a scalar reasoning_effort value. Keep the
+        ModelSettings.reasoning path aligned with that contract and leave extra_body / extra_args as
+        the explicit escape hatches for advanced provider-specific overrides.
+        """
+        reasoning_effort: Any | None = None
+
+        if model_settings.reasoning:
+            reasoning_effort = model_settings.reasoning.effort
+            if model_settings.reasoning.summary is not None:
+                logger.warning(
+                    "LitellmModel does not forward Reasoning.summary on the LiteLLM "
+                    "chat-completions path; ignoring summary and passing reasoning_effort only."
+                )
+
+        # Enable developers to pass non-OpenAI compatible reasoning_effort data like "none".
+        # Priority order:
+        #  1. model_settings.reasoning.effort
+        #  2. model_settings.extra_body["reasoning_effort"]
+        #  3. model_settings.extra_args["reasoning_effort"]
+        if (
+            reasoning_effort is None
+            and isinstance(model_settings.extra_body, dict)
+            and "reasoning_effort" in model_settings.extra_body
+        ):
+            reasoning_effort = model_settings.extra_body["reasoning_effort"]
+
+        if (
+            reasoning_effort is None
+            and model_settings.extra_args
+            and "reasoning_effort" in model_settings.extra_args
+        ):
+            reasoning_effort = model_settings.extra_args["reasoning_effort"]
+
+        return reasoning_effort
 
     async def get_response(
         self,
@@ -163,8 +214,11 @@ class LitellmModel(Model):
     ) -> ModelResponse:
         with generation_span(
             model=str(self.model),
-            model_config=model_settings.to_json_dict()
-            | {"base_url": str(self.base_url or ""), "model_impl": "litellm"},
+            model_config=model_config_for_trace(
+                model_settings,
+                base_url=self.base_url or "",
+                extra_config={"model_impl": "litellm"},
+            ),
             disabled=tracing.is_disabled(),
         ) as span_generation:
             response = await self._fetch_response(
@@ -186,20 +240,19 @@ class LitellmModel(Model):
                 choice = response.choices[0]
                 if isinstance(choice, litellm.types.utils.Choices):
                     first_choice = choice
-                    message = first_choice.message
+                    message = choice.message
 
             if _debug.DONT_LOG_MODEL_DATA:
                 logger.debug("Received model response")
             else:
                 if message is not None:
                     logger.debug(
-                        f"""LLM resp:\n{
-                            json.dumps(message.model_dump(), indent=2, ensure_ascii=False)
-                        }\n"""
+                        "LLM resp:\n%s\n",
+                        json.dumps(message.model_dump(), indent=2, ensure_ascii=False),
                     )
                 else:
                     finish_reason = first_choice.finish_reason if first_choice else "-"
-                    logger.debug(f"LLM resp had no message. finish_reason: {finish_reason}")
+                    logger.debug("LLM resp had no message. finish_reason: %s", finish_reason)
 
             if hasattr(response, "usage"):
                 response_usage = response.usage
@@ -209,11 +262,14 @@ class LitellmModel(Model):
                         input_tokens=response_usage.prompt_tokens,
                         output_tokens=response_usage.completion_tokens,
                         total_tokens=response_usage.total_tokens,
-                        input_tokens_details=InputTokensDetails(
+                        input_tokens_details=_make_input_tokens_details(
                             cached_tokens=getattr(
                                 response_usage.prompt_tokens_details, "cached_tokens", 0
                             )
-                            or 0
+                            or 0,
+                            cache_write_tokens=_cache_write_tokens(
+                                response_usage.prompt_tokens_details
+                            ),
                         ),
                         output_tokens_details=OutputTokensDetails(
                             reasoning_tokens=getattr(
@@ -241,6 +297,27 @@ class LitellmModel(Model):
                 "input_tokens_details": usage.input_tokens_details.model_dump(),
                 "output_tokens_details": usage.output_tokens_details.model_dump(),
             }
+
+            # Surface content-filter refusals explicitly. Some providers (e.g.
+            # Anthropic on Amazon Bedrock) signal a safety block only via
+            # ``finish_reason == "content_filter"`` with an empty message and no
+            # ``refusal`` field. Without this, ``message`` converts to zero
+            # output items and the caller sees an indistinguishable "empty turn",
+            # which drives agent loops into fruitless retries. Synthesize a
+            # refusal so downstream handling (ResponseOutputRefusal) fires.
+            if (
+                message is not None
+                and first_choice is not None
+                and getattr(first_choice, "finish_reason", None) == "content_filter"
+                and not message.content
+                and not getattr(message, "tool_calls", None)
+            ):
+                provider_specific_fields = getattr(message, "provider_specific_fields", None) or {}
+                if not provider_specific_fields.get("refusal"):
+                    provider_specific_fields["refusal"] = (
+                        "Response withheld by the provider's content filter."
+                    )
+                    message.provider_specific_fields = provider_specific_fields
 
             # Build provider_data for provider specific fields
             provider_data: dict[str, Any] = {"model": self.model}
@@ -277,8 +354,11 @@ class LitellmModel(Model):
     ) -> AsyncIterator[TResponseStreamEvent]:
         with generation_span(
             model=str(self.model),
-            model_config=model_settings.to_json_dict()
-            | {"base_url": str(self.base_url or ""), "model_impl": "litellm"},
+            model_config=model_config_for_trace(
+                model_settings,
+                base_url=self.base_url or "",
+                extra_config={"model_impl": "litellm"},
+            ),
             disabled=tracing.is_disabled(),
         ) as span_generation:
             response, stream = await self._fetch_response(
@@ -315,7 +395,7 @@ class LitellmModel(Model):
                     "input_tokens_details": (
                         final_response.usage.input_tokens_details.model_dump()
                         if final_response.usage.input_tokens_details
-                        else {"cached_tokens": 0}
+                        else {"cached_tokens": 0, "cache_write_tokens": 0}
                     ),
                     "output_tokens_details": (
                         final_response.usage.output_tokens_details.model_dump()
@@ -375,9 +455,11 @@ class LitellmModel(Model):
 
         converted_messages = Converter.items_to_messages(
             input,
+            base_url=self.base_url,
             preserve_thinking_blocks=preserve_thinking_blocks,
             preserve_tool_output_all_content=True,
             model=self.model,
+            should_replay_reasoning_content=self.should_replay_reasoning_content,
         )
 
         # Fix message ordering: reorder to ensure tool_use comes before tool_result.
@@ -435,61 +517,45 @@ class LitellmModel(Model):
                 ensure_ascii=False,
             )
             logger.debug(
-                f"Calling Litellm model: {self.model}\n"
-                f"{messages_json}\n"
-                f"Tools:\n{tools_json}\n"
-                f"Stream: {stream}\n"
-                f"Tool choice: {tool_choice}\n"
-                f"Response format: {response_format}\n"
+                "Calling Litellm model: %s\n%s\nTools:\n%s\nStream: %s\n"
+                "Tool choice: %s\nResponse format: %s\n",
+                self.model,
+                messages_json,
+                tools_json,
+                stream,
+                tool_choice,
+                response_format,
             )
 
-        # Build reasoning_effort - use dict only when summary is present (OpenAI feature)
-        # Otherwise pass string for backward compatibility with all providers
-        reasoning_effort: dict[str, Any] | str | None = None
-        if model_settings.reasoning:
-            if model_settings.reasoning.summary is not None:
-                # Dict format when summary is needed (OpenAI only)
-                reasoning_effort = {
-                    "effort": model_settings.reasoning.effort,
-                    "summary": model_settings.reasoning.summary,
-                }
-            elif model_settings.reasoning.effort is not None:
-                # String format for compatibility with all providers
-                reasoning_effort = model_settings.reasoning.effort
-
-        # Enable developers to pass non-OpenAI compatible reasoning_effort data like "none"
-        # Priority order:
-        #  1. model_settings.reasoning (effort + summary)
-        #  2. model_settings.extra_body["reasoning_effort"]
-        #  3. model_settings.extra_args["reasoning_effort"]
-        if (
-            reasoning_effort is None  # Unset in model_settings
-            and isinstance(model_settings.extra_body, dict)
-            and "reasoning_effort" in model_settings.extra_body
-        ):
-            reasoning_effort = model_settings.extra_body["reasoning_effort"]
-        if (
-            reasoning_effort is None  # Unset in both model_settings and model_settings.extra_body
-            and model_settings.extra_args
-            and "reasoning_effort" in model_settings.extra_args
-        ):
-            reasoning_effort = model_settings.extra_args["reasoning_effort"]
+        reasoning_effort = self._get_reasoning_effort(model_settings)
 
         stream_options = None
         if stream and model_settings.include_usage is not None:
             stream_options = {"include_usage": model_settings.include_usage}
 
-        extra_kwargs = {}
+        extra_kwargs: dict[str, Any] = {}
         if model_settings.extra_query:
             extra_kwargs["extra_query"] = copy(model_settings.extra_query)
         if model_settings.metadata:
             extra_kwargs["metadata"] = copy(model_settings.metadata)
-        if model_settings.extra_body and isinstance(model_settings.extra_body, dict):
-            extra_kwargs.update(model_settings.extra_body)
+        if model_settings.extra_body is not None:
+            extra_body = copy(model_settings.extra_body)
+            if isinstance(extra_body, dict) and reasoning_effort is not None:
+                extra_body.pop("reasoning_effort", None)
+                if not extra_body:
+                    extra_body = None
+            if extra_body is not None:
+                extra_kwargs["extra_body"] = extra_body
 
         # Add kwargs from model_settings.extra_args, filtering out None values
         if model_settings.extra_args:
             extra_kwargs.update(model_settings.extra_args)
+
+        if should_disable_provider_managed_retries():
+            # Preserve provider-managed retries on the first attempt, but make runner retries the
+            # sole retry layer by forcing LiteLLM's retry knobs off on replay attempts.
+            extra_kwargs["num_retries"] = 0
+            extra_kwargs["max_retries"] = 0
 
         # Prevent duplicate reasoning_effort kwargs when it was promoted to a top-level argument.
         extra_kwargs.pop("reasoning_effort", None)
@@ -627,13 +693,24 @@ class LitellmModel(Model):
                 # Extract tool calls from this assistant message
                 tool_calls = message.get("tool_calls", [])
                 if isinstance(tool_calls, list):
-                    for tool_call in tool_calls:
+                    for split_idx, tool_call in enumerate(tool_calls):
                         if isinstance(tool_call, dict):
                             tool_id = tool_call.get("id")
                             if tool_id:
-                                # Create a separate assistant message for each tool call
+                                # Create a separate assistant message for each tool call.
+                                # Only the first split keeps the assistant text/thinking
+                                # blocks/reasoning content; the rest carry tool_calls only,
+                                # to avoid duplicating signed thinking blocks (which
+                                # Anthropic rejects) and assistant text in history.
                                 single_tool_msg = cast(dict[str, Any], message.copy())
                                 single_tool_msg["tool_calls"] = [tool_call]
+                                if split_idx > 0:
+                                    for shared_field in (
+                                        "content",
+                                        "thinking_blocks",
+                                        "reasoning_content",
+                                    ):
+                                        single_tool_msg.pop(shared_field, None)
                                 tool_call_messages[tool_id] = (
                                     i,
                                     cast(ChatCompletionMessageParam, single_tool_msg),

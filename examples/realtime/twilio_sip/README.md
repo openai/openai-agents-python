@@ -32,8 +32,7 @@ This example shows how to handle OpenAI Realtime SIP calls with the Agents SDK. 
    export OPENAI_API_KEY="sk-..."
    export OPENAI_WEBHOOK_SECRET="whsec_..."
    ```
-3. (Optional) Adjust the multi-agent logic in `examples/realtime/twilio_sip/agents.py` if you want
-   to change the specialist agents or tools.
+3. (Optional) Adjust the multi-agent logic in `examples/realtime/twilio_sip/agents.py` if you want to change the specialist agents or tools.
 4. Run the FastAPI server:
    ```bash
    uv run uvicorn examples.realtime.twilio_sip.server:app --host 0.0.0.0 --port 8000

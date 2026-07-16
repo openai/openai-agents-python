@@ -13,38 +13,86 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import functools
 import os
 import re
 import shlex
+import shutil
+import socket
 import subprocess
 import sys
+import tempfile
 import threading
-from collections.abc import Iterable, Sequence
+import time
+from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlparse
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 EXAMPLES_DIR = ROOT_DIR / "examples"
 MAIN_PATTERN = re.compile(r"__name__\s*==\s*['\"]__main__['\"]")
 
 LOG_DIR_DEFAULT = ROOT_DIR / ".tmp" / "examples-start-logs"
+ARTIFACTS_DIR_DEFAULT = ROOT_DIR / ".tmp" / "examples-artifacts"
 RERUN_FILE_DEFAULT = ROOT_DIR / ".tmp" / "examples-rerun.txt"
 DEFAULT_MAIN_LOG = LOG_DIR_DEFAULT / f"main_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
+REDIS_SESSION_EXAMPLE = "examples/memory/redis_session_example.py"
+DAPR_SESSION_EXAMPLE = "examples/memory/dapr_session_example.py"
+DEFAULT_REDIS_URL = "redis://localhost:6379/0"
+LOCAL_REDIS_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+COMMON_PATH_HINTS = (
+    Path.home() / ".local" / "bin",
+    Path("/opt/homebrew/bin"),
+    Path("/opt/homebrew/sbin"),
+    Path("/usr/local/bin"),
+    Path("/usr/local/sbin"),
+)
+
+DISCOVERY_EXCLUDE = {
+    "examples/run_examples.py",
+    "examples/sandbox/tutorials/data/dataroom/setup.py",
+}
 
 # Examples that are noisy, require extra credentials, or hang in auto runs.
 DEFAULT_AUTO_SKIP = {
     "examples/agent_patterns/llm_as_a_judge.py",
-    "examples/agent_patterns/routing.py",
-    "examples/customer_service/main.py",
     "examples/hosted_mcp/connectors.py",
     "examples/mcp/git_example/main.py",
+    # These are helper daemons or multi-process components exercised by sibling examples.
+    "examples/mcp/manager_example/app.py",
+    "examples/mcp/manager_example/mcp_server.py",
+    "examples/mcp/prompt_server/server.py",
+    "examples/mcp/sse_example/server.py",
+    "examples/mcp/streamablehttp_custom_client_example/server.py",
+    "examples/mcp/streamablehttp_example/server.py",
     "examples/model_providers/custom_example_agent.py",
     "examples/model_providers/custom_example_global.py",
     "examples/model_providers/custom_example_provider.py",
     "examples/realtime/app/server.py",
     "examples/realtime/cli/demo.py",
     "examples/realtime/twilio/server.py",
+    "examples/sandbox/misc/reference_policy_mcp_server.py",
+    "examples/sandbox/docker/mounts/azure_mount_read_write.py",
+    "examples/sandbox/docker/mounts/gcs_mount_read_write.py",
+    "examples/sandbox/docker/mounts/s3_files_mount_read_write.py",
+    "examples/sandbox/docker/mounts/s3_mount_read_write.py",
+    "examples/sandbox/extensions/daytona/usaspending_text2sql/setup_db.py",
+    "examples/sandbox/extensions/temporal/temporal_sandbox_agent.py",
+    # Temporarily disabled due to credential issues.
+    "examples/sandbox/extensions/vercel_runner.py",
+    "examples/sandbox/memory_s3.py",
+    "examples/sandbox/sandbox_agent_with_remote_snapshot.py",
+    "examples/sandbox/tax_prep.py",
+    "examples/sandbox/tutorials/dataroom_metric_extract/evals.py",
+    "examples/sandbox/tutorials/dataroom_metric_extract/main.py",
+    "examples/sandbox/tutorials/dataroom_qa/main.py",
+    "examples/sandbox/tutorials/repo_code_review/evals.py",
+    "examples/sandbox/tutorials/repo_code_review/main.py",
+    "examples/sandbox/tutorials/vision_website_clone/main.py",
+    "examples/tools/codex_same_thread.py",
     "examples/voice/static/main.py",
     "examples/voice/streamed/main.py",
 }
@@ -67,7 +115,7 @@ class ExampleScript:
     @property
     def command(self) -> list[str]:
         # Run via module path so relative imports inside examples work.
-        return ["uv", "run", "python", "-m", self.module]
+        return [*build_uv_run_command(), "python", "-u", "-m", self.module]
 
 
 @dataclass
@@ -79,9 +127,246 @@ class ExampleResult:
     exit_code: int | None = None
 
 
+@dataclass
+class TemporaryRedisServer:
+    process: subprocess.Popen[bytes]
+    temp_dir: tempfile.TemporaryDirectory[str]
+    url: str
+
+    def close(self) -> None:
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+        self.temp_dir.cleanup()
+
+
 def normalize_relpath(relpath: str) -> str:
     normalized = relpath.replace("\\", "/")
     return str(PurePosixPath(normalized))
+
+
+def split_path_entries(path_value: str) -> list[str]:
+    return [entry for entry in path_value.split(os.pathsep) if entry]
+
+
+def split_words(value: str) -> list[str]:
+    return [entry for entry in value.split() if entry]
+
+
+def build_uv_run_command() -> list[str]:
+    command = ["uv", "run"]
+    for extra in split_words(os.environ.get("EXAMPLES_UV_EXTRAS", "")):
+        command.extend(["--extra", extra])
+    return command
+
+
+def dedupe_existing_paths(paths: Iterable[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for entry in paths:
+        expanded = os.path.expanduser(entry)
+        if not expanded or expanded in seen:
+            continue
+        if not Path(expanded).exists():
+            continue
+        deduped.append(expanded)
+        seen.add(expanded)
+    return deduped
+
+
+@functools.lru_cache(maxsize=1)
+def interactive_shell_path() -> str | None:
+    shell = os.environ.get("SHELL")
+    if not shell:
+        return None
+
+    shell_name = Path(shell).name
+    if shell_name not in {"bash", "zsh"}:
+        return None
+
+    try:
+        result = subprocess.run(
+            [shell, "-lic", 'printf "%s" "$PATH"'],
+            capture_output=True,
+            check=True,
+            cwd=ROOT_DIR,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    path_value = result.stdout.strip()
+    return path_value or None
+
+
+def build_command_path(base_path: str | None = None) -> str:
+    candidates: list[str] = []
+    if base_path is None:
+        base_path = os.environ.get("PATH", "")
+    candidates.extend(split_path_entries(base_path))
+
+    shell_path = interactive_shell_path()
+    if shell_path:
+        candidates.extend(split_path_entries(shell_path))
+
+    candidates.extend(str(path) for path in COMMON_PATH_HINTS)
+    return os.pathsep.join(dedupe_existing_paths(candidates))
+
+
+def build_python_path(base_path: str | None = None) -> str:
+    candidates = [str(ROOT_DIR)]
+    if base_path:
+        candidates.extend(split_path_entries(base_path))
+    return os.pathsep.join(dedupe_existing_paths(candidates))
+
+
+def choose_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        address = sock.getsockname()
+        return int(address[1])
+
+
+def redis_url_host_port(url: str) -> tuple[str, int] | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"redis", "rediss"}:
+        return None
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 6379
+    return host, port
+
+
+def redis_url_is_local(url: str) -> bool:
+    host_port = redis_url_host_port(url)
+    if host_port is None:
+        return False
+    host, _ = host_port
+    return host in LOCAL_REDIS_HOSTS
+
+
+def redis_ping_url(url: str, timeout: float = 0.5) -> bool:
+    host_port = redis_url_host_port(url)
+    if host_port is None:
+        return False
+    host, port = host_port
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(b"*1\r\n$4\r\nPING\r\n")
+            return sock.recv(16).startswith(b"+PONG")
+    except OSError:
+        return False
+
+
+def truthy_env_value(value: str | None) -> bool:
+    return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def dapr_sidecar_available(env: Mapping[str, str], timeout: float = 0.5) -> bool:
+    endpoint = env.get("DAPR_HTTP_ENDPOINT", "http://127.0.0.1:3500")
+    parsed = urlparse(endpoint)
+    host = parsed.hostname or "127.0.0.1"
+    if parsed.port is not None:
+        port = parsed.port
+    elif parsed.scheme == "https":
+        port = 443
+    else:
+        port = 80
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def prerequisite_skip_reasons(
+    relpath: str,
+    *,
+    auto_mode: bool,
+    env: Mapping[str, str],
+) -> set[str]:
+    if not auto_mode:
+        return set()
+    if relpath != DAPR_SESSION_EXAMPLE:
+        return set()
+    if truthy_env_value(env.get("EXAMPLES_FORCE_DAPR")):
+        return set()
+    if dapr_sidecar_available(env):
+        return set()
+    return {"missing-dapr-sidecar"}
+
+
+def start_temporary_redis_server() -> TemporaryRedisServer | None:
+    redis_server = shutil.which("redis-server")
+    if redis_server is None:
+        return None
+
+    port = choose_loopback_port()
+    temp_dir = tempfile.TemporaryDirectory(prefix="examples-redis-")
+    url = f"redis://127.0.0.1:{port}/0"
+    process = subprocess.Popen(
+        [
+            redis_server,
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--save",
+            "",
+            "--appendonly",
+            "no",
+            "--dir",
+            temp_dir.name,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    server = TemporaryRedisServer(process=process, temp_dir=temp_dir, url=url)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            server.close()
+            return None
+        if redis_ping_url(url, timeout=0.2):
+            return server
+        time.sleep(0.1)
+
+    server.close()
+    return None
+
+
+def prepare_redis_for_example(
+    relpath: str,
+    env: dict[str, str],
+) -> tuple[TemporaryRedisServer | None, list[str]]:
+    if relpath != REDIS_SESSION_EXAMPLE:
+        return None, []
+
+    configured_url = env.get("REDIS_URL")
+    redis_url = configured_url or DEFAULT_REDIS_URL
+    if redis_url_is_local(redis_url) and redis_ping_url(redis_url):
+        env["REDIS_URL"] = redis_url
+        return None, [f"Using existing Redis server at {redis_url}."]
+
+    if configured_url:
+        env["REDIS_URL"] = redis_url
+        return None, [f"REDIS_URL is set but not reachable before example start: {redis_url}."]
+
+    server = start_temporary_redis_server()
+    if server is None:
+        env["REDIS_URL"] = redis_url
+        return None, [
+            "redis-server was not found or did not start; running the example without managed Redis."
+        ]
+
+    env["REDIS_URL"] = server.url
+    return server, [f"Started temporary Redis server at {server.url}."]
 
 
 def parse_args() -> argparse.Namespace:
@@ -130,6 +415,11 @@ def parse_args() -> argparse.Namespace:
         "--main-log",
         default=str(DEFAULT_MAIN_LOG),
         help="Path to write the main summary log.",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        default=str(ARTIFACTS_DIR_DEFAULT),
+        help="Directory for example-generated artifacts.",
     )
     parser.add_argument(
         "--rerun-file",
@@ -221,6 +511,10 @@ def discover_examples(filters: Iterable[str]) -> list[ExampleScript]:
         if not MAIN_PATTERN.search(source):
             continue
 
+        relpath = normalize_relpath(str(path.relative_to(ROOT_DIR)))
+        if relpath in DISCOVERY_EXCLUDE:
+            continue
+
         if filters_lower and not any(
             f in str(path.relative_to(ROOT_DIR)).lower() for f in filters_lower
         ):
@@ -291,6 +585,12 @@ def ensure_dirs(path: Path, is_file: bool | None = None) -> None:
     target.mkdir(parents=True, exist_ok=True)
 
 
+def artifact_dir_for_example(relpath: str, artifacts_dir: Path) -> Path:
+    """Return a deterministic scratch directory for one example run."""
+    stem = normalize_relpath(str(Path(relpath).with_suffix("")))
+    return artifacts_dir / stem.replace("/", "__")
+
+
 def parse_rerun_from_log(log_path: Path) -> list[str]:
     if not log_path.exists():
         raise FileNotFoundError(log_path)
@@ -321,6 +621,7 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
         overrides.add("external")
 
     logs_dir = Path(args.logs_dir).resolve()
+    artifacts_dir = Path(args.artifacts_dir).resolve()
     main_log_path = Path(args.main_log).resolve()
     auto_mode = args.auto_mode or os.environ.get("EXAMPLES_INTERACTIVE_MODE", "").lower() == "auto"
     auto_skip_set = load_auto_skip()
@@ -329,6 +630,7 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
         overrides.add("interactive")
 
     ensure_dirs(logs_dir, is_file=False)
+    ensure_dirs(artifacts_dir, is_file=False)
     ensure_dirs(main_log_path, is_file=True)
     rerun_entries: list[str] = []
 
@@ -351,6 +653,11 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
     buffer_output = not args.no_buffer_output and os.environ.get(
         "EXAMPLES_BUFFER_OUTPUT", "1"
     ).lower() not in {"0", "false", "no", "off"}
+    command_path = build_command_path()
+    path_augmented = command_path != os.environ.get("PATH", "")
+
+    if path_augmented:
+        print("Augmented subprocess PATH using interactive shell/common tool directories.")
 
     def safe_write_main(line: str) -> None:
         with main_log_lock:
@@ -363,54 +670,81 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
         ensure_dirs(log_path, is_file=True)
 
         env = os.environ.copy()
+        env["PATH"] = command_path
+        env["PYTHONPATH"] = build_python_path(env.get("PYTHONPATH"))
+        env["EXAMPLES_ARTIFACTS_DIR"] = str(artifact_dir_for_example(relpath, artifacts_dir))
         if auto_mode:
             env["EXAMPLES_INTERACTIVE_MODE"] = "auto"
             env["APPLY_PATCH_AUTO_APPROVE"] = "1"
             env.setdefault("SHELL_AUTO_APPROVE", "1")
             env.setdefault("AUTO_APPROVE_MCP", "1")
 
-        proc = subprocess.Popen(
-            example.command,
-            cwd=ROOT_DIR,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=env,
-        )
-        assert proc.stdout is not None
         force_prompt_stream = (not auto_mode) and ("interactive" in example.tags)
         buffer_output_local = buffer_output and not force_prompt_stream
         buffer_lines: list[str] = []
+        redis_server: TemporaryRedisServer | None = None
+        service_messages: list[str] = []
 
         with log_path.open("w", encoding="utf-8") as per_log:
-            if force_prompt_stream:
-                at_line_start = True
-                while True:
-                    char = proc.stdout.read(1)
-                    if char == "":
-                        break
-                    per_log.write(char)
+            redis_server, service_messages = prepare_redis_for_example(relpath, env)
+            for message in service_messages:
+                per_log.write(f"[runner] {message}\n")
+                if not buffer_output_local:
                     with output_lock:
-                        if at_line_start:
-                            sys.stdout.write(f"[{relpath}] ")
-                        sys.stdout.write(char)
-                        sys.stdout.flush()
-                    at_line_start = char == "\n"
-            else:
-                for line in proc.stdout:
-                    per_log.write(line)
-                    if buffer_output_local:
-                        buffer_lines.append(line)
-                    else:
+                        sys.stdout.write(f"[{relpath}] [runner] {message}\n")
+
+            try:
+                proc = subprocess.Popen(
+                    example.command,
+                    cwd=ROOT_DIR,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env=env,
+                )
+                assert proc.stdout is not None
+
+                if force_prompt_stream:
+                    at_line_start = True
+                    while True:
+                        char = proc.stdout.read(1)
+                        if char == "":
+                            break
+                        per_log.write(char)
                         with output_lock:
-                            sys.stdout.write(f"[{relpath}] {line}")
-        proc.wait()
-        exit_code = proc.returncode
+                            if at_line_start:
+                                sys.stdout.write(f"[{relpath}] ")
+                            sys.stdout.write(char)
+                            sys.stdout.flush()
+                        at_line_start = char == "\n"
+                else:
+                    for line in proc.stdout:
+                        per_log.write(line)
+                        if buffer_output_local:
+                            buffer_lines.append(line)
+                        else:
+                            with output_lock:
+                                sys.stdout.write(f"[{relpath}] {line}")
+                proc.wait()
+                exit_code = proc.returncode
+            finally:
+                if redis_server is not None:
+                    redis_server.close()
+                    per_log.write(
+                        f"[runner] Stopped temporary Redis server at {redis_server.url}.\n"
+                    )
 
         if buffer_output_local and buffer_lines:
             with output_lock:
+                for message in service_messages:
+                    sys.stdout.write(f"[{relpath}] [runner] {message}\n")
                 for line in buffer_lines:
                     sys.stdout.write(f"[{relpath}] {line}")
+                if redis_server is not None:
+                    sys.stdout.write(
+                        f"[{relpath}] [runner] Stopped temporary Redis server at "
+                        f"{redis_server.url}.\n"
+                    )
 
         if exit_code == 0:
             safe_write_main(f"PASSED {relpath} exit=0 log={display_path(log_path)}")
@@ -439,14 +773,24 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
         safe_write_main(f"# include: {sorted(overrides)}")
         safe_write_main(f"# auto_mode: {auto_mode}")
         safe_write_main(f"# logs_dir: {logs_dir}")
+        safe_write_main(f"# artifacts_dir: {artifacts_dir}")
         safe_write_main(f"# jobs: {jobs}")
         safe_write_main(f"# buffer_output: {buffer_output}")
+        safe_write_main(f"# path_augmented: {path_augmented}")
 
         run_list: list[ExampleScript] = []
 
         for example in examples:
             relpath = example.relpath
             skip, reasons = should_skip(example.tags, overrides, auto_skip_set, relpath, auto_mode)
+            prerequisite_reasons = prerequisite_skip_reasons(
+                relpath,
+                auto_mode=auto_mode,
+                env=os.environ,
+            )
+            if prerequisite_reasons:
+                skip = True
+                reasons = reasons | prerequisite_reasons
             tag_label = f" [tags: {', '.join(sorted(example.tags))}]" if args.verbose else ""
 
             if skip:

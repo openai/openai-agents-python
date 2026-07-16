@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from openai.types.responses import ResponseTextDeltaEvent
@@ -28,6 +31,29 @@ from agents import (
 from agents.agent import ToolsToFinalOutputResult
 from agents.items import TResponseInputItem
 from agents.tool import FunctionToolResult, function_tool
+from examples.financial_research_agent.agents.verifier_agent import (
+    VerificationIssue,
+    VerificationResult,
+)
+from examples.financial_research_agent.agents.writer_agent import FinancialReportData
+from examples.financial_research_agent.manager import (
+    FinancialResearchManager,
+    FinancialSearchEvidence,
+    FinancialSource,
+    _extract_financial_sources,
+)
+from examples.sandbox.basic import _import_docker_from_env
+from examples.sandbox.docker.docker_runner import (
+    _format_tool_call,
+    _format_tool_output,
+)
+from examples.sandbox.sandbox_agents_as_tools import (
+    PricingPacketReview,
+    RolloutRiskReview,
+    _structured_tool_output_extractor,
+)
+from examples.tools.web_search_filters import _normalized_source_urls
+from examples.web_search_utils import extract_url_citations, extract_web_search_source_urls
 
 from .fake_model import FakeModel
 from .test_responses import (
@@ -37,6 +63,243 @@ from .test_responses import (
     get_text_input_item,
     get_text_message,
 )
+
+
+def test_web_search_source_urls_reject_decoded_reserved_delimiters() -> None:
+    assert (
+        _normalized_source_urls(
+            ["https://developers.openai.com/api/docs/models/finding-the-right-model%3F.pls"]
+        )
+        == []
+    )
+
+
+def test_web_search_source_urls_are_canonical_and_domain_scoped() -> None:
+    assert _normalized_source_urls(
+        [
+            "https://developers.openai.com/api/docs/models/gpt-5.6-sol?utm_source=openai",
+            "https://developers.openai.com/api/docs/models/gpt-5.6-sol#pricing",
+            "https://subdomain.developers.openai.com/api/docs/models/gpt-5.6-terra/",
+            "https://developers.openai.com/assets/logo.svg",
+            "https://user@developers.openai.com/api/docs/models/gpt-5.6-sol",
+            "https://example.com/api/docs/models/gpt-5.6-sol",
+        ]
+    ) == [
+        "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+        "https://subdomain.developers.openai.com/api/docs/models/gpt-5.6-terra",
+    ]
+
+
+def test_web_search_metadata_distinguishes_citations_from_retrieved_sources() -> None:
+    items = [
+        {
+            "raw_item": {
+                "type": "web_search_call",
+                "action": {
+                    "type": "search",
+                    "sources": [
+                        {
+                            "type": "url",
+                            "url": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+                        },
+                        {
+                            "type": "url",
+                            "url": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+                        },
+                    ],
+                },
+            }
+        },
+        {
+            "raw_item": {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Use Sol for the most demanding work.",
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "title": "GPT-5.6 Sol",
+                                "url": (
+                                    "https://developers.openai.com/api/docs/models/gpt-5.6-sol"
+                                ),
+                            }
+                        ],
+                    }
+                ],
+            }
+        },
+    ]
+
+    assert extract_web_search_source_urls(items) == [
+        "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+        "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+    ]
+    assert [(citation.title, citation.url) for citation in extract_url_citations(items)] == [
+        (
+            "GPT-5.6 Sol",
+            "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+        )
+    ]
+
+
+def test_financial_search_evidence_preserves_citations_and_retrieved_sources() -> None:
+    sources = _extract_financial_sources(
+        [
+            {
+                "raw_item": {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "title": "Annual report",
+                                    "url": "https://example.com/annual-report",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            },
+            {
+                "raw_item": {
+                    "type": "web_search_call",
+                    "action": {
+                        "sources": [
+                            {"type": "url", "url": "https://example.com/annual-report"},
+                            {"type": "url", "url": "https://example.com/earnings"},
+                        ]
+                    },
+                }
+            },
+        ]
+    )
+
+    assert sources == [
+        FinancialSource(title="Annual report", url="https://example.com/annual-report"),
+        FinancialSource(
+            title="https://example.com/earnings",
+            url="https://example.com/earnings",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_financial_report_revises_once_after_failed_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = object.__new__(FinancialResearchManager)
+    original_report = FinancialReportData(
+        short_summary="Original",
+        markdown_report="Unsupported claim",
+        follow_up_questions=[],
+    )
+    revised_report = FinancialReportData(
+        short_summary="Revised",
+        markdown_report="Supported claim",
+        follow_up_questions=[],
+    )
+    rejected = VerificationResult(
+        verified=False,
+        issues=[
+            VerificationIssue(
+                claim="Unsupported claim",
+                category="unsupported",
+                explanation="No supplied evidence supports it.",
+                source_urls=[],
+            )
+        ],
+    )
+    accepted = VerificationResult(verified=True, issues=[])
+    write_report = AsyncMock(return_value=original_report)
+    verify_report = AsyncMock(side_effect=[rejected, accepted])
+    revise_report = AsyncMock(return_value=revised_report)
+    monkeypatch.setattr(manager, "_write_report", write_report)
+    monkeypatch.setattr(manager, "_verify_report", verify_report)
+    monkeypatch.setattr(manager, "_revise_report", revise_report)
+
+    report, verification = await manager._produce_verified_report("query", [])
+
+    assert report == revised_report
+    assert verification == accepted
+    write_report.assert_awaited_once_with("query", [])
+    revise_report.assert_awaited_once_with("query", original_report, [], rejected)
+    assert verify_report.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_financial_report_fails_after_second_rejected_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = object.__new__(FinancialResearchManager)
+    report = FinancialReportData(
+        short_summary="Summary",
+        markdown_report="Unsupported claim",
+        follow_up_questions=[],
+    )
+    rejected = VerificationResult(
+        verified=False,
+        issues=[
+            VerificationIssue(
+                claim="Unsupported claim",
+                category="unsupported",
+                explanation="No supplied evidence supports it.",
+                source_urls=[],
+            )
+        ],
+    )
+    monkeypatch.setattr(manager, "_write_report", AsyncMock(return_value=report))
+    monkeypatch.setattr(manager, "_verify_report", AsyncMock(return_value=rejected))
+    monkeypatch.setattr(manager, "_revise_report", AsyncMock(return_value=report))
+
+    with pytest.raises(RuntimeError, match="failed evidence verification after one revision"):
+        await manager._produce_verified_report("query", [])
+
+
+def test_financial_report_input_includes_cutoff_and_evidence() -> None:
+    manager = object.__new__(FinancialResearchManager)
+    manager.research_cutoff = "2026-07-11"
+    evidence = FinancialSearchEvidence(
+        query="company annual report",
+        reason="Ground annual metrics",
+        summary="Revenue increased.",
+        sources=[FinancialSource(title="Annual report", url="https://example.com/report")],
+        retrieved_at="2026-07-11",
+    )
+
+    payload = json.loads(manager._report_input("Analyze the company", [evidence]))
+
+    assert payload == {
+        "original_query": "Analyze the company",
+        "research_cutoff": "2026-07-11",
+        "evidence": [evidence.model_dump(mode="json")],
+    }
+
+
+def test_sandbox_basic_direct_run_imports_external_docker_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sdk_dir = tmp_path / "sdk"
+    docker_package = sdk_dir / "docker"
+    docker_package.mkdir(parents=True)
+    docker_package.joinpath("__init__.py").write_text(
+        "def from_env():\n    return 'external docker sdk'\n"
+    )
+
+    script_dir = Path("examples/sandbox").resolve()
+    monkeypatch.setattr(sys, "path", [str(script_dir), str(sdk_dir)])
+    for module_name in list(sys.modules):
+        if module_name == "docker" or module_name.startswith("docker."):
+            monkeypatch.delitem(sys.modules, module_name, raising=False)
+
+    docker_from_env = _import_docker_from_env()
+
+    assert docker_from_env() == "external docker sdk"
+    assert sys.path == [str(script_dir), str(sdk_dir)]
 
 
 @dataclass
@@ -485,6 +748,185 @@ async def test_agent_as_tool_streaming_example_collects_events() -> None:
     assert all(
         event["tool_call"] and event["tool_call"].name == "billing_agent" for event in received
     )
+
+
+@pytest.mark.asyncio
+async def test_sandbox_agents_as_tools_example_serializes_structured_reviews() -> None:
+    pricing_model = FakeModel()
+    pricing_model.set_next_output(
+        [
+            get_final_output_message(
+                json.dumps(
+                    {
+                        "requested_discount_percent": 15,
+                        "requested_term_months": 24,
+                        "pricing_risk": "medium",
+                        "summary": "Discount ask is above target band.",
+                        "recommended_next_step": "Trade discount for a stronger give-get.",
+                        "evidence_files": ["pricing_summary.md", "commercial_notes.md"],
+                    }
+                )
+            )
+        ]
+    )
+    rollout_model = FakeModel()
+    rollout_model.set_next_output(
+        [
+            get_final_output_message(
+                json.dumps(
+                    {
+                        "rollout_risk": "medium",
+                        "summary": "Launch timing is compressed.",
+                        "blockers": [
+                            "Regional admin training is incomplete.",
+                            "SSO migration lands in week 2.",
+                        ],
+                        "recommended_next_step": "Require a phased rollout plan.",
+                        "evidence_files": ["rollout_plan.md", "support_history.md"],
+                    }
+                )
+            )
+        ]
+    )
+    orchestrator_model = FakeModel()
+    orchestrator_model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "review_pricing_packet",
+                    json.dumps({"input": "Review pricing"}),
+                    call_id="outer_pricing",
+                ),
+                get_function_tool_call(
+                    "review_rollout_risk",
+                    json.dumps({"input": "Review rollout"}),
+                    call_id="outer_rollout",
+                ),
+                get_function_tool_call(
+                    "get_discount_approval_rule",
+                    json.dumps({"discount_percent": 15}),
+                    call_id="outer_approval",
+                ),
+            ],
+            [get_text_message("Recommendation complete")],
+        ]
+    )
+
+    @function_tool
+    def get_discount_approval_rule(discount_percent: int) -> str:
+        if discount_percent <= 10:
+            return "AE"
+        if discount_percent <= 15:
+            return "RSD"
+        return "Finance + RSD"
+
+    pricing_agent = Agent(
+        name="pricing",
+        model=pricing_model,
+        output_type=PricingPacketReview,
+    )
+    rollout_agent = Agent(
+        name="rollout",
+        model=rollout_model,
+        output_type=RolloutRiskReview,
+    )
+    orchestrator = Agent(
+        name="orchestrator",
+        model=orchestrator_model,
+        tools=[
+            pricing_agent.as_tool(
+                "review_pricing_packet",
+                "Pricing review",
+                custom_output_extractor=_structured_tool_output_extractor,
+            ),
+            rollout_agent.as_tool(
+                "review_rollout_risk",
+                "Rollout review",
+                custom_output_extractor=_structured_tool_output_extractor,
+            ),
+            get_discount_approval_rule,
+        ],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+
+    result = await Runner.run(orchestrator, "Review the renewal")
+
+    assert result.final_output == "Recommendation complete"
+    outer_second_turn_input = cast(
+        list[dict[str, Any]],
+        orchestrator_model.last_turn_args["input"],
+    )
+    outer_tool_outputs = [
+        item for item in outer_second_turn_input if item.get("type") == "function_call_output"
+    ]
+    assert outer_tool_outputs == [
+        {
+            "call_id": "outer_pricing",
+            "output": json.dumps(
+                {
+                    "evidence_files": ["pricing_summary.md", "commercial_notes.md"],
+                    "pricing_risk": "medium",
+                    "recommended_next_step": "Trade discount for a stronger give-get.",
+                    "requested_discount_percent": 15,
+                    "requested_term_months": 24,
+                    "summary": "Discount ask is above target band.",
+                },
+                sort_keys=True,
+            ),
+            "type": "function_call_output",
+        },
+        {
+            "call_id": "outer_rollout",
+            "output": json.dumps(
+                {
+                    "blockers": [
+                        "Regional admin training is incomplete.",
+                        "SSO migration lands in week 2.",
+                    ],
+                    "evidence_files": ["rollout_plan.md", "support_history.md"],
+                    "recommended_next_step": "Require a phased rollout plan.",
+                    "rollout_risk": "medium",
+                    "summary": "Launch timing is compressed.",
+                },
+                sort_keys=True,
+            ),
+            "type": "function_call_output",
+        },
+        {
+            "call_id": "outer_approval",
+            "output": "RSD",
+            "type": "function_call_output",
+        },
+    ]
+
+
+def test_docker_runner_formats_tool_calls_without_dumping_run_item() -> None:
+    assert (
+        _format_tool_call(
+            {
+                "type": "function_call",
+                "name": "read_file",
+                "arguments": json.dumps({"path": "README.md"}),
+            }
+        )
+        == '[tool call] read_file: {"path": "README.md"}'
+    )
+
+    assert (
+        _format_tool_call(
+            {
+                "type": "shell_call",
+                "action": {
+                    "commands": ["find . -maxdepth 2 -type f", "cat README.md"],
+                },
+            }
+        )
+        == "[tool call] shell: find . -maxdepth 2 -type f; cat README.md"
+    )
+
+
+def test_docker_runner_formats_tool_output_as_readable_block() -> None:
+    assert _format_tool_output("$ ls\nREADME.md\nsrc\n") == "[tool output]\n$ ls\nREADME.md\nsrc\n"
 
 
 @pytest.mark.asyncio

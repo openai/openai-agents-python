@@ -12,7 +12,8 @@ from .manager import FinancialResearchManager
 async def main() -> None:
     query = input_with_fallback(
         "Enter a financial research query: ",
-        "Write up an analysis of Apple Inc.'s most recent quarter.",
+        "Write a short analysis of Apple's long-term revenue drivers and key risks. "
+        "Avoid making claims about unreleased quarterly results.",
     )
     mgr = FinancialResearchManager()
     await mgr.run(query)

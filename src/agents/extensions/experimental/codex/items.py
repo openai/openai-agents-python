@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Union, cast
-
-from typing_extensions import Literal, TypeAlias, TypeGuard
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypeGuard, cast
 
 from .payloads import _DictLike
 
@@ -116,17 +114,17 @@ class _UnknownThreadItem(_DictLike):
     id: str | None = None
 
 
-ThreadItem: TypeAlias = Union[
-    AgentMessageItem,
-    ReasoningItem,
-    CommandExecutionItem,
-    FileChangeItem,
-    McpToolCallItem,
-    WebSearchItem,
-    TodoListItem,
-    ErrorItem,
-    _UnknownThreadItem,
-]
+ThreadItem: TypeAlias = (
+    AgentMessageItem
+    | ReasoningItem
+    | CommandExecutionItem
+    | FileChangeItem
+    | McpToolCallItem
+    | WebSearchItem
+    | TodoListItem
+    | ErrorItem
+    | _UnknownThreadItem
+)
 
 
 def is_agent_message_item(item: ThreadItem) -> TypeGuard[AgentMessageItem]:
@@ -183,7 +181,7 @@ def coerce_thread_item(raw: ThreadItem | Mapping[str, Any]) -> ThreadItem:
             command=cast(str, raw["command"]),
             aggregated_output=cast(str, raw.get("aggregated_output", "")),
             status=cast(CommandExecutionStatus, raw["status"]),
-            exit_code=cast(Optional[int], raw.get("exit_code")),
+            exit_code=cast(int | None, raw.get("exit_code")),
         )
     if item_type == "file_change":
         changes = [_coerce_file_update_change(change) for change in raw.get("changes", [])]
@@ -241,5 +239,5 @@ def coerce_thread_item(raw: ThreadItem | Mapping[str, Any]) -> ThreadItem:
     return _UnknownThreadItem(
         type=cast(str, item_type) if item_type is not None else "unknown",
         payload=dict(raw),
-        id=cast(Optional[str], raw.get("id")),
+        id=cast(str | None, raw.get("id")),
     )

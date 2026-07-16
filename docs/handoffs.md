@@ -61,7 +61,7 @@ handoff_obj = handoff(
 
 ## Handoff inputs
 
-In certain situations, you want the LLM to provide some data when it calls a handoff. For example, imagine a handoff to an "Escalation agent". You might want a reason to be provided, so you can log it.
+In certain situations, you want the LLM to provide some data when it calls a handoff. For example, imagine a handoff to an "Escalation agent". You might want the model to provide a reason so you can log it.
 
 ```python
 from pydantic import BaseModel

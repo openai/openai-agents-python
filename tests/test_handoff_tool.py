@@ -1,5 +1,6 @@
 import inspect
 import json
+import logging
 from typing import Any
 
 import pytest
@@ -79,6 +80,31 @@ async def test_multiple_handoffs_setup():
 
     assert handoff_objects[0].agent_name == agent_1.name
     assert handoff_objects[1].agent_name == agent_2.name
+
+
+def test_default_handoff_tool_name_allows_whitespace_without_warning(
+    caplog: pytest.LogCaptureFixture,
+):
+    agent = Agent(name="Refund agent")
+
+    with caplog.at_level(logging.WARNING):
+        tool_name = Handoff.default_tool_name(agent)
+
+    assert tool_name == "transfer_to_refund_agent"
+    assert not caplog.records
+
+
+def test_default_handoff_tool_name_warns_for_non_whitespace_invalid_characters(
+    caplog: pytest.LogCaptureFixture,
+):
+    agent = Agent(name="Refund/agent")
+
+    with caplog.at_level(logging.WARNING):
+        tool_name = Handoff.default_tool_name(agent)
+
+    assert tool_name == "transfer_to_refund_agent"
+    assert len(caplog.records) == 1
+    assert "contains invalid characters for function calling" in caplog.records[0].message
 
 
 @pytest.mark.asyncio
@@ -202,6 +228,42 @@ async def test_async_on_handoff_without_input_called():
 
 
 @pytest.mark.asyncio
+async def test_callable_class_with_async_dunder_call_is_awaited():
+    """Callable instances whose ``__call__`` is async must be awaited.
+
+    ``inspect.iscoroutinefunction`` returns ``False`` for the instance itself, so the
+    previous implementation invoked it without awaiting and silently dropped the
+    coroutine.
+    """
+
+    class WithInput:
+        def __init__(self) -> None:
+            self.calls: list[Foo] = []
+
+        async def __call__(self, ctx: RunContextWrapper[Any], input: Foo) -> None:
+            self.calls.append(input)
+
+    class NoInput:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, ctx: RunContextWrapper[Any]) -> None:
+            self.calls += 1
+
+    agent = Agent(name="test")
+
+    with_input_cb = WithInput()
+    obj_with = handoff(agent, input_type=Foo, on_handoff=with_input_cb)
+    await obj_with.on_invoke_handoff(RunContextWrapper(agent), Foo(bar="baz").model_dump_json())
+    assert with_input_cb.calls == [Foo(bar="baz")]
+
+    no_input_cb = NoInput()
+    obj_no = handoff(agent, on_handoff=no_input_cb)
+    await obj_no.on_invoke_handoff(RunContextWrapper(agent), "")
+    assert no_input_cb.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_invalid_on_handoff_raises_error():
     was_called = False
 
@@ -214,6 +276,30 @@ async def test_invalid_on_handoff_raises_error():
     with pytest.raises(UserError):
         # Purposely ignoring the type error here to simulate invalid input
         handoff(agent, on_handoff=_on_handoff)  # type: ignore
+
+
+def test_input_type_without_on_handoff_raises_error():
+    """Providing input_type without on_handoff should raise an error."""
+
+    class MyInput(BaseModel):
+        reason: str
+
+    agent = Agent(name="test")
+
+    with pytest.raises(UserError, match="You must provide on_handoff when input_type is provided"):
+        handoff(agent, input_type=MyInput)  # type: ignore
+
+
+def test_non_callable_on_handoff_with_input_type_raises_error():
+    """Providing a non-callable on_handoff with input_type should raise an error."""
+
+    class MyInput(BaseModel):
+        reason: str
+
+    agent = Agent(name="test")
+
+    with pytest.raises(UserError, match="on_handoff must be callable"):
+        handoff(agent, on_handoff="not_a_function", input_type=MyInput)  # type: ignore
 
 
 def test_handoff_input_data():
@@ -382,3 +468,85 @@ async def test_handoff_is_enabled_filtering_integration():
     agent_names = {h.agent_name for h in filtered_handoffs}
     assert agent_names == {"agent_1", "agent_3"}
     assert "agent_2" not in agent_names
+
+
+@pytest.mark.asyncio
+async def test_handoff_is_enabled_sync_callable_false_filters_handoff():
+    target_agent = Agent(name="target")
+    main_agent = Agent(
+        name="main",
+        handoffs=[handoff(target_agent, is_enabled=lambda ctx, agent: False)],
+    )
+
+    filtered_handoffs = await get_handoffs(main_agent, RunContextWrapper(main_agent))
+
+    assert filtered_handoffs == []
+
+
+@pytest.mark.asyncio
+async def test_handoff_direct_sync_is_enabled_callable_filters_handoff():
+    async def invoke_handoff(ctx: RunContextWrapper[Any], input_json: str) -> Agent[Any]:
+        _ = (ctx, input_json)
+        return Agent(name="target")
+
+    handoff_obj = Handoff(
+        tool_name="transfer_to_target",
+        tool_description="Transfer to target.",
+        input_json_schema={},
+        on_invoke_handoff=invoke_handoff,
+        agent_name="target",
+        is_enabled=lambda ctx, agent: False,
+    )
+    main_agent = Agent(name="main", handoffs=[handoff_obj])
+
+    filtered_handoffs = await get_handoffs(main_agent, RunContextWrapper(main_agent))
+
+    assert filtered_handoffs == []
+
+
+class StrictInput(BaseModel):
+    name: str
+    age: int
+
+
+@pytest.mark.asyncio
+async def test_handoff_strict_json_rejects_type_coercion():
+    """With strict_json_schema=True (default), string input for an int field must raise
+    ModelBehaviorError instead of being silently coerced."""
+
+    async def _on_handoff(ctx: RunContextWrapper[Any], input: StrictInput):
+        pass  # pragma: no cover
+
+    agent = Agent(name="test")
+    obj = handoff(agent, input_type=StrictInput, on_handoff=_on_handoff)
+
+    # strict_json_schema defaults to True
+    assert obj.strict_json_schema is True
+
+    # age is a string "25" — strict mode should reject this
+    malformed_json = '{"name": "Alice", "age": "25"}'
+    with pytest.raises(ModelBehaviorError, match="Invalid JSON"):
+        await obj.on_invoke_handoff(RunContextWrapper(agent), malformed_json)
+
+    # Correctly typed input should still be accepted
+    valid_json = '{"name": "Alice", "age": 25}'
+    result = await obj.on_invoke_handoff(RunContextWrapper(agent), valid_json)
+    assert result == agent
+
+
+@pytest.mark.asyncio
+async def test_handoff_lenient_json_allows_type_coercion():
+    """Without strict validation, Pydantic's default lenient mode silently coerces
+    string input for an int field — verifying backward compatibility."""
+    from pydantic import TypeAdapter
+
+    from agents.util._json import validate_json
+
+    type_adapter = TypeAdapter(StrictInput)
+
+    # age is a string "25" — lenient mode should coerce it to int 25
+    malformed_json = '{"name": "Alice", "age": "25"}'
+    result = validate_json(malformed_json, type_adapter, partial=False)
+    assert result.name == "Alice"
+    assert result.age == 25
+    assert isinstance(result.age, int)

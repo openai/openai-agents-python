@@ -10,6 +10,7 @@ from ..exceptions import UserError
 from ..logger import logger
 from ..tracing import Span, SpeechGroupSpanData, speech_group_span, speech_span
 from ..tracing.util import time_iso
+from ..util._error_tracing import get_trace_error
 from .events import (
     VoiceStreamEvent,
     VoiceStreamEventAudio,
@@ -178,7 +179,12 @@ class StreamedAudioResult:
             except Exception as e:
                 tts_span.set_error(
                     {
-                        "message": str(e),
+                        "message": get_trace_error(
+                            trace_include_sensitive_data=(
+                                self._voice_pipeline_config.trace_include_sensitive_data
+                            ),
+                            error_message=str(e),
+                        ),
                         "data": {
                             "text": text
                             if self._voice_pipeline_config.trace_include_sensitive_data
@@ -186,7 +192,7 @@ class StreamedAudioResult:
                         },
                     }
                 )
-                logger.error(f"Error streaming audio: {e}")
+                logger.error("Error streaming audio: %s", e)
 
                 # Signal completion for whole session because of error
                 await local_queue.put(VoiceStreamEventLifecycle(event="session_ended"))
@@ -201,7 +207,7 @@ class StreamedAudioResult:
 
         combined_sentences, self._text_buffer = self.tts_settings.text_splitter(self._text_buffer)
 
-        if len(combined_sentences) >= 20:
+        if combined_sentences:
             local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
             self._ordered_tasks.append(local_queue)
             self._tasks.append(
@@ -220,6 +226,10 @@ class StreamedAudioResult:
                 )
             )
             self._text_buffer = ""
+        elif self._started_processing_turn:
+            local_queue = asyncio.Queue()
+            self._ordered_tasks.append(local_queue)
+            await local_queue.put(VoiceStreamEventLifecycle(event="turn_ended"))
         self._done_processing = True
         if self._dispatcher_task is None:
             self._dispatcher_task = asyncio.create_task(self._dispatch_audio())
@@ -298,7 +308,7 @@ class StreamedAudioResult:
                 break
             if isinstance(event, VoiceStreamEventError):
                 self._stored_exception = event.error
-                logger.error(f"Error processing output: {event.error}")
+                logger.error("Error processing output: %s", event.error)
                 break
             if event is None:
                 break

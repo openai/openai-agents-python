@@ -2,7 +2,7 @@ from ...models.default_models import get_default_model
 from ...models.interface import Model, ModelProvider
 from .litellm_model import LitellmModel
 
-# This is kept for backward compatiblity but using get_default_model() method is recommended.
+# This is kept for backward compatibility but using get_default_model() method is recommended.
 DEFAULT_MODEL: str = "gpt-4.1"
 
 

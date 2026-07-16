@@ -1,14 +1,20 @@
+import httpx
 import litellm
 import pytest
+from httpx import Headers, Response
+from litellm.exceptions import RateLimitError
 from litellm.types.utils import Choices, Message, ModelResponse, Usage
+from openai import APIConnectionError
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.completion_usage import CompletionUsage
 
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.model_settings import ModelSettings
+from agents.models._retry_runtime import provider_managed_retries_disabled
 from agents.models.interface import ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+from agents.retry import ModelRetryAdviceRequest, ModelRetrySettings
 
 
 @pytest.mark.allow_call_model_methods
@@ -214,3 +220,98 @@ async def test_reasoning_effort_falls_back_to_extra_args(monkeypatch):
     assert captured["reasoning_effort"] == "none"
     assert captured["custom_param"] == "custom_value"
     assert settings.extra_args == {"reasoning_effort": "none", "custom_param": "custom_value"}
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_litellm_retry_settings_do_not_leak_and_disable_provider_retries_on_runner_retry(
+    monkeypatch,
+):
+    """Runner retries should disable LiteLLM's own retries without forwarding SDK retry config."""
+
+    captured: dict[str, object] = {}
+
+    async def fake_acompletion(model, messages=None, **kwargs):
+        captured.update(kwargs)
+        msg = Message(role="assistant", content="test response")
+        choice = Choices(index=0, message=msg)
+        return ModelResponse(choices=[choice], usage=Usage(0, 0, 0))
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+
+    settings = ModelSettings(
+        retry=ModelRetrySettings(
+            max_retries=2,
+            backoff={"initial_delay": 0.25, "jitter": False},
+        ),
+        extra_args={"max_retries": 7, "num_retries": 6, "custom_param": "custom_value"},
+    )
+    model = LitellmModel(model="test-model")
+
+    with provider_managed_retries_disabled(True):
+        await model.get_response(
+            system_instructions=None,
+            input="test input",
+            model_settings=settings,
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+        )
+
+    assert settings.retry is not None
+    assert settings.retry.backoff is not None
+    assert captured["custom_param"] == "custom_value"
+    assert captured["max_retries"] == 0
+    assert captured["num_retries"] == 0
+    assert "retry" not in captured
+
+
+def test_litellm_get_retry_advice_uses_response_headers() -> None:
+    """LiteLLM retry advice should expose OpenAI-compatible retry headers."""
+
+    model = LitellmModel(model="test-model")
+    error = RateLimitError(
+        message="rate limited",
+        llm_provider="openai",
+        model="gpt-4o-mini",
+        response=Response(
+            status_code=429,
+            headers=Headers({"x-should-retry": "true", "retry-after-ms": "250"}),
+        ),
+    )
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.retry_after == 0.25
+
+
+def test_litellm_get_retry_advice_keeps_stateful_transport_failures_ambiguous() -> None:
+    model = LitellmModel(model="test-model")
+    error = APIConnectionError(
+        message="connection error",
+        request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+    )
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+            previous_response_id="resp_prev",
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety is None

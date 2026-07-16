@@ -1,17 +1,18 @@
 ---
 name: pr-draft-summary
-description: Create a PR title and draft description after substantive code changes are finished. Trigger when wrapping up a moderate-or-larger change (runtime code, tests, build config, docs with behavior impact) and you need the PR-ready summary block with change summary plus PR draft text.
+description: Create the required PR-ready summary block, branch suggestion, title, and draft description for openai-agents-python. Use before the final response whenever the current task changed runtime code, tests, examples, build/test configuration, or docs with behavior impact, regardless of perceived change size and including local-only or uncommitted work. Skip only for trivial or conversation-only tasks, repo-meta/doc-only tasks without behavior impact, or when the user explicitly says not to include the PR draft block.
 ---
 
 # PR Draft Summary
 
 ## Purpose
-Produce the PR-ready summary required in this repository after substantive code work is complete: a concise summary plus a PR-ready title and draft description that begins with "This pull request <verb> ...". The block should be ready to paste into a PR for openai-agents-python.
+Produce the PR-ready summary required in this repository after eligible code work is complete: a concise summary plus a PR-ready title and draft description that begins with "This pull request <verb> ...". The block should be ready to paste into a PR for openai-agents-python.
 
 ## When to Trigger
-- The task for this repo is finished (or ready for review) and it touched runtime code, tests, examples, docs with behavior impact, or build/test configuration.
-- You are about to send the "work complete" response and need the PR block included.
-- Skip only for trivial or conversation-only tasks where no PR-style summary is expected.
+- Before every final response, check whether the current task changed runtime code (`src/agents/`), tests (`tests/`), examples (`examples/`), build/test configuration, or docs with behavior impact.
+- If it did, run this skill after required verification and before sending the final response. Do not use perceived change size to decide whether to run it.
+- Run it for eligible local-only and uncommitted work even when the user did not ask to create a pull request. Producing this text does not authorize creating a branch, committing, pushing, or opening a pull request.
+- Skip only for trivial or conversation-only tasks, repo-meta/doc-only tasks without behavior impact, or when the user explicitly says not to include the PR draft block.
 
 ## Inputs to Collect Automatically (do not ask the user)
 - Current branch: `git rev-parse --abbrev-ref HEAD`.
@@ -37,7 +38,7 @@ Produce the PR-ready summary required in this repository after substantive code 
 9) Output only the block in "Output Format". Keep any surrounding status note minimal and in English.
 
 ## Output Format
-When closing out a task and the summary block is desired, add this concise Markdown block (English only) after any brief status note. If the user says they do not want it, skip this section.
+When closing out a task, add this concise Markdown block (English only) after any brief status note unless the task falls under the documented skip cases or the user says they do not want it.
 
 ```
 # Pull Request Draft

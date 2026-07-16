@@ -20,6 +20,16 @@ cd examples/realtime/app && uv run python server.py
 
 Then open your browser to: http://localhost:8000
 
+### Debugging Realtime usage
+
+Set `LOG_LEVEL=DEBUG` to log the raw `response.done` usage, the typed per-response usage with modality details, and the cumulative session usage:
+
+```bash
+cd examples/realtime/app && LOG_LEVEL=DEBUG uv run python server.py
+```
+
+The debug logs include concise summaries for server, model, session, history, tool, handoff, error, and usage events. Audio frames and high-volume delta events are omitted, and transcript content is not logged. Uvicorn and WebSocket protocol logging remain at INFO so `LOG_LEVEL=DEBUG` does not dump wire payloads.
+
 ## Customization
 
 To use the same UI with your own agents, edit `agent.py` and ensure get_starting_agent() returns the right starting agent for your use case.
@@ -42,10 +52,7 @@ To use the same UI with your own agents, edit `agent.py` and ensure get_starting
 
 -   **Backend**: FastAPI server with WebSocket connections for real-time communication
 -   **Session Management**: Each connection gets a unique session with the OpenAI Realtime API
--   **Image Inputs**: The UI uploads images and the server forwards a
-    `conversation.item.create` event with `input_image` (plus optional `input_text`),
-    followed by `response.create` to start the model response. The messages pane
-    renders image bubbles for `input_image` content.
+- **Image Inputs**: The UI uploads images and the server forwards a `conversation.item.create` event with `input_image` (plus optional `input_text`), followed by `response.create` to start the model response. The messages pane renders image bubbles for `input_image` content.
 -   **Audio Processing**: 24kHz mono audio capture and playback
 -   **Event Handling**: Full event stream processing with transcript generation
 -   **Frontend**: Vanilla JavaScript with clean, responsive CSS

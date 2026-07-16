@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from collections.abc import Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -13,7 +15,7 @@ from openai.types.responses.response_reasoning_item_param import (
     ResponseReasoningItemParam,
     Summary,
 )
-from sqlalchemy import select, text, update
+from sqlalchemy import insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.sql import Select
 
@@ -104,6 +106,51 @@ async def test_sqlalchemy_session_direct_ops(agent: Agent):
     assert len(retrieved_after_clear) == 0
 
 
+async def test_sqlalchemy_session_defaults_to_escaped_non_ascii_storage():
+    """Default storage keeps the historical escaped non-ASCII JSON representation."""
+    session = SQLAlchemySession.from_url("default_ascii_storage", url=DB_URL, create_tables=True)
+    item: TResponseInputItem = {"role": "user", "content": "café"}
+
+    await session.add_items([item])
+
+    async with session._session_factory() as sess:
+        rows = await sess.execute(
+            select(session._messages.c.message_data).where(
+                session._messages.c.session_id == session.session_id
+            )
+        )
+        stored = rows.scalar_one()
+
+    assert "\\u00e9" in stored
+    assert "café" not in stored
+    assert await session.get_items() == [item]
+
+
+async def test_sqlalchemy_session_can_store_non_ascii_without_escaping():
+    """ensure_ascii=False stores multilingual content readably while preserving round-trip data."""
+    session = SQLAlchemySession.from_url(
+        "non_ascii_storage",
+        url=DB_URL,
+        create_tables=True,
+        ensure_ascii=False,
+    )
+    item: TResponseInputItem = {"role": "user", "content": "café"}
+
+    await session.add_items([item])
+
+    async with session._session_factory() as sess:
+        rows = await sess.execute(
+            select(session._messages.c.message_data).where(
+                session._messages.c.session_id == session.session_id
+            )
+        )
+        stored = rows.scalar_one()
+
+    assert "café" in stored
+    assert "\\u00e9" not in stored
+    assert await session.get_items() == [item]
+
+
 async def test_runner_integration(agent: Agent):
     """Test that SQLAlchemySession works correctly with the agent Runner."""
     session_id = "runner_integration_test"
@@ -189,6 +236,43 @@ async def test_pop_from_empty_session():
     assert popped is None
 
 
+async def test_pop_item_skips_corrupt_most_recent():
+    """pop_item skips corrupt newest rows and returns the next valid item."""
+    session = SQLAlchemySession.from_url("pop_corrupt", url=DB_URL, create_tables=True)
+
+    valid_item: TResponseInputItem = {"role": "user", "content": "valid"}
+    await session.add_items([valid_item])
+
+    await session._ensure_tables()
+    async with session._session_factory() as sess:
+        async with sess.begin():
+            await sess.execute(
+                insert(session._messages).values(
+                    {"session_id": session.session_id, "message_data": "not valid json {{{"}
+                )
+            )
+
+    assert await session.pop_item() == valid_item
+    assert await session.get_items() == []
+
+
+async def test_pop_item_returns_none_after_dropping_only_corrupt_rows():
+    """pop_item removes corrupt rows and returns None when no valid items remain."""
+    session = SQLAlchemySession.from_url("pop_only_corrupt", url=DB_URL, create_tables=True)
+
+    await session._ensure_tables()
+    async with session._session_factory() as sess:
+        async with sess.begin():
+            await sess.execute(
+                insert(session._messages).values(
+                    {"session_id": session.session_id, "message_data": "not valid json {{{"}
+                )
+            )
+
+    assert await session.pop_item() is None
+    assert await session.get_items() == []
+
+
 async def test_add_empty_items_list():
     """Test that adding an empty list of items is a no-op."""
     session_id = "add_empty_test"
@@ -201,6 +285,300 @@ async def test_add_empty_items_list():
 
     items_after_add = await session.get_items()
     assert len(items_after_add) == 0
+
+
+async def test_add_items_concurrent_first_access_with_create_tables(tmp_path):
+    """Concurrent first writes should not race table creation or drop items."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'concurrent_first_access.db'}"
+    session = SQLAlchemySession.from_url(
+        "concurrent_first_access",
+        url=db_url,
+        create_tables=True,
+    )
+    submitted = [f"msg-{i}" for i in range(25)]
+
+    async def worker(content: str) -> None:
+        await session.add_items([{"role": "user", "content": content}])
+
+    results = await asyncio.gather(
+        *(worker(content) for content in submitted),
+        return_exceptions=True,
+    )
+
+    assert [result for result in results if isinstance(result, Exception)] == []
+
+    stored = await session.get_items()
+    assert len(stored) == len(submitted)
+    stored_contents: list[str] = []
+    for item in stored:
+        content = item.get("content")
+        assert isinstance(content, str)
+        stored_contents.append(content)
+    assert sorted(stored_contents) == sorted(submitted)
+
+
+async def test_add_items_concurrent_first_write_after_tables_exist(tmp_path):
+    """Concurrent first writes should not race parent session creation."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'concurrent_first_write.db'}"
+    setup_session = SQLAlchemySession.from_url(
+        "concurrent_first_write",
+        url=db_url,
+        create_tables=True,
+    )
+    await setup_session.get_items()
+
+    session = SQLAlchemySession.from_url(
+        "concurrent_first_write",
+        url=db_url,
+        create_tables=False,
+    )
+    submitted = [f"msg-{i}" for i in range(25)]
+
+    async def worker(content: str) -> None:
+        await session.add_items([{"role": "user", "content": content}])
+
+    results = await asyncio.gather(
+        *(worker(content) for content in submitted),
+        return_exceptions=True,
+    )
+
+    assert [result for result in results if isinstance(result, Exception)] == []
+
+    stored = await session.get_items()
+    assert len(stored) == len(submitted)
+    stored_contents: list[str] = []
+    for item in stored:
+        content = item.get("content")
+        assert isinstance(content, str)
+        stored_contents.append(content)
+    assert sorted(stored_contents) == sorted(submitted)
+
+
+async def test_add_items_waits_for_transient_sqlite_write_lock(tmp_path):
+    """SQLite writes should wait briefly for a transient lock instead of failing."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'sqlite_write_lock_retry.db'}"
+    session = SQLAlchemySession.from_url(
+        "sqlite_write_lock_retry",
+        url=db_url,
+        create_tables=True,
+    )
+    await session.get_items()
+
+    async with session.engine.connect() as conn:
+        await conn.execute(text("BEGIN IMMEDIATE"))
+        blocked_write = asyncio.create_task(
+            session.add_items([{"role": "user", "content": "after-lock"}])
+        )
+        await asyncio.sleep(0.1)
+        await conn.rollback()
+
+    await asyncio.wait_for(blocked_write, timeout=5)
+
+    stored = await session.get_items()
+    assert len(stored) == 1
+    assert stored[0].get("content") == "after-lock"
+
+
+async def test_add_items_concurrent_first_access_across_sessions_with_shared_engine(tmp_path):
+    """Concurrent first writes should not race table creation across session instances."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'concurrent_shared_engine.db'}"
+    engine = create_async_engine(db_url)
+    try:
+        session_a = SQLAlchemySession("shared_engine_a", engine=engine, create_tables=True)
+        session_b = SQLAlchemySession("shared_engine_b", engine=engine, create_tables=True)
+
+        results = await asyncio.gather(
+            session_a.add_items([{"role": "user", "content": "one"}]),
+            session_b.add_items([{"role": "user", "content": "two"}]),
+            return_exceptions=True,
+        )
+
+        assert [result for result in results if isinstance(result, Exception)] == []
+
+        stored_a = await session_a.get_items()
+        assert len(stored_a) == 1
+        assert stored_a[0].get("content") == "one"
+
+        stored_b = await session_b.get_items()
+        assert len(stored_b) == 1
+        assert stored_b[0].get("content") == "two"
+    finally:
+        await engine.dispose()
+
+
+async def test_add_items_concurrent_first_access_across_from_url_sessions(tmp_path):
+    """Concurrent first writes should not race table creation across from_url sessions."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'concurrent_from_url.db'}"
+    session_a = SQLAlchemySession.from_url("from_url_a", url=db_url, create_tables=True)
+    session_b = SQLAlchemySession.from_url("from_url_b", url=db_url, create_tables=True)
+    try:
+        results = await asyncio.gather(
+            session_a.add_items([{"role": "user", "content": "one"}]),
+            session_b.add_items([{"role": "user", "content": "two"}]),
+            return_exceptions=True,
+        )
+
+        assert [result for result in results if isinstance(result, Exception)] == []
+
+        stored_a = await session_a.get_items()
+        assert len(stored_a) == 1
+        assert stored_a[0].get("content") == "one"
+
+        stored_b = await session_b.get_items()
+        assert len(stored_b) == 1
+        assert stored_b[0].get("content") == "two"
+    finally:
+        await session_a.engine.dispose()
+        await session_b.engine.dispose()
+
+
+async def test_add_items_concurrent_first_access_across_from_url_sessions_cross_loop(tmp_path):
+    """Concurrent first writes should not race or hang across event loops."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'concurrent_from_url_cross_loop.db'}"
+    barrier = threading.Barrier(2)
+    results: list[tuple[str, str, Any]] = []
+    results_lock = threading.Lock()
+
+    def worker(session_id: str, content: str) -> None:
+        async def run() -> tuple[str, Any]:
+            session = SQLAlchemySession.from_url(session_id, url=db_url, create_tables=True)
+            barrier.wait()
+            try:
+                await asyncio.wait_for(
+                    session.add_items([{"role": "user", "content": content}]),
+                    timeout=5,
+                )
+                stored = await session.get_items()
+                return ("ok", stored)
+            finally:
+                await session.engine.dispose()
+
+        try:
+            status, payload = asyncio.run(run())
+        except Exception as exc:
+            status, payload = type(exc).__name__, str(exc)
+
+        with results_lock:
+            results.append((session_id, status, payload))
+
+    threads = [
+        threading.Thread(target=worker, args=("from_url_cross_loop_a", "one")),
+        threading.Thread(target=worker, args=("from_url_cross_loop_b", "two")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        await asyncio.to_thread(thread.join)
+
+    assert len(results) == 2
+    assert [status for _, status, _ in results] == ["ok", "ok"]
+
+    stored_by_session = {
+        session_id: cast(list[TResponseInputItem], payload) for session_id, _, payload in results
+    }
+    assert stored_by_session["from_url_cross_loop_a"][0].get("content") == "one"
+    assert stored_by_session["from_url_cross_loop_b"][0].get("content") == "two"
+
+
+async def test_add_items_concurrent_first_access_with_shared_session_cross_loop(tmp_path):
+    """A shared session instance should not hang when used from two event loops."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'shared_session_cross_loop.db'}"
+    session = SQLAlchemySession.from_url(
+        "shared_session_cross_loop",
+        url=db_url,
+        create_tables=True,
+    )
+    barrier = threading.Barrier(2)
+    results: list[tuple[str, str]] = []
+    results_lock = threading.Lock()
+
+    def worker(content: str) -> None:
+        async def run() -> None:
+            barrier.wait()
+            await asyncio.wait_for(
+                session.add_items([{"role": "user", "content": content}]),
+                timeout=5,
+            )
+
+        try:
+            asyncio.run(run())
+            status = "ok"
+        except Exception as exc:
+            status = type(exc).__name__
+
+        with results_lock:
+            results.append((content, status))
+
+    threads = [
+        threading.Thread(target=worker, args=("one",)),
+        threading.Thread(target=worker, args=("two",)),
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            await asyncio.to_thread(thread.join)
+
+        assert sorted(results) == [("one", "ok"), ("two", "ok")]
+
+        stored = await session.get_items()
+        stored_contents: list[str] = []
+        for item in stored:
+            content = item.get("content")
+            assert isinstance(content, str)
+            stored_contents.append(content)
+        assert sorted(stored_contents) == ["one", "two"]
+    finally:
+        await session.engine.dispose()
+
+
+async def test_add_items_cancelled_waiter_does_not_strand_table_init_lock(tmp_path):
+    """Cancelling a waiting initializer must not leave the shared init lock acquired."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'cancelled_table_init_waiter.db'}"
+    holder = SQLAlchemySession.from_url("holder", url=db_url, create_tables=True)
+    waiter = SQLAlchemySession.from_url("waiter", url=db_url, create_tables=True)
+    follower = SQLAlchemySession.from_url("follower", url=db_url, create_tables=True)
+
+    assert holder._init_lock is waiter._init_lock
+    assert waiter._init_lock is follower._init_lock
+    assert holder._init_lock is not None
+
+    acquired = holder._init_lock.acquire(blocking=False)
+    assert acquired
+
+    try:
+        blocked = asyncio.create_task(waiter.add_items([{"role": "user", "content": "waiter"}]))
+        await asyncio.sleep(0.05)
+        blocked.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await blocked
+    finally:
+        holder._init_lock.release()
+
+    try:
+        await asyncio.wait_for(
+            follower.add_items([{"role": "user", "content": "follower"}]),
+            timeout=2,
+        )
+        stored = await follower.get_items()
+        assert len(stored) == 1
+        assert stored[0].get("content") == "follower"
+    finally:
+        await holder.engine.dispose()
+        await waiter.engine.dispose()
+        await follower.engine.dispose()
+
+
+async def test_create_tables_false_does_not_allocate_shared_init_lock(tmp_path):
+    """Sessions that skip auto-create should not populate the shared lock map."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'no_create_tables_lock.db'}"
+    before = len(SQLAlchemySession._table_init_locks)
+    session = SQLAlchemySession.from_url("no_create_tables_lock", url=db_url, create_tables=False)
+    try:
+        assert session._init_lock is None
+        assert len(SQLAlchemySession._table_init_locks) == before
+    finally:
+        await session.engine.dispose()
 
 
 async def test_get_items_same_timestamp_consistent_order():

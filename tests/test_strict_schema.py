@@ -9,6 +9,25 @@ def test_empty_schema_has_additional_properties_false():
     assert strict_schema["additionalProperties"] is False
 
 
+def test_empty_schema_returns_fresh_copy():
+    first = ensure_strict_json_schema({})
+    first["additionalProperties"] = True
+    first["properties"]["polluted"] = {"type": "string"}
+    first["required"].append("polluted")
+
+    second = ensure_strict_json_schema({})
+
+    assert second is not first
+    assert second == {
+        "additionalProperties": False,
+        "type": "object",
+        "properties": {},
+        "required": [],
+    }
+    assert second["properties"] is not first["properties"]
+    assert second["required"] is not first["required"]
+
+
 def test_non_dict_schema_errors():
     with pytest.raises(TypeError):
         ensure_strict_json_schema([])  # type: ignore
@@ -123,4 +142,48 @@ def test_invalid_ref_format():
     # A $ref that does not start with "#/" should trigger a ValueError when resolved.
     schema = {"type": "object", "properties": {"a": {"$ref": "invalid", "description": "desc"}}}
     with pytest.raises(ValueError):
+        ensure_strict_json_schema(schema)
+
+
+def test_chained_ref_with_sibling_keys_is_resolved():
+    # When a $ref points to a definition that is itself just a $ref (a chained alias),
+    # and the original $ref has sibling keys (like "description"), the chain must be
+    # fully resolved instead of silently dropping the inner $ref and losing the type.
+    schema = {
+        "$defs": {
+            "Inner": {"type": "string"},
+            "Outer": {"$ref": "#/$defs/Inner"},
+        },
+        "type": "object",
+        "properties": {"a": {"$ref": "#/$defs/Outer", "description": "desc"}},
+    }
+    result = ensure_strict_json_schema(schema)
+    a_schema = result["properties"]["a"]
+    assert a_schema["type"] == "string"
+    assert a_schema["description"] == "desc"
+    assert "$ref" not in a_schema
+
+
+def test_ref_expansion_bomb_is_rejected():
+    # A $ref ladder where each level references the next twice expands exponentially
+    # (2**N nodes) when inlined. Strict conversion must reject it with a UserError
+    # instead of exhausting CPU and memory.
+    depth = 30
+    defs: dict[str, object] = {
+        f"L{i}": {
+            "type": "object",
+            "properties": {
+                "a": {"$ref": f"#/$defs/L{i + 1}", "title": "t"},
+                "b": {"$ref": f"#/$defs/L{i + 1}", "title": "t"},
+            },
+        }
+        for i in range(depth)
+    }
+    defs[f"L{depth}"] = {"type": "string"}
+    schema = {
+        "$defs": defs,
+        "type": "object",
+        "properties": {"root": {"$ref": "#/$defs/L0", "title": "t"}},
+    }
+    with pytest.raises(UserError):
         ensure_strict_json_schema(schema)

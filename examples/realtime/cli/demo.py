@@ -225,6 +225,7 @@ class NoUIDemo:
             model_config: RealtimeModelConfig = {
                 "playback_tracker": self.playback_tracker,
                 "initial_model_settings": {
+                    "model_name": "gpt-realtime-2.1",
                     "turn_detection": {
                         "type": "semantic_vad",
                         "interrupt_response": True,

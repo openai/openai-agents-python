@@ -38,8 +38,7 @@ The Agents SDK delivers a focused set of Python primitives—agents, tools, guar
 - [Realtime guide](https://openai.github.io/openai-agents-python/realtime/guide/): Deep dive into realtime session lifecycle, structured input, approvals, interruptions, and low-level transport control.
 
 ## Models and Provider Integrations
-- [Model catalog](https://openai.github.io/openai-agents-python/models/): Lists supported OpenAI and partner models with guidance on selecting capabilities for different workloads.
-- [LiteLLM integration](https://openai.github.io/openai-agents-python/models/litellm/): Configure LiteLLM as a provider, map model aliases, and route requests across heterogeneous backends.
+- [Model catalog](https://openai.github.io/openai-agents-python/models/): Covers OpenAI model selection, non-OpenAI provider patterns, websocket transport, and third-party adapter guidance in one place.
 
 ## API Reference – Agents SDK Core
 - [API index](https://openai.github.io/openai-agents-python/ref/index/): Directory of all documented modules, classes, and functions in the SDK.
@@ -104,7 +103,7 @@ The Agents SDK delivers a focused set of Python primitives—agents, tools, guar
 ## API Reference – Extensions
 - [Handoff filters extension](https://openai.github.io/openai-agents-python/ref/extensions/handoff_filters/): Build filters that decide whether to trigger a handoff.
 - [Handoff prompt extension](https://openai.github.io/openai-agents-python/ref/extensions/handoff_prompt/): Customize prompt templates used when transferring control.
-- [LiteLLM extension](https://openai.github.io/openai-agents-python/ref/extensions/litellm/): Adapter for using LiteLLM-managed providers inside the SDK.
+- [Third-party adapters API reference](https://openai.github.io/openai-agents-python/ref/extensions/): API reference entry point for Any-LLM and LiteLLM model adapters and providers.
 - [SQLAlchemy session memory](https://openai.github.io/openai-agents-python/ref/extensions/memory/sqlalchemy_session/): Persist agent session history to SQL databases.
 
 ## Optional

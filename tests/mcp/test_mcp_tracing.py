@@ -1,7 +1,7 @@
 import pytest
 from inline_snapshot import snapshot
 
-from agents import Agent, Runner
+from agents import Agent, RunConfig, Runner
 
 from ..fake_model import FakeModel
 from ..test_responses import get_function_tool, get_function_tool_call, get_text_message
@@ -207,6 +207,64 @@ async def test_mcp_tracing():
                                     "server": "fake_mcp_server",
                                     "result": ["test_tool_1", "test_tool_2", "test_tool_3"],
                                 },
+                            },
+                        ],
+                    },
+                ],
+            }
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_tracing_redacts_output_when_sensitive_data_disabled():
+    model = FakeModel()
+    server = FakeMCPServer()
+    server.add_tool("test_tool_1", {})
+    agent = Agent(name="test", model=model, mcp_servers=[server])
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("test_tool_1", "")],
+            [get_text_message("done")],
+        ]
+    )
+
+    await Runner.run(
+        agent,
+        input="redaction_test",
+        run_config=RunConfig(trace_include_sensitive_data=False),
+    )
+
+    spans = fetch_normalized_spans()
+    assert spans == snapshot(
+        [
+            {
+                "workflow_name": "Agent workflow",
+                "children": [
+                    {
+                        "type": "mcp_tools",
+                        "data": {"server": "fake_mcp_server", "result": ["test_tool_1"]},
+                    },
+                    {
+                        "type": "agent",
+                        "data": {
+                            "name": "test",
+                            "handoffs": [],
+                            "tools": ["test_tool_1"],
+                            "output_type": "str",
+                        },
+                        "children": [
+                            {
+                                "type": "function",
+                                "data": {
+                                    "name": "test_tool_1",
+                                    "mcp_data": {"server": "fake_mcp_server"},
+                                },
+                            },
+                            {
+                                "type": "mcp_tools",
+                                "data": {"server": "fake_mcp_server", "result": ["test_tool_1"]},
                             },
                         ],
                     },

@@ -9,8 +9,17 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
+from agents import trace
+from tests.testing_processor import fetch_span_errors
+
 try:
-    from agents.voice import OpenAISTTTranscriptionSession, StreamedAudioInput, STTModelSettings
+    from agents.voice import (
+        AudioInput,
+        OpenAISTTModel,
+        OpenAISTTTranscriptionSession,
+        StreamedAudioInput,
+        STTModelSettings,
+    )
     from agents.voice.exceptions import STTWebsocketConnectionError
     from agents.voice.models.openai_stt import EVENT_INACTIVITY_TIMEOUT
 
@@ -43,6 +52,34 @@ def fake_time(increment: int):
 
 
 # ===== Tests =====
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("trace_include_sensitive_data", "expected_error"),
+    [
+        (False, "Error details are redacted."),
+        (True, "sensitive-stt-error"),
+    ],
+)
+async def test_transcribe_error_respects_sensitive_data_setting(
+    trace_include_sensitive_data: bool,
+    expected_error: str,
+) -> None:
+    client = AsyncMock()
+    client.audio.transcriptions.create = AsyncMock(side_effect=RuntimeError("sensitive-stt-error"))
+    model = OpenAISTTModel(model="whisper-1", openai_client=client)
+
+    with trace("stt-error"):
+        with pytest.raises(RuntimeError, match="sensitive-stt-error"):
+            await model.transcribe(
+                AudioInput(buffer=np.zeros(2, dtype=np.int16)),
+                STTModelSettings(),
+                trace_include_sensitive_data=trace_include_sensitive_data,
+                trace_include_sensitive_audio_data=False,
+            )
+
+    assert fetch_span_errors("transcription") == [{"message": expected_error, "data": {}}]
+
+
 @pytest.mark.asyncio
 async def test_non_json_messages_should_crash():
     """This tests that non-JSON messages will raise an exception"""

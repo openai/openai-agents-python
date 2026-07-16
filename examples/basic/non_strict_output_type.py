@@ -3,7 +3,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from agents import Agent, AgentOutputSchema, AgentOutputSchemaBase, Runner
+from agents import Agent, AgentOutputSchema, AgentOutputSchemaBase, ModelBehaviorError, Runner
 
 """This example demonstrates how to use an output type that is not in strict mode. Strict mode
 allows us to guarantee valid JSON output, but some schemas are not strict-compatible.
@@ -68,8 +68,11 @@ async def main():
     # In some cases, it will raise an error - the schema isn't strict, so the model may
     # produce an invalid JSON object.
     agent.output_type = AgentOutputSchema(OutputType, strict_json_schema=False)
-    result = await Runner.run(agent, input)
-    print(result.final_output)
+    try:
+        result = await Runner.run(agent, input)
+        print(result.final_output)
+    except ModelBehaviorError as e:
+        print(f"Non-strict output validation failed (expected possibility): {e}")
 
     # Finally, let's try a custom output type.
     agent.output_type = CustomOutputSchema()

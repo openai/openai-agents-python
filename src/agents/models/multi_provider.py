@@ -6,7 +6,9 @@ from openai import AsyncOpenAI
 
 from ..exceptions import UserError
 from .interface import Model, ModelProvider
+from .openai_agent_registration import OpenAIAgentRegistrationConfig
 from .openai_provider import OpenAIProvider
+from .openai_responses import OpenAIResponsesWebSocketOptions
 
 MultiProviderOpenAIPrefixMode = Literal["alias", "model_id"]
 MultiProviderUnknownPrefixMode = Literal["error", "model_id"]
@@ -61,6 +63,7 @@ class MultiProvider(ModelProvider):
     mapping is:
     - "openai/" prefix or no prefix -> OpenAIProvider. e.g. "openai/gpt-4.1", "gpt-4.1"
     - "litellm/" prefix -> LitellmProvider. e.g. "litellm/openai/gpt-4.1"
+    - "any-llm/" prefix -> AnyLLMProvider. e.g. "any-llm/openrouter/openai/gpt-4.1"
 
     You can override or customize this mapping. The ``openai`` prefix is ambiguous for some
     OpenAI-compatible backends because a string like ``openai/gpt-4.1`` could mean either "route
@@ -80,9 +83,13 @@ class MultiProvider(ModelProvider):
         openai_project: str | None = None,
         openai_use_responses: bool | None = None,
         openai_use_responses_websocket: bool | None = None,
+        openai_strict_feature_validation: bool = False,
         openai_websocket_base_url: str | None = None,
         openai_prefix_mode: MultiProviderOpenAIPrefixMode = "alias",
         unknown_prefix_mode: MultiProviderUnknownPrefixMode = "error",
+        openai_agent_registration: OpenAIAgentRegistrationConfig | None = None,
+        openai_responses_websocket_options: OpenAIResponsesWebSocketOptions | None = None,
+        openai_buffer_streamed_tool_calls: bool = False,
     ) -> None:
         """Create a new OpenAI provider.
 
@@ -101,6 +108,10 @@ class MultiProvider(ModelProvider):
             openai_use_responses: Whether to use the OpenAI responses API.
             openai_use_responses_websocket: Whether to use websocket transport for the OpenAI
                 responses API.
+            openai_strict_feature_validation: Whether OpenAI Chat Completions models should raise
+                a UserError when callers pass Responses-only features such as previous_response_id,
+                conversation_id, prompt, or non-text-only tool outputs. Defaults to False, which
+                preserves the default compatibility behavior.
             openai_websocket_base_url: The websocket base URL to use for the OpenAI provider.
                 If not provided, the provider will use `OPENAI_WEBSOCKET_BASE_URL` when set.
             openai_prefix_mode: Controls how ``openai/...`` model strings are interpreted.
@@ -112,6 +123,13 @@ class MultiProvider(ModelProvider):
                 behavior and raises ``UserError``. ``"model_id"`` passes the full string through to
                 the OpenAI provider so OpenAI-compatible endpoints can receive namespaced model IDs
                 such as ``openrouter/openai/gpt-4o``.
+            openai_agent_registration: Optional agent registration configuration for the OpenAI
+                provider.
+            openai_responses_websocket_options: Optional low-level websocket keepalive options for
+                the OpenAI Responses websocket transport.
+            openai_buffer_streamed_tool_calls: Whether OpenAI Chat Completions models should buffer
+                streamed function tool-call deltas and emit them to the SDK only after the provider
+                stream finishes.
         """
         self.provider_map = provider_map
         self.openai_provider = OpenAIProvider(
@@ -123,6 +141,10 @@ class MultiProvider(ModelProvider):
             project=openai_project,
             use_responses=openai_use_responses,
             use_responses_websocket=openai_use_responses_websocket,
+            strict_feature_validation=openai_strict_feature_validation,
+            agent_registration=openai_agent_registration,
+            responses_websocket_options=openai_responses_websocket_options,
+            buffer_streamed_tool_calls=openai_buffer_streamed_tool_calls,
         )
         self._openai_prefix_mode = self._validate_openai_prefix_mode(openai_prefix_mode)
         self._unknown_prefix_mode = self._validate_unknown_prefix_mode(unknown_prefix_mode)
@@ -143,6 +165,10 @@ class MultiProvider(ModelProvider):
             from ..extensions.models.litellm_provider import LitellmProvider
 
             return LitellmProvider()
+        elif prefix == "any-llm":
+            from ..extensions.models.any_llm_provider import AnyLLMProvider
+
+            return AnyLLMProvider()
         else:
             raise UserError(f"Unknown prefix: {prefix}")
 
@@ -181,7 +207,7 @@ class MultiProvider(ModelProvider):
         if self.provider_map and (provider := self.provider_map.get_provider(prefix)):
             return provider, stripped_model_name
 
-        if prefix == "litellm":
+        if prefix in {"litellm", "any-llm"}:
             return self._get_fallback_provider(prefix), stripped_model_name
 
         if prefix == "openai":

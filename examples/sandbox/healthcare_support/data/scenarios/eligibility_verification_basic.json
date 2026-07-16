@@ -1,0 +1,30 @@
+{
+  "scenario_id": "eligibility_verification_basic",
+  "description": "Basic eligibility verification call with clear Blue Cross identifiers.",
+  "transcript": "Hi, this is Maya Thompson. I have an MRI next week and I want to confirm if it is covered.\nI have Blue Cross and my member ID is BCX-4439201. My date of birth is 02/14/1985.\nCan you tell me what my benefits look like and what I should do next?",
+  "patient_metadata": {
+    "patient_id": "PAT-1001"
+  },
+  "followup_qa": {
+    "member ID": "BCX-4439201",
+    "date of birth": "02/14/1985"
+  },
+  "expected": {
+    "intent": "eligibility_verification",
+    "required_entities": {
+      "payer": "Blue Cross",
+      "member_id": "BCX-4439201"
+    },
+    "required_tool_calls": [
+      "insurance_eligibility_lookup"
+    ],
+    "required_resolution_elements": [
+      "eligibility verified",
+      "recommended next step"
+    ],
+    "expected_payer": "Blue Cross"
+  },
+  "gold": {
+    "expected_next_step": "Confirm prior auth requirement for MRI and proceed with scheduling."
+  }
+}

@@ -15,8 +15,6 @@ will use the agent returned from get_starting_agent() as the starting agent."""
     name_override="faq_lookup_tool", description_override="Lookup frequently asked questions."
 )
 async def faq_lookup_tool(question: str) -> str:
-    print("faq_lookup_tool called with question:", question)
-
     # Simulate a slow API call
     await asyncio.sleep(3)
 
@@ -90,11 +88,19 @@ triage_agent = RealtimeAgent(
         f"{RECOMMENDED_PROMPT_PREFIX} "
         "You are a helpful triaging agent. You can use your tools to delegate questions to other appropriate agents."
     ),
-    handoffs=[faq_agent, realtime_handoff(seat_booking_agent)],
+    tools=[get_weather],
+    handoffs=[
+        realtime_handoff(faq_agent, tool_name_override="transfer_to_faq_agent"),
+        realtime_handoff(seat_booking_agent, tool_name_override="transfer_to_seat_booking_agent"),
+    ],
 )
 
-faq_agent.handoffs.append(triage_agent)
-seat_booking_agent.handoffs.append(triage_agent)
+faq_agent.handoffs.append(
+    realtime_handoff(triage_agent, tool_name_override="transfer_to_triage_agent")
+)
+seat_booking_agent.handoffs.append(
+    realtime_handoff(triage_agent, tool_name_override="transfer_to_triage_agent")
+)
 
 
 def get_starting_agent() -> RealtimeAgent:

@@ -29,6 +29,16 @@ def test_coerce_shell_call_requires_commands() -> None:
         run_loop.coerce_shell_call(tool_call)
 
 
+@pytest.mark.parametrize("commands", ["echo hi", b"echo hi", bytearray(b"echo hi")])
+def test_coerce_shell_call_rejects_string_like_commands(commands: object) -> None:
+    tool_call = {"call_id": "shell-3", "action": {"commands": commands}}
+    with pytest.raises(
+        ModelBehaviorError,
+        match="Shell call action commands must be a sequence of command strings.",
+    ):
+        run_loop.coerce_shell_call(tool_call)
+
+
 def test_normalize_shell_output_handles_timeout() -> None:
     entry = {
         "stdout": "",

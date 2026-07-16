@@ -9,9 +9,12 @@ In production, you may want to preserve existing conversation history.
 """
 
 import asyncio
+import os
 
 from agents import Agent, Runner
 from agents.extensions.memory import RedisSession
+
+DEFAULT_REDIS_URL = "redis://localhost:6379/0"
 
 
 async def main():
@@ -22,8 +25,9 @@ async def main():
     )
 
     print("=== Redis Session Example ===")
-    print("This example requires Redis to be running on localhost:6379")
-    print("Start Redis with: redis-server")
+    redis_url = os.environ.get("REDIS_URL", DEFAULT_REDIS_URL)
+    print(f"This example uses Redis at {redis_url}")
+    print("Set REDIS_URL to use a different Redis server.")
     print()
 
     # Create a Redis session instance
@@ -31,7 +35,7 @@ async def main():
     try:
         session = RedisSession.from_url(
             session_id,
-            url="redis://localhost:6379/0",  # Use database 0
+            url=redis_url,
         )
 
         # Test Redis connectivity
@@ -99,7 +103,7 @@ async def main():
         print("\n=== Session Isolation Demo ===")
         new_session = RedisSession.from_url(
             "different_conversation_456",
-            url="redis://localhost:6379/0",
+            url=redis_url,
         )
 
         print("Creating a new session with different ID...")
@@ -125,7 +129,7 @@ async def main():
         print("\n=== TTL Demo ===")
         ttl_session = RedisSession.from_url(
             "ttl_demo_session",
-            url="redis://localhost:6379/0",
+            url=redis_url,
             ttl=3600,  # 1 hour TTL
         )
 
@@ -143,7 +147,7 @@ async def main():
 
     except Exception as e:
         print(f"Error: {e}")
-        print("Make sure Redis is running on localhost:6379")
+        print(f"Make sure Redis is running and reachable at {redis_url}")
 
 
 async def demonstrate_advanced_features():
@@ -153,7 +157,7 @@ async def demonstrate_advanced_features():
     # Custom key prefix for multi-tenancy
     tenant_session = RedisSession.from_url(
         "user_123",
-        url="redis://localhost:6379/0",
+        url=os.environ.get("REDIS_URL", DEFAULT_REDIS_URL),
         key_prefix="tenant_abc:sessions",  # Custom prefix for isolation
     )
 

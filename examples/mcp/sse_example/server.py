@@ -1,9 +1,13 @@
+import os
 import random
 
 from mcp.server.fastmcp import FastMCP
 
+SSE_HOST = os.getenv("SSE_HOST", "127.0.0.1")
+SSE_PORT = int(os.getenv("SSE_PORT", "8000"))
+
 # Create server
-mcp = FastMCP("Echo Server")
+mcp = FastMCP("Echo Server", host=SSE_HOST, port=SSE_PORT)
 
 
 @mcp.tool()

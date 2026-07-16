@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+import threading
+from typing import Any, ClassVar
 
 from sqlalchemy import (
     TIMESTAMP,
@@ -38,11 +39,13 @@ from sqlalchemy import (
     Table,
     Text,
     delete,
+    event,
     insert,
     select,
     text as sql_text,
     update,
 )
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from ...items import TResponseInputItem
@@ -51,11 +54,78 @@ from ...memory.session_settings import SessionSettings, resolve_session_limit
 
 
 class SQLAlchemySession(SessionABC):
-    """SQLAlchemy implementation of :pyclass:`agents.memory.session.Session`."""
+    """SQLAlchemy implementation of [`Session`][agents.memory.session.Session]."""
 
+    _table_init_locks: ClassVar[dict[tuple[str, str, str], threading.Lock]] = {}
+    _table_init_locks_guard: ClassVar[threading.Lock] = threading.Lock()
+    _sqlite_configured_engines: ClassVar[set[int]] = set()
+    _sqlite_configured_engines_guard: ClassVar[threading.Lock] = threading.Lock()
+    _SQLITE_BUSY_TIMEOUT_MS: ClassVar[int] = 5000
+    _SQLITE_LOCK_RETRY_DELAYS: ClassVar[tuple[float, ...]] = (0.05, 0.1, 0.2, 0.4, 0.8)
     _metadata: MetaData
     _sessions: Table
     _messages: Table
+    session_settings: SessionSettings | None = None
+
+    @classmethod
+    def _get_table_init_lock(
+        cls, engine: AsyncEngine, sessions_table: str, messages_table: str
+    ) -> threading.Lock:
+        lock_key = (
+            engine.url.render_as_string(hide_password=True),
+            sessions_table,
+            messages_table,
+        )
+        with cls._table_init_locks_guard:
+            lock = cls._table_init_locks.get(lock_key)
+            if lock is None:
+                lock = threading.Lock()
+                cls._table_init_locks[lock_key] = lock
+            return lock
+
+    @classmethod
+    def _configure_sqlite_engine(cls, engine: AsyncEngine) -> None:
+        """Apply SQLite settings that reduce transient lock failures."""
+        if engine.dialect.name != "sqlite":
+            return
+
+        engine_key = id(engine.sync_engine)
+        with cls._sqlite_configured_engines_guard:
+            if engine_key in cls._sqlite_configured_engines:
+                return
+
+            @event.listens_for(engine.sync_engine, "connect")
+            def _configure_sqlite_connection(dbapi_connection: Any, _: Any) -> None:
+                cursor = dbapi_connection.cursor()
+                try:
+                    cursor.execute(f"PRAGMA busy_timeout = {cls._SQLITE_BUSY_TIMEOUT_MS}")
+                    cursor.execute("PRAGMA journal_mode = WAL")
+                finally:
+                    cursor.close()
+
+            cls._sqlite_configured_engines.add(engine_key)
+
+    @staticmethod
+    def _is_sqlite_lock_error(exc: OperationalError) -> bool:
+        return "database is locked" in str(exc).lower()
+
+    async def _run_sqlite_write_with_retry(self, operation: Any) -> None:
+        """Retry transient SQLite write lock failures with bounded backoff."""
+        if self._engine.dialect.name != "sqlite":
+            await operation()
+            return
+
+        for attempt, delay in enumerate((0.0, *self._SQLITE_LOCK_RETRY_DELAYS)):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                await operation()
+                return
+            except OperationalError as exc:
+                if not self._is_sqlite_lock_error(exc):
+                    raise
+                if attempt == len(self._SQLITE_LOCK_RETRY_DELAYS):
+                    raise
 
     def __init__(
         self,
@@ -66,6 +136,7 @@ class SQLAlchemySession(SessionABC):
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
         session_settings: SessionSettings | None = None,
+        ensure_ascii: bool = True,
     ):
         """Initializes a new SQLAlchemySession.
 
@@ -80,11 +151,19 @@ class SQLAlchemySession(SessionABC):
             sessions_table (str, optional): Override the default table name for sessions if needed.
             messages_table (str, optional): Override the default table name for messages if needed.
             session_settings (SessionSettings | None, optional): Session configuration settings
+            ensure_ascii (bool, optional): Whether to escape non-ASCII characters when serializing
+                session items to JSON. Defaults to True to preserve the historical storage format.
         """
         self.session_id = session_id
         self.session_settings = session_settings or SessionSettings()
         self._engine = engine
-        self._lock = asyncio.Lock()
+        self._ensure_ascii = ensure_ascii
+        self._configure_sqlite_engine(engine)
+        self._init_lock = (
+            self._get_table_init_lock(engine, sessions_table, messages_table)
+            if create_tables
+            else None
+        )
 
         self._metadata = MetaData()
         self._sessions = Table(
@@ -170,7 +249,7 @@ class SQLAlchemySession(SessionABC):
 
     async def _serialize_item(self, item: TResponseInputItem) -> str:
         """Serialize an item to JSON string. Can be overridden by subclasses."""
-        return json.dumps(item, separators=(",", ":"))
+        return json.dumps(item, ensure_ascii=self._ensure_ascii, separators=(",", ":"))
 
     async def _deserialize_item(self, item: str) -> TResponseInputItem:
         """Deserialize a JSON string to an item. Can be overridden by subclasses."""
@@ -181,10 +260,23 @@ class SQLAlchemySession(SessionABC):
     # ------------------------------------------------------------------
     async def _ensure_tables(self) -> None:
         """Ensure tables are created before any database operations."""
-        if self._create_tables:
+        if not self._create_tables:
+            return
+
+        assert self._init_lock is not None
+        while not self._init_lock.acquire(blocking=False):  # noqa: ASYNC110
+            # Poll without handing lock acquisition to a background thread so
+            # cancellation cannot strand the shared init lock in the acquired state.
+            await asyncio.sleep(0.01)
+        try:
+            if not self._create_tables:
+                return
+
             async with self._engine.begin() as conn:
                 await conn.run_sync(self._metadata.create_all)
             self._create_tables = False  # Only create once
+        finally:
+            self._init_lock.release()
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
@@ -256,30 +348,37 @@ class SQLAlchemySession(SessionABC):
             for item in items
         ]
 
-        async with self._session_factory() as sess:
-            async with sess.begin():
-                # Ensure the parent session row exists - use merge for cross-DB compatibility
-                # Check if session exists
-                existing = await sess.execute(
-                    select(self._sessions.c.session_id).where(
-                        self._sessions.c.session_id == self.session_id
+        async def _write_items() -> None:
+            async with self._session_factory() as sess:
+                async with sess.begin():
+                    # Avoid check-then-insert races on the first write while keeping
+                    # the common path free of avoidable integrity exceptions.
+                    existing = await sess.execute(
+                        select(self._sessions.c.session_id).where(
+                            self._sessions.c.session_id == self.session_id
+                        )
                     )
-                )
-                if not existing.scalar_one_or_none():
-                    # Session doesn't exist, create it
+                    if not existing.scalar_one_or_none():
+                        try:
+                            async with sess.begin_nested():
+                                await sess.execute(
+                                    insert(self._sessions).values({"session_id": self.session_id})
+                                )
+                        except IntegrityError:
+                            # Another concurrent writer created the parent row first.
+                            pass
+
+                    # Insert messages in bulk
+                    await sess.execute(insert(self._messages), payload)
+
+                    # Touch updated_at column
                     await sess.execute(
-                        insert(self._sessions).values({"session_id": self.session_id})
+                        update(self._sessions)
+                        .where(self._sessions.c.session_id == self.session_id)
+                        .values(updated_at=sql_text("CURRENT_TIMESTAMP"))
                     )
 
-                # Insert messages in bulk
-                await sess.execute(insert(self._messages), payload)
-
-                # Touch updated_at column
-                await sess.execute(
-                    update(self._sessions)
-                    .where(self._sessions.c.session_id == self.session_id)
-                    .values(updated_at=sql_text("CURRENT_TIMESTAMP"))
-                )
+        await self._run_sqlite_write_with_retry(_write_items)
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
@@ -290,33 +389,34 @@ class SQLAlchemySession(SessionABC):
         await self._ensure_tables()
         async with self._session_factory() as sess:
             async with sess.begin():
-                # Fallback for all dialects - get ID first, then delete
-                subq = (
-                    select(self._messages.c.id)
-                    .where(self._messages.c.session_id == self.session_id)
-                    .order_by(
-                        self._messages.c.created_at.desc(),
-                        self._messages.c.id.desc(),
+                while True:
+                    # Fallback for all dialects - get ID first, then delete
+                    subq = (
+                        select(self._messages.c.id)
+                        .where(self._messages.c.session_id == self.session_id)
+                        .order_by(
+                            self._messages.c.created_at.desc(),
+                            self._messages.c.id.desc(),
+                        )
+                        .limit(1)
                     )
-                    .limit(1)
-                )
-                res = await sess.execute(subq)
-                row_id = res.scalar_one_or_none()
-                if row_id is None:
-                    return None
-                # Fetch data before deleting
-                res_data = await sess.execute(
-                    select(self._messages.c.message_data).where(self._messages.c.id == row_id)
-                )
-                row = res_data.scalar_one_or_none()
-                await sess.execute(delete(self._messages).where(self._messages.c.id == row_id))
+                    res = await sess.execute(subq)
+                    row_id = res.scalar_one_or_none()
+                    if row_id is None:
+                        return None
+                    # Fetch data before deleting
+                    res_data = await sess.execute(
+                        select(self._messages.c.message_data).where(self._messages.c.id == row_id)
+                    )
+                    row = res_data.scalar_one_or_none()
+                    await sess.execute(delete(self._messages).where(self._messages.c.id == row_id))
 
-                if row is None:
-                    return None
-                try:
-                    return await self._deserialize_item(row)
-                except json.JSONDecodeError:
-                    return None
+                    if row is None:
+                        continue
+                    try:
+                        return await self._deserialize_item(row)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
 
     async def clear_session(self) -> None:
         """Clear all items for this session."""

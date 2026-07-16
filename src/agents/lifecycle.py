@@ -1,4 +1,4 @@
-from typing import Any, Generic, Optional
+from typing import Any, Generic
 
 from typing_extensions import TypeVar
 
@@ -19,7 +19,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
         self,
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
-        system_prompt: Optional[str],
+        system_prompt: str | None,
         input_items: list[TResponseInputItem],
     ) -> None:
         """Called just before invoking the LLM for this agent."""
@@ -73,7 +73,13 @@ class RunHooksBase(Generic[TContext, TAgent]):
         agent: TAgent,
         tool: Tool,
     ) -> None:
-        """Called immediately before a local tool is invoked."""
+        """Called immediately before a local tool is invoked.
+
+        For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
+        which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
+        and ``tool_arguments``. Other local tool families may provide a plain
+        ``RunContextWrapper`` instead.
+        """
         pass
 
     async def on_tool_end(
@@ -81,9 +87,19 @@ class RunHooksBase(Generic[TContext, TAgent]):
         context: RunContextWrapper[TContext],
         agent: TAgent,
         tool: Tool,
-        result: str,
+        result: object,
     ) -> None:
-        """Called immediately after a local tool is invoked."""
+        """Called immediately after a local tool is invoked.
+
+        For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
+        which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
+        and ``tool_arguments``. Other local tool families may provide a plain
+        ``RunContextWrapper`` instead.
+
+        Simple tool outputs are typically ``str`` values. Function tools may also return
+        structured tool output objects or any value the SDK can stringify before sending it to
+        the model.
+        """
         pass
 
 
@@ -135,7 +151,13 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         agent: TAgent,
         tool: Tool,
     ) -> None:
-        """Called immediately before a local tool is invoked."""
+        """Called immediately before a local tool is invoked.
+
+        For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
+        which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
+        and ``tool_arguments``. Other local tool families may provide a plain
+        ``RunContextWrapper`` instead.
+        """
         pass
 
     async def on_tool_end(
@@ -143,16 +165,26 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         context: RunContextWrapper[TContext],
         agent: TAgent,
         tool: Tool,
-        result: str,
+        result: object,
     ) -> None:
-        """Called immediately after a local tool is invoked."""
+        """Called immediately after a local tool is invoked.
+
+        For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
+        which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
+        and ``tool_arguments``. Other local tool families may provide a plain
+        ``RunContextWrapper`` instead.
+
+        Simple tool outputs are typically ``str`` values. Function tools may also return
+        structured tool output objects or any value the SDK can stringify before sending it to
+        the model.
+        """
         pass
 
     async def on_llm_start(
         self,
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
-        system_prompt: Optional[str],
+        system_prompt: str | None,
         input_items: list[TResponseInputItem],
     ) -> None:
         """Called immediately before the agent issues an LLM call."""

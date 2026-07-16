@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
-from typing import Any
-
-from typing_extensions import Literal
+from typing import Any, Literal
 
 from agents.exceptions import UserError
 

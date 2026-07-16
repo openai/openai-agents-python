@@ -3,7 +3,16 @@ import asyncio
 import json
 from typing import Literal
 
-from agents import Agent, HostedMCPTool, ModelSettings, Runner, RunResult, RunResultStreaming
+from agents import (
+    Agent,
+    HostedMCPTool,
+    ModelSettings,
+    RunConfig,
+    Runner,
+    RunResult,
+    RunResultStreaming,
+)
+from agents.model_settings import MCPToolChoice
 from examples.auto_mode import confirm_with_fallback
 
 
@@ -44,6 +53,8 @@ async def _drain_stream(
 
 async def main(verbose: bool, stream: bool) -> None:
     require_approval: Literal["always"] = "always"
+    # Use the concise question tool first, then allow the model to answer after approval instead of
+    # forcing the same tool again.
     agent = Agent(
         name="MCP Assistant",
         instructions=(
@@ -51,7 +62,9 @@ async def main(verbose: bool, stream: bool) -> None:
             "Use the DeepWiki hosted MCP server to answer questions and do not ask the user for "
             "additional configuration."
         ),
-        model_settings=ModelSettings(tool_choice="required"),
+        model_settings=ModelSettings(
+            tool_choice=MCPToolChoice(server_label="deepwiki", name="ask_question")
+        ),
         tools=[
             HostedMCPTool(
                 tool_config={
@@ -63,6 +76,7 @@ async def main(verbose: bool, stream: bool) -> None:
             )
         ],
     )
+    resume_config = RunConfig(model_settings=ModelSettings(tool_choice="auto"))
 
     question = "Which language is the repository openai/codex written in?"
 
@@ -78,7 +92,12 @@ async def main(verbose: bool, stream: bool) -> None:
                     state.approve(interruption)
                 else:
                     state.reject(interruption)
-            stream_result = Runner.run_streamed(agent, state, max_turns=100)
+            stream_result = Runner.run_streamed(
+                agent,
+                state,
+                max_turns=100,
+                run_config=resume_config,
+            )
             stream_result = await _drain_stream(stream_result, verbose)
         print(f"Done streaming; final result: {stream_result.final_output}")
         run_result = stream_result
@@ -92,7 +111,12 @@ async def main(verbose: bool, stream: bool) -> None:
                     state.approve(interruption)
                 else:
                     state.reject(interruption)
-            run_result = await Runner.run(agent, state, max_turns=100)
+            run_result = await Runner.run(
+                agent,
+                state,
+                max_turns=100,
+                run_config=resume_config,
+            )
         print(run_result.final_output)
 
     if verbose:

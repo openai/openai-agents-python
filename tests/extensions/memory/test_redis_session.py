@@ -679,6 +679,33 @@ async def test_get_next_id_method():
         await session.close()
 
 
+async def test_add_items_preserves_created_at_metadata():
+    """`created_at` must be set once and not overwritten by subsequent add_items calls."""
+    session = await _create_test_session("created_at_test")
+
+    try:
+        await session.clear_session()
+        await session.add_items([{"role": "user", "content": "first"}])
+        first_meta = await session._redis.hgetall(session._session_key)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
+        first_created = first_meta.get(b"created_at") or first_meta.get("created_at")
+        assert first_created is not None
+
+        # Force a clock advance so a regression would surface as a different value.
+        import time
+
+        time.sleep(1.1)
+
+        await session.add_items([{"role": "user", "content": "second"}])
+        second_meta = await session._redis.hgetall(session._session_key)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
+        second_created = second_meta.get(b"created_at") or second_meta.get("created_at")
+        second_updated = second_meta.get(b"updated_at") or second_meta.get("updated_at")
+
+        assert second_created == first_created, "created_at must remain stable"
+        assert second_updated != first_created, "updated_at must advance on writes"
+    finally:
+        await session.close()
+
+
 async def test_corrupted_data_handling():
     """Test that corrupted JSON data is handled gracefully."""
     if not USE_FAKE_REDIS:
@@ -713,12 +740,11 @@ async def test_corrupted_data_handling():
         assert items[0].get("content") == "valid message"
         assert items[1].get("content") == "valid after corruption"
 
-        # Test pop_item with corrupted data at the end
+        # Test pop_item with corrupted data at the end.
         await _safe_rpush(fake_redis, messages_key, "corrupted at end")
 
-        # The corrupted item should be handled gracefully
-        # Since it's at the end, pop_item will encounter it first and return None
-        # But first, let's pop the valid items to get to the corrupted one
+        # The corrupted item should be dropped and pop_item should keep looking
+        # for the next valid item.
         popped1 = await session.pop_item()
         assert popped1 is not None
         assert popped1.get("content") == "valid after corruption"
@@ -727,8 +753,7 @@ async def test_corrupted_data_handling():
         assert popped2 is not None
         assert popped2.get("content") == "valid message"
 
-        # Now we should hit the corrupted data - this should gracefully handle it
-        # by returning None (and removing the corrupted item)
+        # All corrupt items were removed while looking for valid messages.
         popped_corrupted = await session.pop_item()
         assert popped_corrupted is None
 

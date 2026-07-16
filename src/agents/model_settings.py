@@ -1,18 +1,24 @@
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Mapping
 from dataclasses import fields, replace
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal, TypeAlias, cast
 
 from openai import Omit as _Omit
 from openai._types import Body, Query
 from openai.types.responses import ResponseIncludable
+from openai.types.responses.response_create_params import ContextManagement, PromptCacheOptions
 from openai.types.shared import Reasoning
-from pydantic import BaseModel, GetCoreSchemaHandler
+from pydantic import GetCoreSchemaHandler, TypeAdapter
 from pydantic.dataclasses import dataclass
 from pydantic_core import core_schema
-from typing_extensions import TypeAlias
+
+from .retry import (
+    ModelRetryBackoffInput,
+    ModelRetryBackoffSettings,
+    ModelRetrySettings,
+    _coerce_backoff_settings,
+)
 
 
 class _OmitTypeAnnotation:
@@ -51,8 +57,30 @@ class MCPToolChoice:
 
 
 Omit = Annotated[_Omit, _OmitTypeAnnotation]
-Headers: TypeAlias = Mapping[str, Union[str, Omit]]
-ToolChoice: TypeAlias = Union[Literal["auto", "required", "none"], str, MCPToolChoice, None]
+Headers: TypeAlias = Mapping[str, str | Omit]
+ToolChoice: TypeAlias = Literal["auto", "required", "none"] | str | MCPToolChoice | None
+
+_TRACEABLE_MODEL_SETTING_FIELDS = (
+    "temperature",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "tool_choice",
+    "parallel_tool_calls",
+    "truncation",
+    "max_tokens",
+    "reasoning",
+    "verbosity",
+    "metadata",
+    "store",
+    "prompt_cache_retention",
+    "include_usage",
+    "response_include",
+    "top_logprobs",
+    "retry",
+    "context_management",
+    "prompt_cache_options",
+)
 
 
 @dataclass
@@ -154,6 +182,23 @@ class ModelSettings:
     These will be passed directly to the underlying model provider's API.
     Use with caution as not all models support all parameters."""
 
+    retry: ModelRetrySettings | None = None
+    """Opt-in runner-managed retry settings for model calls."""
+
+    context_management: list[ContextManagement] | None = None
+    """Context management entries for OpenAI Responses API requests.
+
+    For example, use ``[{"type": "compaction", "compact_threshold": 200000}]``
+    to enable server-side compaction when the rendered context crosses a token threshold.
+    """
+
+    prompt_cache_options: PromptCacheOptions | None = None
+    """Prompt-cache configuration for OpenAI API requests.
+
+    Use ``{"mode": "explicit", "ttl": "30m"}`` with content-part cache breakpoints to
+    control which prompt prefixes are eligible for caching.
+    """
+
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
         """Produce a new ModelSettings by overlaying any non-None values from the
         override on top of this instance."""
@@ -166,7 +211,7 @@ class ModelSettings:
             if getattr(override, field.name) is not None
         }
 
-        # Handle extra_args merging specially - merge dictionaries instead of replacing
+        # Handle extra_args merging specially - merge dictionaries instead of replacing.
         if self.extra_args is not None or override.extra_args is not None:
             merged_args = {}
             if self.extra_args:
@@ -175,17 +220,52 @@ class ModelSettings:
                 merged_args.update(override.extra_args)
             changes["extra_args"] = merged_args if merged_args else None
 
+        if self.retry is not None or override.retry is not None:
+            changes["retry"] = _merge_retry_settings(self.retry, override.retry)
+
         return replace(self, **changes)
 
     def to_json_dict(self) -> dict[str, Any]:
-        dataclass_dict = dataclasses.asdict(self)
+        return cast(dict[str, Any], TypeAdapter(ModelSettings).dump_python(self, mode="json"))
 
-        json_dict: dict[str, Any] = {}
+    def to_traceable_dict(self) -> dict[str, Any]:
+        """Serialize settings for tracing without provider-specific request extras."""
+        payload = self.to_json_dict()
+        return {key: payload[key] for key in _TRACEABLE_MODEL_SETTING_FIELDS if key in payload}
 
-        for field_name, value in dataclass_dict.items():
-            if isinstance(value, BaseModel):
-                json_dict[field_name] = value.model_dump(mode="json")
-            else:
-                json_dict[field_name] = value
 
-        return json_dict
+def _merge_retry_settings(
+    inherited: ModelRetrySettings | None,
+    override: ModelRetrySettings | None,
+) -> ModelRetrySettings | None:
+    if inherited is None:
+        return override
+    if override is None:
+        return inherited
+
+    merged_backoff = _merge_backoff_settings(inherited.backoff, override.backoff)
+    retry_changes = {
+        field.name: getattr(override, field.name)
+        for field in fields(inherited)
+        if field.name != "backoff" and getattr(override, field.name) is not None
+    }
+    return replace(inherited, **retry_changes, backoff=merged_backoff)
+
+
+def _merge_backoff_settings(
+    inherited: ModelRetryBackoffInput | None,
+    override: ModelRetryBackoffInput | None,
+) -> ModelRetryBackoffSettings | None:
+    inherited = _coerce_backoff_settings(inherited)
+    override = _coerce_backoff_settings(override)
+    if inherited is None:
+        return override
+    if override is None:
+        return inherited
+
+    changes = {
+        field.name: getattr(override, field.name)
+        for field in fields(inherited)
+        if getattr(override, field.name) is not None
+    }
+    return replace(inherited, **changes)

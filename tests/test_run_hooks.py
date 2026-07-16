@@ -1,5 +1,6 @@
+import json
 from collections import defaultdict
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 import pytest
 
@@ -9,12 +10,16 @@ from agents.lifecycle import AgentHooks, RunHooks
 from agents.models.interface import Model
 from agents.run import Runner
 from agents.run_context import AgentHookContext, RunContextWrapper, TContext
-from agents.tool import Tool
+from agents.run_internal.run_loop import validate_run_hooks
+from agents.tool import Tool, function_tool
+from agents.tool_context import ToolContext
 from tests.test_agent_llm_hooks import AgentHooksForTests
 
 from .fake_model import FakeModel
 from .test_responses import (
     get_function_tool,
+    get_function_tool_call,
+    get_handoff_tool_call,
     get_text_message,
 )
 
@@ -22,9 +27,11 @@ from .test_responses import (
 class RunHooksForTests(RunHooks):
     def __init__(self):
         self.events: dict[str, int] = defaultdict(int)
+        self.tool_context_ids: list[str] = []
 
     def reset(self):
         self.events.clear()
+        self.tool_context_ids.clear()
 
     async def on_agent_start(
         self, context: AgentHookContext[TContext], agent: Agent[TContext]
@@ -54,15 +61,17 @@ class RunHooksForTests(RunHooks):
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
         tool: Tool,
-        result: str,
+        result: object,
     ) -> None:
         self.events["on_tool_end"] += 1
+        if isinstance(context, ToolContext):
+            self.tool_context_ids.append(context.tool_call_id)
 
     async def on_llm_start(
         self,
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
-        system_prompt: Optional[str],
+        system_prompt: str | None,
         input_items: list[TResponseInputItem],
     ) -> None:
         self.events["on_llm_start"] += 1
@@ -214,6 +223,11 @@ def test_runner_run_streamed_rejects_agent_hooks():
         Runner.run_streamed(agent, input="hello", hooks=hooks)
 
 
+def test_validate_run_hooks_rejects_non_hook_objects() -> None:
+    with pytest.raises(TypeError, match="Received object"):
+        validate_run_hooks(object())
+
+
 class BoomModel(Model):
     async def get_response(self, *a, **k):
         raise AssertionError("get_response should not be called in streaming test")
@@ -313,3 +327,120 @@ async def test_run_hooks_receives_turn_input_streamed():
     turn_input = hooks.captured_turn_inputs[0]
     assert len(turn_input) == 1
     assert turn_input[0]["content"] == "streamed input"
+
+
+@pytest.mark.asyncio
+async def test_run_hooks_count_tool_and_handoff_invocations():
+    hooks = RunHooksForTests()
+    model = FakeModel()
+
+    agent_1 = Agent(name="test_1", model=model)
+    agent_2 = Agent(
+        name="test_2",
+        model=model,
+        handoffs=[agent_1],
+        tools=[get_function_tool("some_function", "result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("some_function", json.dumps({"a": "b"}))],
+            [get_text_message("a_message"), get_handoff_tool_call(agent_1)],
+            [get_text_message("done")],
+        ]
+    )
+    await Runner.run(agent_2, input="user_message", hooks=hooks)
+
+    assert hooks.events["on_tool_start"] == 1
+    assert hooks.events["on_tool_end"] == 1
+    assert hooks.events["on_handoff"] == 1
+    assert hooks.events["on_agent_start"] == 2
+    assert hooks.events["on_agent_end"] == 1
+    assert len(hooks.tool_context_ids) == 1
+
+
+@pytest.mark.asyncio
+async def test_streamed_run_hooks_count_tool_and_handoff_invocations():
+    hooks = RunHooksForTests()
+    model = FakeModel()
+
+    agent_1 = Agent(name="test_1", model=model)
+    agent_2 = Agent(
+        name="test_2",
+        model=model,
+        handoffs=[agent_1],
+        tools=[get_function_tool("some_function", "result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call("some_function", json.dumps({"a": "b"})),
+                get_function_tool_call("some_function", json.dumps({"a": "b"})),
+            ],
+            [get_text_message("a_message"), get_handoff_tool_call(agent_1)],
+            [get_text_message("done")],
+        ]
+    )
+    stream = Runner.run_streamed(agent_2, input="user_message", hooks=hooks)
+    async for _ in stream.stream_events():
+        pass
+
+    assert hooks.events["on_tool_start"] == 2
+    assert hooks.events["on_tool_end"] == 2
+    assert hooks.events["on_handoff"] == 1
+    assert hooks.events["on_agent_start"] == 2
+    assert hooks.events["on_agent_end"] == 1
+    assert len(hooks.tool_context_ids) == 2
+
+
+@pytest.mark.asyncio
+async def test_tool_end_hooks_receive_raw_function_tool_result():
+    class RecordingRunHooks(RunHooks):
+        def __init__(self):
+            self.result: object | None = None
+
+        async def on_tool_end(
+            self,
+            context: RunContextWrapper[Any],
+            agent: Agent[Any],
+            tool: Tool,
+            result: object,
+        ) -> None:
+            self.result = result
+
+    class RecordingAgentHooks(AgentHooks):
+        def __init__(self):
+            self.result: object | None = None
+
+        async def on_tool_end(
+            self,
+            context: RunContextWrapper[Any],
+            agent: Agent[Any],
+            tool: Tool,
+            result: object,
+        ) -> None:
+            self.result = result
+
+    metadata_result: dict[str, object] = {"status": "ok", "count": 1}
+
+    @function_tool
+    def get_metadata() -> dict[str, object]:
+        return metadata_result
+
+    run_hooks = RecordingRunHooks()
+    agent_hooks = RecordingAgentHooks()
+    model = FakeModel()
+    agent = Agent(name="test", model=model, tools=[get_metadata], hooks=agent_hooks)
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("get_metadata", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+
+    await Runner.run(agent, input="user_message", hooks=run_hooks)
+
+    assert run_hooks.result is metadata_result
+    assert agent_hooks.result is metadata_result

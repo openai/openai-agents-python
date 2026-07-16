@@ -1,19 +1,24 @@
-# Custom LLM providers
+# Model provider examples
 
-The examples in this directory demonstrate how you might use a non-OpenAI LLM provider. To run them, first set a base URL, API key and model.
+The examples in this directory show how to route models through adapter layers such as LiteLLM and
+any-llm. The default examples all use OpenRouter so you only need one API key:
 
 ```bash
-export EXAMPLE_BASE_URL="..."
-export EXAMPLE_API_KEY="..."
-export EXAMPLE_MODEL_NAME"..."
+export OPENROUTER_API_KEY="..."
 ```
 
-Then run the examples, e.g.:
+Run one of the adapter examples:
 
+```bash
+uv run examples/model_providers/any_llm_provider.py
+uv run examples/model_providers/any_llm_auto.py
+uv run examples/model_providers/litellm_provider.py
+uv run examples/model_providers/litellm_auto.py
 ```
-python examples/model_providers/custom_example_provider.py
 
-Loops within themselves,
-Function calls its own being,
-Depth without ending.
+Direct-model examples let you override the target model:
+
+```bash
+uv run examples/model_providers/any_llm_provider.py --model openrouter/openai/gpt-5.4-mini
+uv run examples/model_providers/litellm_provider.py --model openrouter/openai/gpt-5.4-mini
 ```

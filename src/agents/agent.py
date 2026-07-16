@@ -3,14 +3,15 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, cast
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, cast
 
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from pydantic import BaseModel, TypeAdapter, ValidationError
-from typing_extensions import NotRequired, TypeAlias, TypedDict
+from typing_extensions import NotRequired, TypedDict
 
+from ._tool_identity import get_function_tool_approval_keys
 from .agent_output import AgentOutputSchemaBase
 from .agent_tool_input import (
     AgentAsToolInput,
@@ -33,8 +34,6 @@ from .mcp import MCPUtil
 from .model_settings import ModelSettings
 from .models.default_models import (
     get_default_model_settings,
-    gpt_5_reasoning_settings_required,
-    is_gpt_5_default,
 )
 from .models.interface import Model
 from .prompts import DynamicPromptFunction, Prompt, PromptUtil
@@ -45,11 +44,14 @@ from .tool import (
     FunctionToolResult,
     Tool,
     ToolErrorFunction,
+    ToolOrigin,
+    ToolOriginType,
     _build_handled_function_tool_error_handler,
     _build_wrapped_function_tool,
     _log_function_tool_invocation,
     _parse_function_tool_json_input,
     default_tool_error_function,
+    prune_orphaned_tool_search_tools,
 )
 from .tool_context import ToolContext
 from .util import _transforms
@@ -148,6 +150,25 @@ class MCPConfig(TypedDict):
     default_tool_error_function.
     """
 
+    include_server_in_tool_names: NotRequired[bool]
+    """If True, local MCP tools are exposed with server-prefixed public names to avoid name
+    collisions across multiple MCP servers. Defaults to False.
+    """
+
+
+def _initial_model_settings_for_model(model: str | Model | None) -> ModelSettings:
+    if model is None:
+        return get_default_model_settings()
+    if isinstance(model, str):
+        return get_default_model_settings(model)
+    return ModelSettings()
+
+
+def _model_settings_match_implicit_model_defaults(
+    model: str | Model | None, model_settings: ModelSettings
+) -> bool:
+    return model_settings == _initial_model_settings_for_model(model)
+
 
 @dataclass
 class AgentBase(Generic[TContext]):
@@ -178,11 +199,39 @@ class AgentBase(Generic[TContext]):
     mcp_config: MCPConfig = field(default_factory=lambda: MCPConfig())
     """Configuration for MCP servers."""
 
+    async def _get_mcp_tool_reserved_names(
+        self, run_context: RunContextWrapper[TContext]
+    ) -> set[str]:
+        reserved_tool_names = {tool.name for tool in self.tools if isinstance(tool, FunctionTool)}
+
+        async def _check_handoff_enabled(handoff_obj: Handoff[Any, Any]) -> bool:
+            attr = handoff_obj.is_enabled
+            if isinstance(attr, bool):
+                return attr
+            res = attr(run_context, self)
+            if inspect.isawaitable(res):
+                return bool(await res)
+            return bool(res)
+
+        for handoff_item in getattr(self, "handoffs", ()):
+            if isinstance(handoff_item, Handoff):
+                if await _check_handoff_enabled(handoff_item):
+                    reserved_tool_names.add(handoff_item.tool_name)
+            elif isinstance(handoff_item, AgentBase):
+                reserved_tool_names.add(Handoff.default_tool_name(handoff_item))
+        return reserved_tool_names
+
     async def get_mcp_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
         """Fetches the available tools from the MCP servers."""
         convert_schemas_to_strict = self.mcp_config.get("convert_schemas_to_strict", False)
         failure_error_function = self.mcp_config.get(
             "failure_error_function", default_tool_error_function
+        )
+        include_server_in_tool_names = self.mcp_config.get("include_server_in_tool_names", False)
+        reserved_tool_names = (
+            await self._get_mcp_tool_reserved_names(run_context)
+            if include_server_in_tool_names
+            else None
         )
         return await MCPUtil.get_all_function_tools(
             self.mcp_servers,
@@ -190,6 +239,8 @@ class AgentBase(Generic[TContext]):
             run_context,
             self,
             failure_error_function=failure_error_function,
+            include_server_in_tool_names=include_server_in_tool_names,
+            reserved_tool_names=reserved_tool_names,
         )
 
     async def get_all_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
@@ -209,8 +260,8 @@ class AgentBase(Generic[TContext]):
             return bool(res)
 
         results = await asyncio.gather(*(_check_tool_enabled(t) for t in self.tools))
-        enabled: list[Tool] = [t for t, ok in zip(self.tools, results) if ok]
-        all_tools: list[Tool] = [*mcp_tools, *enabled]
+        enabled: list[Tool] = [t for t, ok in zip(self.tools, results, strict=False) if ok]
+        all_tools: list[Tool] = prune_orphaned_tool_search_tools([*mcp_tools, *enabled])
         _validate_codex_tool_name_collisions(all_tools)
         return all_tools
 
@@ -261,7 +312,7 @@ class Agent(AgentBase, Generic[TContext]):
     """The model implementation to use when invoking the LLM.
 
     By default, if not set, the agent will use the default model configured in
-    `agents.models.get_default_model()` (currently "gpt-4.1").
+    `agents.models.get_default_model()` (currently "gpt-5.4-mini").
     """
 
     model_settings: ModelSettings = field(default_factory=get_default_model_settings)
@@ -379,25 +430,8 @@ class Agent(AgentBase, Generic[TContext]):
                 f"got {type(self.model_settings).__name__}"
             )
 
-        if (
-            # The user sets a non-default model
-            self.model is not None
-            and (
-                # The default model is gpt-5
-                is_gpt_5_default() is True
-                # However, the specified model is not a gpt-5 model
-                and (
-                    isinstance(self.model, str) is False
-                    or gpt_5_reasoning_settings_required(self.model) is False  # type: ignore
-                )
-                # The model settings are not customized for the specified model
-                and self.model_settings == get_default_model_settings()
-            )
-        ):
-            # In this scenario, we should use a generic model settings
-            # because non-gpt-5 models are not compatible with the default gpt-5 model settings.
-            # This is a best-effort attempt to make the agent work with non-gpt-5 models.
-            self.model_settings = ModelSettings()
+        if self.model is not None and self.model_settings == get_default_model_settings():
+            self.model_settings = _initial_model_settings_for_model(self.model)
 
         if not isinstance(self.input_guardrails, list):
             raise TypeError(
@@ -414,7 +448,7 @@ class Agent(AgentBase, Generic[TContext]):
             from .agent_output import AgentOutputSchemaBase
 
             if not (
-                isinstance(self.output_type, (type, AgentOutputSchemaBase))
+                isinstance(self.output_type, type | AgentOutputSchemaBase)
                 or get_origin(self.output_type) is not None
             ):
                 raise TypeError(
@@ -463,6 +497,12 @@ class Agent(AgentBase, Generic[TContext]):
             new_agent = agent.clone(instructions="New instructions")
             ```
         """
+        if (
+            "model" in kwargs
+            and "model_settings" not in kwargs
+            and _model_settings_match_implicit_model_defaults(self.model, self.model_settings)
+        ):
+            kwargs["model_settings"] = _initial_model_settings_for_model(kwargs["model"])
         return dataclasses.replace(self, **kwargs)
 
     def as_tool(
@@ -597,6 +637,7 @@ class Agent(AgentBase, Generic[TContext]):
                     tool_call_id=context.tool_call_id,
                     tool_arguments=context.tool_arguments,
                     tool_call=context.tool_call,
+                    tool_namespace=context.tool_namespace,
                     agent=context.agent,
                     run_config=resolved_run_config,
                 )
@@ -631,8 +672,12 @@ class Agent(AgentBase, Generic[TContext]):
                     if not call_id:
                         has_pending = True
                         continue
+                    tool_namespace = RunContextWrapper._resolve_tool_namespace(interruption)
                     status = context.get_approval_status(
-                        interruption.tool_name or "", call_id, existing_pending=interruption
+                        interruption.tool_name or "",
+                        call_id,
+                        tool_namespace=tool_namespace,
+                        existing_pending=interruption,
                     )
                     if status is False:
                         return "rejected"
@@ -651,17 +696,54 @@ class Agent(AgentBase, Generic[TContext]):
                 parent_context: RunContextWrapper[Any],
                 interruptions: list[ToolApprovalItem],
             ) -> None:
+                def _find_mirrored_approval_record(
+                    interruption: ToolApprovalItem,
+                    *,
+                    approved: bool,
+                ) -> Any | None:
+                    candidate_keys = list(RunContextWrapper._resolve_approval_keys(interruption))
+                    for candidate_key in get_function_tool_approval_keys(
+                        tool_name=RunContextWrapper._resolve_tool_name(interruption),
+                        tool_namespace=RunContextWrapper._resolve_tool_namespace(interruption),
+                        tool_lookup_key=RunContextWrapper._resolve_tool_lookup_key(interruption),
+                        include_legacy_deferred_key=True,
+                    ):
+                        if candidate_key not in candidate_keys:
+                            candidate_keys.append(candidate_key)
+                    fallback: Any | None = None
+                    for candidate_key in candidate_keys:
+                        candidate = parent_context._approvals.get(candidate_key)
+                        if candidate is None:
+                            continue
+                        if approved and candidate.approved is True:
+                            return candidate
+                        if not approved and candidate.rejected is True:
+                            return candidate
+                        if fallback is None:
+                            fallback = candidate
+                    return fallback
+
                 for interruption in interruptions:
                     call_id = interruption.call_id
                     if not call_id:
                         continue
                     tool_name = RunContextWrapper._resolve_tool_name(interruption)
+                    tool_namespace = RunContextWrapper._resolve_tool_namespace(interruption)
+                    approval_key = RunContextWrapper._resolve_approval_key(interruption)
                     status = parent_context.get_approval_status(
-                        tool_name, call_id, existing_pending=interruption
+                        tool_name,
+                        call_id,
+                        tool_namespace=tool_namespace,
+                        existing_pending=interruption,
                     )
                     if status is None:
                         continue
-                    approval_record = parent_context._approvals.get(tool_name)
+                    approval_record = parent_context._approvals.get(approval_key)
+                    if approval_record is None:
+                        approval_record = _find_mirrored_approval_record(
+                            interruption,
+                            approved=status,
+                        )
                     if status is True:
                         always_approve = bool(approval_record and approval_record.approved is True)
                         nested_context.approve_tool(
@@ -701,6 +783,7 @@ class Agent(AgentBase, Generic[TContext]):
 
             if run_result is None:
                 if on_stream is not None:
+                    stream_handler = on_stream
                     run_result_streaming = Runner.run_streamed(
                         starting_agent=cast(Agent[Any], self),
                         input=resume_state or resolved_input,
@@ -721,7 +804,7 @@ class Agent(AgentBase, Generic[TContext]):
                     async def _run_handler(payload: AgentToolStreamEvent) -> None:
                         """Execute the user callback while capturing exceptions."""
                         try:
-                            maybe_result = on_stream(payload)
+                            maybe_result = stream_handler(payload)
                             if inspect.isawaitable(maybe_result):
                                 await maybe_result
                         except Exception:
@@ -744,25 +827,37 @@ class Agent(AgentBase, Generic[TContext]):
                                 break
 
                     dispatch_task = asyncio.create_task(dispatch_stream_events())
+                    stream_iteration_cancelled = False
 
                     try:
                         from .stream_events import AgentUpdatedStreamEvent
 
                         current_agent = run_result_streaming.current_agent
-                        async for event in run_result_streaming.stream_events():
-                            if isinstance(event, AgentUpdatedStreamEvent):
-                                current_agent = event.new_agent
+                        try:
+                            async for event in run_result_streaming.stream_events():
+                                if isinstance(event, AgentUpdatedStreamEvent):
+                                    current_agent = event.new_agent
 
-                            payload: AgentToolStreamEvent = {
-                                "event": event,
-                                "agent": current_agent,
-                                "tool_call": context.tool_call,
-                            }
-                            await event_queue.put(payload)
+                                payload: AgentToolStreamEvent = {
+                                    "event": event,
+                                    "agent": current_agent,
+                                    "tool_call": context.tool_call,
+                                }
+                                await event_queue.put(payload)
+                        except asyncio.CancelledError:
+                            stream_iteration_cancelled = True
+                            raise
                     finally:
-                        await event_queue.put(None)
-                        await event_queue.join()
-                        await dispatch_task
+                        if stream_iteration_cancelled:
+                            dispatch_task.cancel()
+                            try:
+                                await dispatch_task
+                            except asyncio.CancelledError:
+                                pass
+                        else:
+                            await event_queue.put(None)
+                            await event_queue.join()
+                            await dispatch_task
                     run_result = run_result_streaming
                 else:
                     run_result = await Runner.run(
@@ -793,6 +888,26 @@ class Agent(AgentBase, Generic[TContext]):
             if custom_output_extractor:
                 return await custom_output_extractor(run_result)
 
+            if run_result.final_output is not None and (
+                not isinstance(run_result.final_output, str) or run_result.final_output != ""
+            ):
+                return run_result.final_output
+
+            from .items import ItemHelpers, MessageOutputItem, ToolCallOutputItem
+
+            for item in reversed(run_result.new_items):
+                if isinstance(item, MessageOutputItem):
+                    text_output = ItemHelpers.text_message_output(item)
+                    if text_output:
+                        return text_output
+
+                if (
+                    isinstance(item, ToolCallOutputItem)
+                    and isinstance(item.output, str)
+                    and item.output
+                ):
+                    return item.output
+
             return run_result.final_output
 
         run_agent_tool = _build_wrapped_function_tool(
@@ -809,6 +924,11 @@ class Agent(AgentBase, Generic[TContext]):
             strict_json_schema=True,
             is_enabled=is_enabled,
             needs_approval=needs_approval,
+            tool_origin=ToolOrigin(
+                type=ToolOriginType.AGENT_AS_TOOL,
+                agent_name=self.name,
+                agent_tool_name=tool_name_resolved,
+            ),
         )
         run_agent_tool._is_agent_tool = True
         run_agent_tool._agent_instance = self
@@ -838,8 +958,8 @@ class Agent(AgentBase, Generic[TContext]):
 
         elif self.instructions is not None:
             logger.error(
-                f"Instructions must be a string or a callable function, "
-                f"got {type(self.instructions).__name__}"
+                "Instructions must be a string or a callable function, got %s",
+                type(self.instructions).__name__,
             )
 
         return None
@@ -848,4 +968,10 @@ class Agent(AgentBase, Generic[TContext]):
         self, run_context: RunContextWrapper[TContext]
     ) -> ResponsePromptParam | None:
         """Get the prompt for the agent."""
-        return await PromptUtil.to_model_input(self.prompt, run_context, self)
+        from ._public_agent import get_public_agent
+
+        return await PromptUtil.to_model_input(
+            self.prompt,
+            run_context,
+            cast(Agent[TContext], get_public_agent(self)),
+        )

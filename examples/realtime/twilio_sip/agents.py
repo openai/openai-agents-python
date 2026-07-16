@@ -74,11 +74,18 @@ triage_agent = RealtimeAgent(
         "before collecting details. Once the greeting is complete, gather context and hand off to "
         "the FAQ or Records agents when appropriate."
     ),
-    handoffs=[faq_agent, realtime_handoff(records_agent)],
+    handoffs=[
+        realtime_handoff(faq_agent, tool_name_override="transfer_to_faq_agent"),
+        realtime_handoff(records_agent, tool_name_override="transfer_to_records_agent"),
+    ],
 )
 
-faq_agent.handoffs.append(triage_agent)
-records_agent.handoffs.append(triage_agent)
+faq_agent.handoffs.append(
+    realtime_handoff(triage_agent, tool_name_override="transfer_to_triage_agent")
+)
+records_agent.handoffs.append(
+    realtime_handoff(triage_agent, tool_name_override="transfer_to_triage_agent")
+)
 
 
 def get_starting_agent() -> RealtimeAgent:

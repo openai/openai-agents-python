@@ -14,6 +14,7 @@ from ... import _debug
 from ...exceptions import AgentsException
 from ...logger import logger
 from ...tracing import Span, SpanError, TranscriptionSpanData, transcription_span
+from ...util._error_tracing import get_trace_error
 from ..exceptions import STTWebsocketConnectionError
 from ..imports import np, npt, websockets
 from ..input import AudioInput, StreamedAudioInput
@@ -210,7 +211,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             if _debug.DONT_LOG_MODEL_DATA:
                 logger.debug("Session updated")
             else:
-                logger.debug(f"Session updated: {event}")
+                logger.debug("Session updated: %s", event)
         except TimeoutError as e:
             wrapped_err = STTWebsocketConnectionError(
                 "Timeout waiting for transcription_session.updated event"
@@ -433,7 +434,15 @@ class OpenAISTTModel(STTModel):
                 return response.text
             except Exception as e:
                 span.span_data.output = ""
-                span.set_error(SpanError(message=str(e), data={}))
+                span.set_error(
+                    SpanError(
+                        message=get_trace_error(
+                            trace_include_sensitive_data=trace_include_sensitive_data,
+                            error_message=str(e),
+                        ),
+                        data={},
+                    )
+                )
                 raise e
 
     async def create_session(

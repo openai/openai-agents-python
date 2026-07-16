@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Union
-
-from typing_extensions import TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from .agent import Agent
 from .items import RunItem, TResponseStreamEvent
@@ -34,6 +32,8 @@ class RunItemStreamEvent:
         # This is misspelled, but we can't change it because that would be a breaking change
         "handoff_occured",
         "tool_called",
+        "tool_search_called",
+        "tool_search_output_created",
         "tool_output",
         "reasoning_item_created",
         "mcp_approval_requested",
@@ -58,5 +58,5 @@ class AgentUpdatedStreamEvent:
     type: Literal["agent_updated_stream_event"] = "agent_updated_stream_event"
 
 
-StreamEvent: TypeAlias = Union[RawResponsesStreamEvent, RunItemStreamEvent, AgentUpdatedStreamEvent]
+StreamEvent: TypeAlias = RawResponsesStreamEvent | RunItemStreamEvent | AgentUpdatedStreamEvent
 """A streaming event from an agent."""

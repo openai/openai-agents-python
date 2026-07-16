@@ -1,6 +1,13 @@
 """Tests for AdvancedSQLiteSession functionality."""
 
-from typing import Any, Optional, cast
+import asyncio
+import contextlib
+import json
+import tempfile
+import threading
+from pathlib import Path
+from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 
@@ -39,14 +46,14 @@ def usage_data() -> Usage:
         input_tokens=50,
         output_tokens=30,
         total_tokens=80,
-        input_tokens_details=InputTokensDetails(cached_tokens=10),
+        input_tokens_details=InputTokensDetails.model_validate(
+            {"cache_write_tokens": 0, "cached_tokens": 10}
+        ),
         output_tokens_details=OutputTokensDetails(reasoning_tokens=5),
     )
 
 
-def create_mock_run_result(
-    usage: Optional[Usage] = None, agent: Optional[Agent] = None
-) -> RunResult:
+def create_mock_run_result(usage: Usage | None = None, agent: Agent | None = None) -> RunResult:
     """Helper function to create a mock RunResult for testing."""
     if agent is None:
         agent = Agent(name="test", model=FakeModel())
@@ -57,7 +64,9 @@ def create_mock_run_result(
             input_tokens=50,
             output_tokens=30,
             total_tokens=80,
-            input_tokens_details=InputTokensDetails(cached_tokens=10),
+            input_tokens_details=InputTokensDetails.model_validate(
+                {"cache_write_tokens": 0, "cached_tokens": 10}
+            ),
             output_tokens_details=OutputTokensDetails(reasoning_tokens=5),
         )
 
@@ -76,6 +85,52 @@ def create_mock_run_result(
         _last_agent=agent,
         interruptions=[],
     )
+
+
+class FailingOnceStructureMetadataSession(AdvancedSQLiteSession):
+    """Advanced session test double that fails the next structure metadata write."""
+
+    def __init__(self, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.fail_structure_metadata_once = True
+
+    def _insert_structure_metadata(
+        self,
+        conn: Any,
+        items: list[TResponseInputItem],
+    ) -> None:
+        if self.fail_structure_metadata_once:
+            self.fail_structure_metadata_once = False
+            raise RuntimeError("structure metadata failed")
+        super()._insert_structure_metadata(conn, items)
+
+
+class PartiallyFailingStructureMetadataSession(AdvancedSQLiteSession):
+    """Advanced session test double that fails after writing one structure row."""
+
+    def _insert_structure_metadata(
+        self,
+        conn: Any,
+        items: list[TResponseInputItem],
+    ) -> None:
+        cursor = conn.execute(
+            f"SELECT id FROM {self.messages_table} WHERE session_id = ? ORDER BY id ASC LIMIT 1",
+            (self.session_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError("no inserted message id found")
+
+        conn.execute(
+            """
+            INSERT INTO message_structure
+            (session_id, message_id, branch_id, message_type, sequence_number,
+             user_turn_number, branch_turn_number, tool_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (self.session_id, row[0], self._current_branch_id, "user", 1, 1, 1, None),
+        )
+        raise RuntimeError("structure metadata failed after partial write")
 
 
 async def test_advanced_session_basic_functionality(agent: Agent):
@@ -97,6 +152,179 @@ async def test_advanced_session_basic_functionality(agent: Agent):
     assert retrieved[1].get("content") == "Hi there!"
 
     session.close()
+
+
+async def test_advanced_session_respects_custom_table_names():
+    """AdvancedSQLiteSession should consistently use configured table names."""
+    session = AdvancedSQLiteSession(
+        session_id="advanced_custom_tables",
+        create_tables=True,
+        sessions_table="custom_agent_sessions",
+        messages_table="custom_agent_messages",
+    )
+
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi there!"},
+        {"role": "user", "content": "Let's do some math"},
+        {"role": "assistant", "content": "Sure"},
+    ]
+    await session.add_items(items)
+
+    assert await session.get_items() == items
+
+    conversation_turns = await session.get_conversation_turns()
+    assert [turn["turn"] for turn in conversation_turns] == [1, 2]
+
+    matching_turns = await session.find_turns_by_content("math")
+    assert [turn["turn"] for turn in matching_turns] == [2]
+
+    conn = session._get_connection()
+    structure_foreign_keys = {
+        row[2] for row in conn.execute("PRAGMA foreign_key_list(message_structure)").fetchall()
+    }
+    usage_foreign_keys = {
+        row[2] for row in conn.execute("PRAGMA foreign_key_list(turn_usage)").fetchall()
+    }
+    assert structure_foreign_keys == {
+        session.messages_table,
+        session.sessions_table,
+    }
+    assert usage_foreign_keys == {session.sessions_table}
+
+    branch_name = await session.create_branch_from_turn(2, "custom_branch")
+    assert branch_name == "custom_branch"
+    assert await session.get_items() == items[:2]
+    assert await session.get_items(branch_id="main") == items
+
+    session.close()
+
+
+async def test_add_items_rolls_back_messages_when_structure_metadata_fails():
+    """Failed structure metadata writes should not leave invisible message rows."""
+    session = FailingOnceStructureMetadataSession(
+        session_id="advanced_add_items_rollback",
+        create_tables=True,
+    )
+    items: list[TResponseInputItem] = [{"role": "user", "content": "not saved"}]
+
+    try:
+        with pytest.raises(RuntimeError, match="structure metadata failed"):
+            await session.add_items(items)
+
+        assert await session.get_items() == []
+
+        with session._locked_connection() as conn:
+            message_count = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+            structure_count = conn.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+
+        assert message_count == 0
+        assert structure_count == 0
+    finally:
+        session.close()
+
+
+async def test_add_items_can_retry_after_structure_metadata_failure():
+    """Retrying after a metadata failure should persist the batch exactly once."""
+    session = FailingOnceStructureMetadataSession(
+        session_id="advanced_add_items_retry",
+        create_tables=True,
+    )
+    items: list[TResponseInputItem] = [{"role": "user", "content": "saved once"}]
+
+    try:
+        with pytest.raises(RuntimeError, match="structure metadata failed"):
+            await session.add_items(items)
+
+        await session.add_items(items)
+
+        assert await session.get_items() == items
+
+        with session._locked_connection() as conn:
+            message_count = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+            structure_count = conn.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+
+        assert message_count == 1
+        assert structure_count == 1
+    finally:
+        session.close()
+
+
+async def test_add_items_failure_preserves_existing_history():
+    """A failed batch should not roll back or hide previously committed messages."""
+    session = FailingOnceStructureMetadataSession(
+        session_id="advanced_add_items_existing_history",
+        create_tables=True,
+    )
+    existing_items: list[TResponseInputItem] = [{"role": "user", "content": "already saved"}]
+    failed_items: list[TResponseInputItem] = [{"role": "assistant", "content": "not saved"}]
+
+    try:
+        session.fail_structure_metadata_once = False
+        await session.add_items(existing_items)
+
+        session.fail_structure_metadata_once = True
+        with pytest.raises(RuntimeError, match="structure metadata failed"):
+            await session.add_items(failed_items)
+
+        assert await session.get_items() == existing_items
+
+        with session._locked_connection() as conn:
+            message_count = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+            structure_count = conn.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+
+        assert message_count == 1
+        assert structure_count == 1
+    finally:
+        session.close()
+
+
+async def test_add_items_rolls_back_partial_structure_metadata_write():
+    """Partial metadata writes should roll back with the message rows in the same batch."""
+    session = PartiallyFailingStructureMetadataSession(
+        session_id="advanced_add_items_partial_metadata",
+        create_tables=True,
+    )
+    items: list[TResponseInputItem] = [{"role": "user", "content": "not saved"}]
+
+    try:
+        with pytest.raises(RuntimeError, match="structure metadata failed after partial write"):
+            await session.add_items(items)
+
+        assert await session.get_items() == []
+
+        with session._locked_connection() as conn:
+            message_count = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+            structure_count = conn.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+
+        assert message_count == 0
+        assert structure_count == 0
+    finally:
+        session.close()
 
 
 async def test_message_structure_tracking(agent: Agent):
@@ -155,6 +383,174 @@ async def test_tool_usage_tracking(agent: Agent):
     tool_names = {usage[0] for usage in tool_usage}
     assert "web_search" in tool_names
     assert "calculator" in tool_names
+
+    session.close()
+
+
+async def test_tool_usage_tracking_preserves_namespaces_and_tool_search(agent: Agent):
+    """Tool usage should retain namespaces and count tool_search calls once."""
+    session_id = "tools_namespace_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Look up the same account in multiple systems"},
+        {
+            "type": "function_call",
+            "name": "lookup_account",
+            "namespace": "crm",
+            "arguments": '{"account_id": "acct_123"}',
+            "call_id": "crm-call",
+        },
+        {
+            "type": "function_call",
+            "name": "lookup_account",
+            "namespace": "billing",
+            "arguments": '{"account_id": "acct_123"}',
+            "call_id": "billing-call",
+        },
+        {
+            "type": "tool_search_call",
+            "id": "tsc_memory",
+            "arguments": {"paths": ["crm"], "query": "lookup_account"},
+            "execution": "server",
+            "status": "completed",
+        },
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_output",
+                "id": "tso_memory",
+                "execution": "server",
+                "status": "completed",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "lookup_account",
+                        "description": "Look up an account.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "account_id": {
+                                    "type": "string",
+                                }
+                            },
+                            "required": ["account_id"],
+                        },
+                        "defer_loading": True,
+                    }
+                ],
+            },
+        ),
+    ]
+    await session.add_items(items)
+
+    usage_by_tool = {tool_name: count for tool_name, count, _turn in await session.get_tool_usage()}
+
+    assert usage_by_tool["crm.lookup_account"] == 1
+    assert usage_by_tool["billing.lookup_account"] == 1
+    assert usage_by_tool["tool_search"] == 1
+
+    session.close()
+
+
+async def test_tool_usage_tracking_counts_tool_search_output_without_matching_call(
+    agent: Agent,
+) -> None:
+    """Tool-search output-only histories should still report one tool_search usage."""
+    session_id = "tools_tool_search_output_only_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Look up customer_42"},
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_output",
+                "id": "tso_memory_only",
+                "execution": "server",
+                "status": "completed",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "lookup_account",
+                        "description": "Look up an account.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "account_id": {
+                                    "type": "string",
+                                }
+                            },
+                            "required": ["account_id"],
+                        },
+                    }
+                ],
+            },
+        ),
+    ]
+    await session.add_items(items)
+
+    usage_by_tool = {tool_name: count for tool_name, count, _turn in await session.get_tool_usage()}
+
+    assert usage_by_tool["tool_search"] == 1
+
+    session.close()
+
+
+async def test_tool_usage_tracking_uses_bare_name_for_deferred_top_level_calls(agent: Agent):
+    """Deferred top-level tool calls should not retain synthetic namespace aliases."""
+    session_id = "tools_deferred_top_level_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "What is the weather?"},
+        {
+            "type": "function_call",
+            "name": "get_weather",
+            "arguments": '{"city": "Tokyo"}',
+            "call_id": "weather-call",
+        },
+        {
+            "type": "function_call",
+            "name": "get_weather",
+            "namespace": "get_weather",
+            "arguments": '{"city": "Osaka"}',
+            "call_id": "weather-call-2",
+        },
+    ]
+    await session.add_items(items)
+
+    usage_by_tool = {tool_name: count for tool_name, count, _turn in await session.get_tool_usage()}
+
+    assert usage_by_tool["get_weather"] == 2
+    assert "get_weather.get_weather" not in usage_by_tool
+
+    session.close()
+
+
+async def test_tool_usage_tracking_collapses_reserved_same_name_namespace_shape(
+    agent: Agent,
+):
+    """Reserved same-name namespace wire shapes should collapse to the bare tool name."""
+    session_id = "tools_deferred_top_level_namespace_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "What is the weather?"},
+        {
+            "type": "function_call",
+            "name": "lookup_account",
+            "namespace": "lookup_account",
+            "arguments": '{"account_id": "acct_123"}',
+            "call_id": "lookup-call",
+        },
+    ]
+    await session.add_items(items)
+
+    usage_by_tool = {tool_name: count for tool_name, count, _turn in await session.get_tool_usage()}
+
+    assert usage_by_tool["lookup_account"] == 1
+    assert "lookup_account.lookup_account" not in usage_by_tool
 
     session.close()
 
@@ -224,6 +620,168 @@ async def test_branching_functionality(agent: Agent):
     assert branches_after_delete[0]["branch_id"] == "main"
 
     session.close()
+
+
+async def test_delete_branch_removes_branch_only_messages():
+    """Deleting a branch should not leave unreferenced branch-only messages behind."""
+    session_id = "branch_delete_cleanup_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    main_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "First question"},
+        {"role": "assistant", "content": "First answer"},
+        {"role": "user", "content": "Second question"},
+        {"role": "assistant", "content": "Second answer"},
+    ]
+    await session.add_items(main_items)
+
+    await session.create_branch_from_turn(2, "cleanup_branch")
+    branch_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Branch-only question"},
+        {"role": "assistant", "content": "Branch-only answer"},
+    ]
+    await session.add_items(branch_items)
+
+    await session.delete_branch("cleanup_branch", force=True)
+
+    with session._locked_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT message_data
+            FROM {session.messages_table}
+            WHERE session_id = ?
+            ORDER BY id
+            """,
+            (session.session_id,),
+        ).fetchall()
+
+    contents = [json.loads(message_data)["content"] for (message_data,) in rows]
+    assert contents == [
+        "First question",
+        "First answer",
+        "Second question",
+        "Second answer",
+    ]
+    assert await session.get_items(branch_id="main") == main_items
+
+    session.close()
+
+
+async def test_delete_branch_keeps_messages_still_referenced_by_another_branch():
+    """Deleting one branch should keep messages inherited by a surviving branch."""
+    session = AdvancedSQLiteSession(
+        session_id="branch_delete_shared_descendant_test",
+        create_tables=True,
+    )
+
+    main_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Main first question"},
+        {"role": "assistant", "content": "Main first answer"},
+        {"role": "user", "content": "Main second question"},
+        {"role": "assistant", "content": "Main second answer"},
+    ]
+    branch_a_shared_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Branch A shared question"},
+        {"role": "assistant", "content": "Branch A shared answer"},
+    ]
+    branch_a_only_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Branch A only question"},
+        {"role": "assistant", "content": "Branch A only answer"},
+    ]
+
+    try:
+        await session.add_items(main_items)
+        await session.create_branch_from_turn(2, "branch_a")
+        await session.add_items(branch_a_shared_items + branch_a_only_items)
+
+        await session.create_branch_from_turn(3, "branch_b")
+        await session.delete_branch("branch_a")
+
+        with session._locked_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT message_data
+                FROM {session.messages_table}
+                WHERE session_id = ?
+                ORDER BY id
+                """,
+                (session.session_id,),
+            ).fetchall()
+
+        contents = [json.loads(message_data)["content"] for (message_data,) in rows]
+        assert "Branch A shared question" in contents
+        assert "Branch A shared answer" in contents
+        assert "Branch A only question" not in contents
+        assert "Branch A only answer" not in contents
+        assert await session.get_items(branch_id="branch_b") == [
+            *main_items[:2],
+            *branch_a_shared_items,
+        ]
+    finally:
+        session.close()
+
+
+async def test_orphan_cleanup_uses_set_based_delete_for_many_messages():
+    """Orphan cleanup should not build one DELETE parameter per orphaned row."""
+
+    class RecordingCursor:
+        def __init__(self, cursor: Any, connection: "RecordingConnection") -> None:
+            self._cursor = cursor
+            self._connection = connection
+
+        @property
+        def rowcount(self) -> int:
+            return cast(int, self._cursor.rowcount)
+
+        def execute(self, sql: str, parameters: Any = None) -> Any:
+            normalized_sql = " ".join(sql.split()).upper()
+            if normalized_sql.startswith("DELETE"):
+                self._connection.delete_parameter_counts.append(len(parameters or ()))
+            if parameters is None:
+                return self._cursor.execute(sql)
+            return self._cursor.execute(sql, parameters)
+
+        def fetchall(self) -> Any:
+            return self._cursor.fetchall()
+
+        def close(self) -> None:
+            self._cursor.close()
+
+    class RecordingConnection:
+        def __init__(self, conn: Any) -> None:
+            self._conn = conn
+            self.delete_parameter_counts: list[int] = []
+
+        def cursor(self) -> RecordingCursor:
+            return RecordingCursor(self._conn.cursor(), self)
+
+    session = AdvancedSQLiteSession(
+        session_id="branch_delete_many_orphans_cleanup",
+        create_tables=True,
+    )
+    orphan_items: list[TResponseInputItem] = [
+        {"role": "user", "content": f"orphan {i}"} for i in range(1200)
+    ]
+
+    try:
+        with session._locked_connection() as conn:
+            session._insert_items(conn, orphan_items)
+            conn.commit()
+
+            recording_conn = RecordingConnection(conn)
+            deleted_count = session._cleanup_orphaned_messages_sync(cast(Any, recording_conn))
+            conn.commit()
+
+            remaining_count = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+
+        assert deleted_count == len(orphan_items)
+        assert remaining_count == 0
+        assert recording_conn.delete_parameter_counts == [2]
+    finally:
+        session.close()
 
 
 async def test_get_conversation_turns():
@@ -301,6 +859,58 @@ async def test_find_turns_by_content():
     # Search for non-existent content
     no_turns = await session.find_turns_by_content("elephants")
     assert len(no_turns) == 0
+
+    session.close()
+
+
+async def test_get_conversation_turns_with_list_content():
+    """List (multimodal) content is previewed as a string instead of crashing or leaking a list."""
+    session_id = "conversation_turns_list_content_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    # A short list content must be previewed as a string, not returned as the raw list.
+    short_items: list[TResponseInputItem] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+    ]
+    await session.add_items(short_items)
+
+    # A long list content must not raise when the preview is built.
+    long_items: list[TResponseInputItem] = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": str(i)} for i in range(101)],
+        },
+    ]
+    await session.add_items(long_items)
+
+    turns = await session.get_conversation_turns()
+    assert len(turns) == 2
+
+    # 'content' is the documented truncated preview string, while 'full_content' keeps the list.
+    assert isinstance(turns[0]["content"], str)
+    assert isinstance(turns[0]["full_content"], list)
+
+    assert isinstance(turns[1]["content"], str)
+    assert turns[1]["content"].endswith("...")
+    assert isinstance(turns[1]["full_content"], list)
+
+    session.close()
+
+
+async def test_find_turns_by_content_with_list_content():
+    """find_turns_by_content returns a string preview for list (multimodal) content."""
+    session_id = "find_turns_list_content_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "hello world"}]},
+    ]
+    await session.add_items(items)
+
+    matches = await session.find_turns_by_content("hello")
+    assert len(matches) == 1
+    assert isinstance(matches[0]["content"], str)
+    assert isinstance(matches[0]["full_content"], list)
 
     session.close()
 
@@ -543,7 +1153,9 @@ async def test_usage_tracking_storage(agent: Agent, usage_data: Usage):
         input_tokens=75,
         output_tokens=45,
         total_tokens=120,
-        input_tokens_details=InputTokensDetails(cached_tokens=20),
+        input_tokens_details=InputTokensDetails.model_validate(
+            {"cache_write_tokens": 0, "cached_tokens": 20}
+        ),
         output_tokens_details=OutputTokensDetails(reasoning_tokens=15),
     )
 
@@ -1129,3 +1741,703 @@ async def test_runner_with_session_settings_override(agent: Agent):
     assert len(history_items) == 2
 
     session.close()
+
+
+async def test_concurrent_add_items_preserves_message_structure_for_file_db():
+    """Concurrent add_items calls should keep agent_messages and message_structure aligned."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "advanced_concurrent.db"
+        session = AdvancedSQLiteSession(
+            session_id="advanced_concurrent",
+            db_path=db_path,
+            create_tables=True,
+        )
+
+        async def add_batch(worker_id: int) -> list[str]:
+            contents = [f"worker-{worker_id}-message-{index}" for index in range(10)]
+            await session.add_items([{"role": "user", "content": content} for content in contents])
+            return contents
+
+        expected_batches = await asyncio.gather(*(add_batch(worker_id) for worker_id in range(8)))
+        expected_contents = {content for batch in expected_batches for content in batch}
+
+        retrieved_items = await session.get_items()
+        retrieved_contents = {
+            content
+            for item in retrieved_items
+            for content in [item.get("content")]
+            if isinstance(content, str)
+        }
+
+        assert retrieved_contents == expected_contents
+        assert len(retrieved_items) == len(expected_contents)
+
+        with session._locked_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT m.message_data
+                FROM {session.messages_table} m
+                JOIN message_structure s ON s.message_id = m.id
+                WHERE m.session_id = ?
+                ORDER BY s.sequence_number ASC
+                """,
+                (session.session_id,),
+            ).fetchall()
+
+        structured_contents = {json.loads(message_data).get("content") for (message_data,) in rows}
+
+        assert structured_contents == expected_contents
+        assert len(rows) == len(expected_contents)
+
+        session.close()
+
+
+async def test_output_tokens_details_persisted_when_input_details_missing():
+    """Regression: output_tokens_details must persist even if input_tokens_details is None.
+
+    Previously the output serialization branch was nested inside the input branch,
+    silently dropping output_tokens_details whenever input_tokens_details was falsy
+    (e.g., when a provider populated only output details).
+    """
+    session = AdvancedSQLiteSession(session_id="output_only_usage", create_tables=True)
+    usage = Usage(
+        requests=1,
+        input_tokens=10,
+        output_tokens=5,
+        total_tokens=15,
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=42),
+    )
+    # Mimic providers that bypass validation and leave input_tokens_details unset.
+    object.__setattr__(usage, "input_tokens_details", None)
+
+    await session.add_items([{"role": "user", "content": "hi"}])
+    await session.store_run_usage(create_mock_run_result(usage))
+
+    turn_usage = await session.get_turn_usage(1)
+    assert isinstance(turn_usage, dict)
+    assert turn_usage["output_tokens_details"] == {"reasoning_tokens": 42}
+    assert turn_usage["input_tokens_details"] is None
+    session.close()
+
+
+def _count_rows(session: AdvancedSQLiteSession, table: str) -> int:
+    """Helper: count rows for the session in one of the metadata tables."""
+    with session._locked_connection() as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()
+        return cast(int, row[0])
+
+
+async def test_clear_session_removes_structure_and_usage_metadata(usage_data: Usage):
+    """Regression: clear_session must also clear message_structure and turn_usage.
+
+    Those tables declare an ON DELETE CASCADE foreign key, but SQLite does not
+    enforce foreign keys by default, so the inherited base clear_session left the
+    rows behind. That leaked stale structure/usage data and permanently offset
+    sequence and turn numbering for items added after clearing.
+    """
+    session = AdvancedSQLiteSession(session_id="clear_metadata_test", create_tables=True)
+
+    await session.add_items(
+        [
+            {"role": "user", "content": "First question"},
+            {"role": "assistant", "content": "First answer"},
+        ]
+    )
+    await session.store_run_usage(create_mock_run_result(usage_data))
+
+    assert _count_rows(session, "message_structure") > 0
+    assert _count_rows(session, "turn_usage") > 0
+
+    await session.clear_session()
+
+    assert await session.get_items() == []
+    assert _count_rows(session, "message_structure") == 0
+    assert _count_rows(session, "turn_usage") == 0
+
+    # Numbering must reset: the next item starts a fresh sequence and turn.
+    await session.add_items([{"role": "user", "content": "Fresh start"}])
+    with session._locked_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT sequence_number, user_turn_number
+            FROM message_structure
+            WHERE session_id = ?
+            """,
+            (session.session_id,),
+        ).fetchall()
+    assert rows == [(1, 1)]
+
+    session.close()
+
+
+async def test_pop_item_removes_its_structure_row():
+    """Regression: pop_item must delete the popped message's structure row.
+
+    The inherited base pop_item removed only the message row, leaving an orphaned
+    message_structure row that corrupted later MAX(sequence_number)/turn numbering.
+    """
+    session = AdvancedSQLiteSession(session_id="pop_structure_test", create_tables=True)
+
+    await session.add_items(
+        [
+            {"role": "user", "content": "Question"},
+            {"role": "assistant", "content": "Answer"},
+        ]
+    )
+
+    popped = await session.pop_item()
+    assert popped == {"role": "assistant", "content": "Answer"}
+
+    with session._locked_connection() as conn:
+        message_ids = {
+            row[0]
+            for row in conn.execute(
+                f"SELECT id FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchall()
+        }
+        structure_message_ids = {
+            row[0]
+            for row in conn.execute(
+                "SELECT message_id FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchall()
+        }
+
+    # No structure row may reference a message that no longer exists.
+    assert structure_message_ids <= message_ids
+    assert await session.get_items() == [{"role": "user", "content": "Question"}]
+
+    session.close()
+
+
+async def test_pop_item_removes_turn_usage_only_when_turn_emptied(usage_data: Usage):
+    """Regression: pop_item must drop a turn's turn_usage row once the turn has no
+    remaining items on the current branch, while keeping it for a partial pop.
+    """
+    session = AdvancedSQLiteSession(session_id="pop_turn_usage_test", create_tables=True)
+
+    # One turn with two items, plus stored usage for that turn.
+    await session.add_items(
+        [
+            {"role": "user", "content": "Question"},
+            {"role": "assistant", "content": "Answer"},
+        ]
+    )
+    await session.store_run_usage(create_mock_run_result(usage_data))
+    assert _count_rows(session, "turn_usage") == 1
+
+    # Popping only the assistant item leaves the turn non-empty: usage is kept.
+    await session.pop_item()
+    assert _count_rows(session, "turn_usage") == 1
+
+    # Popping the last item of the turn removes the now-stale usage row.
+    await session.pop_item()
+    assert _count_rows(session, "turn_usage") == 0
+    assert not await session.get_turn_usage(1)
+
+    session.close()
+
+
+async def test_pop_item_respects_current_branch_and_keeps_shared_messages():
+    """Regression: pop_item must pop from the current branch and preserve messages
+    still referenced by another branch (branches share the underlying message rows).
+    """
+    session = AdvancedSQLiteSession(session_id="pop_branch_test", create_tables=True)
+
+    main_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Main first question"},
+        {"role": "assistant", "content": "Main first answer"},
+        {"role": "user", "content": "Main second question"},
+        {"role": "assistant", "content": "Main second answer"},
+    ]
+
+    try:
+        await session.add_items(main_items)
+        # Branch from turn 2 copies turn 1's shared messages into the new branch.
+        await session.create_branch_from_turn(2, "branch_a")
+        await session.switch_to_branch("branch_a")
+        await session.add_items([{"role": "user", "content": "Branch-only question"}])
+
+        # Popping on branch_a removes only its own newest item.
+        popped = await session.pop_item()
+        assert popped == {"role": "user", "content": "Branch-only question"}
+
+        # The main branch, which shares turn 1's messages, is untouched.
+        assert await session.get_items(branch_id="main") == main_items
+
+        # No orphaned structure rows anywhere in the session.
+        with session._locked_connection() as conn:
+            message_ids = {
+                row[0]
+                for row in conn.execute(
+                    f"SELECT id FROM {session.messages_table} WHERE session_id = ?",
+                    (session.session_id,),
+                ).fetchall()
+            }
+            structure_message_ids = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT message_id FROM message_structure WHERE session_id = ?",
+                    (session.session_id,),
+                ).fetchall()
+            }
+        assert structure_message_ids <= message_ids
+    finally:
+        session.close()
+
+
+async def test_pop_item_deletes_shared_copied_message_only_when_unreferenced():
+    """Regression: popping a message that was copied into a branch (branches share
+    the underlying message row) must keep the message while another branch still
+    references it, and only remove it once no branch references it anymore.
+    """
+    session = AdvancedSQLiteSession(session_id="pop_shared_copy_test", create_tables=True)
+
+    main_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+
+    def message_count() -> int:
+        with session._locked_connection() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()
+            return cast(int, row[0])
+
+    try:
+        await session.add_items(main_items)
+        # Branch from turn 2 copies turn 1 (u1, a1) into branch_a as shared rows.
+        await session.create_branch_from_turn(2, "branch_a")
+        await session.switch_to_branch("branch_a")
+        await session.add_items([{"role": "user", "content": "branch-only"}])
+
+        assert message_count() == 5  # u1, a1, u2, a2, branch-only
+
+        # Pop the branch-only item (not shared): its message row is removed.
+        assert await session.pop_item() == {"role": "user", "content": "branch-only"}
+        assert message_count() == 4
+
+        # Pop the copied, shared a1 and u1 off branch_a. They remain in the
+        # messages table because the main branch still references them.
+        assert await session.pop_item() == {"role": "assistant", "content": "a1"}
+        assert await session.pop_item() == {"role": "user", "content": "u1"}
+        assert message_count() == 4
+        assert await session.get_items(branch_id="main") == main_items
+        assert await session.get_items(branch_id="branch_a") == []
+
+        # Now drain main: once no branch references u1/a1, the rows are removed.
+        await session.switch_to_branch("main")
+        for _ in range(len(main_items)):
+            await session.pop_item()
+        assert message_count() == 0
+        assert await session.get_items() == []
+
+        # No orphaned structure rows at any point.
+        with session._locked_connection() as conn:
+            leftover = conn.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+        assert leftover == 0
+    finally:
+        session.close()
+
+
+@contextlib.contextmanager
+def _gate_worker(target_name: str):
+    """Deterministically pause a session worker to control interleaving.
+
+    Patches ``asyncio.to_thread`` in the session module so the first dispatch of
+    a worker whose ``__name__`` equals ``target_name`` signals ``started`` and
+    blocks on ``release`` before running. The pause happens before the worker
+    acquires the connection lock, so other operations can run to completion
+    while it is held. Yields ``(started, release)`` threading events.
+    """
+    started = threading.Event()
+    release = threading.Event()
+    real_to_thread = asyncio.to_thread
+    state = {"gated": False}
+
+    async def gated(func, /, *args, **kwargs):
+        if not state["gated"] and getattr(func, "__name__", "") == target_name:
+            state["gated"] = True
+            started.set()
+            await real_to_thread(release.wait)
+        return await real_to_thread(func, *args, **kwargs)
+
+    with patch(
+        "agents.extensions.memory.advanced_sqlite_session.asyncio.to_thread",
+        gated,
+    ):
+        yield started, real_to_thread, release
+
+
+async def test_pop_item_uses_branch_snapshot_when_branch_switches_concurrently():
+    """Regression: pop_item snapshots the current branch at call time, so a branch
+    switch that interleaves after dispatch cannot redirect the pop to another branch.
+
+    Uses a barrier (not sleep) to prove the ordering: the pop worker is held after
+    its branch snapshot is taken while a full switch_to_branch("main") completes.
+    """
+    session = AdvancedSQLiteSession(session_id="pop_snapshot_test", create_tables=True)
+
+    main_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+
+    try:
+        await session.add_items(main_items)
+        await session.create_branch_from_turn(2, "branch_a")
+        await session.switch_to_branch("branch_a")
+        await session.add_items([{"role": "user", "content": "branch-only"}])
+
+        with _gate_worker("_pop_item_sync") as (started, real_to_thread, release):
+            # pop_item snapshots _current_branch_id ("branch_a") synchronously,
+            # then dispatches its worker, which parks at the barrier.
+            task = asyncio.ensure_future(session.pop_item())
+            await real_to_thread(started.wait)
+            # Switch to main completes fully while the pop worker is parked.
+            await session.switch_to_branch("main")
+            release.set()
+            popped = await task
+
+        # The pop targeted branch_a (its state at call time), not main.
+        assert popped == {"role": "user", "content": "branch-only"}
+        assert await session.get_items(branch_id="main") == main_items
+    finally:
+        session.close()
+
+
+async def test_stale_switch_after_clear_does_not_repoint_to_deleted_branch():
+    """A switch_to_branch that commits its pointer after clear_session must not
+    resurrect the deleted branch; the generation guard makes it a no-op.
+    """
+    session = AdvancedSQLiteSession(session_id="stale_switch_test", create_tables=True)
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+                {"role": "assistant", "content": "a2"},
+            ]
+        )
+        await session.create_branch_from_turn(2, "branch_a")
+        await session.switch_to_branch("main")
+        assert session._current_branch_id == "main"
+
+        with _gate_worker("_commit_branch_pointer") as (started, real_to_thread, release):
+            # switch validates branch_a and captures the generation, then parks
+            # right before committing the pointer.
+            task = asyncio.ensure_future(session.switch_to_branch("branch_a"))
+            await real_to_thread(started.wait)
+            # A full clear commits: it bumps the generation and resets to main.
+            await session.clear_session()
+            release.set()
+            await task
+
+        # The stale switch saw a newer generation and left the pointer on main.
+        assert session._current_branch_id == "main"
+        assert await session.get_items() == []
+    finally:
+        session.close()
+
+
+async def test_stale_create_branch_after_clear_does_not_repoint():
+    """A create_branch_from_turn that commits its pointer after clear_session must
+    not point at the branch clear removed.
+    """
+    session = AdvancedSQLiteSession(session_id="stale_create_test", create_tables=True)
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+                {"role": "assistant", "content": "a2"},
+            ]
+        )
+
+        with _gate_worker("_commit_branch_pointer") as (started, real_to_thread, release):
+            task = asyncio.ensure_future(session.create_branch_from_turn(2, "branch_b"))
+            await real_to_thread(started.wait)
+            await session.clear_session()
+            release.set()
+            await task
+
+        # clear won: the pointer stays on main, not the wiped branch_b.
+        assert session._current_branch_id == "main"
+        assert await session.get_items() == []
+    finally:
+        session.close()
+
+
+async def test_stale_store_run_usage_skipped_when_turn_removed_by_pop(usage_data: Usage):
+    """A store_run_usage that reads a turn and then races with pop_item removing
+    that turn must not reinsert usage for the now-nonexistent turn.
+    """
+    session = AdvancedSQLiteSession(session_id="stale_usage_test", create_tables=True)
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+            ]
+        )
+        result = create_mock_run_result(usage_data)
+
+        with _gate_worker("_update_sync") as (started, real_to_thread, release):
+            # store_run_usage reads current_turn (1) and captures the turn-usage
+            # version, then parks before writing turn_usage.
+            task = asyncio.ensure_future(session.store_run_usage(result))
+            await real_to_thread(started.wait)
+            # Pop both items of turn 1 so the turn no longer exists.
+            await session.pop_item()
+            await session.pop_item()
+            release.set()
+            await task
+
+        # The stale usage write was skipped: no row for the removed turn.
+        assert _count_rows(session, "turn_usage") == 0
+    finally:
+        session.close()
+
+
+async def test_stale_store_run_usage_not_recorded_against_reused_turn_number(
+    usage_data: Usage,
+):
+    """A store_run_usage that read turn N must not record its usage when that turn
+    is popped and a *new* turn later reuses the same numeric id (the ABA case).
+
+    An existence-only guard would pass here because turn 1 exists again; the
+    turn-usage version counter invalidates the stale write.
+    """
+    session = AdvancedSQLiteSession(session_id="stale_usage_aba_test", create_tables=True)
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+            ]
+        )
+        result = create_mock_run_result(usage_data)
+
+        with _gate_worker("_update_sync") as (started, real_to_thread, release):
+            # Reads current_turn (1), captures the turn anchor, parks before write.
+            task = asyncio.ensure_future(session.store_run_usage(result))
+            await real_to_thread(started.wait)
+            # Remove turn 1 entirely, then create a brand-new turn that reuses the
+            # numeric id 1.
+            await session.pop_item()
+            await session.pop_item()
+            await session.add_items([{"role": "user", "content": "fresh turn"}])
+            release.set()
+            await task
+
+        # The new turn 1 must not carry the previous run's usage.
+        assert _count_rows(session, "turn_usage") == 0
+        assert not await session.get_turn_usage(1)
+    finally:
+        session.close()
+
+
+async def test_store_run_usage_survives_unrelated_branch_deletion(usage_data: Usage):
+    """A store_run_usage in flight must not be dropped when an unrelated turn is
+    removed (e.g. delete_branch on a non-current branch). The invalidation is
+    scoped to the captured branch/turn, so the write still lands.
+    """
+    session = AdvancedSQLiteSession(session_id="usage_scope_test", create_tables=True)
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+                {"role": "assistant", "content": "a2"},
+            ]
+        )
+        # A separate branch that shares turn 1's messages; deleting it must not
+        # affect usage captured for the current (main) branch.
+        await session.create_branch_from_turn(2, "side_branch")
+        await session.switch_to_branch("main")
+        result = create_mock_run_result(usage_data)
+
+        with _gate_worker("_update_sync") as (started, real_to_thread, release):
+            # Captures main/turn 2 and its anchor, then parks before the write.
+            task = asyncio.ensure_future(session.store_run_usage(result))
+            await real_to_thread(started.wait)
+            # Delete an unrelated branch while the usage write is parked.
+            await session.delete_branch("side_branch")
+            release.set()
+            await task
+
+        # The write landed: main's turn 2 usage is recorded despite the deletion.
+        assert _count_rows(session, "turn_usage") == 1
+        turn_2_usage = await session.get_turn_usage(2)
+        assert isinstance(turn_2_usage, dict)
+        assert turn_2_usage["total_tokens"] == usage_data.total_tokens
+    finally:
+        session.close()
+
+
+async def test_clear_session_resets_current_branch_to_main():
+    """Regression: clear_session must reset the in-memory branch pointer to 'main'
+    (inside the locked operation) since every branch was removed.
+    """
+    session = AdvancedSQLiteSession(session_id="clear_branch_reset_test", create_tables=True)
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+                {"role": "assistant", "content": "a2"},
+            ]
+        )
+        await session.create_branch_from_turn(2, "branch_a")
+        await session.switch_to_branch("branch_a")
+        assert session._current_branch_id == "branch_a"
+
+        await session.clear_session()
+
+        assert session._current_branch_id == "main"
+        assert await session.get_items() == []
+    finally:
+        session.close()
+
+
+async def test_pop_item_rolls_back_on_failure_after_earlier_delete():
+    """Regression: a failure partway through pop_item's delete sequence must
+    roll back so no partial mutation or open transaction survives.
+
+    _locked_connection() does not manage transactions itself, so pop_item must
+    roll back explicitly on failure. Otherwise the message_structure delete
+    that already ran would remain pending in an open transaction for whatever
+    the connection does next (on this thread) to inherit and possibly commit.
+    """
+    session = AdvancedSQLiteSession(session_id="pop_rollback_test", create_tables=True)
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "Question"},
+                {"role": "assistant", "content": "Answer"},
+            ]
+        )
+
+        message_count_before = _count_rows(session, session.messages_table)
+        structure_count_before = _count_rows(session, "message_structure")
+        branch_before = session._current_branch_id
+
+        # Fail the step that runs immediately after the message_structure
+        # delete, simulating a failure after an earlier delete has executed.
+        with patch.object(
+            session,
+            "_cleanup_orphaned_messages_sync",
+            side_effect=RuntimeError("Simulated failure after earlier delete"),
+        ):
+            with pytest.raises(RuntimeError, match="Simulated failure"):
+                await session.pop_item()
+
+        # The message_structure delete that ran before the injected failure
+        # must have been rolled back: nothing was actually removed.
+        assert _count_rows(session, session.messages_table) == message_count_before
+        assert _count_rows(session, "message_structure") == structure_count_before
+        assert session._current_branch_id == branch_before
+        with session._locked_connection() as conn:
+            assert conn.in_transaction is False
+
+        # The connection must be left clean for a subsequent legitimate pop.
+        popped = await session.pop_item()
+        assert popped == {"role": "assistant", "content": "Answer"}
+        assert await session.get_items() == [{"role": "user", "content": "Question"}]
+    finally:
+        session.close()
+
+
+async def test_clear_session_rolls_back_on_failure_after_earlier_delete(usage_data: Usage):
+    """Regression: a failure partway through clear_session's delete sequence
+    must roll back so no partial mutation or open transaction survives.
+
+    _locked_connection() does not manage transactions itself, so clear_session
+    must roll back explicitly. Otherwise a failure after the first deletes
+    would leave those deletes pending in an open transaction, and the branch
+    pointer / generation reset (which only happens after a successful commit)
+    could drift out of sync with what's actually persisted.
+    """
+    session = AdvancedSQLiteSession(session_id="clear_rollback_test", create_tables=True)
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "First question"},
+                {"role": "assistant", "content": "First answer"},
+            ]
+        )
+        await session.store_run_usage(create_mock_run_result(usage_data))
+
+        message_count_before = _count_rows(session, session.messages_table)
+        structure_count_before = _count_rows(session, "message_structure")
+        usage_count_before = _count_rows(session, "turn_usage")
+        assert structure_count_before > 0
+        assert usage_count_before > 0
+        branch_before = session._current_branch_id
+        generation_before = session._generation
+
+        real_conn = session._shared_connection
+
+        class _FailOnTurnUsageDelete:
+            """Delegates to the real connection but fails the turn_usage
+            delete, simulating a failure after the earlier deletes in
+            clear_session have already executed against this connection."""
+
+            def execute(self, sql, parameters=()):
+                if "DELETE FROM turn_usage" in sql:
+                    raise RuntimeError("Simulated failure after earlier deletes")
+                return real_conn.execute(sql, parameters)
+
+            def __getattr__(self, name):
+                return getattr(real_conn, name)
+
+        session._shared_connection = _FailOnTurnUsageDelete()  # type: ignore
+        try:
+            with pytest.raises(RuntimeError, match="Simulated failure"):
+                await session.clear_session()
+        finally:
+            session._shared_connection = real_conn
+
+        # The earlier deletes (messages, sessions, message_structure) that ran
+        # before the injected failure must have been rolled back too.
+        assert _count_rows(session, session.messages_table) == message_count_before
+        assert _count_rows(session, "message_structure") == structure_count_before
+        assert _count_rows(session, "turn_usage") == usage_count_before
+        assert real_conn.in_transaction is False
+        # In-memory state is only updated after a successful commit, so it
+        # must be untouched when the commit never happened.
+        assert session._current_branch_id == branch_before
+        assert session._generation == generation_before
+
+        # The connection must be left clean for a subsequent legitimate clear.
+        await session.clear_session()
+        assert _count_rows(session, "message_structure") == 0
+        assert _count_rows(session, "turn_usage") == 0
+        assert await session.get_items() == []
+    finally:
+        session.close()

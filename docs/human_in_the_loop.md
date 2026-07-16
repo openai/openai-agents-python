@@ -51,6 +51,36 @@ Sticky decisions created with `always_approve=True` or `always_reject=True` are 
 
 You do not need to resolve every pending approval in the same pass. `interruptions` can contain a mix of regular function tools, hosted MCP approvals, and nested `Agent.as_tool()` approvals. If you rerun after approving or rejecting only some items, those resolved calls can continue while unresolved ones remain in `interruptions` and pause the run again.
 
+## Custom rejection messages
+
+By default, a rejected tool call returns the SDK's standard rejection text back into the run. You can customize that message in two layers:
+
+-   Run-wide fallback: set [`RunConfig.tool_error_formatter`][agents.run.RunConfig.tool_error_formatter] to control the default model-visible message for approval rejections across the whole run.
+-   Per-call override: pass `rejection_message=...` to `state.reject(...)` when you want one specific rejected tool call to surface a different message.
+
+If both are provided, the per-call `rejection_message` takes precedence over the run-wide formatter.
+
+```python
+from agents import RunConfig, ToolErrorFormatterArgs
+
+
+def format_rejection(args: ToolErrorFormatterArgs[None]) -> str | None:
+    if args.kind != "approval_rejected":
+        return None
+    return "Publish action was canceled because approval was rejected."
+
+
+run_config = RunConfig(tool_error_formatter=format_rejection)
+
+# Later, while resolving a specific interruption:
+state.reject(
+    interruption,
+    rejection_message="Publish action was canceled because the reviewer denied approval.",
+)
+```
+
+See [`examples/agent_patterns/human_in_the_loop_custom_rejection.py`](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns/human_in_the_loop_custom_rejection.py) for a complete example that shows both layers together.
+
 ## Automatic approval decisions
 
 Manual `interruptions` are the most general pattern, but they are not the only one:
@@ -140,6 +170,7 @@ To stream output while waiting for approvals, call `Runner.run_streamed`, consum
 ## Repository patterns and examples
 
 - **Streaming approvals**: `examples/agent_patterns/human_in_the_loop_stream.py` shows how to drain `stream_events()` and then approve pending tool calls before resuming with `Runner.run_streamed(agent, state)`.
+- **Custom rejection text**: `examples/agent_patterns/human_in_the_loop_custom_rejection.py` shows how to combine run-level `tool_error_formatter` with per-call `rejection_message` overrides when approvals are rejected.
 - **Agent as tool approvals**: `Agent.as_tool(..., needs_approval=...)` applies the same interruption flow when delegated agent tasks need review. Nested interruptions still surface on the outer run, so resume the original top-level agent rather than the nested one.
 - **Local shell and apply_patch tools**: `ShellTool` and `ApplyPatchTool` also support `needs_approval`. Use `state.approve(interruption, always_approve=True)` or `state.reject(..., always_reject=True)` to cache the decision for future calls. For automatic decisions, provide `on_approval` (see `examples/tools/shell.py`); for manual decisions, handle interruptions (see `examples/tools/shell_human_in_the_loop.py`). Hosted shell environments do not support `needs_approval` or `on_approval`; see the [tools guide](tools.md).
 - **Local MCP servers**: Use `require_approval` on `MCPServerStdio` / `MCPServerSse` / `MCPServerStreamableHttp` to gate MCP tool calls (see `examples/mcp/get_all_mcp_tools_example/main.py` and `examples/mcp/tool_filter_example/main.py`).
@@ -155,19 +186,11 @@ Useful serialization options:
 
 -   `context_serializer`: Customize how non-mapping context objects are serialized.
 -   `context_deserializer`: Rebuild non-mapping context objects when loading state with `RunState.from_json(...)` or `RunState.from_string(...)`.
--   `strict_context=True`: Fail serialization or deserialization unless the context is already a
-    mapping or you provide the appropriate serializer/deserializer.
--   `context_override`: Replace the serialized context when loading state. This is useful when you
-    do not want to restore the original context object, but it does not remove that context from an
-    already serialized payload.
--   `include_tracing_api_key=True`: Include the tracing API key in the serialized trace payload
-    when you need resumed work to keep exporting traces with the same credentials.
+- `strict_context=True`: Fail serialization or deserialization unless the context is already a mapping or you provide the appropriate serializer/deserializer.
+- `context_override`: Replace the serialized context when loading state. This is useful when you do not want to restore the original context object, but it does not remove that context from an already serialized payload.
+- `include_tracing_api_key=True`: Include the tracing API key in the serialized trace payload when you need resumed work to keep exporting traces with the same credentials.
 
-Serialized run state includes your app context plus SDK-managed runtime metadata such as approvals,
-usage, serialized `tool_input`, nested agent-as-tool resumptions, trace metadata, and server-managed
-conversation settings. If you plan to store or transmit serialized state, treat
-`RunContextWrapper.context` as persisted data and avoid placing secrets there unless you
-intentionally want them to travel with the state.
+Serialized run state includes your app context plus SDK-managed runtime metadata such as approvals, usage, serialized `tool_input`, nested agent-as-tool resumptions, trace metadata, and server-managed conversation settings. If you plan to store or transmit serialized state, treat `RunContextWrapper.context` as persisted data and avoid placing secrets there unless you intentionally want them to travel with the state.
 
 ## Versioning pending tasks
 

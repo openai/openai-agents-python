@@ -42,6 +42,7 @@ async def main(verbose: bool, stream: bool) -> None:
                     "type": "mcp",
                     "server_label": "deepwiki",
                     "server_url": "https://mcp.deepwiki.com/mcp",
+                    "allowed_tools": ["ask_question"],
                     "require_approval": require_approval,
                 },
                 on_approval_request=prompt_approval,

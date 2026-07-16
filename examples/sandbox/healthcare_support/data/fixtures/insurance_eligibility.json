@@ -1,0 +1,99 @@
+{
+  "records": [
+    {
+      "payer": "Blue Cross",
+      "member_id": "BCX-4439201",
+      "dob": "1985-02-14",
+      "plan_name": "Blue Cross PPO Silver 4500",
+      "eligibility_status": "active",
+      "copay_primary_care": "$35",
+      "copay_specialist": "$60",
+      "deductible_remaining": "$1,200",
+      "prior_auth_required_services": [
+        "mri",
+        "ct angiogram",
+        "elective surgery"
+      ],
+      "notes": "Coverage active. MRI requires prior authorization except emergency use."
+    },
+    {
+      "payer": "UnitedHealthcare",
+      "member_id": "UHC-771032",
+      "dob": "1990-09-03",
+      "plan_name": "UHC Choice Plus Bronze",
+      "eligibility_status": "active",
+      "copay_primary_care": "$30",
+      "copay_specialist": "$75",
+      "deductible_remaining": "$2,050",
+      "prior_auth_required_services": [
+        "ct angiogram",
+        "inpatient admission",
+        "outpatient surgery"
+      ],
+      "notes": "Prior auth required for CT angiogram unless ordered in emergency setting."
+    },
+    {
+      "payer": "Aetna",
+      "member_id": "AET-562100",
+      "dob": "1978-11-20",
+      "plan_name": "Aetna Open Access Basic",
+      "eligibility_status": "active",
+      "copay_primary_care": "$25",
+      "copay_specialist": "$50",
+      "deductible_remaining": "$850",
+      "prior_auth_required_services": [
+        "specialist consult"
+      ],
+      "notes": "Referral on file for specialist consult."
+    },
+    {
+      "payer": "Cigna",
+      "member_id": "CG-291001",
+      "dob": "1982-06-30",
+      "plan_name": "Cigna Connect Gold",
+      "eligibility_status": "active",
+      "copay_primary_care": "$20",
+      "copay_specialist": "$45",
+      "deductible_remaining": "$300",
+      "prior_auth_required_services": [
+        "advanced imaging",
+        "elective procedures"
+      ],
+      "notes": "Claims for advanced imaging can deny if authorization is missing."
+    },
+    {
+      "payer": "Blue Cross",
+      "member_id": "BCX-8822009",
+      "dob": "1974-05-12",
+      "plan_name": "Blue Cross PPO Platinum",
+      "eligibility_status": "active",
+      "copay_primary_care": "$20",
+      "copay_specialist": "$40",
+      "deductible_remaining": "$0",
+      "prior_auth_required_services": [
+        "physical therapy after 12 visits"
+      ],
+      "notes": "Physical therapy benefit allows 12 visits without prior authorization per calendar year."
+    },
+    {
+      "payer": "Blue Cross",
+      "member_id": "BCX-9017710",
+      "dob": "1992-04-17",
+      "plan_name": "Blue Cross PPO Silver 3000",
+      "eligibility_status": "active",
+      "copay_primary_care": "$30",
+      "copay_specialist": "$55",
+      "deductible_remaining": "$1,600",
+      "prior_auth_required_services": [
+        "mri",
+        "knee surgery consult",
+        "outpatient surgery"
+      ],
+      "notes": "Prior auth normally required for knee surgery consult and advanced imaging."
+    }
+  ],
+  "default_response": {
+    "eligibility_status": "unknown",
+    "notes": "No eligibility match. Confirm payer, member ID, and DOB."
+  }
+}

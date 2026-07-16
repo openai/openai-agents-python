@@ -45,17 +45,21 @@ These surfaces answer different questions:
 | Property or helper | What it contains | Best for |
 | --- | --- | --- |
 | [`input`][agents.result.RunResultBase.input] | The base input for this run segment. If a handoff input filter rewrote the history, this reflects the filtered input the run continued with. | Auditing what this run actually used as input |
-| [`to_input_list()`][agents.result.RunResultBase.to_input_list] | A replay-ready next-turn input list built from `input` plus the converted `new_items` from this run. | Manual chat loops and client-managed conversation state |
+| [`to_input_list()`][agents.result.RunResultBase.to_input_list] | An input-item view of the run. The default `mode="preserve_all"` keeps the full converted history from `new_items`; `mode="normalized"` prefers canonical continuation input when handoff filtering rewrites model history. | Manual chat loops, client-managed conversation state, and plain-item history inspection |
 | [`new_items`][agents.result.RunResultBase.new_items] | Rich [`RunItem`][agents.items.RunItem] wrappers with agent, tool, handoff, and approval metadata. | Logs, UIs, audits, and debugging |
 | [`raw_responses`][agents.result.RunResultBase.raw_responses] | Raw [`ModelResponse`][agents.items.ModelResponse] objects from each model call in the run. | Provider-level diagnostics or raw response inspection |
 
 In practice:
 
--   Use `to_input_list()` when your application manually carries the entire conversation transcript.
+-   Use `to_input_list()` when you want a plain input-item view of the run.
+-   Use `to_input_list(mode="normalized")` when you want the canonical local input for the next `Runner.run(..., input=...)` call after handoff filtering or nested handoff history rewrites.
 -   Use [`session=...`](sessions/index.md) when you want the SDK to load and save history for you.
 -   If you are using OpenAI server-managed state with `conversation_id` or `previous_response_id`, usually pass only the new user input and reuse the stored ID instead of resending `to_input_list()`.
+-   Use the default `to_input_list()` mode or `new_items` when you need the full converted history for logs, UIs, or audits.
 
 Unlike the JavaScript SDK, Python does not expose a separate `output` property for the model-shaped delta only. Use `new_items` when you need SDK metadata, or inspect `raw_responses` when you need the raw model payloads.
+
+Computer-tool replay follows the raw Responses payload shape. Preview-model `computer_call` items preserve a single `action`, while `gpt-5.5` computer calls can preserve batched `actions[]`. [`to_input_list()`][agents.result.RunResultBase.to_input_list] and [`RunState`][agents.run_state.RunState] keep whichever shape the model produced, so manual replay, pause/resume flows, and stored transcripts continue to work across both preview and GA computer-tool calls. Local execution results still appear as `computer_call_output` items in `new_items`.
 
 ### New items
 
@@ -63,11 +67,14 @@ Unlike the JavaScript SDK, Python does not expose a separate `output` property f
 
 -   [`MessageOutputItem`][agents.items.MessageOutputItem] for assistant messages
 -   [`ReasoningItem`][agents.items.ReasoningItem] for reasoning items
+-   [`ToolSearchCallItem`][agents.items.ToolSearchCallItem] and [`ToolSearchOutputItem`][agents.items.ToolSearchOutputItem] for Responses tool search requests and loaded tool-search results
 -   [`ToolCallItem`][agents.items.ToolCallItem] and [`ToolCallOutputItem`][agents.items.ToolCallOutputItem] for tool calls and their results
 -   [`ToolApprovalItem`][agents.items.ToolApprovalItem] for tool calls that paused for approval
 -   [`HandoffCallItem`][agents.items.HandoffCallItem] and [`HandoffOutputItem`][agents.items.HandoffOutputItem] for handoff requests and completed transfers
 
 Choose `new_items` over `to_input_list()` whenever you need agent associations, tool outputs, handoff boundaries, or approval boundaries.
+
+When you use hosted tool search, inspect `ToolSearchCallItem.raw_item` to see the search request the model emitted, and `ToolSearchOutputItem.raw_item` to see which namespaces, functions, or hosted MCP servers were loaded for that turn.
 
 ## Continue or resume the conversation
 

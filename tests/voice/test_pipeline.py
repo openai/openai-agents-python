@@ -6,7 +6,8 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from tests.testing_processor import fetch_events
+from agents import trace
+from tests.testing_processor import fetch_events, fetch_span_errors
 
 try:
     from agents.voice import (
@@ -73,12 +74,110 @@ async def test_streamed_audio_result_preserves_cross_chunk_sample_boundaries() -
     audio_chunks: list[bytes] = []
     while True:
         event = await local_queue.get()
+        assert event is not None
         if isinstance(event, VoiceStreamEventAudio) and event.data is not None:
             audio_chunks.append(event.data.tobytes())
         if isinstance(event, VoiceStreamEventLifecycle) and event.event == "turn_ended":
             break
 
     assert audio_chunks == [np.array([1], dtype=np.int16).tobytes()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("trace_include_sensitive_data", "expected_error"),
+    [
+        (False, "Error details are redacted."),
+        (True, "sensitive-tts-error"),
+    ],
+)
+async def test_streamed_audio_error_respects_sensitive_data_setting(
+    trace_include_sensitive_data: bool,
+    expected_error: str,
+) -> None:
+    class FailingTTS(FakeTTS):
+        async def run(self, text: str, settings: TTSModelSettings):
+            del text, settings
+            raise RuntimeError("sensitive-tts-error")
+            yield b""  # pragma: no cover
+
+    result = StreamedAudioResult(
+        FailingTTS(),
+        TTSModelSettings(),
+        VoicePipelineConfig(trace_include_sensitive_data=trace_include_sensitive_data),
+    )
+    local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
+
+    with trace("tts-error"):
+        with pytest.raises(RuntimeError, match="sensitive-tts-error"):
+            await result._stream_audio("sensitive input", local_queue)
+
+    assert fetch_span_errors("speech") == [
+        {
+            "message": expected_error,
+            "data": {
+                "text": "sensitive input" if trace_include_sensitive_data else "",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_streamed_audio_result_synthesizes_short_custom_splitter_chunk() -> None:
+    texts: list[str] = []
+
+    class RecordingTTS(FakeTTS):
+        async def run(self, text: str, settings: TTSModelSettings):
+            texts.append(text)
+            yield np.zeros(2, dtype=np.int16).tobytes()
+
+    def split_immediately(text: str) -> tuple[str, str]:
+        return text, ""
+
+    result = StreamedAudioResult(
+        RecordingTTS(),
+        TTSModelSettings(buffer_size=1, text_splitter=split_immediately),
+        VoicePipelineConfig(),
+    )
+
+    await result._add_text("ok")
+    await result._turn_done()
+    await result._done()
+
+    events, audio_chunks = await extract_events(result)
+
+    assert texts == ["ok"]
+    assert events == ["turn_started", "audio", "turn_ended", "session_ended"]
+    assert audio_chunks == [np.zeros(2, dtype=np.int16).tobytes()]
+
+
+@pytest.mark.asyncio
+async def test_streamed_audio_result_ignores_empty_custom_splitter_chunk() -> None:
+    texts: list[str] = []
+
+    class RecordingTTS(FakeTTS):
+        async def run(self, text: str, settings: TTSModelSettings):
+            texts.append(text)
+            yield np.zeros(2, dtype=np.int16).tobytes()
+
+    def discard_text(_text: str) -> tuple[str, str]:
+        return "", ""
+
+    result = StreamedAudioResult(
+        RecordingTTS(),
+        TTSModelSettings(buffer_size=1, text_splitter=discard_text),
+        VoicePipelineConfig(),
+    )
+
+    await result._add_text("ok")
+    await result._turn_done()
+    await result._done()
+
+    events, audio_chunks = await extract_events(result)
+
+    assert texts == []
+    assert events == ["turn_started", "turn_ended", "session_ended"]
+    assert audio_chunks == []
 
 
 @pytest.mark.asyncio

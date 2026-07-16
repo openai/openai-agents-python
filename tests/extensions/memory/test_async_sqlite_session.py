@@ -15,6 +15,7 @@ pytest.importorskip("aiosqlite")  # Skip tests if aiosqlite is not installed
 
 from agents import Agent, Runner, TResponseInputItem
 from agents.extensions.memory import AsyncSQLiteSession
+from agents.memory import SessionSettings
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 
@@ -77,6 +78,47 @@ async def test_async_sqlite_session_pop_item():
         await session.close()
 
 
+async def test_async_sqlite_session_pop_item_skips_corrupt_most_recent():
+    """pop_item skips corrupt newest rows and returns the next valid item."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "async_pop_corrupt.db"
+        session = AsyncSQLiteSession("async_pop_corrupt", db_path)
+
+        valid_item: TResponseInputItem = {"role": "user", "content": "valid"}
+        await session.add_items([valid_item])
+
+        conn = await session._get_connection()
+        await conn.execute(
+            f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
+            (session.session_id, "not valid json {{{"),
+        )
+        await conn.commit()
+
+        assert await session.pop_item() == valid_item
+        assert await session.get_items() == []
+
+        await session.close()
+
+
+async def test_async_sqlite_session_pop_item_returns_none_after_dropping_only_corrupt_rows():
+    """pop_item removes corrupt rows and returns None when no valid items remain."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "async_pop_only_corrupt.db"
+        session = AsyncSQLiteSession("async_pop_only_corrupt", db_path)
+
+        conn = await session._get_connection()
+        await conn.execute(
+            f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
+            (session.session_id, "not valid json {{{"),
+        )
+        await conn.commit()
+
+        assert await session.pop_item() is None
+        assert await session.get_items() == []
+
+        await session.close()
+
+
 async def test_async_sqlite_session_get_items_limit():
     """Test AsyncSQLiteSession get_items limit handling."""
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -95,6 +137,74 @@ async def test_async_sqlite_session_get_items_limit():
 
         none = await session.get_items(limit=0)
         assert none == []
+
+        await session.close()
+
+
+async def test_async_sqlite_session_session_settings_default():
+    """Test that session_settings defaults to empty SessionSettings."""
+    session = AsyncSQLiteSession("async_default_settings")
+
+    assert isinstance(session.session_settings, SessionSettings)
+    assert session.session_settings.limit is None
+
+    await session.close()
+
+
+async def test_async_sqlite_session_session_settings_constructor():
+    """Test passing session_settings via constructor."""
+    session = AsyncSQLiteSession(
+        "async_constructor_settings",
+        session_settings=SessionSettings(limit=5),
+    )
+
+    assert session.session_settings is not None
+    assert session.session_settings.limit == 5
+
+    await session.close()
+
+
+async def test_async_sqlite_session_get_items_uses_session_settings_limit():
+    """Test that get_items uses session_settings.limit as default."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "async_settings_limit.db"
+        session = AsyncSQLiteSession(
+            "async_settings_limit",
+            db_path,
+            session_settings=SessionSettings(limit=3),
+        )
+
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"Message {i}"} for i in range(5)
+        ]
+        await session.add_items(items)
+
+        retrieved = await session.get_items()
+        assert retrieved == items[-3:]
+
+        await session.close()
+
+
+async def test_async_sqlite_session_explicit_limit_overrides_session_settings():
+    """Test that explicit limit parameter overrides session_settings."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "async_settings_override.db"
+        session = AsyncSQLiteSession(
+            "async_settings_override",
+            db_path,
+            session_settings=SessionSettings(limit=5),
+        )
+
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"Message {i}"} for i in range(10)
+        ]
+        await session.add_items(items)
+
+        retrieved = await session.get_items(limit=2)
+        assert retrieved == items[-2:]
+
+        no_items = await session.get_items(limit=0)
+        assert no_items == []
 
         await session.close()
 

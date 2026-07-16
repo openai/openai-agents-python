@@ -8,8 +8,7 @@ Before running any tests, make sure you have `uv` installed (and ideally run `ma
 make tests
 ```
 
-`make tests` runs the shard-safe suite in parallel and then runs tests marked `serial`
-in a separate serial pass.
+`make tests` runs the shard-safe suite in parallel and then runs tests marked `serial` in a separate serial pass.
 
 ## Snapshots
 

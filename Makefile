@@ -19,6 +19,23 @@ lint:
 mypy: 
 	uv run mypy . --exclude site
 
+.PHONY: pyright
+pyright:
+	uv run pyright --project pyrightconfig.json
+
+.PHONY: typecheck
+typecheck:
+	@set -eu; \
+	mypy_pid=''; \
+	pyright_pid=''; \
+	trap 'test -n "$$mypy_pid" && kill $$mypy_pid 2>/dev/null || true; test -n "$$pyright_pid" && kill $$pyright_pid 2>/dev/null || true' EXIT INT TERM; \
+	echo "Running make mypy and make pyright in parallel..."; \
+	$(MAKE) mypy & mypy_pid=$$!; \
+	$(MAKE) pyright & pyright_pid=$$!; \
+	wait $$mypy_pid; \
+	wait $$pyright_pid; \
+	trap - EXIT
+
 .PHONY: tests
 tests: tests-parallel tests-serial
 
@@ -68,4 +85,4 @@ deploy-docs:
 	uv run mkdocs gh-deploy --force --verbose
 
 .PHONY: check
-check: format-check lint mypy tests
+check: format-check lint typecheck tests

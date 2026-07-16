@@ -10,15 +10,18 @@ from typing_extensions import TypedDict
 
 from agents import (
     Agent,
+    AgentsException,
     GuardrailFunctionOutput,
     InputGuardrail,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     OutputGuardrail,
     OutputGuardrailTripwireTriggered,
+    RunConfig,
     RunContextWrapper,
     Runner,
     TResponseInputItem,
+    _debug,
 )
 
 from .fake_model import FakeModel
@@ -29,7 +32,9 @@ from .test_responses import (
     get_handoff_tool_call,
     get_text_message,
 )
-from .testing_processor import fetch_normalized_spans
+from .testing_processor import fetch_normalized_spans, fetch_span_errors
+
+SENSITIVE_ERROR_MESSAGE = "sensitive-error-detail"
 
 
 async def wait_for_normalized_spans(timeout: float = 0.2):
@@ -92,6 +97,35 @@ async def test_single_turn_model_error():
             }
         ]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(AgentsException(SENSITIVE_ERROR_MESSAGE), id="inner-handler"),
+        pytest.param(ValueError(SENSITIVE_ERROR_MESSAGE), id="outer-handler"),
+    ],
+)
+async def test_streamed_agent_error_redacts_sensitive_data(error: Exception) -> None:
+    model = FakeModel(tracing_enabled=False)
+    model.set_next_output(error)
+
+    with pytest.raises(type(error)):
+        result = Runner.run_streamed(
+            Agent(name="test_agent", model=model),
+            input="first_test",
+            run_config=RunConfig(trace_include_sensitive_data=False),
+        )
+        async for _ in result.stream_events():
+            pass
+
+    assert fetch_span_errors("agent") == [
+        {
+            "message": "Error in agent run",
+            "data": {"error": "Error details are redacted."},
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -160,7 +194,11 @@ async def test_multi_turn_no_handoffs():
 
 
 @pytest.mark.asyncio
-async def test_tool_call_error():
+async def test_tool_call_error(monkeypatch: pytest.MonkeyPatch):
+    # Opt in to tool payload logging so the friendly "parsing tool arguments" message,
+    # which depends on inspecting the chained JSONDecodeError, is preserved.
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
     model = FakeModel(tracing_enabled=True)
 
     agent = Agent(

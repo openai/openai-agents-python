@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Union, cast
-
-from typing_extensions import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, cast
 
 from .items import ThreadItem, coerce_thread_item
 from .payloads import _DictLike
@@ -77,17 +75,17 @@ class _UnknownThreadEvent(_DictLike):
     payload: Mapping[str, Any] = field(default_factory=dict)
 
 
-ThreadEvent: TypeAlias = Union[
-    ThreadStartedEvent,
-    TurnStartedEvent,
-    TurnCompletedEvent,
-    TurnFailedEvent,
-    ItemStartedEvent,
-    ItemUpdatedEvent,
-    ItemCompletedEvent,
-    ThreadErrorEvent,
-    _UnknownThreadEvent,
-]
+ThreadEvent: TypeAlias = (
+    ThreadStartedEvent
+    | TurnStartedEvent
+    | TurnCompletedEvent
+    | TurnFailedEvent
+    | ItemStartedEvent
+    | ItemUpdatedEvent
+    | ItemCompletedEvent
+    | ThreadErrorEvent
+    | _UnknownThreadEvent
+)
 
 
 def _coerce_thread_error(raw: ThreadError | Mapping[str, Any]) -> ThreadError:
@@ -132,7 +130,7 @@ def coerce_thread_event(raw: ThreadEvent | Mapping[str, Any]) -> ThreadEvent:
     if event_type == "item.started":
         item_raw = raw.get("item")
         item = (
-            coerce_thread_item(cast(Union[ThreadItem, Mapping[str, Any]], item_raw))
+            coerce_thread_item(cast(ThreadItem | Mapping[str, Any], item_raw))
             if item_raw is not None
             else coerce_thread_item({"type": "unknown"})
         )
@@ -140,7 +138,7 @@ def coerce_thread_event(raw: ThreadEvent | Mapping[str, Any]) -> ThreadEvent:
     if event_type == "item.updated":
         item_raw = raw.get("item")
         item = (
-            coerce_thread_item(cast(Union[ThreadItem, Mapping[str, Any]], item_raw))
+            coerce_thread_item(cast(ThreadItem | Mapping[str, Any], item_raw))
             if item_raw is not None
             else coerce_thread_item({"type": "unknown"})
         )
@@ -148,7 +146,7 @@ def coerce_thread_event(raw: ThreadEvent | Mapping[str, Any]) -> ThreadEvent:
     if event_type == "item.completed":
         item_raw = raw.get("item")
         item = (
-            coerce_thread_item(cast(Union[ThreadItem, Mapping[str, Any]], item_raw))
+            coerce_thread_item(cast(ThreadItem | Mapping[str, Any], item_raw))
             if item_raw is not None
             else coerce_thread_item({"type": "unknown"})
         )

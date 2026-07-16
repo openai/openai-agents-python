@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
-from typing import Any, Literal, Union, cast
+from collections.abc import Iterable, Mapping
+from typing import Any, Literal, cast
 
 from openai import Omit, omit
 from openai.types.chat import (
@@ -47,11 +47,27 @@ from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import AgentsException, UserError
 from ..handoffs import Handoff
 from ..items import TResponseInputItem, TResponseOutputItem
+from ..logger import logger
 from ..model_settings import MCPToolChoice
-from ..tool import FunctionTool, Tool
+from ..tool import (
+    FunctionTool,
+    Tool,
+    ensure_function_tool_supports_responses_only_features,
+    ensure_tool_choice_supports_backend,
+)
 from .fake_id import FAKE_RESPONSES_ID
+from .reasoning_content_replay import (
+    ReasoningContentReplayContext,
+    ReasoningContentSource,
+    ShouldReplayReasoningContent,
+    default_should_replay_reasoning_content,
+)
 
-ResponseInputContentWithAudioParam = Union[ResponseInputContentParam, ResponseInputAudioParam]
+ResponseInputContentWithAudioParam = (
+    ResponseInputContentParam | ResponseInputAudioParam | dict[str, Any]
+)
+
+_OMITTED_TOOL_OUTPUT_PLACEHOLDER = "[tool output omitted]"
 
 
 class Converter:
@@ -70,6 +86,10 @@ class Converter:
         elif tool_choice == "none":
             return "none"
         else:
+            ensure_tool_choice_supports_backend(
+                tool_choice,
+                backend_name="OpenAI Responses models",
+            )
             return {
                 "type": "function",
                 "function": {
@@ -98,6 +118,7 @@ class Converter:
         cls,
         message: ChatCompletionMessage,
         provider_data: dict[str, Any] | None = None,
+        strict_feature_validation: bool = False,
     ) -> list[TResponseOutputItem]:
         """
         Convert a ChatCompletionMessage to a list of response output items.
@@ -110,7 +131,7 @@ class Converter:
         """
         items: list[TResponseOutputItem] = []
 
-        # Check if message is agents.extentions.models.litellm_model.InternalChatCompletionMessage
+        # Check if message is agents.extensions.models.litellm_model.InternalChatCompletionMessage
         # We can't actually import it here because litellm is an optional dependency
         # So we use hasattr to check for reasoning_content and thinking_blocks
         if hasattr(message, "reasoning_content") and message.reasoning_content:
@@ -210,7 +231,10 @@ class Converter:
 
                     items.append(ResponseFunctionToolCall(**func_call_kwargs))
                 elif tool_call.type == "custom":
-                    pass
+                    if strict_feature_validation:
+                        raise UserError(
+                            "Custom tool calls are not supported by the Chat Completions converter"
+                        )
 
         return items
 
@@ -300,11 +324,59 @@ class Converter:
         all_content = cls.extract_all_content(content)
         if isinstance(all_content, str):
             return all_content
+
         out: list[ChatCompletionContentPartTextParam] = []
         for c in all_content:
-            if c.get("type") == "text":
+            c_type = cast(dict[str, Any], c).get("type")
+            if c_type == "text":
                 out.append(cast(ChatCompletionContentPartTextParam, c))
+            elif c_type == "video_url":
+                raise UserError(f"Only text content is supported here, got: {c}")
         return out
+
+    @classmethod
+    def _normalize_input_content_part_alias(
+        cls,
+        content_part: ResponseInputContentWithAudioParam,
+    ) -> ResponseInputContentWithAudioParam:
+        """Accept raw Chat Completions parts by mapping them to SDK canonical shapes."""
+        if not isinstance(content_part, dict):
+            return content_part
+
+        content_type = content_part.get("type")
+        if content_type == "text":
+            text = content_part.get("text")
+            if not isinstance(text, str):
+                raise UserError(f"Only text content is supported here, got: {content_part}")
+            # Cast the normalized dict because we are constructing a TypedDict alias by hand.
+            normalized_text: dict[str, Any] = {"type": "input_text", "text": text}
+            cls._copy_prompt_cache_breakpoint(content_part, normalized_text)
+            return cast(ResponseInputTextParam, normalized_text)
+
+        if content_type != "image_url":
+            return content_part
+
+        image_payload = content_part.get("image_url")
+        if not isinstance(image_payload, dict):
+            raise UserError(f"Only image URLs are supported for image_url {content_part}")
+
+        image_url = image_payload.get("url")
+        if not isinstance(image_url, str) or not image_url:
+            raise UserError(f"Only image URLs are supported for image_url {content_part}")
+
+        normalized: dict[str, Any] = {"type": "input_image", "image_url": image_url}
+        detail = image_payload.get("detail")
+        if detail is not None:
+            normalized["detail"] = detail
+        cls._copy_prompt_cache_breakpoint(content_part, normalized)
+        # Cast the normalized dict because we are constructing a TypedDict alias by hand.
+        return cast(ResponseInputImageParam, normalized)
+
+    @staticmethod
+    def _copy_prompt_cache_breakpoint(source: Mapping[str, Any], target: dict[str, Any]) -> None:
+        prompt_cache_breakpoint = source.get("prompt_cache_breakpoint")
+        if prompt_cache_breakpoint is not None:
+            target["prompt_cache_breakpoint"] = prompt_cache_breakpoint
 
     @classmethod
     def extract_all_content(
@@ -315,26 +387,45 @@ class Converter:
         out: list[ChatCompletionContentPartParam] = []
 
         for c in content:
+            c = cls._normalize_input_content_part_alias(c)
             if isinstance(c, dict) and c.get("type") == "input_text":
                 casted_text_param = cast(ResponseInputTextParam, c)
-                out.append(
-                    ChatCompletionContentPartTextParam(
-                        type="text",
-                        text=casted_text_param["text"],
-                    )
-                )
+                text_part: dict[str, Any] = {
+                    "type": "text",
+                    "text": casted_text_param["text"],
+                }
+                cls._copy_prompt_cache_breakpoint(c, text_part)
+                out.append(cast(ChatCompletionContentPartTextParam, text_part))
             elif isinstance(c, dict) and c.get("type") == "input_image":
                 casted_image_param = cast(ResponseInputImageParam, c)
                 if "image_url" not in casted_image_param or not casted_image_param["image_url"]:
                     raise UserError(
                         f"Only image URLs are supported for input_image {casted_image_param}"
                     )
+                detail = casted_image_param.get("detail", "auto")
+                if detail == "original":
+                    # Chat Completions only supports auto/low/high, so preserve the caller's
+                    # highest-fidelity intent with the closest available value.
+                    detail = "high"
+                image_part: dict[str, Any] = {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": casted_image_param["image_url"],
+                        "detail": detail,
+                    },
+                }
+                cls._copy_prompt_cache_breakpoint(c, image_part)
+                out.append(cast(ChatCompletionContentPartImageParam, image_part))
+            elif isinstance(c, dict) and c.get("type") == "video_url":
+                video_payload = c.get("video_url")
+                if not isinstance(video_payload, dict) or not video_payload.get("url"):
+                    raise UserError(f"Only video URLs are supported for video_url {c}")
                 out.append(
-                    ChatCompletionContentPartImageParam(
-                        type="image_url",
-                        image_url={
-                            "url": casted_image_param["image_url"],
-                            "detail": casted_image_param.get("detail", "auto"),
+                    cast(
+                        Any,
+                        {
+                            "type": "video_url",
+                            "video_url": {"url": video_payload["url"]},
                         },
                     )
                 )
@@ -355,15 +446,15 @@ class Converter:
                     raise UserError(
                         f"input_audio requires both data and format {casted_audio_param}"
                     )
-                out.append(
-                    ChatCompletionContentPartInputAudioParam(
-                        type="input_audio",
-                        input_audio={
-                            "data": audio_data,
-                            "format": audio_format,
-                        },
-                    )
-                )
+                audio_part: dict[str, Any] = {
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": audio_data,
+                        "format": audio_format,
+                    },
+                }
+                cls._copy_prompt_cache_breakpoint(c, audio_part)
+                out.append(cast(ChatCompletionContentPartInputAudioParam, audio_part))
             elif isinstance(c, dict) and c.get("type") == "input_file":
                 casted_file_param = cast(ResponseInputFileParam, c)
                 if "file_data" not in casted_file_param or not casted_file_param["file_data"]:
@@ -375,7 +466,9 @@ class Converter:
                 if "filename" in casted_file_param and casted_file_param["filename"]:
                     filedata["filename"] = casted_file_param["filename"]
 
-                out.append(File(type="file", file=filedata))
+                file_part: dict[str, Any] = {"type": "file", "file": filedata}
+                cls._copy_prompt_cache_breakpoint(c, file_part)
+                out.append(cast(File, file_part))
             else:
                 raise UserError(f"Unknown content: {c}")
         return out
@@ -387,6 +480,9 @@ class Converter:
         model: str | None = None,
         preserve_thinking_blocks: bool = False,
         preserve_tool_output_all_content: bool = False,
+        base_url: str | None = None,
+        should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
+        strict_feature_validation: bool = False,
     ) -> list[ChatCompletionMessageParam]:
         """
         Convert a sequence of 'Item' objects into a list of ChatCompletionMessageParam.
@@ -406,6 +502,14 @@ class Converter:
                 When True, all content types including images are preserved. This is useful
                 for model providers (e.g. Anthropic via LiteLLM) that support processing
                 non-text content in tool results.
+            base_url: The request base URL, if the caller knows the concrete endpoint.
+                This is used by reasoning-content replay hooks to distinguish direct
+                provider calls from proxy or gateway requests.
+            should_replay_reasoning_content: Optional hook that decides whether a
+                reasoning item should be replayed into the next assistant message as
+                `reasoning_content`.
+            strict_feature_validation: Whether to raise a UserError for Responses-only
+                features that Chat Completions cannot faithfully represent.
 
         Rules:
         - EasyInputMessage or InputMessage (role=user) => ChatCompletionUserMessageParam
@@ -429,8 +533,9 @@ class Converter:
         current_assistant_msg: ChatCompletionAssistantMessageParam | None = None
         pending_thinking_blocks: list[dict[str, str]] | None = None
         pending_reasoning_content: str | None = None  # For DeepSeek reasoning_content
+        normalized_base_url = base_url.rstrip("/") if base_url is not None else None
 
-        def flush_assistant_message() -> None:
+        def flush_assistant_message(*, clear_pending_reasoning_content: bool = True) -> None:
             nonlocal current_assistant_msg, pending_reasoning_content
             if current_assistant_msg is not None:
                 # The API doesn't support empty arrays for tool_calls
@@ -440,7 +545,15 @@ class Converter:
                     pending_reasoning_content = None
                 result.append(current_assistant_msg)
                 current_assistant_msg = None
-            else:
+            elif clear_pending_reasoning_content:
+                pending_reasoning_content = None
+
+        def apply_pending_reasoning_content(
+            assistant_msg: ChatCompletionAssistantMessageParam,
+        ) -> None:
+            nonlocal pending_reasoning_content
+            if pending_reasoning_content:
+                assistant_msg["reasoning_content"] = pending_reasoning_content  # type: ignore[typeddict-unknown-key]
                 pending_reasoning_content = None
 
         def ensure_assistant_message() -> ChatCompletionAssistantMessageParam:
@@ -449,6 +562,8 @@ class Converter:
                 current_assistant_msg = ChatCompletionAssistantMessageParam(role="assistant")
                 current_assistant_msg["content"] = None
                 current_assistant_msg["tool_calls"] = []
+
+            apply_pending_reasoning_content(current_assistant_msg)
 
             return current_assistant_msg
 
@@ -518,7 +633,9 @@ class Converter:
 
             # 3) response output message => assistant
             elif resp_msg := cls.maybe_response_output_message(item):
-                flush_assistant_message()
+                # A reasoning item can be followed by an assistant message and then tool calls
+                # in the same turn, so preserve pending reasoning_content across this flush.
+                flush_assistant_message(clear_pending_reasoning_content=False)
                 new_asst = ChatCompletionAssistantMessageParam(role="assistant")
                 contents = resp_msg["content"]
 
@@ -559,6 +676,7 @@ class Converter:
                     pending_thinking_blocks = None  # Clear after using
 
                 new_asst["tool_calls"] = []
+                apply_pending_reasoning_content(new_asst)
                 current_assistant_msg = new_asst
 
             # 4) function/file-search calls => attach to assistant
@@ -583,11 +701,6 @@ class Converter:
 
             elif func_call := cls.maybe_function_tool_call(item):
                 asst = ensure_assistant_message()
-
-                # If we have pending reasoning content for DeepSeek, add it to the assistant message
-                if pending_reasoning_content:
-                    asst["reasoning_content"] = pending_reasoning_content  # type: ignore[typeddict-unknown-key]
-                    pending_reasoning_content = None  # Clear after using
 
                 # If we have pending thinking blocks, use them as the content
                 # This is required for Anthropic API tool calls with interleaved thinking
@@ -638,12 +751,33 @@ class Converter:
             elif func_output := cls.maybe_function_tool_call_output(item):
                 flush_assistant_message()
                 output_content = cast(
-                    Union[str, Iterable[ResponseInputContentWithAudioParam]], func_output["output"]
+                    str | Iterable[ResponseInputContentWithAudioParam], func_output["output"]
                 )
                 if preserve_tool_output_all_content:
                     tool_result_content = cls.extract_all_content(output_content)
                 else:
-                    tool_result_content = cls.extract_text_content(output_content)  # type: ignore[assignment]
+                    all_output_content = cls.extract_all_content(output_content)
+                    if isinstance(all_output_content, str):
+                        tool_result_content = all_output_content
+                    else:
+                        tool_result_content = [
+                            cast(ChatCompletionContentPartTextParam, c)
+                            for c in all_output_content
+                            if c.get("type") == "text"
+                        ]
+                        if not tool_result_content:
+                            message = (
+                                "Chat Completions tool outputs cannot be empty or contain only "
+                                "non-text content unless preserve_tool_output_all_content=True."
+                            )
+                            if strict_feature_validation:
+                                raise UserError(message)
+                            logger.warning(
+                                "%s Replacing the tool output with a placeholder; enable strict "
+                                "feature validation to raise an error instead.",
+                                message,
+                            )
+                            tool_result_content = _OMITTED_TOOL_OUTPUT_PLACEHOLDER
                 msg: ChatCompletionToolMessageParam = {
                     "role": "tool",
                     "tool_call_id": func_output["call_id"],
@@ -665,6 +799,7 @@ class Converter:
 
                 item_provider_data: dict[str, Any] = reasoning_item.get("provider_data", {})  # type: ignore[assignment]
                 item_model = item_provider_data.get("model", "")
+                should_replay = False
 
                 if (
                     model
@@ -697,17 +832,23 @@ class Converter:
                     # This preserves the original behavior
                     pending_thinking_blocks = reconstructed_thinking_blocks
 
-                # DeepSeek requires reasoning_content field in assistant messages with tool calls
-                # Items may not all originate from DeepSeek, so need to check for model match.
-                # For backward compatibility, if provider_data is missing, ignore the check.
-                elif (
-                    model
-                    and "deepseek" in model.lower()
-                    and (
-                        (item_model and "deepseek" in item_model.lower())
-                        or item_provider_data == {}
+                if model is not None:
+                    replay_context = ReasoningContentReplayContext(
+                        model=model,
+                        base_url=normalized_base_url,
+                        reasoning=ReasoningContentSource(
+                            item=reasoning_item,
+                            origin_model=item_model or None,
+                            provider_data=item_provider_data,
+                        ),
                     )
-                ):
+                    should_replay = (
+                        should_replay_reasoning_content(replay_context)
+                        if should_replay_reasoning_content is not None
+                        else default_should_replay_reasoning_content(replay_context)
+                    )
+
+                if should_replay:
                     summary_items = reasoning_item.get("summary", [])
                     if summary_items:
                         reasoning_texts = []
@@ -734,6 +875,10 @@ class Converter:
     @classmethod
     def tool_to_openai(cls, tool: Tool) -> ChatCompletionToolParam:
         if isinstance(tool, FunctionTool):
+            ensure_function_tool_supports_responses_only_features(
+                tool,
+                backend_name="Chat Completions-compatible models",
+            )
             return {
                 "type": "function",
                 "function": {

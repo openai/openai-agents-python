@@ -67,6 +67,85 @@ print(
     assert payload["shutdown_handler_registered"] is False
 
 
+def test_import_agents_does_not_require_sqlite3() -> None:
+    payload = _run_python(
+        """
+import importlib.abc
+import json
+import sys
+
+class BlockSqlite3(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if fullname in {"sqlite3", "_sqlite3"}:
+            raise ModuleNotFoundError(f"blocked optional backend module: {fullname}")
+        return None
+
+sys.meta_path.insert(0, BlockSqlite3())
+
+import agents
+from agents import Agent, Runner
+from agents.memory import Session, SessionSettings
+
+print(
+    json.dumps(
+        {
+            "agent_name": Agent.__name__,
+            "runner_name": Runner.__name__,
+            "session_name": Session.__name__,
+            "settings_name": SessionSettings.__name__,
+            "sqlite3_loaded": "sqlite3" in sys.modules,
+            "private_sqlite3_loaded": "_sqlite3" in sys.modules,
+            "sqlite_session_loaded": "agents.memory.sqlite_session" in sys.modules,
+            "sqlite_session_exported": "SQLiteSession" in agents.__all__,
+        }
+    )
+)
+"""
+    )
+
+    assert payload["agent_name"] == "Agent"
+    assert payload["runner_name"] == "Runner"
+    assert payload["session_name"] == "Session"
+    assert payload["settings_name"] == "SessionSettings"
+    assert payload["sqlite3_loaded"] is False
+    assert payload["private_sqlite3_loaded"] is False
+    assert payload["sqlite_session_loaded"] is False
+    assert payload["sqlite_session_exported"] is True
+
+
+def test_sqlite_session_top_level_export_is_lazy() -> None:
+    payload = _run_python(
+        """
+import json
+import sys
+
+import agents
+
+loaded_after_import = "agents.memory.sqlite_session" in sys.modules
+
+from agents import SQLiteSession
+
+loaded_after_export = "agents.memory.sqlite_session" in sys.modules
+
+print(
+    json.dumps(
+        {
+            "sqlite_session_name": SQLiteSession.__name__,
+            "loaded_after_import": loaded_after_import,
+            "loaded_after_export": loaded_after_export,
+            "sqlite3_loaded": "sqlite3" in sys.modules,
+        }
+    )
+)
+"""
+    )
+
+    assert payload["sqlite_session_name"] == "SQLiteSession"
+    assert payload["loaded_after_import"] is False
+    assert payload["loaded_after_export"] is True
+    assert payload["sqlite3_loaded"] is True
+
+
 def test_get_trace_provider_lazily_initializes_defaults() -> None:
     payload = _run_python(
         """

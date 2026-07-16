@@ -14,6 +14,7 @@ from ..tool import Tool
 
 if TYPE_CHECKING:
     from ..model_settings import ModelSettings
+    from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 
 
 class ModelTracing(enum.Enum):
@@ -36,11 +37,23 @@ class ModelTracing(enum.Enum):
 class Model(abc.ABC):
     """The base interface for calling an LLM."""
 
+    async def _cleanup_on_run_end(self, owner: object) -> None:
+        """Release run-scoped resources after the runner finishes using this model."""
+        return None
+
     async def close(self) -> None:
         """Release any resources held by the model.
 
         Models that maintain persistent connections can override this. The default implementation
         is a no-op.
+        """
+        return None
+
+    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
+        """Return provider-specific retry guidance for a failed model request.
+
+        Models can override this to surface transport- or provider-specific hints such as replay
+        safety, retry-after delays, or explicit server retry guidance.
         """
         return None
 

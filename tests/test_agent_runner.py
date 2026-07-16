@@ -4,13 +4,14 @@ import asyncio
 import json
 import tempfile
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
 import httpx
 import pytest
-from openai import BadRequestError
+from openai import APIConnectionError, BadRequestError
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_output_text import AnnotationFileCitation, ResponseOutputText
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
@@ -24,6 +25,8 @@ from agents import (
     InputGuardrail,
     InputGuardrailTripwireTriggered,
     ModelBehaviorError,
+    ModelRetryAdvice,
+    ModelRetrySettings,
     ModelSettings,
     OpenAIConversationsSession,
     OutputGuardrail,
@@ -32,9 +35,15 @@ from agents import (
     RunContextWrapper,
     Runner,
     SQLiteSession,
+    ToolExecutionConfig,
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrailData,
     ToolTimeoutError,
     UserError,
     handoff,
+    retry_policies,
+    tool_input_guardrail,
+    tool_namespace,
 )
 from agents.agent import ToolsToFinalOutputResult
 from agents.computer import Computer
@@ -44,13 +53,17 @@ from agents.items import (
     ReasoningItem,
     RunItem,
     ToolApprovalItem,
+    ToolCallItem,
     ToolCallOutputItem,
     TResponseInputItem,
 )
 from agents.lifecycle import RunHooks
 from agents.run import AgentRunner, get_default_agent_runner, set_default_agent_runner
 from agents.run_config import _default_trace_include_sensitive_data
+from agents.run_internal.agent_bindings import bind_public_agent
 from agents.run_internal.items import (
+    TOOL_CALL_SESSION_DESCRIPTION_KEY,
+    TOOL_CALL_SESSION_TITLE_KEY,
     drop_orphan_function_calls,
     ensure_input_item_format,
     fingerprint_input_item,
@@ -61,14 +74,17 @@ from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
 from agents.run_internal.run_loop import get_new_response
 from agents.run_internal.run_steps import NextStepFinalOutput, SingleStepResult
 from agents.run_internal.session_persistence import (
+    _collect_retry_owned_tail_serializations,
+    persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     rewind_session_items,
     save_result_to_session,
+    wait_for_session_cleanup,
 )
 from agents.run_internal.tool_execution import execute_approved_tools
 from agents.run_internal.tool_use_tracker import AgentToolUseTracker
 from agents.run_state import RunState
-from agents.tool import ComputerTool, FunctionToolResult, function_tool
+from agents.tool import ComputerTool, FunctionToolResult, ShellTool, function_tool
 from agents.tool_context import ToolContext
 from agents.usage import Usage
 
@@ -82,7 +98,7 @@ from .test_responses import (
     get_text_message,
 )
 from .utils.factories import make_run_state
-from .utils.hitl import make_context_wrapper, make_model_and_agent
+from .utils.hitl import make_context_wrapper, make_model_and_agent, make_shell_call
 from .utils.simple_session import CountingSession, IdStrippingSession, SimpleListSession
 
 
@@ -101,6 +117,7 @@ async def run_execute_approved_tools(
     *,
     approve: bool | None,
     run_config: RunConfig | None = None,
+    mutate_state: Callable[[RunState[Any, Agent[Any]], ToolApprovalItem], None] | None = None,
 ) -> list[RunItem]:
     """Execute approved tools with a consistent setup."""
 
@@ -116,6 +133,8 @@ async def run_execute_approved_tools(
         state.approve(approval_item)
     elif approve is False:
         state.reject(approval_item)
+    if mutate_state is not None:
+        mutate_state(state, approval_item)
 
     generated_items: list[RunItem] = []
 
@@ -131,6 +150,21 @@ async def run_execute_approved_tools(
     )
 
     return generated_items
+
+
+async def _run_agent_with_optional_streaming(
+    agent: Agent[Any],
+    *,
+    input: str | list[TResponseInputItem],
+    streamed: bool,
+    **kwargs: Any,
+):
+    if streamed:
+        result = Runner.run_streamed(agent, input=input, **kwargs)
+        async for _ in result.stream_events():
+            pass
+        return result
+    return await Runner.run(agent, input=input, **kwargs)
 
 
 def test_set_default_agent_runner_roundtrip():
@@ -299,6 +333,126 @@ def test_normalize_resumed_input_drops_orphan_function_calls():
     ]
     assert "orphan_call" not in call_ids
     assert "paired_call" in call_ids
+
+
+def test_normalize_resumed_input_drops_orphan_tool_search_calls():
+    raw_input: list[TResponseInputItem] = [
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_call",
+                "call_id": "orphan_search",
+                "arguments": {"query": "orphan"},
+                "execution": "server",
+                "status": "completed",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_call",
+                "call_id": "paired_search",
+                "arguments": {"query": "paired"},
+                "execution": "server",
+                "status": "completed",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_output",
+                "call_id": "paired_search",
+                "execution": "server",
+                "status": "completed",
+                "tools": [],
+            },
+        ),
+    ]
+
+    normalized = normalize_resumed_input(raw_input)
+    assert isinstance(normalized, list)
+    call_ids = [
+        cast(dict[str, Any], item).get("call_id")
+        for item in normalized
+        if isinstance(item, dict) and item.get("type") == "tool_search_call"
+    ]
+    assert "orphan_search" not in call_ids
+    assert "paired_search" in call_ids
+
+
+def test_normalize_resumed_input_preserves_hosted_tool_search_pair_without_call_ids():
+    raw_input: list[TResponseInputItem] = [
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_call",
+                "call_id": None,
+                "arguments": {"query": "paired"},
+                "execution": "server",
+                "status": "completed",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_output",
+                "call_id": None,
+                "execution": "server",
+                "status": "completed",
+                "tools": [],
+            },
+        ),
+    ]
+
+    normalized = normalize_resumed_input(raw_input)
+    assert isinstance(normalized, list)
+    assert [cast(dict[str, Any], item)["type"] for item in normalized] == [
+        "tool_search_call",
+        "tool_search_output",
+    ]
+
+
+def test_normalize_resumed_input_matches_latest_anonymous_tool_search_call():
+    raw_input: list[TResponseInputItem] = [
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_call",
+                "call_id": None,
+                "arguments": {"query": "orphan"},
+                "execution": "server",
+                "status": "completed",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_call",
+                "call_id": None,
+                "arguments": {"query": "paired"},
+                "execution": "server",
+                "status": "completed",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_output",
+                "call_id": None,
+                "execution": "server",
+                "status": "completed",
+                "tools": [],
+            },
+        ),
+    ]
+
+    normalized = normalize_resumed_input(raw_input)
+    assert isinstance(normalized, list)
+    assert [cast(dict[str, Any], item)["type"] for item in normalized] == [
+        "tool_search_call",
+        "tool_search_output",
+    ]
+    assert cast(dict[str, Any], normalized[0])["arguments"] == {"query": "paired"}
 
 
 def testnormalize_input_items_for_api_preserves_provider_data():
@@ -513,6 +667,45 @@ async def test_parallel_tool_call_with_cancelled_sibling_reaches_final_output() 
 
 
 @pytest.mark.asyncio
+async def test_single_tool_call_with_cancelled_tool_reaches_final_output() -> None:
+    async def _cancel_tool() -> str:
+        raise asyncio.CancelledError("tool-cancelled")
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[function_tool(_cancel_tool, name_override="cancel_tool")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("cancel_tool", "{}", call_id="call_cancel")],
+            [get_text_message("final answer")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="user_message")
+
+    assert result.final_output == "final answer"
+    assert len(result.raw_responses) == 2
+
+    second_turn_input = cast(list[dict[str, Any]], model.last_turn_args["input"])
+    tool_outputs = [
+        item for item in second_turn_input if item.get("type") == "function_call_output"
+    ]
+    assert tool_outputs == [
+        {
+            "call_id": "call_cancel",
+            "output": (
+                "An error occurred while running the tool. Please try again. Error: tool-cancelled"
+            ),
+            "type": "function_call_output",
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_reasoning_item_id_policy_omits_follow_up_reasoning_ids() -> None:
     model = FakeModel()
     agent = Agent(
@@ -652,6 +845,131 @@ async def test_resumed_run_uses_serialized_reasoning_item_id_policy() -> None:
     second_request_reasoning = _find_reasoning_input_item(model.last_turn_args.get("input"))
     assert second_request_reasoning is not None
     assert "id" not in second_request_reasoning
+
+
+@pytest.mark.asyncio
+async def test_pending_approval_skips_tool_input_guardrails_by_default() -> None:
+    model = FakeModel()
+    guardrail_runs = 0
+
+    @tool_input_guardrail
+    def count_guardrail(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        nonlocal guardrail_runs
+        guardrail_runs += 1
+        return ToolGuardrailFunctionOutput.allow()
+
+    @function_tool(
+        name_override="approval_tool",
+        needs_approval=True,
+        tool_input_guardrails=[count_guardrail],
+    )
+    def approval_tool() -> str:
+        return "ok"
+
+    agent = Agent(name="test", model=model, tools=[approval_tool])
+    model.set_next_output([get_function_tool_call("approval_tool", "{}", call_id="call_default")])
+
+    result = await Runner.run(agent, "hello")
+
+    assert len(result.interruptions) == 1
+    assert guardrail_runs == 0
+    assert result.tool_input_guardrail_results == []
+
+
+@pytest.mark.asyncio
+async def test_pre_approval_tool_input_guardrails_can_reject_before_pending_approval() -> None:
+    model = FakeModel()
+    executed = False
+
+    @tool_input_guardrail
+    def reject_guardrail(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.reject_content("blocked before approval")
+
+    @function_tool(
+        name_override="approval_tool",
+        needs_approval=True,
+        tool_input_guardrails=[reject_guardrail],
+    )
+    def approval_tool() -> str:
+        nonlocal executed
+        executed = True
+        return "ok"
+
+    agent = Agent(name="test", model=model, tools=[approval_tool])
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("approval_tool", "{}", call_id="call_reject")],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent,
+        "hello",
+        run_config=RunConfig(
+            tool_execution=ToolExecutionConfig(pre_approval_tool_input_guardrails=True)
+        ),
+    )
+
+    assert result.final_output == "done"
+    assert result.interruptions == []
+    assert executed is False
+    assert len(result.tool_input_guardrail_results) == 1
+    assert any(
+        isinstance(item, ToolCallOutputItem) and item.output == "blocked before approval"
+        for item in result.new_items
+    )
+
+
+@pytest.mark.asyncio
+async def test_pre_approval_tool_input_guardrails_rerun_after_resume() -> None:
+    model = FakeModel()
+    guardrail_runs = 0
+    executed = 0
+
+    @tool_input_guardrail
+    def count_guardrail(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        nonlocal guardrail_runs
+        guardrail_runs += 1
+        return ToolGuardrailFunctionOutput.allow()
+
+    @function_tool(
+        name_override="approval_tool",
+        needs_approval=True,
+        tool_input_guardrails=[count_guardrail],
+    )
+    def approval_tool() -> str:
+        nonlocal executed
+        executed += 1
+        return "ok"
+
+    agent = Agent(name="test", model=model, tools=[approval_tool])
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("approval_tool", "{}", call_id="call_resume")],
+            [get_text_message("done")],
+        ]
+    )
+    run_config = RunConfig(
+        tool_execution=ToolExecutionConfig(pre_approval_tool_input_guardrails=True)
+    )
+
+    first = await Runner.run(agent, "hello", run_config=run_config)
+    assert len(first.interruptions) == 1
+    assert guardrail_runs == 1
+    assert executed == 0
+    assert len(first.tool_input_guardrail_results) == 1
+
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+    restored_state = await RunState.from_string(agent, state.to_string())
+
+    resumed = await Runner.run(agent, restored_state, run_config=run_config)
+
+    assert resumed.final_output == "done"
+    assert guardrail_runs == 2
+    assert executed == 1
+    assert len(resumed.tool_input_guardrail_results) == 1
 
 
 @pytest.mark.asyncio
@@ -1017,6 +1335,10 @@ async def test_structured_output():
         "should have input: conversation summary, function call, function call result, message, "
         "handoff, handoff output, preamble message, tool call, tool call result, final output"
     )
+    assert len(result.to_input_list(mode="normalized")) == 6, (
+        "should have normalized replay input: conversation summary, carried-forward message, "
+        "preamble message, tool call, tool call result, final output"
+    )
 
     assert result.last_agent == agent_1, "should have handed off to agent_1"
     assert result.final_output == Foo(bar="baz"), "should have structured output"
@@ -1166,6 +1488,101 @@ async def test_opt_in_handoff_history_accumulates_across_multiple_handoffs():
     assert "triage summary" in summary_content
     assert "delegate update" in summary_content
     assert "user_question" in summary_content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.parametrize("nest_source", ["run_config", "handoff"], ids=["run_config", "handoff"])
+async def test_server_managed_handoff_history_auto_disables_with_warning(
+    streamed: bool,
+    nest_source: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    triage_model = FakeModel()
+    delegate_model = FakeModel()
+    delegate = Agent(name="delegate", model=delegate_model)
+
+    run_config = RunConfig()
+    triage_handoffs: list[Agent[Any] | Handoff[Any, Any]]
+    if nest_source == "handoff":
+        triage_handoffs = [handoff(delegate, nest_handoff_history=True)]
+    else:
+        triage_handoffs = [delegate]
+        run_config = RunConfig(nest_handoff_history=True)
+
+    triage = Agent(name="triage", model=triage_model, handoffs=triage_handoffs)
+    triage_model.add_multiple_turn_outputs(
+        [[get_text_message("triage summary"), get_handoff_tool_call(delegate)]]
+    )
+    delegate_model.add_multiple_turn_outputs([[get_text_message("done")]])
+
+    with caplog.at_level("WARNING", logger="openai.agents"):
+        result = await _run_agent_with_optional_streaming(
+            triage,
+            input="user_message",
+            streamed=streamed,
+            run_config=run_config,
+            auto_previous_response_id=True,
+        )
+
+    assert result.final_output == "done"
+    assert "do not support nest_handoff_history" in caplog.text
+    assert delegate_model.first_turn_args is not None
+    delegate_input = delegate_model.first_turn_args["input"]
+    assert isinstance(delegate_input, list)
+    assert len(delegate_input) == 1
+    handoff_output = delegate_input[0]
+    assert handoff_output.get("type") == "function_call_output"
+    assert "delegate" in str(handoff_output.get("output"))
+    assert not any(
+        isinstance(item, dict)
+        and item.get("role") == "assistant"
+        and "<CONVERSATION HISTORY>" in str(item.get("content"))
+        for item in delegate_input
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.parametrize("filter_source", ["run_config", "handoff"], ids=["run_config", "handoff"])
+async def test_server_managed_handoff_input_filters_still_raise(
+    streamed: bool,
+    filter_source: str,
+) -> None:
+    triage_model = FakeModel()
+    delegate_model = FakeModel()
+    delegate = Agent(name="delegate", model=delegate_model)
+
+    def passthrough_filter(data: HandoffInputData) -> HandoffInputData:
+        return data
+
+    run_config = RunConfig()
+    triage_handoffs: list[Agent[Any] | Handoff[Any, Any]]
+    if filter_source == "handoff":
+        triage_handoffs = [handoff(delegate, input_filter=passthrough_filter)]
+    else:
+        triage_handoffs = [delegate]
+        run_config = RunConfig(handoff_input_filter=passthrough_filter)
+
+    triage = Agent(name="triage", model=triage_model, handoffs=triage_handoffs)
+    triage_model.add_multiple_turn_outputs(
+        [[get_text_message("triage summary"), get_handoff_tool_call(delegate)]]
+    )
+    delegate_model.add_multiple_turn_outputs([[get_text_message("done")]])
+
+    with pytest.raises(
+        UserError,
+        match="Server-managed conversations do not support handoff input filters",
+    ):
+        await _run_agent_with_optional_streaming(
+            triage,
+            input="user_message",
+            streamed=streamed,
+            run_config=run_config,
+            auto_previous_response_id=True,
+        )
+
+    assert delegate_model.first_turn_args is None
 
 
 @pytest.mark.asyncio
@@ -1565,6 +1982,45 @@ async def test_prepare_input_with_session_drops_orphan_function_calls():
     )
 
 
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_preserves_pending_new_shell_calls() -> None:
+    orphan_call = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "orphan_call",
+            "name": "tool_orphan",
+            "arguments": "{}",
+        },
+    )
+    pending_shell_call = cast(
+        TResponseInputItem,
+        make_shell_call("manual_shell", id_value="shell_1", commands=["echo hi"]),
+    )
+    session = SimpleListSession(history=[orphan_call])
+
+    prepared_input, session_items = await prepare_input_with_session(
+        [pending_shell_call],
+        session,
+        None,
+    )
+
+    assert isinstance(prepared_input, list)
+    assert session_items == [pending_shell_call]
+    assert not any(
+        isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and item.get("call_id") == "orphan_call"
+        for item in prepared_input
+    )
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "shell_call"
+        and item.get("call_id") == "manual_shell"
+        for item in prepared_input
+    )
+
+
 def test_ensure_api_input_item_handles_model_dump_objects():
     class _ModelDumpItem:
         def model_dump(self, exclude_unset: bool = True) -> dict[str, Any]:
@@ -1769,6 +2225,320 @@ async def test_prepare_input_with_session_rejects_non_list_callback_result():
 
 
 @pytest.mark.asyncio
+async def test_prepare_input_with_session_matches_copied_items_by_content() -> None:
+    history_item = cast(TResponseInputItem, {"role": "user", "content": "history"})
+    session = SimpleListSession(history=[history_item])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        return [
+            cast(TResponseInputItem, dict(cast(dict[str, Any], history[0]))),
+            cast(TResponseInputItem, dict(cast(dict[str, Any], new_input[0]))),
+        ]
+
+    prepared, session_items = await prepare_input_with_session("new", session, callback)
+
+    assert [cast(dict[str, Any], item).get("content") for item in prepared] == [
+        "history",
+        "new",
+    ]
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_openai_conversation_strips_assistant_history_ids() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self, history: list[TResponseInputItem]) -> None:
+            self.history = history
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            if limit is None:
+                return list(self.history)
+            return self.history[-limit:]
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.history.extend(items)
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return self.history.pop() if self.history else None
+
+        async def clear_session(self) -> None:
+            self.history.clear()
+
+    history_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_assistant",
+            "type": "message",
+            "role": "assistant",
+            "content": "history",
+            "provider_data": {"server": "metadata"},
+        },
+    )
+    user_history_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_user",
+            "type": "message",
+            "role": "user",
+            "content": "user history",
+            "provider_data": {"server": "metadata"},
+        },
+    )
+    function_call_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_call",
+            "type": "function_call",
+            "call_id": "call_history",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+    )
+    function_call_output_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_output",
+            "type": "function_call_output",
+            "call_id": "call_history",
+            "output": "ok",
+        },
+    )
+    session = DummyOpenAIConversationsSession(
+        history=[user_history_item, history_item, function_call_item, function_call_output_item]
+    )
+
+    prepared, session_items = await prepare_input_with_session("new", session, None)
+
+    assert isinstance(prepared, list)
+    user_payload = cast(dict[str, Any], prepared[0])
+    history_payload = cast(dict[str, Any], prepared[1])
+    call_payload = cast(dict[str, Any], prepared[2])
+    output_payload = cast(dict[str, Any], prepared[3])
+    new_payload = cast(dict[str, Any], prepared[4])
+    assert user_payload["role"] == "user"
+    assert user_payload["id"] == "conv_item_user"
+    assert "provider_data" in user_payload
+    assert history_payload["role"] == "assistant"
+    assert "id" not in history_payload
+    assert "provider_data" not in history_payload
+    assert call_payload["id"] == "conv_item_call"
+    assert output_payload["id"] == "conv_item_output"
+    assert new_payload["role"] == "user"
+    assert new_payload["content"] == "new"
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_regular_session_preserves_history_ids() -> None:
+    history_item = cast(
+        TResponseInputItem,
+        {
+            "id": "message_id",
+            "type": "message",
+            "role": "assistant",
+            "content": "history",
+        },
+    )
+    session = SimpleListSession(history=[history_item])
+
+    prepared, _ = await prepare_input_with_session("new", session, None)
+
+    assert isinstance(prepared, list)
+    history_payload = cast(dict[str, Any], prepared[0])
+    assert history_payload["id"] == "message_id"
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_openai_conversation_callback_matches_assistant_no_ids() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self, history: list[TResponseInputItem]) -> None:
+            self.history = history
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            if limit is None:
+                return list(self.history)
+            return self.history[-limit:]
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.history.extend(items)
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return self.history.pop() if self.history else None
+
+        async def clear_session(self) -> None:
+            self.history.clear()
+
+    history_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_assistant",
+            "type": "message",
+            "role": "assistant",
+            "content": "history",
+            "provider_data": {"server": "metadata"},
+        },
+    )
+    session = DummyOpenAIConversationsSession(history=[history_item])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        history_copy = dict(cast(dict[str, Any], history[0]))
+        history_copy.pop("id", None)
+        history_copy.pop("provider_data", None)
+        return [
+            cast(TResponseInputItem, history_copy),
+            cast(TResponseInputItem, dict(cast(dict[str, Any], new_input[0]))),
+        ]
+
+    prepared, session_items = await prepare_input_with_session("new", session, callback)
+
+    assert isinstance(prepared, list)
+    assert [cast(dict[str, Any], item).get("content") for item in prepared] == [
+        "history",
+        "new",
+    ]
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_openai_conversation_callback_keeps_user_ids_distinct() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self, history: list[TResponseInputItem]) -> None:
+            self.history = history
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            if limit is None:
+                return list(self.history)
+            return self.history[-limit:]
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.history.extend(items)
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return self.history.pop() if self.history else None
+
+        async def clear_session(self) -> None:
+            self.history.clear()
+
+    history_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_user",
+            "type": "message",
+            "role": "user",
+            "content": "history",
+            "provider_data": {"server": "metadata"},
+        },
+    )
+    session = DummyOpenAIConversationsSession(history=[history_item])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        history_copy = dict(cast(dict[str, Any], history[0]))
+        history_copy.pop("id", None)
+        history_copy.pop("provider_data", None)
+        return [
+            cast(TResponseInputItem, history_copy),
+            cast(TResponseInputItem, dict(cast(dict[str, Any], new_input[0]))),
+        ]
+
+    prepared, session_items = await prepare_input_with_session("new", session, callback)
+
+    assert isinstance(prepared, list)
+    assert [cast(dict[str, Any], item).get("content") for item in prepared] == [
+        "history",
+        "new",
+    ]
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == [
+        "history",
+        "new",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_persist_session_items_for_guardrail_trip_uses_original_input_when_missing() -> None:
+    session = SimpleListSession()
+    agent = Agent(name="agent", model=FakeModel())
+    run_state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+
+    persisted = await persist_session_items_for_guardrail_trip(
+        session,
+        None,
+        None,
+        "guardrail input",
+        run_state,
+    )
+
+    assert persisted == [{"role": "user", "content": "guardrail input"}]
+    assert await session.get_items() == persisted
+
+
+@pytest.mark.asyncio
+async def test_wait_for_session_cleanup_retries_after_get_items_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = cast(TResponseInputItem, {"id": "msg-1", "type": "message", "content": "hello"})
+    serialized_target = fingerprint_input_item(target)
+
+    class FlakyCleanupSession(SimpleListSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.get_items_calls = 0
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            self.get_items_calls += 1
+            if self.get_items_calls == 1:
+                raise RuntimeError("temporary failure")
+            return []
+
+    session = FlakyCleanupSession()
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    assert serialized_target is not None
+    await wait_for_session_cleanup(session, [serialized_target])
+
+    assert session.get_items_calls == 2
+    assert sleeps == [0.1]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_session_cleanup_logs_when_targets_linger(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    target = cast(TResponseInputItem, {"id": "msg-1", "type": "message", "content": "hello"})
+    session = SimpleListSession(history=[target])
+    serialized_target = fingerprint_input_item(target)
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    assert serialized_target is not None
+    with caplog.at_level("DEBUG", logger="openai.agents"):
+        await wait_for_session_cleanup(session, [serialized_target], max_attempts=2)
+
+    assert sleeps == [0.1, 0.2]
+    assert "Session cleanup verification exhausted attempts" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
     history_item = cast(TResponseInputItem, {"id": "old", "type": "message"})
     new_item = cast(TResponseInputItem, {"id": "new", "type": "message"})
@@ -1792,7 +2562,7 @@ async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
     agent = Agent(name="test", model=model)
 
     result = await get_new_response(
-        agent=agent,
+        bindings=bind_public_agent(agent),
         system_prompt=None,
         input=[history_item, new_item],
         output_schema=None,
@@ -1810,6 +2580,51 @@ async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
 
     assert isinstance(result, ModelResponse)
     assert session.pop_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_get_new_response_uses_agent_retry_settings() -> None:
+    model = FakeModel()
+    model.set_hardcoded_usage(Usage(requests=1))
+    model.add_multiple_turn_outputs(
+        [
+            APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+            [get_text_message("ok")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+
+    result = await get_new_response(
+        bindings=bind_public_agent(agent),
+        system_prompt=None,
+        input=[get_text_input_item("hello")],
+        output_schema=None,
+        all_tools=[],
+        handoffs=[],
+        hooks=RunHooks(),
+        context_wrapper=RunContextWrapper(context={}),
+        run_config=RunConfig(),
+        tool_use_tracker=AgentToolUseTracker(),
+        server_conversation_tracker=None,
+        prompt_config=None,
+        session=None,
+        session_items_to_rewind=[],
+    )
+
+    assert isinstance(result, ModelResponse)
+    assert result.usage.requests == 2
 
 
 @pytest.mark.asyncio
@@ -1890,6 +2705,79 @@ async def test_rewind_handles_id_stripped_sessions() -> None:
 
     assert session.pop_calls == 1
     assert session.saved_items == []
+
+
+@pytest.mark.asyncio
+async def test_rewind_skips_mismatched_tail_suffix() -> None:
+    target = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "target"})
+    unrelated = cast(
+        TResponseInputItem,
+        {"type": "message", "role": "user", "content": "unrelated tail item"},
+    )
+    session = CountingSession(history=[target, unrelated])
+
+    await rewind_session_items(session, [target])
+
+    assert session.pop_calls == 0
+    assert session.saved_items == [target, unrelated]
+
+
+@pytest.mark.asyncio
+async def test_rewind_preserves_unrelated_tail_items_when_server_tracker_cleanup_runs() -> None:
+    known_server_item = cast(
+        TResponseInputItem,
+        {"id": "msg_server_1", "type": "message", "role": "assistant", "content": "server item"},
+    )
+    unrelated = cast(
+        TResponseInputItem,
+        {"type": "message", "role": "user", "content": "unrelated tail item"},
+    )
+    target = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "target"})
+    session = CountingSession(history=[known_server_item, unrelated, target])
+    tracker = OpenAIServerConversationTracker()
+    tracker.server_item_ids.add("msg_server_1")
+
+    await rewind_session_items(session, [target], tracker)
+
+    assert session.pop_calls == 1
+    assert session.saved_items == [known_server_item, unrelated]
+
+
+@pytest.mark.asyncio
+async def test_rewind_strips_only_retry_owned_tail_items_before_known_server_item() -> None:
+    known_server_item = cast(
+        TResponseInputItem,
+        {"id": "msg_server_1", "type": "message", "role": "assistant", "content": "server item"},
+    )
+    retry_owned_tail = cast(
+        TResponseInputItem,
+        {"type": "message", "role": "user", "content": "retry-owned local item"},
+    )
+    target = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "target"})
+    session = CountingSession(history=[known_server_item, retry_owned_tail, target])
+    tracker = OpenAIServerConversationTracker()
+    tracker.server_item_ids.add("msg_server_1")
+    retry_owned_fingerprint = fingerprint_input_item(retry_owned_tail)
+    assert retry_owned_fingerprint is not None
+    tracker.sent_item_fingerprints.add(retry_owned_fingerprint)
+
+    await rewind_session_items(session, [target], tracker)
+
+    assert session.pop_calls == 2
+    assert session.saved_items == [known_server_item]
+
+
+def test_collect_retry_owned_tail_serializations_returns_empty_for_empty_session() -> None:
+    tracker = OpenAIServerConversationTracker()
+
+    assert (
+        _collect_retry_owned_tail_serializations(
+            [],
+            server_tracker=tracker,
+            ignore_ids_for_matching=False,
+        )
+        == []
+    )
 
 
 @pytest.mark.asyncio
@@ -2038,6 +2926,296 @@ async def test_save_result_to_session_omits_reasoning_ids_when_policy_is_omit() 
 
 
 @pytest.mark.asyncio
+async def test_save_result_to_openai_conversation_preserves_reasoning_id_when_policy_is_omit() -> (
+    None
+):
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved_items: list[TResponseInputItem] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.saved_items.extend(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+    agent = Agent(name="agent", model=FakeModel())
+    run_state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+    run_state.set_reasoning_item_id_policy("omit")
+
+    reasoning_item = ReasoningItem(
+        agent=agent,
+        raw_item=ResponseReasoningItem(
+            type="reasoning",
+            id="rs_openai_conversation",
+            summary=[Summary(text="thinking", type="summary_text")],
+        ),
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [reasoning_item]),
+        run_state,
+    )
+
+    assert saved_count == 1
+    assert run_state._current_turn_persisted_item_count == 1
+    assert len(session.saved_items) == 1
+    saved_reasoning = cast(dict[str, Any], session.saved_items[0])
+    assert saved_reasoning.get("type") == "reasoning"
+    assert saved_reasoning.get("id") == "rs_openai_conversation"
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_openai_conversation_drops_unpersistable_reasoning_item() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved_items: list[TResponseInputItem] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.saved_items.extend(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+    agent = Agent(name="agent", model=FakeModel())
+    run_state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+    malformed_reasoning = _DummyRunItem(
+        {"type": "reasoning", "summary": [], "content": []},
+        "reasoning_item",
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [malformed_reasoning]),
+        run_state,
+    )
+
+    assert saved_count == 1
+    assert run_state._current_turn_persisted_item_count == 1
+    assert session.saved_items == []
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_openai_conversation_keeps_reasoning_encrypted_content() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved_items: list[TResponseInputItem] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.saved_items.extend(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+    encrypted_reasoning = _DummyRunItem(
+        {
+            "type": "reasoning",
+            "summary": [],
+            "content": [],
+            "encrypted_content": "encrypted",
+        },
+        "reasoning_item",
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [encrypted_reasoning]),
+        None,
+    )
+
+    assert saved_count == 1
+    assert len(session.saved_items) == 1
+    saved_reasoning = cast(dict[str, Any], session.saved_items[0])
+    assert saved_reasoning["encrypted_content"] == "encrypted"
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_session_keeps_tool_call_payload_api_safe() -> None:
+    session = SimpleListSession()
+    agent = Agent(name="agent", model=FakeModel())
+    tool_call = ToolCallItem(
+        agent=agent,
+        raw_item=ResponseFunctionToolCall(
+            id="fc_session",
+            call_id="call_session",
+            name="lookup_account",
+            arguments="{}",
+            type="function_call",
+            status="completed",
+        ),
+        description="Lookup customer records.",
+        title="Lookup Account",
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [tool_call]),
+        None,
+    )
+
+    assert saved_count == 1
+    assert len(session.saved_items) == 1
+    saved_tool_call = cast(dict[str, Any], session.saved_items[0])
+    assert saved_tool_call["type"] == "function_call"
+    assert TOOL_CALL_SESSION_DESCRIPTION_KEY not in saved_tool_call
+    assert TOOL_CALL_SESSION_TITLE_KEY not in saved_tool_call
+    assert "description" not in saved_tool_call
+    assert "title" not in saved_tool_call
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_session_sanitizes_original_input_items() -> None:
+    session = SimpleListSession()
+
+    saved_count = await save_result_to_session(
+        session,
+        [
+            cast(
+                TResponseInputItem,
+                {
+                    "type": "function_call",
+                    "call_id": "call_input",
+                    "name": "lookup_account",
+                    "arguments": "{}",
+                    TOOL_CALL_SESSION_DESCRIPTION_KEY: "Lookup customer records.",
+                    TOOL_CALL_SESSION_TITLE_KEY: "Lookup Account",
+                },
+            )
+        ],
+        [],
+        None,
+    )
+
+    assert saved_count == 0
+    assert len(session.saved_items) == 1
+    saved_tool_call = cast(dict[str, Any], session.saved_items[0])
+    assert saved_tool_call["type"] == "function_call"
+    assert TOOL_CALL_SESSION_DESCRIPTION_KEY not in saved_tool_call
+    assert TOOL_CALL_SESSION_TITLE_KEY not in saved_tool_call
+    assert "description" not in saved_tool_call
+    assert "title" not in saved_tool_call
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_strips_internal_tool_call_metadata() -> None:
+    tool_call = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "call_history",
+            "name": "lookup_account",
+            "arguments": "{}",
+            TOOL_CALL_SESSION_DESCRIPTION_KEY: "Lookup customer records.",
+            TOOL_CALL_SESSION_TITLE_KEY: "Lookup Account",
+        },
+    )
+    tool_output = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call_output",
+            "call_id": "call_history",
+            "output": "ok",
+        },
+    )
+    session = SimpleListSession(history=[tool_call, tool_output])
+
+    prepared_input, session_items = await prepare_input_with_session("hello", session, None)
+
+    assert isinstance(prepared_input, list)
+    prepared_tool_calls = [
+        cast(dict[str, Any], item)
+        for item in prepared_input
+        if isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and item.get("call_id") == "call_history"
+    ]
+    assert len(prepared_tool_calls) == 1
+    assert TOOL_CALL_SESSION_DESCRIPTION_KEY not in prepared_tool_calls[0]
+    assert TOOL_CALL_SESSION_TITLE_KEY not in prepared_tool_calls[0]
+    assert len(session_items) == 1
+    assert cast(dict[str, Any], session_items[0])["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_sanitizes_new_tool_call_session_items() -> None:
+    prepared_input, session_items = await prepare_input_with_session(
+        [
+            cast(
+                TResponseInputItem,
+                {
+                    "type": "function_call",
+                    "call_id": "call_new",
+                    "name": "lookup_account",
+                    "arguments": "{}",
+                    TOOL_CALL_SESSION_DESCRIPTION_KEY: "Lookup customer records.",
+                    TOOL_CALL_SESSION_TITLE_KEY: "Lookup Account",
+                },
+            )
+        ],
+        SimpleListSession(),
+        None,
+    )
+
+    assert isinstance(prepared_input, list)
+    assert len(prepared_input) == 1
+    prepared_tool_call = cast(dict[str, Any], prepared_input[0])
+    assert prepared_tool_call["type"] == "function_call"
+    assert TOOL_CALL_SESSION_DESCRIPTION_KEY not in prepared_tool_call
+    assert TOOL_CALL_SESSION_TITLE_KEY not in prepared_tool_call
+
+    assert len(session_items) == 1
+    session_tool_call = cast(dict[str, Any], session_items[0])
+    assert session_tool_call["type"] == "function_call"
+    assert TOOL_CALL_SESSION_DESCRIPTION_KEY not in session_tool_call
+    assert TOOL_CALL_SESSION_TITLE_KEY not in session_tool_call
+
+
+@pytest.mark.asyncio
 async def test_session_persists_only_new_step_items(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure only per-turn new_step_items are persisted to the session."""
 
@@ -2083,8 +3261,10 @@ async def test_session_persists_only_new_step_items(monkeypatch: pytest.MonkeyPa
     async def fake_run_output_guardrails(*_: Any, **__: Any) -> list[Any]:
         return []
 
-    async def noop_initialize_computer_tools(*_: Any, **__: Any) -> None:
-        return None
+    async def noop_initialize_computer_tools(
+        *args: Any, tools: list[Any], **kwargs: Any
+    ) -> list[Any]:
+        return tools
 
     monkeypatch.setattr("agents.run.save_result_to_session", save_wrapper)
     monkeypatch.setattr(
@@ -2615,6 +3795,49 @@ async def test_previous_response_id_only_sends_new_items_multi_turn():
 
 
 @pytest.mark.asyncio
+async def test_previous_response_id_retry_does_not_resend_initial_input_multi_turn():
+    class StatefulRetrySafeFakeModel(FakeModel):
+        def get_retry_advice(self, request):
+            if request.previous_response_id or request.conversation_id:
+                return ModelRetryAdvice(suggested=True, replay_safety="safe")
+            return None
+
+    model = StatefulRetrySafeFakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent, input="user_message", previous_response_id="initial-response-123"
+    )
+    assert result.final_output == "done"
+
+    last_input = model.last_turn_args["input"]
+    assert isinstance(last_input, list)
+    assert len(last_input) == 1
+    assert last_input[0].get("type") == "function_call_output"
+
+
+@pytest.mark.asyncio
 async def test_previous_response_id_only_sends_new_items_multi_turn_streamed():
     """Test that previous_response_id mode only sends new items and updates
     previous_response_id between turns (streamed mode)."""
@@ -2669,6 +3892,52 @@ async def test_previous_response_id_only_sends_new_items_multi_turn_streamed():
 
     # Verify that previous_response_id is modified according to fake_model behavior
     assert model.last_turn_args.get("previous_response_id") == "resp-789"
+
+
+@pytest.mark.asyncio
+async def test_previous_response_id_retry_does_not_resend_initial_input_multi_turn_streamed():
+    class StatefulRetrySafeFakeModel(FakeModel):
+        def get_retry_advice(self, request):
+            if request.previous_response_id or request.conversation_id:
+                return ModelRetryAdvice(suggested=True, replay_safety="safe")
+            return None
+
+    model = StatefulRetrySafeFakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = Runner.run_streamed(
+        agent, input="user_message", previous_response_id="initial-response-123"
+    )
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "done"
+
+    last_input = model.last_turn_args["input"]
+    assert isinstance(last_input, list)
+    assert len(last_input) == 1
+    assert last_input[0].get("type") == "function_call_output"
 
 
 @pytest.mark.asyncio
@@ -2791,6 +4060,198 @@ async def test_default_send_all_items_streamed():
     # Check function result
     assert function_result.get("type") == "function_call_output"
     assert function_result.get("call_id") is not None
+
+
+@pytest.mark.asyncio
+async def test_default_multi_turn_drops_orphan_hosted_shell_calls() -> None:
+    model = FakeModel()
+    agent = Agent(
+        name="hosted-shell",
+        model=model,
+        tools=[ShellTool(environment={"type": "container_auto"})],
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [make_shell_call("call_shell_1", id_value="shell_1", commands=["echo hi"])],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="user_message")
+
+    assert result.final_output == "done"
+
+    last_input = model.last_turn_args["input"]
+    assert isinstance(last_input, list)
+    assert len(last_input) == 1
+    assert not any(
+        isinstance(item, dict) and item.get("type") == "shell_call" for item in last_input
+    )
+    assert last_input[0].get("role") == "user"
+    assert last_input[0].get("content") == "user_message"
+
+
+@pytest.mark.asyncio
+async def test_manual_pending_shell_call_input_is_preserved_non_streamed() -> None:
+    model = FakeModel()
+    agent = Agent(
+        name="manual-shell",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+    )
+    pending_shell_call = cast(
+        TResponseInputItem,
+        make_shell_call("manual_shell", id_value="shell_1", commands=["echo hi"]),
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("test_func", '{"arg": "foo"}')],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input=[pending_shell_call])
+
+    assert result.final_output == "done"
+    assert isinstance(model.first_turn_args, dict)
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "shell_call"
+        and item.get("call_id") == "manual_shell"
+        for item in model.first_turn_args["input"]
+    )
+
+    last_input = model.last_turn_args["input"]
+    assert isinstance(last_input, list)
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "shell_call"
+        and item.get("call_id") == "manual_shell"
+        for item in last_input
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_pending_shell_call_input_is_preserved_non_streamed_with_session() -> None:
+    model = FakeModel()
+    agent = Agent(
+        name="manual-shell",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+    )
+    session = SimpleListSession()
+    pending_shell_call = cast(
+        TResponseInputItem,
+        make_shell_call("manual_shell", id_value="shell_1", commands=["echo hi"]),
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("test_func", '{"arg": "foo"}')],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input=[pending_shell_call], session=session)
+
+    assert result.final_output == "done"
+    assert isinstance(model.first_turn_args, dict)
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "shell_call"
+        and item.get("call_id") == "manual_shell"
+        for item in model.first_turn_args["input"]
+    )
+
+    last_input = model.last_turn_args["input"]
+    assert isinstance(last_input, list)
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "shell_call"
+        and item.get("call_id") == "manual_shell"
+        for item in last_input
+    )
+
+
+@pytest.mark.asyncio
+async def test_default_multi_turn_streamed_drops_orphan_hosted_shell_calls() -> None:
+    model = FakeModel()
+    agent = Agent(
+        name="hosted-shell",
+        model=model,
+        tools=[ShellTool(environment={"type": "container_auto"})],
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [make_shell_call("call_shell_1", id_value="shell_1", commands=["echo hi"])],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="user_message")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "done"
+
+    last_input = model.last_turn_args["input"]
+    assert isinstance(last_input, list)
+    assert len(last_input) == 1
+    assert not any(
+        isinstance(item, dict) and item.get("type") == "shell_call" for item in last_input
+    )
+    assert last_input[0].get("role") == "user"
+    assert last_input[0].get("content") == "user_message"
+
+
+@pytest.mark.asyncio
+async def test_manual_pending_shell_call_input_is_preserved_streamed() -> None:
+    model = FakeModel()
+    agent = Agent(name="manual-shell", model=model)
+    pending_shell_call = cast(
+        TResponseInputItem,
+        make_shell_call("manual_shell", id_value="shell_1", commands=["echo hi"]),
+    )
+    model.set_next_output([get_text_message("done")])
+
+    result = Runner.run_streamed(agent, input=[pending_shell_call])
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "done"
+    last_input = model.last_turn_args["input"]
+    assert isinstance(last_input, list)
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "shell_call"
+        and item.get("call_id") == "manual_shell"
+        for item in last_input
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_pending_shell_call_input_is_preserved_streamed_with_session() -> None:
+    model = FakeModel()
+    agent = Agent(name="manual-shell", model=model)
+    session = SimpleListSession()
+    pending_shell_call = cast(
+        TResponseInputItem,
+        make_shell_call("manual_shell", id_value="shell_1", commands=["echo hi"]),
+    )
+    model.set_next_output([get_text_message("done")])
+
+    result = Runner.run_streamed(agent, input=[pending_shell_call], session=session)
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "done"
+    last_input = model.last_turn_args["input"]
+    assert isinstance(last_input, list)
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "shell_call"
+        and item.get("call_id") == "manual_shell"
+        for item in last_input
+    )
 
 
 @pytest.mark.asyncio
@@ -2997,6 +4458,132 @@ async def test_dynamic_tool_addition_run() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tool_not_found_behavior_returns_error_to_model() -> None:
+    model = FakeModel()
+    agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("missing_tool", "{}", call_id="call_missing")],
+            [get_text_message("recovered")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
+    )
+
+    assert result.final_output == "recovered"
+    second_turn_input = model.last_turn_args["input"]
+    assert isinstance(second_turn_input, list)
+    tool_outputs = [
+        item
+        for item in second_turn_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    ]
+    assert tool_outputs == [
+        {
+            "call_id": "call_missing",
+            "output": "Tool 'missing_tool' not found.",
+            "type": "function_call_output",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_not_found_behavior_uses_tool_error_formatter() -> None:
+    model = FakeModel()
+    agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("missing_tool", "{}", call_id="call_missing")],
+            [get_text_message("recovered")],
+        ]
+    )
+    seen_kinds: list[str] = []
+
+    async def formatter(args: Any) -> str | None:
+        seen_kinds.append(args.kind)
+        if args.kind != "tool_not_found":
+            return None
+        return f"{args.tool_name} unavailable for {args.call_id}"
+
+    result = await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(
+            tool_not_found_behavior="return_error_to_model",
+            tool_error_formatter=formatter,
+        ),
+    )
+
+    assert result.final_output == "recovered"
+    assert seen_kinds == ["tool_not_found"]
+    second_turn_input = model.last_turn_args["input"]
+    assert isinstance(second_turn_input, list)
+    tool_outputs = [
+        item
+        for item in second_turn_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    ]
+    assert tool_outputs == [
+        {
+            "call_id": "call_missing",
+            "output": "missing_tool unavailable for call_missing",
+            "type": "function_call_output",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_not_found_behavior_handles_mixed_function_tool_calls() -> None:
+    model = FakeModel()
+    calls: list[str] = []
+
+    @function_tool(name_override="known_tool")
+    async def known_tool() -> str:
+        calls.append("known_tool")
+        return "known result"
+
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[known_tool],
+        tool_use_behavior="run_llm_again",
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call("missing_tool", "{}", call_id="call_missing"),
+                get_function_tool_call("known_tool", "{}", call_id="call_known"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
+    )
+
+    assert calls == ["known_tool"]
+    assert result.final_output == "done"
+    second_turn_input = model.last_turn_args["input"]
+    assert isinstance(second_turn_input, list)
+    tool_outputs = {
+        item.get("call_id"): item.get("output")
+        for item in second_turn_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    }
+    assert tool_outputs == {
+        "call_known": "known result",
+        "call_missing": "Tool 'missing_tool' not found.",
+    }
+
+
+@pytest.mark.asyncio
 async def test_session_add_items_called_multiple_times_for_multi_turn_completion():
     """Test that SQLiteSession.add_items is called multiple times
     during a multi-turn agent completion.
@@ -3138,8 +4725,8 @@ async def test_execute_approved_tools_with_non_function_tool():
     agent = Agent(name="TestAgent", model=model, tools=[computer_tool])
 
     # Create an approved tool call for the computer tool
-    # ComputerTool has name "computer_use_preview"
-    tool_call = get_function_tool_call("computer_use_preview", "{}")
+    # ComputerTool is not a function tool and should still fail approval execution cleanly.
+    tool_call = get_function_tool_call(computer_tool.name, "{}")
     assert isinstance(tool_call, ResponseFunctionToolCall)
 
     approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
@@ -3211,6 +4798,68 @@ async def test_execute_approved_tools_with_rejected_tool_uses_run_level_formatte
 
     assert len(generated_items) == 1
     assert generated_items[0].output == "run-level test_tool denied (2)"
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_with_rejected_tool_prefers_explicit_message():
+    """Rejected tools should prefer explicit rejection messages over the formatter."""
+
+    async def test_tool() -> str:
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool")
+    _, agent = make_model_and_agent(tools=[tool])
+
+    tool_call = get_function_tool_call("test_tool", "{}")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    generated_items = await run_execute_approved_tools(
+        agent=agent,
+        approval_item=approval_item,
+        approve=False,
+        run_config=RunConfig(
+            tool_error_formatter=lambda args: f"run-level {args.tool_name} denied ({args.call_id})"
+        ),
+        mutate_state=lambda state, item: state.reject(
+            item, rejection_message="explicit rejection message"
+        ),
+    )
+
+    assert len(generated_items) == 1
+    assert generated_items[0].output == "explicit rejection message"
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_with_rejected_deferred_tool_uses_display_name():
+    """Rejected deferred tools should collapse synthetic namespaces in formatter output."""
+
+    async def get_weather() -> str:
+        return "sunny"
+
+    tool = function_tool(get_weather, name_override="get_weather", defer_loading=True)
+    _, agent = make_model_and_agent(tools=[tool])
+
+    tool_call = get_function_tool_call("get_weather", "{}", namespace="get_weather")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(
+        agent=agent,
+        raw_item=tool_call,
+        tool_name="get_weather",
+        tool_namespace="get_weather",
+    )
+
+    generated_items = await run_execute_approved_tools(
+        agent=agent,
+        approval_item=approval_item,
+        approve=False,
+        run_config=RunConfig(
+            tool_error_formatter=lambda args: f"run-level {args.tool_name} denied ({args.call_id})"
+        ),
+    )
+
+    assert len(generated_items) == 1
+    assert generated_items[0].output == "run-level get_weather denied (2)"
 
 
 @pytest.mark.asyncio
@@ -3289,6 +4938,253 @@ async def test_execute_approved_tools_with_missing_tool():
     assert len(generated_items) == 1
     assert isinstance(generated_items[0], ToolCallOutputItem)
     assert "not found" in generated_items[0].output.lower()
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_does_not_resolve_explicit_namespaced_tool_by_bare_name():
+    crm_calls: list[str] = []
+    billing_calls: list[str] = []
+
+    async def crm_lookup() -> str:
+        crm_calls.append("crm")
+        return "crm"
+
+    async def billing_lookup() -> str:
+        billing_calls.append("billing")
+        return "billing"
+
+    crm_tool = tool_namespace(
+        name="crm",
+        description="CRM tools",
+        tools=[function_tool(crm_lookup, name_override="lookup_account")],
+    )[0]
+    billing_tool = tool_namespace(
+        name="billing",
+        description="Billing tools",
+        tools=[function_tool(billing_lookup, name_override="lookup_account")],
+    )[0]
+    agent = Agent(name="TestAgent", model=FakeModel(), tools=[crm_tool, billing_tool])
+
+    tool_call = get_function_tool_call("lookup_account", "{}", call_id="call-ambiguous")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    generated_items = await run_execute_approved_tools(
+        agent=agent,
+        approval_item=approval_item,
+        approve=True,
+    )
+
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert "not found" in generated_items[0].output.lower()
+    assert crm_calls == []
+    assert billing_calls == []
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_does_not_fallback_from_namespaced_approval_to_bare_tool():
+    bare_calls: list[str] = []
+
+    async def bare_lookup() -> str:
+        bare_calls.append("bare")
+        return "bare"
+
+    bare_tool = function_tool(bare_lookup, name_override="lookup_account")
+    agent = Agent(name="TestAgent", model=FakeModel(), tools=[bare_tool])
+
+    tool_call = get_function_tool_call(
+        "lookup_account",
+        "{}",
+        call_id="call-billing",
+        namespace="billing",
+    )
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    generated_items = await run_execute_approved_tools(
+        agent=agent,
+        approval_item=approval_item,
+        approve=True,
+    )
+
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert "billing.lookup_account" in generated_items[0].output
+    assert "not found" in generated_items[0].output.lower()
+    assert bare_calls == []
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_prefers_visible_top_level_function_over_deferred_same_name_tool(  # noqa: E501
+):
+    visible_calls: list[str] = []
+    deferred_calls: list[str] = []
+
+    async def visible_lookup() -> str:
+        visible_calls.append("visible")
+        return "visible"
+
+    async def deferred_lookup() -> str:
+        deferred_calls.append("deferred")
+        return "deferred"
+
+    visible_tool = function_tool(visible_lookup, name_override="lookup_account")
+    deferred_tool = function_tool(
+        deferred_lookup,
+        name_override="lookup_account",
+        defer_loading=True,
+    )
+    agent = Agent(name="TestAgent", model=FakeModel(), tools=[visible_tool, deferred_tool])
+
+    tool_call = get_function_tool_call("lookup_account", "{}", call_id="call-visible")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    generated_items = await run_execute_approved_tools(
+        agent=agent,
+        approval_item=approval_item,
+        approve=True,
+    )
+
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert generated_items[0].output == "visible"
+    assert visible_calls == ["visible"]
+    assert deferred_calls == []
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_uses_internal_lookup_key_for_deferred_top_level_calls() -> (
+    None
+):
+    visible_calls: list[str] = []
+    deferred_calls: list[str] = []
+
+    async def visible_lookup() -> str:
+        visible_calls.append("visible")
+        return "visible"
+
+    async def deferred_lookup() -> str:
+        deferred_calls.append("deferred")
+        return "deferred"
+
+    visible_tool = function_tool(
+        visible_lookup,
+        name_override="lookup_account.lookup_account",
+    )
+    deferred_tool = function_tool(
+        deferred_lookup,
+        name_override="lookup_account",
+        defer_loading=True,
+    )
+    agent = Agent(name="TestAgent", model=FakeModel(), tools=[visible_tool, deferred_tool])
+
+    tool_call = get_function_tool_call(
+        "lookup_account",
+        "{}",
+        call_id="call-deferred",
+        namespace="lookup_account",
+    )
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    generated_items = await run_execute_approved_tools(
+        agent=agent,
+        approval_item=approval_item,
+        approve=True,
+    )
+
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert generated_items[0].output == "deferred"
+    assert visible_calls == []
+    assert deferred_calls == ["deferred"]
+
+
+@pytest.mark.asyncio
+async def test_deferred_collision_rejection_prefers_explicit_message() -> None:
+    async def visible_lookup() -> str:
+        return "visible"
+
+    async def deferred_lookup() -> str:
+        return "deferred"
+
+    visible_tool = function_tool(
+        visible_lookup,
+        name_override="lookup_account.lookup_account",
+    )
+    deferred_tool = function_tool(
+        deferred_lookup,
+        name_override="lookup_account",
+        defer_loading=True,
+    )
+    agent = Agent(name="TestAgent", model=FakeModel(), tools=[visible_tool, deferred_tool])
+
+    tool_call = get_function_tool_call(
+        "lookup_account",
+        "{}",
+        call_id="call-deferred",
+        namespace="lookup_account",
+    )
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(
+        agent=agent,
+        raw_item=tool_call,
+        tool_name="lookup_account",
+        tool_namespace="lookup_account",
+        tool_lookup_key=("deferred_top_level", "lookup_account"),
+    )
+
+    generated_items = await run_execute_approved_tools(
+        agent=agent,
+        approval_item=approval_item,
+        approve=False,
+        run_config=RunConfig(
+            tool_error_formatter=lambda args: f"run-level {args.tool_name} denied ({args.call_id})"
+        ),
+        mutate_state=lambda state, item: state.reject(
+            item, rejection_message="explicit rejection message"
+        ),
+    )
+
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert generated_items[0].output == "explicit rejection message"
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_uses_last_duplicate_top_level_function():
+    first_calls: list[str] = []
+    second_calls: list[str] = []
+
+    async def first_lookup() -> str:
+        first_calls.append("first")
+        return "first"
+
+    async def second_lookup() -> str:
+        second_calls.append("second")
+        return "second"
+
+    first_tool = function_tool(first_lookup, name_override="lookup_account")
+    second_tool = function_tool(second_lookup, name_override="lookup_account")
+    agent = Agent(name="TestAgent", model=FakeModel(), tools=[first_tool, second_tool])
+
+    tool_call = get_function_tool_call("lookup_account", "{}", call_id="call-shadow")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    generated_items = await run_execute_approved_tools(
+        agent=agent,
+        approval_item=approval_item,
+        approve=True,
+    )
+
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert generated_items[0].output == "second"
+    assert first_calls == []
+    assert second_calls == ["second"]
 
 
 @pytest.mark.asyncio

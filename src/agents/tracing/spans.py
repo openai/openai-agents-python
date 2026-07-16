@@ -13,6 +13,7 @@ from .scope import Scope
 from .span_data import SpanData
 
 TSpanData = TypeVar("TSpanData", bound=SpanData)
+_SPAN_METADATA_ROUTING_KEYS = ("agent_harness_id",)
 
 
 class SpanError(TypedDict):
@@ -369,7 +370,7 @@ class SpanImpl(Span[TSpanData]):
         return self._trace_metadata
 
     def export(self) -> dict[str, Any] | None:
-        return {
+        payload = {
             "object": "trace.span",
             "id": self.span_id,
             "trace_id": self.trace_id,
@@ -379,3 +380,20 @@ class SpanImpl(Span[TSpanData]):
             "span_data": self.span_data.export(),
             "error": self._error,
         }
+        metadata: dict[str, Any] = {}
+        if self._trace_metadata is not None:
+            metadata.update(
+                {
+                    key: self._trace_metadata[key]
+                    for key in _SPAN_METADATA_ROUTING_KEYS
+                    if key in self._trace_metadata
+                }
+            )
+        span_data_metadata = getattr(self.span_data, "metadata", None)
+        if isinstance(span_data_metadata, dict):
+            metadata.update(
+                {key: value for key, value in span_data_metadata.items() if key not in metadata}
+            )
+        if metadata:
+            payload["metadata"] = metadata
+        return payload

@@ -80,6 +80,24 @@ def fetch_events() -> list[TestSpanProcessorEvent]:
     return SPAN_PROCESSOR_TESTING._events
 
 
+def fetch_span_errors(span_type: str) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+    for span in fetch_ordered_spans():
+        exported = span.export()
+        if not exported:
+            continue
+        span_data = exported["span_data"]
+        exported_span_type = span_data.get("type")
+        if exported_span_type == "custom" and isinstance(span_data.get("data"), dict):
+            exported_span_type = span_data["data"].get("sdk_span_type", exported_span_type)
+        if exported_span_type != span_type:
+            continue
+        error = exported.get("error")
+        if error is not None:
+            errors.append(error)
+    return errors
+
+
 def assert_no_spans():
     spans = fetch_ordered_spans()
     if spans:
@@ -127,6 +145,19 @@ def fetch_normalized_spans(
         span_data = {k: v for k, v in span_data.items() if v is not None}
         if span_data:
             span["data"] = span_data
+        trace_id = span.pop("trace_id")
+        sdk_span_type = None
+        if span["type"] == "custom":
+            custom_data = span_data.get("data")
+            if isinstance(custom_data, dict):
+                sdk_span_type = custom_data.get("sdk_span_type")
+        if span["type"] in {"task", "turn"} or sdk_span_type in {"task", "turn"}:
+            parent = nodes[(trace_id, parent_id)]
+            if "error" in span and "error" not in parent:
+                parent["error"] = span["error"]
+            nodes[(trace_id, span_obj.span_id)] = parent
+            continue
+
         nodes[(span_obj.trace_id, span_obj.span_id)] = span
-        nodes[(span.pop("trace_id"), parent_id)].setdefault("children", []).append(span)
+        nodes[(trace_id, parent_id)].setdefault("children", []).append(span)
     return traces

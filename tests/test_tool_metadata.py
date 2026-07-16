@@ -41,7 +41,8 @@ def test_tool_name_properties() -> None:
 
     assert FileSearchTool(vector_store_ids=[]).name == "file_search"
     assert WebSearchTool().name == "web_search"
-    assert isinstance(ComputerTool(computer=dummy_computer).name, str)
+    assert ComputerTool(computer=dummy_computer).name == "computer_use_preview"
+    assert ComputerTool(computer=dummy_computer).trace_name == "computer"
     assert HostedMCPTool(tool_config=dummy_mcp).name == "hosted_mcp"
     assert CodeInterpreterTool(tool_config=dummy_code).name == "code_interpreter"
     assert ImageGenerationTool(tool_config=dummy_image).name == "image_generation"

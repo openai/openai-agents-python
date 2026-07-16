@@ -14,8 +14,16 @@ python -m venv .venv
 
 Do this every time you start a new terminal session.
 
+On macOS or Linux:
+
 ```bash
 source .venv/bin/activate
+```
+
+On Windows:
+
+```cmd
+.venv\Scripts\activate
 ```
 
 ### Install the Agents SDK
@@ -28,8 +36,24 @@ pip install openai-agents # or `uv add openai-agents`, etc
 
 If you don't have one, follow [these instructions](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key) to create an OpenAI API key.
 
+These commands set the key for your current terminal session.
+
+On macOS or Linux:
+
 ```bash
 export OPENAI_API_KEY=sk-...
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:OPENAI_API_KEY = "sk-..."
+```
+
+On Windows Command Prompt:
+
+```cmd
+set "OPENAI_API_KEY=sk-..."
 ```
 
 ## Create your first agent
@@ -77,6 +101,8 @@ Use this rule of thumb:
 | OpenAI-managed server-side continuation | `previous_response_id` or `conversation_id` |
 
 For the tradeoffs and exact behaviors, see [Running agents](running_agents.md#choose-a-memory-strategy).
+
+Use a plain `Agent` plus `Runner` when the task mainly lives in prompts, tools, and conversation state. If the agent should inspect or modify real files in an isolated workspace, jump to the [Sandbox agents quickstart](sandbox_agents.md).
 
 ## Give your agent tools
 
@@ -191,4 +217,5 @@ Learn how to build more complex agentic flows:
 
 -   Learn about how to configure [Agents](agents.md).
 -   Learn about [running agents](running_agents.md) and [sessions](sessions/index.md).
+-   Learn about [Sandbox agents](sandbox_agents.md) if the work should happen inside a real workspace.
 -   Learn about [tools](tools.md), [guardrails](guardrails.md) and [models](models/index.md).

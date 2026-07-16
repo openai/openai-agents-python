@@ -3,26 +3,33 @@ import contextlib
 import copy
 import dataclasses
 import json
+import logging
 import time
-from typing import Any, Callable, cast
+from collections.abc import Callable
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
+import agents._debug as _debug
 import agents.tool as tool_module
 from agents import (
     Agent,
     AgentBase,
     FunctionTool,
+    HostedMCPTool,
     ModelBehaviorError,
     RunContextWrapper,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
     ToolOutputGuardrailData,
+    ToolSearchTool,
     ToolTimeoutError,
+    UserError,
     function_tool,
     tool_input_guardrail,
+    tool_namespace,
     tool_output_guardrail,
 )
 from agents.tool import default_tool_error_function
@@ -31,6 +38,60 @@ from agents.tool_context import ToolContext
 
 def argless_function() -> str:
     return "ok"
+
+
+def test_tool_namespace_copies_tools_with_metadata() -> None:
+    tool = function_tool(argless_function)
+
+    namespaced_tools = tool_namespace(
+        name="crm",
+        description="CRM tools",
+        tools=[tool],
+    )
+
+    assert len(namespaced_tools) == 1
+    assert namespaced_tools[0] is not tool
+    assert namespaced_tools[0]._tool_namespace == "crm"
+    assert namespaced_tools[0]._tool_namespace_description == "CRM tools"
+    assert namespaced_tools[0].qualified_name == "crm.argless_function"
+    assert tool._tool_namespace is None
+    assert tool.qualified_name == "argless_function"
+
+
+def test_tool_namespace_requires_keyword_arguments() -> None:
+    tool = function_tool(argless_function)
+
+    with pytest.raises(TypeError):
+        tool_namespace("crm", "CRM tools", [tool])  # type: ignore[misc]
+
+
+def test_tool_namespace_requires_non_empty_description() -> None:
+    tool = function_tool(argless_function)
+
+    with pytest.raises(UserError, match="non-empty description"):
+        tool_namespace(
+            name="crm",
+            description=None,
+            tools=[tool],
+        )
+
+    with pytest.raises(UserError, match="non-empty description"):
+        tool_namespace(
+            name="crm",
+            description="   ",
+            tools=[tool],
+        )
+
+
+def test_tool_namespace_rejects_reserved_same_name_shape() -> None:
+    tool = function_tool(argless_function, name_override="lookup_account")
+
+    with pytest.raises(UserError, match="synthetic namespace `lookup_account.lookup_account`"):
+        tool_namespace(
+            name="lookup_account",
+            description="Same-name namespace",
+            tools=[tool],
+        )
 
 
 @pytest.mark.asyncio
@@ -438,6 +499,67 @@ async def test_is_enabled_bool_and_callable():
 
 
 @pytest.mark.asyncio
+async def test_get_all_tools_preserves_explicit_tool_search_when_deferred_tools_are_disabled():
+    async def deferred_enabled(ctx: RunContextWrapper[BoolCtx], agent: AgentBase) -> bool:
+        return ctx.context.enable_tools
+
+    @function_tool(defer_loading=True, is_enabled=deferred_enabled)
+    def deferred_lookup() -> str:
+        return "loaded"
+
+    agent = Agent(name="t", tools=[deferred_lookup, ToolSearchTool()])
+
+    tools_with_disabled_context = await agent.get_all_tools(
+        RunContextWrapper(BoolCtx(enable_tools=False))
+    )
+    assert len(tools_with_disabled_context) == 1
+    assert isinstance(tools_with_disabled_context[0], ToolSearchTool)
+
+    tools_with_enabled_context = await agent.get_all_tools(
+        RunContextWrapper(BoolCtx(enable_tools=True))
+    )
+    assert tools_with_enabled_context[0] is deferred_lookup
+    assert isinstance(tools_with_enabled_context[1], ToolSearchTool)
+
+
+@pytest.mark.asyncio
+async def test_get_all_tools_keeps_tool_search_for_namespace_only_tools():
+    namespaced_lookup = tool_namespace(
+        name="crm",
+        description="CRM tools",
+        tools=[function_tool(lambda account_id: account_id, name_override="lookup_account")],
+    )[0]
+
+    agent = Agent(name="t", tools=[namespaced_lookup, ToolSearchTool()])
+
+    tools = await agent.get_all_tools(RunContextWrapper(BoolCtx(enable_tools=False)))
+
+    assert tools[0] is namespaced_lookup
+    assert isinstance(tools[1], ToolSearchTool)
+
+
+@pytest.mark.asyncio
+async def test_get_all_tools_keeps_tool_search_for_deferred_hosted_mcp() -> None:
+    hosted_mcp = HostedMCPTool(
+        tool_config=cast(
+            Any,
+            {
+                "type": "mcp",
+                "server_label": "crm_server",
+                "server_url": "https://example.com/mcp",
+                "defer_loading": True,
+            },
+        )
+    )
+    agent = Agent(name="t", tools=[hosted_mcp, ToolSearchTool()])
+
+    tools = await agent.get_all_tools(RunContextWrapper(BoolCtx(enable_tools=False)))
+
+    assert tools[0] is hosted_mcp
+    assert isinstance(tools[1], ToolSearchTool)
+
+
+@pytest.mark.asyncio
 async def test_async_failure_error_function_is_awaited() -> None:
     async def failure_handler(ctx: RunContextWrapper[Any], exc: Exception) -> str:
         return f"handled:{exc}"
@@ -610,6 +732,116 @@ async def test_copied_function_tool_invalid_input_uses_current_name(copy_style: 
             ),
             "{}",
         )
+
+
+def test_function_tool_does_not_mutate_params_json_schema() -> None:
+    async def noop(ctx: ToolContext[Any], input: str) -> str:
+        return ""
+
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
+    schema_snapshot = copy.deepcopy(schema)
+
+    tool = FunctionTool(
+        name="t",
+        description="d",
+        params_json_schema=schema,
+        on_invoke_tool=noop,
+        strict_json_schema=True,
+    )
+
+    assert schema == schema_snapshot
+    assert tool.params_json_schema is not schema
+    assert tool.params_json_schema["additionalProperties"] is False
+    assert tool.params_json_schema["required"] == ["x"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("input_json", ["[]", '"value"', "123", "null", "true"])
+async def test_function_tool_rejects_non_object_json_input(input_json: str) -> None:
+    def echo(value: str) -> str:
+        return value
+
+    tool = function_tool(
+        echo,
+        name_override="echo_tool",
+        failure_error_function=None,
+    )
+
+    with pytest.raises(
+        ModelBehaviorError,
+        match="Invalid JSON input for tool echo_tool: expected a JSON object",
+    ):
+        await tool.on_invoke_tool(
+            ToolContext(
+                None,
+                tool_name="echo_tool",
+                tool_call_id="1",
+                tool_arguments=input_json,
+            ),
+            input_json,
+        )
+
+
+@pytest.mark.asyncio
+async def test_function_tool_bad_json_redacts_payload_when_dont_log_tool_data(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+
+    def echo(value: str) -> str:
+        return value
+
+    tool = function_tool(echo, name_override="echo_tool", failure_error_function=None)
+    bad_json = '{"secret":"SECRET_TOKEN_123"'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await tool.on_invoke_tool(
+            ToolContext(
+                None,
+                tool_name="echo_tool",
+                tool_call_id="1",
+                tool_arguments=bad_json,
+            ),
+            bad_json,
+        )
+
+    assert str(exc_info.value) == "Invalid JSON input for tool echo_tool"
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    assert "SECRET_TOKEN_123" not in str(exc_info.value)
+    assert "SECRET_TOKEN_123" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_function_tool_bad_json_includes_payload_when_tool_logging_enabled(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
+    def echo(value: str) -> str:
+        return value
+
+    tool = function_tool(echo, name_override="echo_tool", failure_error_function=None)
+    bad_json = '{"secret":"SECRET_TOKEN_123"'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await tool.on_invoke_tool(
+            ToolContext(
+                None,
+                tool_name="echo_tool",
+                tool_call_id="1",
+                tool_arguments=bad_json,
+            ),
+            bad_json,
+        )
+
+    assert str(exc_info.value) == f"Invalid JSON input for tool echo_tool: {bad_json}"
+    assert isinstance(exc_info.value.__cause__, json.JSONDecodeError)
+    assert exc_info.value.__cause__.doc == bad_json
+    assert "SECRET_TOKEN_123" in str(exc_info.value)
+    assert "SECRET_TOKEN_123" in caplog.text
 
 
 @pytest.mark.asyncio

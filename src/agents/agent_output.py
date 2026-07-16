@@ -1,9 +1,9 @@
 import abc
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, get_args, get_origin
 
 from pydantic import BaseModel, TypeAdapter
-from typing_extensions import TypedDict, get_args, get_origin
+from typing_extensions import TypedDict
 
 from .exceptions import ModelBehaviorError, UserError
 from .strict_schema import ensure_strict_json_schema
@@ -137,7 +137,12 @@ class AgentOutputSchema(AgentOutputSchemaBase):
         """Validate a JSON string against the output type. Returns the validated object, or raises
         a `ModelBehaviorError` if the JSON is invalid.
         """
-        validated = _json.validate_json(json_str, self._type_adapter, partial=False)
+        validated = _json.validate_json(
+            json_str,
+            self._type_adapter,
+            partial=False,
+            strict=True if self._strict_json_schema else None,
+        )
         if self._is_wrapped:
             if not isinstance(validated, dict):
                 _error_tracing.attach_error_to_current_span(
@@ -169,26 +174,27 @@ class AgentOutputSchema(AgentOutputSchemaBase):
 
 
 def _is_subclass_of_base_model_or_dict(t: Any) -> bool:
+    # If it's a generic alias, 'origin' will be the actual type, e.g. 'list'
+    origin = get_origin(t)
+    if origin is not None:
+        return isinstance(origin, type) and issubclass(origin, BaseModel | dict)
+
     if not isinstance(t, type):
         return False
 
-    # If it's a generic alias, 'origin' will be the actual type, e.g. 'list'
-    origin = get_origin(t)
-
-    allowed_types = (BaseModel, dict)
-    # If it's a generic alias e.g. list[str], then we should check the origin type i.e. list
-    return issubclass(origin or t, allowed_types)
+    return issubclass(t, BaseModel | dict)
 
 
-def _type_to_str(t: type[Any]) -> str:
+def _type_to_str(t: Any) -> str:
     origin = get_origin(t)
     args = get_args(t)
 
     if origin is None:
         # It's a simple type like `str`, `int`, etc.
-        return t.__name__
+        return getattr(t, "__name__", repr(t))
     elif args:
         args_str = ", ".join(_type_to_str(arg) for arg in args)
-        return f"{origin.__name__}[{args_str}]"
+        origin_name = getattr(origin, "__name__", str(origin))
+        return f"{origin_name}[{args_str}]"
     else:
         return str(t)

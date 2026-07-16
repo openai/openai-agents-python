@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import Literal
 
 ApplyDiffMode = Literal["default", "create"]
 

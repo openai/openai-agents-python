@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 from agents import Agent, AgentBase, ModelSettings, RunContextWrapper, Runner, trace
 from agents.tool import function_tool
-from examples.auto_mode import confirm_with_fallback, input_with_fallback
+from examples.auto_mode import confirm_with_fallback, input_with_fallback, is_auto_mode
 
 """
 This example demonstrates the agents-as-tools pattern with conditional tool enabling.
@@ -36,7 +36,10 @@ async def get_user_name() -> str:
 # Create specialized agents
 spanish_agent = Agent(
     name="spanish_agent",
-    instructions="You respond in Spanish. Always reply to the user's question in Spanish. You must call all the tools to best answer the user's question.",
+    instructions=(
+        "Respond in Spanish. Call get_user_name exactly once before replying, then greet that "
+        "user by name and answer the user's question in a non-empty final response."
+    ),
     model_settings=ModelSettings(tool_choice="required"),
     tools=[get_user_name],
 )
@@ -55,9 +58,10 @@ italian_agent = Agent(
 orchestrator = Agent(
     name="orchestrator",
     instructions=(
-        "You are a multilingual assistant. You use the tools given to you to respond to users. "
-        "You must call ALL available tools to provide responses in different languages. "
-        "You never respond in languages yourself, you always use the provided tools."
+        "You are a multilingual assistant. Call each available language tool requested by the "
+        "user exactly once, including every requested tool when multiple languages are requested. "
+        "Wait for all tool calls to finish, then combine their responses into a non-empty final "
+        "response. Never translate the user's request yourself."
     ),
     tools=[
         spanish_agent.as_tool(
@@ -108,7 +112,7 @@ async def main():
     # Get user request
     user_request = input_with_fallback(
         "Ask a question and see responses in available languages:\n",
-        "How do you say good morning?",
+        "Answer in Spanish and French: How do you say good morning?",
     )
 
     # Run with LLM interaction
@@ -135,6 +139,18 @@ async def main():
                     state.reject(interruption)
                     print(f"✗ Rejected: {interruption.name}")
             result = await Runner.run(orchestrator, state)
+
+    if is_auto_mode():
+        called_tools: list[str] = []
+        for item in result.new_items:
+            tool_name = getattr(item.raw_item, "name", None)
+            if item.type == "tool_call_item" and isinstance(tool_name, str):
+                if tool_name.startswith("respond_"):
+                    called_tools.append(tool_name)
+        if sorted(called_tools) != ["respond_french", "respond_spanish"]:
+            raise RuntimeError(f"Expected Spanish and French responses once, got {called_tools}")
+        if not result.final_output:
+            raise RuntimeError("Expected a non-empty multilingual response")
 
     print(f"\nResponse:\n{result.final_output}")
 

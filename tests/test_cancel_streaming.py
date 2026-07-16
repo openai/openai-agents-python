@@ -230,3 +230,42 @@ async def test_cancel_immediate_unblocks_waiting_stream_consumer():
     assert len(events) <= 1
     assert not block_event.is_set()
     assert result.is_complete
+
+
+@pytest.mark.asyncio
+async def test_run_loop_exception_property_is_none_on_success():
+    """run_loop_exception is None when the stream completes without error."""
+    model = FakeModel()
+    model.set_next_output([get_text_message("hello")])
+    agent = Agent(name="A", model=model)
+
+    result = Runner.run_streamed(agent, input="hi")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.run_loop_exception is None
+
+
+@pytest.mark.asyncio
+async def test_run_loop_exception_surfaced_after_stream():
+    """run_loop_exception is set when the run loop raises before yielding events."""
+
+    class BoomModel(FakeModel):
+        async def get_response(self, *args, **kwargs):
+            raise RuntimeError("run loop boom")
+
+        async def stream_response(self, *args, **kwargs):
+            raise RuntimeError("run loop boom")
+            yield  # make this an async generator
+
+    agent = Agent(name="A", model=BoomModel())
+
+    result = Runner.run_streamed(agent, input="hi")
+    with pytest.raises(RuntimeError, match="run loop boom"):
+        async for _ in result.stream_events():
+            pass
+
+    # Property must also expose the exception for callers who want to inspect it directly.
+    assert result.run_loop_exception is not None
+    assert isinstance(result.run_loop_exception, RuntimeError)
+    assert "run loop boom" in str(result.run_loop_exception)
