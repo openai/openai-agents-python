@@ -1051,7 +1051,7 @@ def test_prepared_item_source_tracking_ignores_reused_ids() -> None:
     assert resolved is not source_obj, "State Corrupted: Tracker confused objects due to reused ID!"
     assert resolved is new_unrelated_obj, "Tracker should return the item itself if not tracked."
 
-    @patch("src.agents.run_internal.oai_conversation._fingerprint_for_tracker")
+@patch("src.agents.run_internal.oai_conversation._fingerprint_for_tracker")
 def test_prepared_item_source_tracking_rebuild_and_collision_across_turns(
     mock_fingerprint: Any,
 ) -> None:
