@@ -146,6 +146,11 @@ class UserContext:
 
     async def fetch_purchases(self) -> list[Purchase]:
         return []
+
+agent = Agent[UserContext](
+    ...,
+)
+        
 ```
 
 ## Output types
