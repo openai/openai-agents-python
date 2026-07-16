@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 from openai.types.responses import ResponseFunctionToolCall
@@ -1026,3 +1027,26 @@ def test_prepare_input_dedupes_same_delivered_tool_output_object() -> None:
         generated_items=cast(list[Any], generated_items),
     )
     assert all(not (isinstance(item, dict) and item.get("call_id") == "call_X") for item in second)
+
+def test_prepared_item_source_tracking_ignores_reused_ids() -> None:
+    tracker = OpenAIServerConversationTracker(conversation_id="conv-id-test", previous_response_id=None)
+    
+    # 1. Create original objects
+    source_obj = cast(TResponseInputItem, {"role": "user", "content": "Hello"})
+    prepared_obj = cast(TResponseInputItem, {"role": "user", "content": "Hello", "formatted": True})
+    
+    # 2. Register them while mocking the ID to "12345"
+    with patch("builtins.id", return_value=12345):
+        tracker._register_prepared_item_source(prepared_obj, source_obj)
+        
+    # 3. Create a brand new, unrelated object that happens to get the same memory address (mocked)
+    new_unrelated_obj = cast(TResponseInputItem, {"role": "assistant", "content": "How can I help?"})
+    
+    # 4. Resolve the new object, forcing the same ID
+    with patch("builtins.id", return_value=12345):
+        resolved = tracker._resolve_prepared_item_source(new_unrelated_obj)
+        
+    # ASSERTION: The tracker MUST NOT return `source_obj` just because the IDs matched. 
+    # It must return the `new_unrelated_obj` itself because the identity (`is`) didn't match.
+    assert resolved is not source_obj, "State Corrupted: Tracker confused objects due to reused ID!"
+    assert resolved is new_unrelated_obj, "Tracker should return the item itself if not tracked."
