@@ -152,7 +152,9 @@ class OpenAIServerConversationTracker:
 
     # Mapping from normalized prepared items back to their original source objects so that
     # mark_input_as_sent() can mark the right object identities after the model call succeeds.
-    prepared_item_sources: dict[int, TResponseInputItem] = field(default_factory=dict)
+    prepared_item_sources: list[tuple[TResponseInputItem, TResponseInputItem]] = field(
+        default_factory=list
+    )
     prepared_item_sources_by_fingerprint: dict[str, list[TResponseInputItem]] = field(
         default_factory=dict
     )
@@ -533,7 +535,13 @@ class OpenAIServerConversationTracker:
     ) -> None:
         if source_item is None:
             source_item = prepared_item
-        self.prepared_item_sources[id(prepared_item)] = source_item
+
+        for existing_prepared, _ in self.prepared_item_sources:
+            if existing_prepared is prepared_item:
+                break
+            else:
+            self.prepared_item_sources.append((prepared_item, source_item))
+
         fingerprint = _fingerprint_for_tracker(prepared_item)
         if fingerprint:
             self.prepared_item_sources_by_fingerprint.setdefault(fingerprint, []).append(
@@ -541,10 +549,10 @@ class OpenAIServerConversationTracker:
             )
 
     def _resolve_prepared_item_source(self, item: TResponseInputItem) -> TResponseInputItem:
-        source_item = self.prepared_item_sources.get(id(item))
-        if source_item is not None:
-            return source_item
-
+        for prepared_item, source_item in self.prepared_item_sources:
+            if prepared_item is item:
+                return source_item
+        
         fingerprint = _fingerprint_for_tracker(item)
         if not fingerprint:
             return item
@@ -556,7 +564,14 @@ class OpenAIServerConversationTracker:
 
     def _consume_prepared_item_source(self, item: TResponseInputItem) -> TResponseInputItem:
         source_item = self._resolve_prepared_item_source(item)
-        direct_source = self.prepared_item_sources.pop(id(item), None)
+        direct_source: TResponseInputItem | None = None
+
+        # Loop through the list of tuples to find and extract the direct source
+        for index, (prepared_candidate, candidate_source) in enumerate(self.prepared_item_sources):
+            if prepared_candidate is item:
+                direct_source = candidate_source
+                self.prepared_item_sources.pop(index)
+                break
 
         fingerprint = _fingerprint_for_tracker(item)
         if not fingerprint:
