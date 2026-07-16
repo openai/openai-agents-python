@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from openai.types.responses import ResponseFunctionToolCall
@@ -1050,3 +1050,63 @@ def test_prepared_item_source_tracking_ignores_reused_ids() -> None:
     # It must return the `new_unrelated_obj` itself because the identity (`is`) didn't match.
     assert resolved is not source_obj, "State Corrupted: Tracker confused objects due to reused ID!"
     assert resolved is new_unrelated_obj, "Tracker should return the item itself if not tracked."
+
+    @patch("src.agents.run_internal.oai_conversation._fingerprint_for_tracker")
+def test_prepared_item_source_tracking_rebuild_and_collision_across_turns(
+    mock_fingerprint: Any,
+) -> None:
+    # Initialize the tracker with required arguments to prevent constructor TypeErrors
+    tracker = OpenAIServerConversationTracker(
+        conversation_id="conv-id-test", previous_response_id=None
+    )
+
+    # --- TURN 1 ---
+    # 1. Prepare initial input item (use casted dicts instead of MagicMock for strict typing compliance)
+    item_t1 = cast(TResponseInputItem, {"role": "user", "content": "initial-t1"})
+    source_t1 = cast(TResponseInputItem, {"role": "user", "content": "source-t1"})
+    mock_fingerprint.return_value = "fingerprint-t1"
+
+    # Set controlled IDs
+    id_t1 = 10001
+    with patch("builtins.id", return_value=id_t1):
+        tracker._register_prepared_item_source(item_t1, source_t1)
+
+    assert len(tracker.prepared_item_sources) == 1
+
+    # 2. Filter rebuilds/mutates the item (identity changes, fingerprint stays the same)
+    rebuilt_t1 = cast(TResponseInputItem, {"role": "user", "content": "rebuilt-t1"})
+    id_rebuilt_t1 = 10002
+
+    # 3. Simulated collision before we consume Turn 1:
+    # CPython GC garbage-collects item_t1 and reassigns its ID (10001) to a Turn 2 item.
+    item_t2 = cast(TResponseInputItem, {"role": "user", "content": "initial-t2"})
+    source_t2 = cast(TResponseInputItem, {"role": "user", "content": "source-t2"})
+    mock_fingerprint.return_value = "fingerprint-t2"
+
+    with patch("builtins.id", return_value=id_t1):  # ID collision!
+        tracker._register_prepared_item_source(item_t2, source_t2)
+
+    # 4. Consume Turn 1 (using the rebuilt item)
+    mock_fingerprint.return_value = "fingerprint-t1"
+    with patch("builtins.id", return_value=id_rebuilt_t1):
+        resolved_t1 = tracker._consume_prepared_item_source(rebuilt_t1)
+
+    # Verify that we correctly skipped the collision and resolved via fingerprint
+    assert resolved_t1 is source_t1
+
+    # Verify delta behavior / accumulation prevention:
+    # The stale entry for item_t1 (which had ID 10001 but identity of item_t1)
+    # should be evicted, while the active item_t2 entry is preserved.
+    assert len(tracker.prepared_item_sources) == 1
+    assert id_t1 in tracker.prepared_item_sources
+    assert tracker.prepared_item_sources[id_t1][0] is item_t2
+
+    # --- TURN 2 ---
+    # 5. Consume Turn 2
+    mock_fingerprint.return_value = "fingerprint-t2"
+    with patch("builtins.id", return_value=id_t1):
+        resolved_t2 = tracker._consume_prepared_item_source(item_t2)
+
+    assert resolved_t2 is source_t2
+    # Entire cache should now be fully cleared
+    assert len(tracker.prepared_item_sources) == 0
