@@ -1049,11 +1049,6 @@ async def start_streaming(
                         server_conversation_tracker,
                         pending_server_items=pending_server_items,
                         session=session,
-                        session_items_to_rewind=(
-                            streamed_result._original_input_for_persistence
-                            if session is not None and server_conversation_tracker is None
-                            else None
-                        ),
                         reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                         prompt_cache_key_resolver=prompt_cache_key_resolver,
                         error_handlers=error_handlers,
@@ -1285,7 +1280,6 @@ async def run_single_turn_streamed(
     all_tools: list[Tool],
     server_conversation_tracker: OpenAIServerConversationTracker | None = None,
     session: Session | None = None,
-    session_items_to_rewind: list[TResponseInputItem] | None = None,
     pending_server_items: list[RunItem] | None = None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
@@ -1486,8 +1480,6 @@ async def run_single_turn_streamed(
     model_settings = model_settings_with_prompt_cache_key(model_settings, prompt_cache_key)
 
     async def rewind_model_request() -> None:
-        items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
-        await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
         if server_conversation_tracker is not None:
             server_conversation_tracker.rewind_input(filtered.input)
 

@@ -61,7 +61,7 @@ from .utils.hitl import (
     queue_function_call_and_text,
     resume_streamed_after_first_approval,
 )
-from .utils.simple_session import SimpleListSession
+from .utils.simple_session import CountingSession, SimpleListSession
 
 
 def _conversation_locked_error() -> BadRequestError:
@@ -367,6 +367,39 @@ async def test_streamed_run_preserves_request_usage_entries_after_retry() -> Non
     assert usage.request_usage_entries[1].input_tokens == 10
     assert usage.request_usage_entries[1].output_tokens == 5
     assert usage.request_usage_entries[1].total_tokens == 15
+
+
+@pytest.mark.asyncio
+async def test_streamed_model_retry_does_not_rewind_committed_session_input() -> None:
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+    session = CountingSession(history=[get_text_input_item("previous")])
+
+    result = Runner.run_streamed(agent, input="test", session=session)
+    async for _ in result.stream_events():
+        pass
+
+    saved_items = await session.get_items()
+    assert [item.get("role") for item in saved_items] == ["user", "user", "assistant"]
+    assert session.pop_calls == 0
 
 
 @pytest.mark.asyncio
