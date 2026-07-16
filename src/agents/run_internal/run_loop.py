@@ -1190,7 +1190,14 @@ async def start_streaming(
                         current_span,
                         SpanError(
                             message="Error in agent run",
-                            data={"error": str(e)},
+                            data={
+                                "error": _error_tracing.get_trace_error(
+                                    trace_include_sensitive_data=(
+                                        run_config.trace_include_sensitive_data
+                                    ),
+                                    error_message=str(e),
+                                )
+                            },
                         ),
                     )
                 raise
@@ -1213,7 +1220,12 @@ async def start_streaming(
                 current_span,
                 SpanError(
                     message="Error in agent run",
-                    data={"error": str(e)},
+                    data={
+                        "error": _error_tracing.get_trace_error(
+                            trace_include_sensitive_data=run_config.trace_include_sensitive_data,
+                            error_message=str(e),
+                        )
+                    },
                 ),
             )
         streamed_result.is_complete = True

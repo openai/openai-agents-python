@@ -10,6 +10,7 @@ from ..exceptions import UserError
 from ..logger import logger
 from ..tracing import Span, SpeechGroupSpanData, speech_group_span, speech_span
 from ..tracing.util import time_iso
+from ..util._error_tracing import get_trace_error
 from .events import (
     VoiceStreamEvent,
     VoiceStreamEventAudio,
@@ -178,7 +179,12 @@ class StreamedAudioResult:
             except Exception as e:
                 tts_span.set_error(
                     {
-                        "message": str(e),
+                        "message": get_trace_error(
+                            trace_include_sensitive_data=(
+                                self._voice_pipeline_config.trace_include_sensitive_data
+                            ),
+                            error_message=str(e),
+                        ),
                         "data": {
                             "text": text
                             if self._voice_pipeline_config.trace_include_sensitive_data

@@ -80,7 +80,15 @@ async def maybe_filter_model_input(
         return updated
     except Exception as e:
         _error_tracing.attach_error_to_current_span(
-            SpanError(message="Error in call_model_input_filter", data={"error": str(e)})
+            SpanError(
+                message="Error in call_model_input_filter",
+                data={
+                    "error": _error_tracing.get_trace_error(
+                        trace_include_sensitive_data=run_config.trace_include_sensitive_data,
+                        error_message=str(e),
+                    )
+                },
+            )
         )
         raise
 
