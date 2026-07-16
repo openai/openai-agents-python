@@ -152,7 +152,7 @@ class OpenAIServerConversationTracker:
 
     # Mapping from normalized prepared items back to their original source objects so that
     # mark_input_as_sent() can mark the right object identities after the model call succeeds.
-    prepared_item_sources: list[tuple[TResponseInputItem, TResponseInputItem]] = field(
+    prepared_item_sources: dict[int, tuple[TResponseInputItem, TResponseInputItem]] = field(
         default_factory=list
     )
     prepared_item_sources_by_fingerprint: dict[str, list[TResponseInputItem]] = field(
