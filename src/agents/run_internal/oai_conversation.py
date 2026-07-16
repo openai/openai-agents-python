@@ -531,16 +531,9 @@ class OpenAIServerConversationTracker:
         return prepared_initial_items + filtered_generated_items
 
     def _register_prepared_item_source(
-        self, prepared_item: TResponseInputItem, source_item: TResponseInputItem | None = None
+        self, prepared_item: TResponseInputItem, source_item: TResponseInputItem
     ) -> None:
-        if source_item is None:
-            source_item = prepared_item
-
-        for existing_prepared, _ in self.prepared_item_sources:
-            if existing_prepared is prepared_item:
-                break
-        else:
-                self.prepared_item_sources.append((prepared_item, source_item))
+        self.prepared_item_sources.[id(prepared_item)] = (prepared_item, source_item)
 
         fingerprint = _fingerprint_for_tracker(prepared_item)
         if fingerprint:
@@ -549,9 +542,12 @@ class OpenAIServerConversationTracker:
             )
 
     def _resolve_prepared_item_source(self, item: TResponseInputItem) -> TResponseInputItem:
-        for prepared_item, source_item in self.prepared_item_sources:
-            if prepared_item is item:
-                return source_item
+        entry = self.prepared_item_sources.get(id(item))
+        if entry is not None:
+            prepared, source = entry
+            # Strict identity check to ensure this is not a stale recycled ID
+            if prepared is item:
+                return source
         
         fingerprint = _fingerprint_for_tracker(item)
         if not fingerprint:
@@ -564,14 +560,14 @@ class OpenAIServerConversationTracker:
 
     def _consume_prepared_item_source(self, item: TResponseInputItem) -> TResponseInputItem:
         source_item = self._resolve_prepared_item_source(item)
-        direct_source: TResponseInputItem | None = None
 
-        # Loop through the list of tuples to find and extract the direct source
-        for index, (prepared_candidate, candidate_source) in enumerate(self.prepared_item_sources):
-            if prepared_candidate is item:
-                direct_source = candidate_source
-                self.prepared_item_sources.pop(index)
-                break
+        direct_source = None
+        entry = self.prepared_item_sources.get(id(item))
+        if entry is not None:
+            prepared, source = entry
+            if prepared is item:
+                self.prepared_item_sources.pop(id(item), None)
+                direct_source = source
 
         fingerprint = _fingerprint_for_tracker(item)
         if not fingerprint:
@@ -586,10 +582,16 @@ class OpenAIServerConversationTracker:
             if candidate is target_source:
                 source_items.pop(index)
                 break
-        else:
-            source_items.pop(0)
 
-        if not source_items:
-            self.prepared_item_sources_by_fingerprint.pop(fingerprint, None)
+        # If resolved via fallback (rebuilt/filtered item), clean up the stale ID mappinp
+        # to prevent elements accumulating across turns.
+        if direct_source is None:
+            stale_keys = [
+                k
+                for k, (prep, src) in self.prepared_item_sources.items()
+                if src is target_source
+            ]
+            for k in stale_keys:
+                self.prepared_item_sources.pop(k, None)
 
         return source_item
