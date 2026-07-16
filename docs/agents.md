@@ -280,6 +280,8 @@ Typical hook timing:
 Use `RunHooks` when you want a single observer for the whole workflow, and `AgentHooks` when one agent needs custom side effects.
 
 ```python
+import asyncio
+
 from agents import Agent, RunHooks, Runner
 
 
@@ -294,9 +296,14 @@ class LoggingHooks(RunHooks):
         print(f"{agent.name} finished with usage: {context.usage}")
 
 
-agent = Agent(name="Assistant", instructions="Be concise.")
-result = await Runner.run(agent, "Explain quines", hooks=LoggingHooks())
-print(result.final_output)
+async def main():
+    agent = Agent(name="Assistant", instructions="Be concise.")
+    result = await Runner.run(agent, "Explain quines", hooks=LoggingHooks())
+    print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 For the full callback surface, see the [Lifecycle API reference](ref/lifecycle.md).
