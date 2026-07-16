@@ -235,7 +235,7 @@ class SpritesUrlAccess(Capability):
             from sprites.types import URLSettings
 
             await asyncio.to_thread(sprite.update_url_settings, URLSettings(auth=visibility))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return f"error updating URL settings: {exc!r}"
         return f"sprite URL visibility is now {visibility!r}"
 
@@ -347,7 +347,7 @@ class SpritesCheckpoints(Capability):
 
         try:
             result = await asyncio.to_thread(_do_create)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return f"error creating checkpoint: {exc!r}"
         if not result:
             return "checkpoint creation completed but no checkpoint was found"
@@ -362,7 +362,7 @@ class SpritesCheckpoints(Capability):
             return "error: sprite handle not available (session not started?)"
         try:
             checkpoints = await asyncio.to_thread(sprite.list_checkpoints)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return f"error listing checkpoints: {exc!r}"
         if not checkpoints:
             return "no checkpoints"
@@ -392,7 +392,7 @@ class SpritesCheckpoints(Capability):
 
         try:
             errors = await asyncio.to_thread(_do_restore)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return f"error restoring checkpoint: {exc!r}"
         if errors:
             return f"restore completed with errors: {'; '.join(errors)}"

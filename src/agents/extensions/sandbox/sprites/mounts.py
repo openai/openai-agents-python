@@ -271,6 +271,8 @@ class SpritesCloudBucketMountStrategy(MountStrategyBase):
         await _ensure_rclone(session)
         delegate = await self._delegate_for_session(session)
         await delegate.restore_after_snapshot(mount, session, path)
+        if self.pattern.mode == "fuse":
+            await _verify_mount_active(session, path)
 
     def build_docker_volume_driver_config(
         self,

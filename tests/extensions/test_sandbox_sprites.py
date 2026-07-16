@@ -5,7 +5,7 @@ import io
 import uuid
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -1486,6 +1486,7 @@ from agents.sandbox.entries import (  # noqa: E402
     RcloneMountPattern,
     S3Mount,
 )
+from agents.sandbox.entries.mounts.base import InContainerMountStrategy  # noqa: E402
 from agents.sandbox.errors import MountConfigError  # noqa: E402
 from agents.sandbox.session.base_sandbox_session import (  # noqa: E402
     BaseSandboxSession,
@@ -1817,6 +1818,40 @@ async def test_verify_mount_active_warmup_runs_after_mountpoint_check() -> None:
 
     assert "mountpoint -q /workspace/some/nested/mount" in session.exec_calls[0]
     assert "ls /workspace/some/nested/mount" in session.exec_calls[1]
+
+
+@pytest.mark.asyncio
+async def test_restore_after_snapshot_verifies_remounted_fuse_path() -> None:
+    strategy = SpritesCloudBucketMountStrategy()
+    mount = MagicMock()
+    session = _FakeMountSession()
+    path = Path("/workspace/tigris")
+
+    with (
+        patch(
+            "agents.extensions.sandbox.sprites.mounts._ensure_fuse_support",
+            new_callable=AsyncMock,
+        ) as fuse_mock,
+        patch(
+            "agents.extensions.sandbox.sprites.mounts._ensure_rclone",
+            new_callable=AsyncMock,
+        ) as rclone_mock,
+        patch.object(
+            InContainerMountStrategy,
+            "restore_after_snapshot",
+            new_callable=AsyncMock,
+        ) as delegate_mock,
+        patch(
+            "agents.extensions.sandbox.sprites.mounts._verify_mount_active",
+            new_callable=AsyncMock,
+        ) as verify_mock,
+    ):
+        await strategy.restore_after_snapshot(mount, session, path)
+
+    fuse_mock.assert_awaited_once_with(session)
+    rclone_mock.assert_awaited_once_with(session)
+    delegate_mock.assert_awaited_once_with(mount, session, path)
+    verify_mock.assert_awaited_once_with(session, path)
 
 
 @pytest.mark.asyncio
