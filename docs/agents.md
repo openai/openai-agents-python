@@ -128,18 +128,24 @@ Agents are generic on their `context` type. Context is a dependency-injection to
 Read the [context guide](context.md) for the full `RunContextWrapper` surface, shared usage tracking, nested `tool_input`, and serialization caveats.
 
 ```python
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass
+class Purchase:
+    id: str
+
+
 @dataclass
 class UserContext:
     name: str
     uid: str
     is_pro_user: bool
 
-    async def fetch_purchases() -> list[Purchase]:
-        return ...
-
-agent = Agent[UserContext](
-    ...,
-)
+    async def fetch_purchases(self) -> list[Purchase]:
+        return []
 ```
 
 ## Output types
