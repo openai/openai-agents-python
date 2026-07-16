@@ -540,7 +540,7 @@ class OpenAIServerConversationTracker:
             if existing_prepared is prepared_item:
                 break
             else:
-            self.prepared_item_sources.append((prepared_item, source_item))
+                self.prepared_item_sources.append((prepared_item, source_item))
 
         fingerprint = _fingerprint_for_tracker(prepared_item)
         if fingerprint:
