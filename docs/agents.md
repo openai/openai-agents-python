@@ -45,7 +45,7 @@ The most common properties of an agent are:
 | `reset_tool_choice` | no | Reset `tool_choice` after a tool call (default: `True`) to avoid tool-use loops. See [Forcing tool use](#forcing-tool-use). |
 
 ```python
-from agents import Agent, ModelSettings, function_tool
+from agents import Agent, function_tool
 
 @function_tool
 def get_weather(city: str) -> str:
