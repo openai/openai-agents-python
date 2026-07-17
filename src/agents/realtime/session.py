@@ -548,12 +548,17 @@ class RealtimeSession(RealtimeModelListener):
     ) -> bool:
         """Evaluate a function tool's needs_approval setting with parsed args."""
         needs_setting = getattr(function_tool, "needs_approval", False)
-        parsed_args: dict[str, Any] = {}
         if callable(needs_setting):
             try:
-                parsed_args = json.loads(tool_call.arguments or "{}")
+                parsed = json.loads(tool_call.arguments or "{}")
             except json.JSONDecodeError:
-                parsed_args = {}
+                # Fail closed: invalid JSON must not look like "empty safe args".
+                return True
+            if not isinstance(parsed, dict):
+                return True
+            parsed_args: dict[str, Any] = parsed
+        else:
+            parsed_args = {}
         return await evaluate_needs_approval_setting(
             needs_setting,
             self._context_wrapper,

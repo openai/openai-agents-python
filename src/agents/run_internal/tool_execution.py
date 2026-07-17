@@ -1208,13 +1208,23 @@ async def function_needs_approval(
     context_wrapper: RunContextWrapper[Any],
     tool_call: ResponseFunctionToolCall,
 ) -> bool:
-    """Evaluate a function tool's needs_approval setting with parsed args."""
-    parsed_args: dict[str, Any] = {}
+    """Evaluate a function tool's needs_approval setting with parsed args.
+
+    For callable approval predicates, invalid or non-object JSON arguments fail
+    closed (require approval) instead of evaluating the predicate on ``{}``.
+    """
     if callable(function_tool.needs_approval):
         try:
-            parsed_args = json.loads(tool_call.arguments or "{}")
+            parsed = json.loads(tool_call.arguments or "{}")
         except json.JSONDecodeError:
-            parsed_args = {}
+            # Fail closed: invalid JSON must not look like "empty safe args".
+            return True
+        if not isinstance(parsed, dict):
+            # Fail closed: predicates document dict params; null/list must not reach .get.
+            return True
+        parsed_args: dict[str, Any] = parsed
+    else:
+        parsed_args = {}
     needs_approval = await evaluate_needs_approval_setting(
         function_tool.needs_approval,
         context_wrapper,
