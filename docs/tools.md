@@ -1,8 +1,9 @@
 # Tools
 
-Tools let agents take actions: things like fetching data, running code, calling external APIs, and even using a computer. The SDK supports five categories:
+Tools let agents take actions: things like fetching data, running code, calling external APIs, and even using a computer. The SDK supports six categories:
 
 -   Hosted OpenAI tools: run alongside the model on OpenAI servers.
+-   Programmatic tool calling: let generated code coordinate multiple tools in one hosted execution.
 -   Local/runtime execution tools: `ComputerTool` and `ApplyPatchTool` always run in your environment, while `ShellTool` can run locally or in a hosted container.
 -   Function calling: wrap any Python function as a tool.
 -   Agents as tools: expose an agent as a callable tool without a full handoff.
@@ -16,6 +17,7 @@ Use this page as a catalog, then jump to the section that matches the runtime yo
 | --- | --- |
 | Use OpenAI-managed tools (web search, file search, code interpreter, hosted MCP, image generation) | [Hosted tools](#hosted-tools) |
 | Defer large tool surfaces until runtime with tool search | [Hosted tool search](#hosted-tool-search) |
+| Let generated code coordinate several tool calls | [Programmatic tool calling](#programmatic-tool-calling) |
 | Run tools in your own process or environment | [Local runtime tools](#local-runtime-tools) |
 | Wrap Python functions as tools | [Function tools](#function-tools) |
 | Let one agent call another without a handoff | [Agents as tools](#agents-as-tools) |
@@ -31,6 +33,7 @@ OpenAI offers a few built-in tools when using the [`OpenAIResponsesModel`][agent
 -   The [`HostedMCPTool`][agents.tool.HostedMCPTool] exposes a remote MCP server's tools to the model.
 -   The [`ImageGenerationTool`][agents.tool.ImageGenerationTool] generates images from a prompt.
 -   The [`ToolSearchTool`][agents.tool.ToolSearchTool] lets the model load deferred tools, namespaces, or hosted MCP servers on demand.
+-   The [`ProgrammaticToolCallingTool`][agents.tool.ProgrammaticToolCallingTool] lets generated JavaScript coordinate eligible tools.
 
 Advanced hosted search options:
 
@@ -118,6 +121,46 @@ What to know:
 -   Tool search activity appears in [`RunResult.new_items`](results.md#new-items) and in [`RunItemStreamEvent`](streaming.md#run-item-event-names) with dedicated item and event types.
 -   See `examples/tools/tool_search.py` for complete runnable examples covering both namespaced loading and top-level deferred tools.
 -   Official platform guide: [Tool search](https://developers.openai.com/api/docs/guides/tools-tool-search).
+
+### Programmatic tool calling
+
+Programmatic tool calling lets an OpenAI Responses model generate a JavaScript program that calls other tools. It is useful when a task needs several calls that can run concurrently or when intermediate results should be filtered or aggregated before they return to the model.
+
+```python
+from pydantic import BaseModel
+
+from agents import Agent, ProgrammaticToolCallingTool, Runner, function_tool
+
+
+class Price(BaseModel):
+    sku: str
+    amount: float
+
+
+@function_tool(allowed_callers=["programmatic"])
+def get_price(sku: str) -> Price:
+    return Price(sku=sku, amount=9.99)
+
+
+agent = Agent(
+    name="Price checker",
+    model="gpt-5.6",
+    instructions="Use one program to compare the requested SKUs concurrently.",
+    tools=[get_price, ProgrammaticToolCallingTool()],
+)
+
+result = await Runner.run(agent, "Compare sku_123 and sku_456.")
+print(result.final_output)
+```
+
+What to know:
+
+-   Programmatic tool calling is available only with OpenAI Responses models.
+-   Add one `ProgrammaticToolCallingTool()` and include `"programmatic"` in each callable tool's `allowed_callers`.
+-   Use `allowed_callers=["programmatic"]` to require the generated program, or `allowed_callers=["direct", "programmatic"]` to permit both direct and programmatic calls.
+-   Function tools called from a program need a structured return type. The SDK infers its output schema from annotations such as Pydantic models; `output_type` and `output_json_schema` provide explicit alternatives.
+-   To require programmatic orchestration for a run, set `ModelSettings(tool_choice="programmatic_tool_calling")`.
+-   See `examples/tools/programmatic_tool_calling.py` for a complete example with concurrent calls, aggregation, and run-item inspection.
 
 ### Hosted container shell + skills
 
