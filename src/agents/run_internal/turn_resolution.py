@@ -1745,6 +1745,7 @@ def process_model_response(
         [*(server_managed_input_items or ()), *(existing_items or ())],
         server_manages_conversation=server_manages_conversation,
     )
+    _, response_completed_program_call_ids = _collect_program_parent_state(response.output)
 
     def _dump_output_item(raw_item: Any) -> dict[str, Any]:
         if isinstance(raw_item, dict):
@@ -1786,7 +1787,9 @@ def process_model_response(
                 tool_call=output,
                 programmatic_tool_present=programmatic_tool is not None,
                 program_call_ids=program_call_ids,
-                completed_program_call_ids=completed_program_call_ids,
+                completed_program_call_ids=(
+                    completed_program_call_ids | response_completed_program_call_ids
+                ),
                 agent_name=agent.name,
             )
         if output_type == "program":

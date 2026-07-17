@@ -814,7 +814,7 @@ def test_process_model_response_keeps_program_items_in_order() -> None:
         tools=[ProgrammaticToolCallingTool(), lookup_inventory],
     )
     response = ModelResponse(
-        output=[_program(), _function_call(), _program_output()],
+        output=[_program(), _function_call(), _program_output("incomplete")],
         usage=Usage(),
         response_id="response_1",
     )
@@ -1039,8 +1039,10 @@ def test_process_model_response_rejects_program_owned_call_for_completed_retaine
 
 
 @pytest.mark.parametrize("as_mapping", [False, True])
-def test_process_model_response_rejects_program_owned_call_after_completed_program_output(
+@pytest.mark.parametrize("call_before_completed_output", [False, True])
+def test_process_model_response_rejects_program_owned_call_when_response_completes_program(
     as_mapping: bool,
+    call_before_completed_output: bool,
 ) -> None:
     @function_tool(allowed_callers=["programmatic"])
     def lookup_inventory(sku: str) -> str:
@@ -1050,7 +1052,12 @@ def test_process_model_response_rejects_program_owned_call_after_completed_progr
         name="inventory",
         tools=[ProgrammaticToolCallingTool(), lookup_inventory],
     )
-    output: list[Any] = [_program(), _program_output(), _function_call()]
+    child_items = (
+        [_function_call(), _program_output()]
+        if call_before_completed_output
+        else [_program_output(), _function_call()]
+    )
+    output: list[Any] = [_program(), *child_items]
     if as_mapping:
         output = [item.model_dump(exclude_none=True) for item in output]
 
