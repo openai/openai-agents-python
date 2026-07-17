@@ -2568,7 +2568,17 @@ class TestToolCallExecution:
         assert approval_event.call_id == tool_call_event.call_id
         assert approval_event.tool == mock_function_tool
 
-    @pytest.mark.parametrize("arguments", ['{"subject": "refund"', "null", "[]"])
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            '{"subject": "refund"',
+            "null",
+            "[]",
+            '{"amount": NaN}',
+            '{"amount": Infinity}',
+            '{"amount": -Infinity}',
+        ],
+    )
     @pytest.mark.asyncio
     async def test_callable_function_approval_fails_closed_for_invalid_arguments(
         self, mock_model, arguments: str

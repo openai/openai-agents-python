@@ -882,7 +882,17 @@ async def test_function_needs_approval_invalid_type_raises() -> None:
         await Runner.run(agent, "run invalid")
 
 
-@pytest.mark.parametrize("arguments", ['{"subject": "refund"', "null", "[]"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        '{"subject": "refund"',
+        "null",
+        "[]",
+        '{"amount": NaN}',
+        '{"amount": Infinity}',
+        '{"amount": -Infinity}',
+    ],
+)
 @pytest.mark.asyncio
 async def test_callable_function_approval_fails_closed_for_invalid_arguments(
     arguments: str,
