@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -8,6 +9,15 @@ from ..exceptions import UserError
 
 # Keep this helper here so both run_internal and realtime can import it without
 # creating cross-package dependencies.
+
+
+def parse_function_tool_arguments(arguments: str | None) -> dict[str, Any] | None:
+    """Return parsed object arguments, or None when an approval policy cannot inspect them."""
+    try:
+        parsed = json.loads(arguments or "{}")
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 async def evaluate_needs_approval_setting(
