@@ -4284,6 +4284,44 @@ class TestRunStateSerializationEdgeCases:
         assert result is not None
         assert len(result.handoffs) == 1
 
+    async def test_deserialize_processed_response_handoff_from_direct_agent(self):
+        """Pending handoffs configured with a direct Agent must survive RunState restoration."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent_b = Agent(name="AgentB")
+        agent_a = Agent(name="AgentA", handoffs=[agent_b])
+        handoff_name = Handoff.default_tool_name(agent_b)
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [
+                {
+                    "tool_call": {
+                        "type": "function_call",
+                        "name": handoff_name,
+                        "call_id": "call123",
+                        "status": "completed",
+                        "arguments": "{}",
+                    },
+                    "handoff": {"tool_name": handoff_name},
+                }
+            ],
+            "functions": [],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        result = await _deserialize_processed_response(
+            processed_response_data,
+            agent_a,
+            context,
+            {"AgentA": agent_a, "AgentB": agent_b},
+        )
+
+        assert len(result.handoffs) == 1
+        assert result.handoffs[0].handoff.agent_name == "AgentB"
+
     async def test_deserialize_processed_response_function_in_tools_map(self):
         """Test deserialization of ProcessedResponse with function in tools_map."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
@@ -5553,6 +5591,181 @@ class TestRunStateSerializationEdgeCases:
         assert serialized["generated_session_item_indexes"] == [0, 1]
         assert restored._generated_items[0] is restored._session_items[0]
         assert restored._generated_items[1] is restored._session_items[1]
+
+    @pytest.mark.parametrize(
+        "invalid_mapping",
+        [
+            "not-a-list",
+            [0],
+            [-1, None],
+            [2, None],
+            [True, None],
+            [0, 0],
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_invalid_generated_session_item_indexes_are_ignored(
+        self,
+        invalid_mapping: object,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A malformed alias sidecar must not partially bind generated and session items."""
+        agent = Agent(name="TestAgent")
+        first = MessageOutputItem(agent=agent, raw_item=make_message_output(text="first"))
+        second = MessageOutputItem(agent=agent, raw_item=make_message_output(text="second"))
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+        )
+        state._generated_items = [first, second]
+        state._session_items = [first, second]
+        serialized = state.to_json()
+        serialized["generated_session_item_indexes"] = invalid_mapping
+
+        with caplog.at_level(logging.WARNING, logger="openai.agents"):
+            restored = await RunState.from_json(agent, serialized)
+
+        assert all(
+            generated is not session
+            for generated, session in zip(
+                restored._generated_items,
+                restored._session_items,
+                strict=True,
+            )
+        )
+        assert "Ignoring invalid generated_session_item_indexes" in caplog.text
+
+    @pytest.mark.parametrize(
+        "invalid_sidecar",
+        [
+            {},
+            ["not-an-object"],
+            [{"index": -1, "digest": "a" * 64, "input_index": 0}],
+            [{"index": 0, "digest": "short", "input_index": 0}],
+            [{"index": 0, "digest": "a" * 64, "input_index": -1}],
+            [{"index": 9, "digest": "a" * 64, "input_index": 0}],
+            [{"index": 0, "digest": "a" * 64, "input_index": 9}],
+            [{"index": 0, "digest": "a" * 64, "input_index": 0}],
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_invalid_nested_history_ownership_sidecars_are_rejected(
+        self,
+        invalid_sidecar: object,
+    ) -> None:
+        """Malformed or mismatched ownership must fail closed during RunState restore."""
+        agent = Agent(name="TestAgent")
+        item = MessageOutputItem(agent=agent, raw_item=make_message_output(text="owned"))
+        input_item = run_item_to_input_item(item)
+        assert input_item is not None
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input=[input_item],
+        )
+        state._generated_items = [item]
+        state._session_items = [item]
+        serialized = state.to_json()
+        serialized["nested_history_owned_session_item_refs"] = invalid_sidecar
+
+        with pytest.raises(UserError):
+            await RunState.from_json(agent, serialized)
+
+    @pytest.mark.asyncio
+    async def test_mismatched_generated_session_occurrence_is_not_aliased(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A valid coordinate cannot alias generated and session items with different payloads."""
+        agent = Agent(name="TestAgent")
+        item = MessageOutputItem(agent=agent, raw_item=make_message_output(text="same"))
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+        )
+        state._generated_items = [item]
+        state._session_items = [item]
+        serialized = state.to_json()
+        serialized["session_items"][0]["raw_item"]["content"][0]["text"] = "changed"
+
+        with caplog.at_level(logging.WARNING, logger="openai.agents"):
+            restored = await RunState.from_json(agent, serialized)
+
+        assert restored._generated_items[0] is not restored._session_items[0]
+        assert "Ignoring mismatched generated/session occurrence" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_nested_history_ownership_with_changed_input_digest_is_rejected(self) -> None:
+        """A sidecar cannot claim an input occurrence whose payload changed after serialization."""
+        agent = Agent(name="TestAgent")
+        item = MessageOutputItem(agent=agent, raw_item=make_message_output(text="owned"))
+        input_item = run_item_to_input_item(item)
+        assert input_item is not None
+        digest = digest_input_item(input_item)
+        assert digest is not None
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input=[input_item],
+        )
+        state._generated_items = [item]
+        state._session_items = [item]
+        state._nested_history_owned_session_item_refs = [
+            NestedHistoryOwnedItemRef(
+                session_index=0,
+                digest=digest,
+                input_index=0,
+                run_item=item,
+                input_item=input_item,
+            )
+        ]
+        serialized = state.to_json()
+        serialized["original_input"][0]["content"][0]["text"] = "changed"
+
+        with pytest.raises(UserError, match="input digest does not match"):
+            await RunState.from_json(agent, serialized)
+
+    @pytest.mark.asyncio
+    async def test_nested_history_ownership_for_skipped_session_item_is_ignored(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Ownership for an item that cannot be restored must not shift to another occurrence."""
+        agent = Agent(name="TestAgent")
+        skipped = MessageOutputItem(agent=agent, raw_item=make_message_output(text="skipped"))
+        kept = MessageOutputItem(agent=agent, raw_item=make_message_output(text="kept"))
+        skipped_input = run_item_to_input_item(skipped)
+        assert skipped_input is not None
+        digest = digest_input_item(skipped_input)
+        assert digest is not None
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input=[skipped_input],
+        )
+        state._generated_items = [skipped]
+        state._session_items = [skipped, kept]
+        state._nested_history_owned_session_item_refs = [
+            NestedHistoryOwnedItemRef(
+                session_index=0,
+                digest=digest,
+                input_index=0,
+                run_item=skipped,
+                input_item=skipped_input,
+            )
+        ]
+        serialized = state.to_json()
+        serialized["session_items"][0]["agent"]["name"] = "UnknownAgent"
+
+        with caplog.at_level(logging.WARNING, logger="openai.agents"):
+            restored = await RunState.from_json(agent, serialized)
+
+        assert len(restored._session_items) == 1
+        assert restored._session_items[0].raw_item == kept.raw_item
+        assert restored._generated_items[0].raw_item == skipped.raw_item
+        assert restored._generated_items[0] is not restored._session_items[0]
+        assert restored._nested_history_owned_session_item_refs == []
+        assert "Ignoring nested history ownership for skipped session item" in caplog.text
 
     @pytest.mark.asyncio
     async def test_equal_generated_replacement_does_not_claim_session_occurrence(self):

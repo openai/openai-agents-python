@@ -1660,7 +1660,7 @@ async def resolve_interrupted_turn(
 
     executed_handoff_call_ids: set[str] = set()
     for item in original_pre_step_items:
-        if isinstance(item, HandoffCallItem):
+        if isinstance(item, HandoffOutputItem):
             handoff_call_id = extract_tool_call_id(item.raw_item)
             if handoff_call_id:
                 executed_handoff_call_ids.add(handoff_call_id)

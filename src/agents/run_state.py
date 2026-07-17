@@ -59,7 +59,7 @@ from .guardrail import (
     OutputGuardrail,
     OutputGuardrailResult,
 )
-from .handoffs import Handoff
+from .handoffs import Handoff, handoff as create_handoff
 from .items import (
     CompactionItem,
     HandoffCallItem,
@@ -1723,12 +1723,16 @@ def _build_handoffs_map(current_agent: Agent[Any]) -> dict[str, Handoff[Any, Age
     if not hasattr(current_agent, "handoffs"):
         return handoffs_map
 
-    for handoff in current_agent.handoffs:
-        if not isinstance(handoff, Handoff):
+    for handoff_item in current_agent.handoffs:
+        if isinstance(handoff_item, Agent):
+            handoff_item = create_handoff(handoff_item)
+        elif not isinstance(handoff_item, Handoff):
             continue
-        handoff_name = getattr(handoff, "tool_name", None) or getattr(handoff, "name", None)
+        handoff_name = getattr(handoff_item, "tool_name", None) or getattr(
+            handoff_item, "name", None
+        )
         if handoff_name:
-            handoffs_map[handoff_name] = handoff
+            handoffs_map[handoff_name] = handoff_item
     return handoffs_map
 
 

@@ -20,7 +20,16 @@ from openai.types.responses import (
 )
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 
-from agents import Agent, RunConfig, Runner, RunState, function_tool, handoff
+from agents import (
+    Agent,
+    RunConfig,
+    RunContextWrapper,
+    RunHooks,
+    Runner,
+    RunState,
+    function_tool,
+    handoff,
+)
 from agents.extensions.handoff_filters import remove_all_tools
 from agents.handoffs import (
     HandoffInputData,
@@ -52,6 +61,7 @@ from agents.run_internal.session_persistence import (
 
 from .fake_model import FakeModel
 from .test_responses import get_function_tool_call, get_handoff_tool_call, get_text_message
+from .utils.simple_session import SimpleListSession
 
 
 def _create_mock_agent() -> Agent:
@@ -1859,6 +1869,271 @@ async def test_nested_handoff_history_partition_survives_interruption_resume() -
     summary = str(cast(dict[str, Any], final_input[0])["content"])
     assert summary.count("once") == 1
     assert sum(_input_item_text(item) == "once" for item in resumed.to_input_list()) == 2
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.parametrize(
+    "nest_handoff_history",
+    [False, True],
+    ids=["flat_history", "nested_history"],
+)
+@pytest.mark.asyncio
+async def test_pending_handoff_in_interrupted_turn_survives_run_state(
+    streamed: bool,
+    nest_handoff_history: bool,
+) -> None:
+    """A handoff paused beside an approval must execute after RunState restoration."""
+
+    @function_tool(needs_approval=True)
+    def approval_tool() -> str:
+        return "approved"
+
+    first_model = FakeModel()
+    second_model = FakeModel()
+    final_model = FakeModel()
+    final_agent = Agent(name="final", model=final_model)
+    second_agent = Agent(
+        name="second",
+        model=second_model,
+        tools=[approval_tool],
+        handoffs=[final_agent],
+    )
+    first_agent = Agent(name="first", model=first_model, handoffs=[second_agent])
+    run_config = RunConfig(nest_handoff_history=nest_handoff_history)
+
+    first_handoff = cast(ResponseFunctionToolCall, get_handoff_tool_call(second_agent))
+    first_handoff.call_id = "first-handoff"
+    final_handoff = cast(ResponseFunctionToolCall, get_handoff_tool_call(final_agent))
+    final_handoff.call_id = "final-handoff"
+    first_model.add_multiple_turn_outputs([[get_text_message("first once"), first_handoff]])
+    second_model.add_multiple_turn_outputs(
+        [
+            [
+                get_text_message("second once"),
+                get_function_tool_call("approval_tool", "{}", call_id="approval"),
+                final_handoff,
+            ]
+        ]
+    )
+    final_model.add_multiple_turn_outputs([[get_text_message("done")]])
+
+    interrupted: RunResult | RunResultStreaming
+    if streamed:
+        interrupted = Runner.run_streamed(
+            first_agent,
+            input="start",
+            run_config=run_config,
+        )
+        async for _ in interrupted.stream_events():
+            pass
+    else:
+        interrupted = await Runner.run(
+            first_agent,
+            input="start",
+            run_config=run_config,
+        )
+
+    assert len(interrupted.interruptions) == 1
+    state = interrupted.to_state()
+    state.approve(interrupted.interruptions[0])
+    restored = await RunState.from_string(first_agent, state.to_string())
+    assert restored._last_processed_response is not None
+    assert len(restored._last_processed_response.handoffs) == 1
+
+    resumed: RunResult | RunResultStreaming
+    if streamed:
+        resumed = Runner.run_streamed(first_agent, restored, run_config=run_config)
+        async for _ in resumed.stream_events():
+            pass
+    else:
+        resumed = await Runner.run(first_agent, restored, run_config=run_config)
+
+    assert resumed.final_output == "done"
+    assert resumed.last_agent is final_agent
+    assert (
+        sum(
+            isinstance(item, HandoffOutputItem)
+            and cast(dict[str, Any], item.raw_item).get("call_id") == "final-handoff"
+            for item in resumed.new_items
+        )
+        == 1
+    )
+    if nest_handoff_history:
+        final_input = final_model.last_turn_args["input"]
+        summary = str(cast(dict[str, Any], final_input[0])["content"])
+        assert summary.count("first once") == 1
+        assert summary.count("second once") == 1
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.parametrize(
+    "nest_handoff_history",
+    [False, True],
+    ids=["flat_history", "nested_history"],
+)
+@pytest.mark.parametrize("second_decision", ["approve", "reject"])
+@pytest.mark.asyncio
+async def test_resumed_handoff_persists_all_staged_approval_outputs(
+    streamed: bool,
+    nest_handoff_history: bool,
+    second_decision: str,
+) -> None:
+    """Each staged approval result must reach the session before the resumed handoff."""
+
+    tool_calls: list[str] = []
+    handoff_count = 0
+
+    @function_tool(needs_approval=True)
+    def first_tool() -> str:
+        tool_calls.append("first")
+        return "first ok"
+
+    @function_tool(needs_approval=True)
+    def second_tool() -> str:
+        tool_calls.append("second")
+        return "second ok"
+
+    class RecordingHooks(RunHooks[Any]):
+        async def on_handoff(
+            self,
+            context: RunContextWrapper[Any],
+            from_agent: Agent[Any],
+            to_agent: Agent[Any],
+        ) -> None:
+            nonlocal handoff_count
+            handoff_count += 1
+
+    source_model = FakeModel()
+    target_model = FakeModel()
+    target_agent = Agent(name="target", model=target_model)
+    source_agent = Agent(
+        name="source",
+        model=source_model,
+        tools=[first_tool, second_tool],
+        handoffs=[target_agent],
+    )
+    first_call = cast(
+        ResponseFunctionToolCall,
+        get_function_tool_call("first_tool", "{}", call_id="first"),
+    )
+    second_call = cast(
+        ResponseFunctionToolCall,
+        get_function_tool_call("second_tool", "{}", call_id="second"),
+    )
+    handoff_call = cast(ResponseFunctionToolCall, get_handoff_tool_call(target_agent))
+    first_call.id = "item-first"
+    second_call.id = "item-second"
+    handoff_call.id = "item-handoff"
+    handoff_call.call_id = "handoff"
+    source_model.add_multiple_turn_outputs([[first_call, second_call, handoff_call]])
+    target_model.add_multiple_turn_outputs([[get_text_message("done")]])
+
+    run_config = RunConfig(nest_handoff_history=nest_handoff_history)
+    hooks = RecordingHooks()
+    session = SimpleListSession()
+
+    first_result: RunResult | RunResultStreaming
+    if streamed:
+        first_stream = Runner.run_streamed(
+            source_agent,
+            "start",
+            run_config=run_config,
+            hooks=hooks,
+            session=session,
+        )
+        async for _ in first_stream.stream_events():
+            pass
+        first_result = first_stream
+    else:
+        first_result = await Runner.run(
+            source_agent,
+            "start",
+            run_config=run_config,
+            hooks=hooks,
+            session=session,
+        )
+    assert len(first_result.interruptions) == 2
+
+    state = await RunState.from_string(source_agent, first_result.to_state().to_string())
+    first_approval = next(
+        item
+        for item in state.get_interruptions()
+        if cast(ResponseFunctionToolCall, item.raw_item).call_id == "first"
+    )
+    state.approve(first_approval)
+    staged_result: RunResult | RunResultStreaming
+    if streamed:
+        staged_stream = Runner.run_streamed(
+            source_agent,
+            state,
+            run_config=run_config,
+            hooks=hooks,
+            session=session,
+        )
+        async for _ in staged_stream.stream_events():
+            pass
+        staged_result = staged_stream
+    else:
+        staged_result = await Runner.run(
+            source_agent,
+            state,
+            run_config=run_config,
+            hooks=hooks,
+            session=session,
+        )
+    assert len(staged_result.interruptions) == 1
+    assert handoff_count == 0
+
+    state = await RunState.from_string(source_agent, staged_result.to_state().to_string())
+    second_approval = state.get_interruptions()[0]
+    assert cast(ResponseFunctionToolCall, second_approval.raw_item).call_id == "second"
+    getattr(state, second_decision)(second_approval)
+    final_result: RunResult | RunResultStreaming
+    if streamed:
+        final_stream = Runner.run_streamed(
+            source_agent,
+            state,
+            run_config=run_config,
+            hooks=hooks,
+            session=session,
+        )
+        async for _ in final_stream.stream_events():
+            pass
+        final_result = final_stream
+    else:
+        final_result = await Runner.run(
+            source_agent,
+            state,
+            run_config=run_config,
+            hooks=hooks,
+            session=session,
+        )
+
+    assert final_result.final_output == "done"
+    assert final_result.last_agent is target_agent
+    assert handoff_count == 1
+    assert tool_calls == (["first", "second"] if second_decision == "approve" else ["first"])
+
+    session_items = await session.get_items()
+    for call_id in ("first", "second", "handoff"):
+        assert (
+            sum(
+                isinstance(item, dict)
+                and item.get("type") == "function_call"
+                and item.get("call_id") == call_id
+                for item in session_items
+            )
+            == 1
+        )
+        assert (
+            sum(
+                isinstance(item, dict)
+                and item.get("type") == "function_call_output"
+                and item.get("call_id") == call_id
+                for item in session_items
+            )
+            == 1
+        )
 
 
 @pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])

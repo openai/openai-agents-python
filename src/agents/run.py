@@ -921,7 +921,7 @@ class AgentRunner:
 
                             if (
                                 session_persistence_enabled
-                                and turn_result.new_step_items
+                                and turn_session_items
                                 and run_state is not None
                             ):
                                 run_state._current_turn_persisted_item_count = (

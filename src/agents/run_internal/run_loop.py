@@ -853,6 +853,11 @@ async def start_streaming(
                         break
 
                     if isinstance(turn_result.next_step, NextStepHandoff):
+                        await _save_resumed_items(
+                            list(turn_session_items),
+                            turn_result.model_response.response_id,
+                            store_setting,
+                        )
                         current_agent = turn_result.next_step.new_agent
                         if run_state is not None:
                             run_state._current_agent = current_agent
