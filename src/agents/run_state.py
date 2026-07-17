@@ -444,28 +444,34 @@ class RunState(Generic[TContext, TAgent]):
         generated_items: Sequence[RunItem],
     ) -> list[int | None]:
         """Map generated occurrences to the same live occurrences in session history."""
+        session_indexes_by_identity: dict[int, deque[int]] = {}
+        session_indexes_by_occurrence_key: dict[str, deque[int]] = {}
+        for index, session_item in enumerate(self._session_items):
+            session_indexes_by_identity.setdefault(id(session_item), deque()).append(index)
+            occurrence_key = nested_history_run_item_occurrence_key(session_item)
+            if occurrence_key is not None:
+                session_indexes_by_occurrence_key.setdefault(occurrence_key, deque()).append(index)
+
         used_session_indexes: set[int] = set()
         indexes: list[int | None] = []
+
+        def _take_unused(candidates: deque[int] | None) -> int | None:
+            while candidates:
+                candidate = candidates.popleft()
+                if candidate not in used_session_indexes:
+                    return candidate
+            return None
+
         for generated_item in generated_items:
-            session_index = next(
-                (
-                    index
-                    for index, session_item in enumerate(self._session_items)
-                    if index not in used_session_indexes and session_item is generated_item
-                ),
-                None,
+            session_index = _take_unused(
+                session_indexes_by_identity.get(id(generated_item)),
             )
-            generated_key = nested_history_run_item_occurrence_key(generated_item)
-            if session_index is None and generated_key is not None:
-                session_index = next(
-                    (
-                        index
-                        for index, session_item in enumerate(self._session_items)
-                        if index not in used_session_indexes
-                        and nested_history_run_item_occurrence_key(session_item) == generated_key
-                    ),
-                    None,
-                )
+            if session_index is None:
+                occurrence_key = nested_history_run_item_occurrence_key(generated_item)
+                if occurrence_key is not None:
+                    session_index = _take_unused(
+                        session_indexes_by_occurrence_key.get(occurrence_key),
+                    )
             if session_index is not None:
                 used_session_indexes.add(session_index)
             indexes.append(session_index)

@@ -5533,6 +5533,28 @@ class TestRunStateSerializationEdgeCases:
         assert restored._generated_items[0] is restored._session_items[0]
 
     @pytest.mark.asyncio
+    async def test_repeated_generated_item_identity_maps_to_distinct_session_occurrences(self):
+        """Repeated references must retain multiplicity in generated/session coordinates."""
+        agent = Agent(name="TestAgent")
+        repeated = MessageOutputItem(
+            agent=agent,
+            raw_item=make_message_output(text="same"),
+        )
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+        )
+        state._generated_items = [repeated, repeated]
+        state._session_items = [repeated, repeated]
+
+        serialized = state.to_json()
+        restored = await RunState.from_json(agent, serialized)
+
+        assert serialized["generated_session_item_indexes"] == [0, 1]
+        assert restored._generated_items[0] is restored._session_items[0]
+        assert restored._generated_items[1] is restored._session_items[1]
+
+    @pytest.mark.asyncio
     async def test_equal_generated_replacement_does_not_claim_session_occurrence(self):
         """Equal payloads without explicit lineage must serialize as distinct occurrences."""
         agent = Agent(name="TestAgent")

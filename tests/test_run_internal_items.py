@@ -575,6 +575,73 @@ def test_reconcile_nested_history_rewrite_keeps_fully_owned_equal_occurrences() 
     assert [item_ref.input_item for item_ref in retained] == rewritten
 
 
+def test_nested_history_occurrence_resolution_reads_sequences_linearly() -> None:
+    class CountingSequence:
+        def __init__(self, values: list[Any]):
+            self.values = values
+            self.reads = 0
+
+        def __len__(self) -> int:
+            return len(self.values)
+
+        def __getitem__(self, index: int) -> Any:
+            self.reads += 1
+            return self.values[index]
+
+    count = 100
+    agent = Agent(name="A")
+    session_items = [
+        ToolCallItem(
+            agent=agent,
+            raw_item=ResponseFunctionToolCall(
+                id=f"fc_{index}",
+                call_id=f"call_{index}",
+                name="lookup",
+                arguments="{}",
+                type="function_call",
+                status="completed",
+            ),
+        )
+        for index in range(count)
+    ]
+    input_items = cast(
+        list[TResponseInputItem],
+        [run_items.run_item_to_input_item(item) for item in session_items],
+    )
+    assert all(item is not None for item in input_items)
+    refs = [
+        run_items.NestedHistoryOwnedItemRef(
+            session_index=-1,
+            digest=cast(str, run_items.digest_input_item(input_items[index])),
+            input_index=index,
+            run_item=session_items[index],
+            input_item=input_items[index],
+        )
+        for index in range(count)
+    ]
+
+    counted_input = CountingSequence(input_items)
+    retained_refs = run_items.filter_nested_history_owned_item_refs_for_input(
+        cast(Any, counted_input), refs
+    )
+    assert len(retained_refs) == count
+    assert counted_input.reads < count * 4
+
+    counted_session = CountingSequence(session_items)
+    assert run_items.resolve_nested_history_owned_item_indexes(
+        cast(Any, counted_session), refs
+    ) == set(range(count))
+    assert counted_session.reads < count * 4
+
+    counted_input = CountingSequence(input_items)
+    counted_session = CountingSequence(session_items)
+    rebased_refs = run_items.rebase_nested_history_owned_item_refs(
+        cast(Any, counted_input), cast(Any, counted_session), refs
+    )
+    assert len(rebased_refs) == count
+    assert counted_input.reads + counted_session.reads < count * 8
+
+
 def test_strip_metadata_and_reasoning_id_helpers_keep_non_matching_items() -> None:
     raw = cast(TResponseInputItem, "raw-item")
     non_reasoning = cast(TResponseInputItem, {"type": "message", "id": "msg_1"})

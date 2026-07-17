@@ -9,6 +9,7 @@ import asyncio
 import copy
 import inspect
 import json
+from collections import deque
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -68,8 +69,22 @@ def resolve_nested_history_owned_session_item_refs(
     if not history_owned_items or isinstance(current_input, str):
         return []
 
+    session_indexes_by_identity: dict[int, deque[int]] = {}
+    session_indexes_by_occurrence_key: dict[str, deque[int]] = {}
+    for index, session_item in enumerate(session_items):
+        session_indexes_by_identity.setdefault(id(session_item), deque()).append(index)
+        occurrence_key = nested_history_run_item_occurrence_key(session_item)
+        if occurrence_key is not None:
+            session_indexes_by_occurrence_key.setdefault(occurrence_key, deque()).append(index)
+
     used_session_indexes: set[int] = set()
     resolved: list[NestedHistoryOwnedItemRef] = []
+
+    def _peek_unused(candidates: deque[int] | None) -> int | None:
+        while candidates and candidates[0] in used_session_indexes:
+            candidates.popleft()
+        return candidates[0] if candidates else None
+
     for owned_item in history_owned_items:
         if owned_item.input_index >= len(current_input):
             continue
@@ -78,24 +93,22 @@ def resolve_nested_history_owned_session_item_refs(
             continue
 
         occurrence_key = nested_history_run_item_occurrence_key(owned_item.run_item)
-        session_index = next(
-            (
-                index
-                for index, session_item in enumerate(session_items)
-                if index not in used_session_indexes
-                and owned_item.run_item is not None
-                and (
-                    session_item is owned_item.run_item
-                    or (
-                        occurrence_key is not None
-                        and nested_history_run_item_occurrence_key(session_item) == occurrence_key
-                    )
-                )
-            ),
-            None,
+        identity_index = (
+            _peek_unused(session_indexes_by_identity.get(id(owned_item.run_item)))
+            if owned_item.run_item is not None
+            else None
         )
-        if session_index is None:
+        occurrence_index = (
+            _peek_unused(session_indexes_by_occurrence_key.get(occurrence_key))
+            if occurrence_key is not None
+            else None
+        )
+        candidate_indexes = [
+            index for index in (identity_index, occurrence_index) if index is not None
+        ]
+        if not candidate_indexes:
             continue
+        session_index = min(candidate_indexes)
         session_input = run_item_to_input_item(session_items[session_index])
         if session_input is None or digest_input_item(session_input) != owned_item.digest:
             continue

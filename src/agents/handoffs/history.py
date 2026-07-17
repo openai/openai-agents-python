@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
@@ -193,8 +194,14 @@ def _get_nested_history_owned_items(
 
     input_digests = [digest_input_item(item) for item in handoff_input_data.input_history]
     input_digest_counts: dict[str, int] = {}
-    for digest in input_digests:
+    input_indexes_by_identity: dict[tuple[int, str], deque[int]] = {}
+    input_indexes_by_digest: dict[str, deque[int]] = {}
+    for index, (item, digest) in enumerate(
+        zip(handoff_input_data.input_history, input_digests, strict=True)
+    ):
         if digest is not None:
+            input_indexes_by_identity.setdefault((id(item), digest), deque()).append(index)
+            input_indexes_by_digest.setdefault(digest, deque()).append(index)
             input_digest_counts[digest] = input_digest_counts.get(digest, 0) + 1
     owned_digest_counts: dict[str, int] = {}
     for owned_item in declared_items:
@@ -202,39 +209,42 @@ def _get_nested_history_owned_items(
 
     retained: list[NestedHistoryOwnedItem] = []
     used_input_indexes: set[int] = set()
+    used_digest_counts: dict[str, int] = {}
+
+    def _take_unused(candidates: deque[int] | None) -> int | None:
+        while candidates:
+            candidate = candidates.popleft()
+            if candidate not in used_input_indexes:
+                return candidate
+        return None
+
     for owned_item in declared_items:
-        input_index = next(
-            (
-                index
-                for index, item in enumerate(handoff_input_data.input_history)
-                if index not in used_input_indexes
-                and owned_item.input_item is not None
-                and item is owned_item.input_item
-                and input_digests[index] == owned_item.digest
-            ),
-            None,
-        )
+        input_index = None
+        if owned_item.input_item is not None:
+            input_index = _take_unused(
+                input_indexes_by_identity.get((id(owned_item.input_item), owned_item.digest))
+            )
         if input_index is None:
-            candidate_indexes = [
-                index
-                for index, digest in enumerate(input_digests)
-                if index not in used_input_indexes and digest == owned_item.digest
-            ]
+            remaining_digest_count = input_digest_counts.get(
+                owned_item.digest, 0
+            ) - used_digest_counts.get(owned_item.digest, 0)
             all_equal_occurrences_owned = (
                 input_digest_counts.get(owned_item.digest, 0)
                 == owned_digest_counts[owned_item.digest]
             )
-            if len(candidate_indexes) == 1 or all_equal_occurrences_owned:
-                input_index = (
-                    owned_item.input_index
-                    if owned_item.input_index in candidate_indexes
-                    else candidate_indexes[0]
-                    if candidate_indexes
-                    else None
-                )
+            if remaining_digest_count == 1 or all_equal_occurrences_owned:
+                if (
+                    0 <= owned_item.input_index < len(input_digests)
+                    and owned_item.input_index not in used_input_indexes
+                    and input_digests[owned_item.input_index] == owned_item.digest
+                ):
+                    input_index = owned_item.input_index
+                else:
+                    input_index = _take_unused(input_indexes_by_digest.get(owned_item.digest))
         if input_index is None:
             continue
         used_input_indexes.add(input_index)
+        used_digest_counts[owned_item.digest] = used_digest_counts.get(owned_item.digest, 0) + 1
         input_item = handoff_input_data.input_history[input_index]
         source_run_item = (
             current_by_source_id.get(id(owned_item.run_item), owned_item.run_item)
@@ -262,27 +272,33 @@ def _map_run_item_occurrences(
 
     from ..run_internal.items import nested_history_run_item_occurrence_key
 
+    source_indexes_by_identity: dict[int, deque[int]] = {}
+    source_indexes_by_occurrence_key: dict[str, deque[int]] = {}
+    for index, source_item in enumerate(source_items):
+        source_indexes_by_identity.setdefault(id(source_item), deque()).append(index)
+        occurrence_key = nested_history_run_item_occurrence_key(source_item)
+        if occurrence_key is not None:
+            source_indexes_by_occurrence_key.setdefault(occurrence_key, deque()).append(index)
+
     used_source_indexes: set[int] = set()
     mapped: list[RunItem | None] = []
+
+    def _take_unused(candidates: deque[int] | None) -> int | None:
+        while candidates:
+            candidate = candidates.popleft()
+            if candidate not in used_source_indexes:
+                return candidate
+        return None
+
     for current_item in current_items:
-        source_index = next(
-            (
-                index
-                for index, source_item in enumerate(source_items)
-                if index not in used_source_indexes and source_item is current_item
-            ),
-            None,
+        source_index = _take_unused(
+            source_indexes_by_identity.get(id(current_item)),
         )
         current_key = nested_history_run_item_occurrence_key(current_item)
         if source_index is None and current_key is not None:
-            candidate_indexes = [
-                index
-                for index, source_item in enumerate(source_items)
-                if index not in used_source_indexes
-                and nested_history_run_item_occurrence_key(source_item) == current_key
-            ]
-            if candidate_indexes:
-                source_index = candidate_indexes[0]
+            source_index = _take_unused(
+                source_indexes_by_occurrence_key.get(current_key),
+            )
         if source_index is None:
             mapped.append(None)
             continue

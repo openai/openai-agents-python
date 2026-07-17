@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
@@ -389,26 +390,34 @@ def filter_nested_history_owned_item_refs_for_input(
     if isinstance(input, str) or not owned_item_refs:
         return []
 
+    input_digests = [digest_input_item(item) for item in input]
+    input_indexes_by_identity: dict[tuple[int, str], deque[int]] = {}
+    for index, (item, digest) in enumerate(zip(input, input_digests, strict=True)):
+        if digest is not None:
+            input_indexes_by_identity.setdefault((id(item), digest), deque()).append(index)
+
     retained: list[NestedHistoryOwnedItemRef] = []
     used_input_indexes: set[int] = set()
+
+    def _take_unused(candidates: deque[int] | None) -> int | None:
+        while candidates:
+            candidate = candidates.popleft()
+            if candidate not in used_input_indexes:
+                return candidate
+        return None
+
     for item_ref in owned_item_refs:
-        input_index = next(
-            (
-                index
-                for index, item in enumerate(input)
-                if index not in used_input_indexes
-                and item_ref.input_item is not None
-                and item is item_ref.input_item
-                and digest_input_item(item) == item_ref.digest
-            ),
-            None,
+        input_index = (
+            _take_unused(input_indexes_by_identity.get((id(item_ref.input_item), item_ref.digest)))
+            if item_ref.input_item is not None
+            else None
         )
         if input_index is None and item_ref.input_item is None:
             candidate_index = item_ref.input_index
             if (
                 0 <= candidate_index < len(input)
                 and candidate_index not in used_input_indexes
-                and digest_input_item(input[candidate_index]) == item_ref.digest
+                and input_digests[candidate_index] == item_ref.digest
             ):
                 input_index = candidate_index
         if input_index is None:
@@ -436,32 +445,54 @@ def reconcile_nested_history_owned_input_after_rewrite(
     previous = list(previous_input)
     previous_digests = [digest_input_item(item) for item in previous]
     rewritten_digests = [digest_input_item(item) for item in rewritten]
+    previous_digest_counts: dict[str, int] = {}
+    rewritten_digest_counts: dict[str, int] = {}
+    previous_identity_digests: set[tuple[int, str]] = set()
+    rewritten_indexes_by_identity: dict[tuple[int, str], deque[int]] = {}
+    rewritten_indexes_by_digest: dict[str, deque[int]] = {}
+    for item, digest in zip(previous, previous_digests, strict=True):
+        if digest is None:
+            continue
+        previous_digest_counts[digest] = previous_digest_counts.get(digest, 0) + 1
+        previous_identity_digests.add((id(item), digest))
+    for index, (item, digest) in enumerate(zip(rewritten, rewritten_digests, strict=True)):
+        if digest is None:
+            continue
+        rewritten_digest_counts[digest] = rewritten_digest_counts.get(digest, 0) + 1
+        rewritten_indexes_by_identity.setdefault((id(item), digest), deque()).append(index)
+        rewritten_indexes_by_digest.setdefault(digest, deque()).append(index)
+
     recoverable_ref_counts: dict[str, int] = {}
     for item_ref in owned_item_refs:
-        if item_ref.input_item is not None and any(
-            item is item_ref.input_item and previous_digests[index] == item_ref.digest
-            for index, item in enumerate(previous)
+        if (
+            item_ref.input_item is not None
+            and (id(item_ref.input_item), item_ref.digest) in previous_identity_digests
         ):
             recoverable_ref_counts[item_ref.digest] = (
                 recoverable_ref_counts.get(item_ref.digest, 0) + 1
             )
     used_indexes: set[int] = set()
+    used_digest_counts: dict[str, int] = {}
     retained: list[NestedHistoryOwnedItemRef] = []
 
+    def _take_unused(candidates: deque[int] | None) -> int | None:
+        while candidates:
+            candidate = candidates.popleft()
+            if candidate not in used_indexes:
+                return candidate
+        return None
+
     for item_ref in owned_item_refs:
-        identity_match = next(
-            (
-                index
-                for index, item in enumerate(rewritten)
-                if index not in used_indexes
-                and item_ref.input_item is not None
-                and item is item_ref.input_item
-                and rewritten_digests[index] == item_ref.digest
-            ),
-            None,
+        identity_match = (
+            _take_unused(
+                rewritten_indexes_by_identity.get((id(item_ref.input_item), item_ref.digest))
+            )
+            if item_ref.input_item is not None
+            else None
         )
         if identity_match is not None:
             used_indexes.add(identity_match)
+            used_digest_counts[item_ref.digest] = used_digest_counts.get(item_ref.digest, 0) + 1
             retained.append(
                 replace(
                     item_ref,
@@ -471,33 +502,27 @@ def reconcile_nested_history_owned_input_after_rewrite(
             )
             continue
 
-        previous_match = next(
-            (
-                index
-                for index, item in enumerate(previous)
-                if item is item_ref.input_item and previous_digests[index] == item_ref.digest
-            ),
-            None,
+        previous_match = (
+            item_ref.input_item is not None
+            and (id(item_ref.input_item), item_ref.digest) in previous_identity_digests
         )
-        candidate_indexes = [
-            index
-            for index, digest in enumerate(rewritten_digests)
-            if index not in used_indexes and digest == item_ref.digest
-        ]
-        previous_count = previous_digests.count(item_ref.digest)
-        rewritten_count = rewritten_digests.count(item_ref.digest)
+        previous_count = previous_digest_counts.get(item_ref.digest, 0)
+        rewritten_count = rewritten_digest_counts.get(item_ref.digest, 0)
         all_equal_occurrences_owned = (
             previous_count == rewritten_count == recoverable_ref_counts.get(item_ref.digest, 0)
         )
         if (
-            previous_match is None
-            or not candidate_indexes
+            not previous_match
+            or rewritten_count <= used_digest_counts.get(item_ref.digest, 0)
             or not ((previous_count == 1 and rewritten_count == 1) or all_equal_occurrences_owned)
         ):
             continue
 
-        candidate_index = candidate_indexes[0]
+        candidate_index = _take_unused(rewritten_indexes_by_digest.get(item_ref.digest))
+        if candidate_index is None:
+            continue
         used_indexes.add(candidate_index)
+        used_digest_counts[item_ref.digest] = used_digest_counts.get(item_ref.digest, 0) + 1
         retained.append(
             replace(
                 item_ref,
@@ -517,37 +542,60 @@ def resolve_nested_history_owned_item_indexes(
     if not owned_item_refs:
         return set()
 
+    indexes_by_identity_digest: dict[tuple[int, str], deque[int]] = {}
+    indexes_by_occurrence_digest: dict[tuple[str, str], deque[int]] = {}
+    run_item_digests: list[str | None] = []
+    for index, run_item in enumerate(run_items):
+        input_item = run_item_to_input_item(run_item)
+        digest = digest_input_item(input_item) if input_item is not None else None
+        run_item_digests.append(digest)
+        if digest is None:
+            continue
+        indexes_by_identity_digest.setdefault((id(run_item), digest), deque()).append(index)
+        occurrence_key = nested_history_run_item_occurrence_key(run_item)
+        if occurrence_key is not None:
+            indexes_by_occurrence_digest.setdefault((occurrence_key, digest), deque()).append(index)
+
     resolved: set[int] = set()
+
+    def _peek_unused(candidates: deque[int] | None) -> int | None:
+        while candidates and candidates[0] in resolved:
+            candidates.popleft()
+        return candidates[0] if candidates else None
+
     for item_ref in owned_item_refs:
         occurrence_key = nested_history_run_item_occurrence_key(item_ref.run_item)
-        candidate_indexes: list[int] = []
-        if 0 <= item_ref.session_index < len(run_items):
-            candidate_indexes.append(item_ref.session_index)
-        candidate_indexes.extend(
-            index
-            for index, item in enumerate(run_items)
-            if index != item_ref.session_index
+        stored_index = item_ref.session_index
+        if (
+            0 <= stored_index < len(run_items)
+            and stored_index not in resolved
+            and run_item_digests[stored_index] == item_ref.digest
             and item_ref.run_item is not None
             and (
-                item is item_ref.run_item
+                run_items[stored_index] is item_ref.run_item
                 or (
                     occurrence_key is not None
-                    and nested_history_run_item_occurrence_key(item) == occurrence_key
+                    and nested_history_run_item_occurrence_key(run_items[stored_index])
+                    == occurrence_key
                 )
             )
+        ):
+            resolved.add(stored_index)
+            continue
+
+        identity_index = (
+            _peek_unused(indexes_by_identity_digest.get((id(item_ref.run_item), item_ref.digest)))
+            if item_ref.run_item is not None
+            else None
         )
-        for index in candidate_indexes:
-            if index in resolved or item_ref.run_item is None:
-                continue
-            if run_items[index] is not item_ref.run_item and not (
-                occurrence_key is not None
-                and nested_history_run_item_occurrence_key(run_items[index]) == occurrence_key
-            ):
-                continue
-            input_item = run_item_to_input_item(run_items[index])
-            if input_item is not None and digest_input_item(input_item) == item_ref.digest:
-                resolved.add(index)
-                break
+        occurrence_index = (
+            _peek_unused(indexes_by_occurrence_digest.get((occurrence_key, item_ref.digest)))
+            if occurrence_key is not None
+            else None
+        )
+        candidates = [index for index in (identity_index, occurrence_index) if index is not None]
+        if candidates:
+            resolved.add(min(candidates))
 
     return resolved
 
@@ -559,24 +607,44 @@ def rebase_nested_history_owned_item_refs(
 ) -> list[NestedHistoryOwnedItemRef]:
     """Rebase surviving ownership onto exact live input and session occurrences."""
     retained_refs = filter_nested_history_owned_item_refs_for_input(input, owned_item_refs)
+    indexes_by_identity_digest: dict[tuple[int, str], deque[int]] = {}
+    indexes_by_occurrence_digest: dict[tuple[str, str], deque[int]] = {}
+    for index, run_item in enumerate(run_items):
+        input_item = run_item_to_input_item(run_item)
+        digest = digest_input_item(input_item) if input_item is not None else None
+        if digest is None:
+            continue
+        indexes_by_identity_digest.setdefault((id(run_item), digest), deque()).append(index)
+        occurrence_key = nested_history_run_item_occurrence_key(run_item)
+        if occurrence_key is not None:
+            indexes_by_occurrence_digest.setdefault((occurrence_key, digest), deque()).append(index)
+
     rebased: list[NestedHistoryOwnedItemRef] = []
     used_indexes: set[int] = set()
+
+    def _peek_unused(candidates: deque[int] | None) -> int | None:
+        while candidates and candidates[0] in used_indexes:
+            candidates.popleft()
+        return candidates[0] if candidates else None
+
     for item_ref in retained_refs:
         occurrence_key = nested_history_run_item_occurrence_key(item_ref.run_item)
-        for index, run_item in enumerate(run_items):
-            if index in used_indexes or item_ref.run_item is None:
-                continue
-            if run_item is not item_ref.run_item and not (
-                occurrence_key is not None
-                and nested_history_run_item_occurrence_key(run_item) == occurrence_key
-            ):
-                continue
-            input_item = run_item_to_input_item(run_item)
-            if input_item is None or digest_input_item(input_item) != item_ref.digest:
-                continue
-            used_indexes.add(index)
-            rebased.append(replace(item_ref, session_index=index, run_item=run_item))
-            break
+        identity_index = (
+            _peek_unused(indexes_by_identity_digest.get((id(item_ref.run_item), item_ref.digest)))
+            if item_ref.run_item is not None
+            else None
+        )
+        occurrence_index = (
+            _peek_unused(indexes_by_occurrence_digest.get((occurrence_key, item_ref.digest)))
+            if occurrence_key is not None
+            else None
+        )
+        candidates = [index for index in (identity_index, occurrence_index) if index is not None]
+        if not candidates:
+            continue
+        index = min(candidates)
+        used_indexes.add(index)
+        rebased.append(replace(item_ref, session_index=index, run_item=run_items[index]))
     return rebased
 
 
