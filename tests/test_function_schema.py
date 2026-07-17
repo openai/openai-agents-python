@@ -958,3 +958,53 @@ def test_google_docstring_missing_blank_line_function_tool():
     assert properties["city"]["description"] == "The city to get weather for."
     assert properties["units"]["description"] == "Temperature units to use."
     assert "Args:" not in (weather.description or "")
+
+
+def section_body_before_args_google_function(city: str, units: str):
+    """Get the weather for a city.
+
+    Note:
+        Results are cached.
+    Args:
+        city: The city to get weather for.
+        units: Temperature units to use.
+    """
+    return f"{city} {units}"
+
+
+def section_body_before_args_blank_line_google_function(city: str, units: str):
+    """Get the weather for a city.
+
+    Note:
+        Results are cached.
+
+    Args:
+        city: The city to get weather for.
+        units: Temperature units to use.
+    """
+    return f"{city} {units}"
+
+
+def test_google_docstring_missing_blank_line_after_section_body():
+    """A Google docstring whose ``Args:`` directly follows another section's indented body
+    (no blank line) should still yield parameter descriptions. griffe skips the header
+    whenever no blank line sits above it, regardless of how the preceding line is indented."""
+    fs = function_schema(section_body_before_args_google_function, strict_json_schema=False)
+
+    properties = fs.params_json_schema.get("properties", {})
+    assert properties["city"]["description"] == "The city to get weather for."
+    assert properties["units"]["description"] == "Temperature units to use."
+
+    assert "Args:" not in (fs.description or "")
+
+
+def test_google_docstring_after_section_body_matches_blank_line_form():
+    """The variant missing the blank line after a preceding section's body must produce the
+    exact same schema as the well-formed variant that includes it."""
+    fixed = function_schema(section_body_before_args_google_function, strict_json_schema=False)
+    control = function_schema(
+        section_body_before_args_blank_line_google_function, strict_json_schema=False
+    )
+
+    assert fixed.description == control.description
+    assert fixed.params_json_schema["properties"] == control.params_json_schema["properties"]
