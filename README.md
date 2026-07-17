@@ -54,6 +54,8 @@ The SDK supports three primary ways to run agents. Set the `OPENAI_API_KEY` envi
 
 Use a [`SandboxAgent`](https://openai.github.io/openai-agents-python/sandbox_agents) when the agent needs to inspect files, run commands, apply patches, or preserve workspace state across longer tasks.
 
+This example uses `UnixLocalSandboxClient`, which is supported on macOS and Linux. On Windows, use `DockerSandboxClient` with the `openai-agents[docker]` extra or a hosted sandbox client instead; see [Sandbox clients](https://openai.github.io/openai-agents-python/sandbox/clients/) for setup details.
+
 ```python
 from agents import Runner
 from agents.run import RunConfig

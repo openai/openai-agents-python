@@ -74,7 +74,7 @@ flowchart LR
 
 ## 샌드박스 클라이언트 선택
 
-로컬 개발에는 `UnixLocalSandboxClient`부터 사용하세요. 컨테이너 격리 또는 이미지 일관성이 필요하면 `DockerSandboxClient`로 전환하세요. 공급자가 관리하는 실행이 필요하면 호스티드 공급자로 전환하세요.
+macOS 또는 Linux의 로컬 개발에는 `UnixLocalSandboxClient`로 시작하세요. Windows에서는 `DockerSandboxClient` 또는 호스티드 공급자를 사용하세요. 지원되는 모든 플랫폼에서 컨테이너 격리나 이미지 일관성이 필요하다면 `DockerSandboxClient`로 전환하고, 공급자가 관리하는 실행이 필요하다면 호스티드 공급자로 전환하세요.
 
 대부분의 경우 [`SandboxRunConfig`][agents.run_config.SandboxRunConfig]에서 샌드박스 클라이언트와 해당 옵션만 변경하면 `SandboxAgent` 정의는 그대로 유지됩니다. 로컬, Docker, 호스티드, 원격 마운트 옵션은 [샌드박스 클라이언트](clients.md)를 참고하세요.
 

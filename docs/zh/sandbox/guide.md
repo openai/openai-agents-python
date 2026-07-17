@@ -74,7 +74,7 @@ flowchart LR
 
 ## 沙盒客户端的选择
 
-本地开发可从 `UnixLocalSandboxClient` 开始。当需要容器隔离或镜像一致性时，请改用 `DockerSandboxClient`。当需要由提供商管理执行时，请改用托管提供商。
+在 macOS 或 Linux 上进行本地开发时，首先使用 `UnixLocalSandboxClient`。在 Windows 上，请改用 `DockerSandboxClient` 或托管提供商。在任何受支持的平台上，当需要容器隔离或镜像一致性时，请改用 `DockerSandboxClient`；当需要由提供商管理执行环境时，请改用托管提供商。
 
 大多数情况下，`SandboxAgent` 定义保持不变，只需在 [`SandboxRunConfig`][agents.run_config.SandboxRunConfig] 中更改沙盒客户端及其选项。有关本地、Docker、托管和远程挂载选项，请参阅[沙盒客户端](clients.md)。
 
