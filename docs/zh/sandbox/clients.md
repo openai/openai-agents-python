@@ -117,7 +117,7 @@ run_config = RunConfig(
 | `DaytonaSandboxClient` | 支持通过`DaytonaCloudBucketMountStrategy`进行由 rclone 支持的云存储挂载；可将其与`S3Mount`、`GCSMount`、`R2Mount`、`AzureBlobMount`和`BoxMount`配合使用。 |
 | `E2BSandboxClient` | 支持通过`E2BCloudBucketMountStrategy`进行由 rclone 支持的云存储挂载；可将其与`S3Mount`、`GCSMount`、`R2Mount`、`AzureBlobMount`和`BoxMount`配合使用。 |
 | `RunloopSandboxClient` | 支持通过`RunloopCloudBucketMountStrategy`进行由 rclone 支持的云存储挂载；可将其与`S3Mount`、`GCSMount`、`R2Mount`、`AzureBlobMount`和`BoxMount`配合使用。 |
-| `VercelSandboxClient` | 目前未暴露特定于托管环境的挂载策略。请改用清单文件、仓库或其他工作区输入。 |
+| `VercelSandboxClient` | 支持通过 `VercelCloudBucketMountStrategy` 和 `S3Mount` 创建仅在沙箱创建时配置的 S3 及 S3 兼容存储桶挂载。包含挂载的会话无法恢复，使用内联凭证时必须设置 `allow_s3_credential_exposure=True`。 |
 
 </div>
 
@@ -134,7 +134,7 @@ run_config = RunConfig(
 | `DaytonaSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `E2BSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `RunloopSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
-| `VercelSandboxClient` | - | - | - | - | - | - |
+| `VercelSandboxClient` | ✓ | - | - | - | - | - |
 
 </div>
 

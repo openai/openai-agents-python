@@ -12,11 +12,14 @@ This page focuses on the manual approval flow via `interruptions`. If your app c
 
 Set `needs_approval` to `True` to always require approval or provide an async function that decides per call. The callable receives the run context, parsed tool parameters, and the tool call ID.
 
+Callable approval rules fail closed when the SDK cannot safely inspect the arguments. If the arguments are malformed JSON, are valid JSON but not an object (for example, `null` or a list), or contain non-standard constants such as `NaN`, `Infinity`, or `-Infinity`, the callable is not invoked and the call requires manual approval. This behavior is the same for Runner and Realtime tool calls.
+
 ```python
-from agents import Agent, function_tool
+from agents import Agent
+from agents.decorators import tool
 
 
-@function_tool(needs_approval=True)
+@tool(needs_approval=True)
 async def cancel_order(order_id: int) -> str:
     return f"Cancelled order {order_id}"
 
@@ -25,7 +28,7 @@ async def requires_review(_ctx, params, _call_id) -> bool:
     return "refund" in params.get("subject", "").lower()
 
 
-@function_tool(needs_approval=requires_review)
+@tool(needs_approval=requires_review)
 async def send_email(subject: str, body: str) -> str:
     return f"Sent '{subject}'"
 
@@ -106,14 +109,15 @@ import asyncio
 import json
 from pathlib import Path
 
-from agents import Agent, Runner, RunState, function_tool
+from agents import Agent, Runner, RunState
+from agents.decorators import tool
 
 
 async def needs_oakland_approval(_ctx, params, _call_id) -> bool:
     return "Oakland" in params.get("city", "")
 
 
-@function_tool(needs_approval=needs_oakland_approval)
+@tool(needs_approval=needs_oakland_approval)
 async def get_temperature(city: str) -> str:
     return f"The temperature in {city} is 20° Celsius"
 

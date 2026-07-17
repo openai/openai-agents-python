@@ -117,7 +117,7 @@ run_config = RunConfig(
 | `DaytonaSandboxClient` | `DaytonaCloudBucketMountStrategy`로 rclone 기반 클라우드 스토리지 마운트를 지원합니다. `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, `BoxMount`와 함께 사용하세요. |
 | `E2BSandboxClient` | `E2BCloudBucketMountStrategy`로 rclone 기반 클라우드 스토리지 마운트를 지원합니다. `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, `BoxMount`와 함께 사용하세요. |
 | `RunloopSandboxClient` | `RunloopCloudBucketMountStrategy`로 rclone 기반 클라우드 스토리지 마운트를 지원합니다. `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, `BoxMount`와 함께 사용하세요. |
-| `VercelSandboxClient` | 현재 노출된 호스티드 전용 마운트 전략은 없습니다. 대신 매니페스트 파일, 리포지토리 또는 기타 워크스페이스 입력을 사용하세요. |
+| `VercelSandboxClient` | `VercelCloudBucketMountStrategy`와 `S3Mount`를 사용한 생성 시점 전용 S3 및 S3 호환 버킷 마운트를 지원합니다. 마운트가 포함된 세션은 재개할 수 없으며, 인라인 자격 증명을 사용하려면 `allow_s3_credential_exposure=True`가 필요합니다. |
 
 </div>
 
@@ -134,7 +134,7 @@ run_config = RunConfig(
 | `DaytonaSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `E2BSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `RunloopSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
-| `VercelSandboxClient` | - | - | - | - | - | - |
+| `VercelSandboxClient` | ✓ | - | - | - | - | - |
 
 </div>
 

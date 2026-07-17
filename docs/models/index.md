@@ -110,15 +110,16 @@ Preview-compatible requests must serialize `environment` and display dimensions 
 
 If you pass a non–GPT-5 model name without custom `model_settings`, the SDK reverts to generic `ModelSettings` compatible with any model.
 
-### Responses-only tool search features
+### Responses-only tool features
 
 The following tool features are supported only with OpenAI Responses models:
 
 -   [`ToolSearchTool`][agents.tool.ToolSearchTool]
 -   [`tool_namespace()`][agents.tool.tool_namespace]
 -   `@function_tool(defer_loading=True)` and other deferred-loading Responses tool surfaces
+-   [`ProgrammaticToolCallingTool`][agents.tool.ProgrammaticToolCallingTool], `allowed_callers`, and `tool_choice="programmatic_tool_calling"`
 
-These features are rejected on Chat Completions models and on non-Responses backends. When you use deferred-loading tools, add `ToolSearchTool()` to the agent and let the model load tools through `auto` or `required` tool choice instead of forcing bare namespace names or deferred-only function names. See [Tools](../tools.md#hosted-tool-search) for the setup details and current constraints.
+These features are rejected on Chat Completions models and on non-Responses backends. When you use deferred-loading tools, add `ToolSearchTool()` to the agent and let the model load tools through `auto` or `required` tool choice instead of forcing bare namespace names or deferred-only function names. See [Hosted tool search](../tools.md#hosted-tool-search) and [Programmatic Tool Calling](../tools.md#programmatic-tool-calling) for setup details and current constraints.
 
 ### Responses WebSocket transport
 
@@ -264,11 +265,11 @@ Use `get_hosted_agent_metadata()` when a tool needs caller-aware logging or auth
 ```python
 from typing import Any
 
-from agents import function_tool
+from agents.decorators import tool
 from agents.extensions.experimental.hosted_multi_agent import get_hosted_agent_metadata
 from agents.tool_context import ToolContext
 
-@function_tool
+@tool
 def lookup_document(ctx: ToolContext[Any], section: str) -> str:
     metadata = get_hosted_agent_metadata(ctx)
     caller = metadata.agent_name if metadata else "unknown"

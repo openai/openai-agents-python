@@ -210,10 +210,10 @@ The Twilio example in [`examples/realtime/twilio/twilio_handler.py`](https://git
 Realtime agents support function tools during live conversations:
 
 ```python
-from agents import function_tool
+from agents.decorators import tool
 
 
-@function_tool
+@tool
 def get_weather(city: str) -> str:
     """Get current weather for a city."""
     return f"The weather in {city} is sunny, 72F."

@@ -214,10 +214,10 @@ async for event in session:
 实时智能体支持在实时对话期间使用工具调用：
 
 ```python
-from agents import function_tool
+from agents.decorators import tool
 
 
-@function_tool
+@tool
 def get_weather(city: str) -> str:
     """Get current weather for a city."""
     return f"The weather in {city} is sunny, 72F."

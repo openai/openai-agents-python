@@ -28,11 +28,12 @@ pip install "openai-agents[viz]"
 ```python
 import os
 
-from agents import Agent, function_tool
+from agents import Agent
+from agents.decorators import tool
 from agents.mcp.server import MCPServerStdio
 from agents.extensions.visualization import draw_graph
 
-@function_tool
+@tool
 def get_weather(city: str) -> str:
     return f"The weather in {city} is sunny."
 

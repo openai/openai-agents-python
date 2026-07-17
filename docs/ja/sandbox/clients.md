@@ -117,7 +117,7 @@ run_config = RunConfig(
 | `DaytonaSandboxClient` | `DaytonaCloudBucketMountStrategy` による `rclone` ベースのクラウドストレージマウントをサポートします。`S3Mount`、`GCSMount`、`R2Mount`、`AzureBlobMount`、`BoxMount` と組み合わせて使用してください。 |
 | `E2BSandboxClient` | `E2BCloudBucketMountStrategy` による `rclone` ベースのクラウドストレージマウントをサポートします。`S3Mount`、`GCSMount`、`R2Mount`、`AzureBlobMount`、`BoxMount` と組み合わせて使用してください。 |
 | `RunloopSandboxClient` | `RunloopCloudBucketMountStrategy` による `rclone` ベースのクラウドストレージマウントをサポートします。`S3Mount`、`GCSMount`、`R2Mount`、`AzureBlobMount`、`BoxMount` と組み合わせて使用してください。 |
-| `VercelSandboxClient` | 現時点ではホスト型固有のマウント戦略は公開されていません。代わりにマニフェストファイル、リポジトリ、またはその他のワークスペース入力を使用してください。 |
+| `VercelSandboxClient` | `VercelCloudBucketMountStrategy` と `S3Mount` による、作成時限定の S3 および S3 互換バケットマウントをサポートします。マウントを含むセッションは再開できず、インライン認証情報を使用するには `allow_s3_credential_exposure=True` が必要です。 |
 
 </div>
 
@@ -134,7 +134,7 @@ run_config = RunConfig(
 | `DaytonaSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `E2BSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `RunloopSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
-| `VercelSandboxClient` | - | - | - | - | - | - |
+| `VercelSandboxClient` | ✓ | - | - | - | - | - |
 
 </div>
 

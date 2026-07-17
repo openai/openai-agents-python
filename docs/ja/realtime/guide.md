@@ -214,10 +214,10 @@ async for event in session:
 Realtime エージェントは、ライブ会話中の関数ツールをサポートしています。
 
 ```python
-from agents import function_tool
+from agents.decorators import tool
 
 
-@function_tool
+@tool
 def get_weather(city: str) -> str:
     """Get current weather for a city."""
     return f"The weather in {city} is sunny, 72F."
