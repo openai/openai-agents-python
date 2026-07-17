@@ -322,7 +322,7 @@ async def _mount_s3(session: BaseSandboxSession, config: BlaxelCloudBucketMountC
         opts.append("ro")
 
     opts_str = ",".join(opts)
-    cmd = f"s3fs {shlex.quote(bucket)} {mount_path} -o {opts_str}"
+    cmd = f"s3fs {shlex.quote(bucket)} {mount_path} -o {shlex.quote(opts_str)}"
 
     try:
         await _exec(session, f"mkdir -p {mount_path}")
@@ -367,7 +367,7 @@ async def _mount_gcs(session: BaseSandboxSession, config: BlaxelCloudBucketMount
         opts.append("-o ro")
 
     if config.prefix:
-        opts.append(f"--only-dir={config.prefix.strip('/')}")
+        opts.append(f"--only-dir={shlex.quote(config.prefix.strip('/'))}")
 
     opts_str = " ".join(opts)
     cmd = f"gcsfuse {opts_str} {bucket} {mount_path}"
