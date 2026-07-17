@@ -2232,6 +2232,17 @@ def _deserialize_message_content_part(value: object) -> object:
 
 
 def _deserialize_message_output_item(payload: Mapping[str, Any]) -> ResponseOutputMessage:
+    if payload.get("role") == "assistant" and isinstance(payload.get("content"), str):
+        normalized_payload = dict(payload)
+        normalized_payload["content"] = [
+            ResponseOutputText.model_construct(
+                type="output_text",
+                text=cast(str, payload["content"]),
+            )
+        ]
+        normalized_payload.setdefault("status", "completed")
+        return ResponseOutputMessage.model_construct(**normalized_payload)
+
     try:
         return ResponseOutputMessage(**payload)
     except ValidationError as exc:

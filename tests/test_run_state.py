@@ -5502,6 +5502,49 @@ class TestRunStateSerializationEdgeCases:
         assert restored_1_12._generated_items[0] is not restored_1_12._session_items[0]
 
     @pytest.mark.asyncio
+    async def test_nested_history_ownership_normalizes_raw_assistant_input_digest(self):
+        """Ownership digests must match the normalized original input written to JSON."""
+        agent = Agent(name="TestAgent")
+        raw_message = {
+            "id": "msg_raw",
+            "type": "message",
+            "role": "assistant",
+            "content": "owned",
+        }
+        message_item = MessageOutputItem(agent=agent, raw_item=cast(Any, raw_message))
+        input_item = run_item_to_input_item(message_item)
+        assert input_item is not None
+        digest = digest_input_item(input_item)
+        assert digest is not None
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input=[input_item],
+        )
+        state._session_items = [message_item]
+        state._generated_items = [message_item]
+        state._nested_history_owned_session_item_refs = [
+            NestedHistoryOwnedItemRef(
+                session_index=0,
+                digest=digest,
+                input_index=0,
+                run_item=message_item,
+                input_item=input_item,
+            )
+        ]
+
+        serialized = state.to_json()
+
+        assert serialized["nested_history_owned_session_item_refs"][0]["digest"] == (
+            digest_input_item(serialized["original_input"][0])
+        )
+        restored = await RunState.from_json(agent, serialized)
+        assert (
+            restored._nested_history_owned_session_item_refs[0].input_item
+            == (restored._original_input[0])
+        )
+
+    @pytest.mark.asyncio
     async def test_nested_history_ownership_remaps_after_skipped_session_item(self):
         """A skipped unrelated item must not shift a surviving ownership reference."""
         agent = Agent(name="TestAgent")

@@ -372,8 +372,12 @@ def digest_input_item(item: Any) -> str | None:
             dict[str, Any],
             strip_internal_input_item_metadata(cast(TResponseInputItem, coerced)),
         )
-        if coerced.get("role") == "assistant" and coerced.get("status") in {None, "completed"}:
-            coerced.pop("status", None)
+        if coerced.get("role") == "assistant":
+            content = coerced.get("content")
+            if isinstance(content, str):
+                coerced["content"] = [{"type": "output_text", "text": content}]
+            if coerced.get("status") in {None, "completed"}:
+                coerced.pop("status", None)
         item = coerced
 
     fingerprint = fingerprint_input_item(item)
