@@ -804,3 +804,43 @@ def test_easy_input_message_rejects_unknown_extra_keys():
         Converter.items_to_messages(
             [{"role": "assistant", "content": "hello", "unexpected_key": True}]
         )
+    # The explicitly typed shape must reject unknown keys the same way.
+    with pytest.raises(UserError):
+        Converter.items_to_messages(
+            [
+                {
+                    "role": "assistant",
+                    "content": "hello",
+                    "type": "message",
+                    "unexpected_key": True,
+                }
+            ]
+        )
+
+
+def test_typed_easy_input_message_content_part_parity():
+    """Content part shapes that the untyped easy-input path supports must behave
+    identically when the optional `type: "message"` key is present.
+    """
+    part_contents: list = [
+        # Raw Chat Completions text part alias, normalized by extract_text_content.
+        [{"type": "text", "text": "hi"}],
+        # Non-text input parts are filtered out by extract_text_content (both paths).
+        [{"type": "input_image", "image_url": "http://example.com/image.png"}],
+    ]
+    for content in part_contents:
+        untyped = Converter.items_to_messages([{"role": "assistant", "content": content}])
+        typed = Converter.items_to_messages(
+            [{"role": "assistant", "content": content, "type": "message"}]
+        )
+        assert typed == untyped, content
+    # Genuine output-message dicts still route through the output-message branch.
+    assert Converter.items_to_messages(
+        [
+            {
+                "role": "assistant",
+                "type": "message",
+                "content": [{"type": "output_text", "text": "out", "annotations": []}],
+            }
+        ]
+    ) == [{"role": "assistant", "content": "out"}]

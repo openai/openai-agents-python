@@ -636,18 +636,27 @@ class Converter:
             elif resp_msg := cls.maybe_response_output_message(item):
                 contents = resp_msg["content"]
 
-                if isinstance(contents, str) or (
+                is_easy_input_content = isinstance(contents, str) or (
                     isinstance(contents, list)
                     and len(contents) > 0
-                    and all(
-                        isinstance(c, dict) and str(c.get("type", "")).startswith("input_")
+                    and not any(
+                        isinstance(c, dict)
+                        and c.get("type") in ("output_text", "refusal", "output_audio")
                         for c in contents
                     )
-                ):
+                )
+                if is_easy_input_content and set(item.keys()) <= {
+                    "content",
+                    "role",
+                    "type",
+                    "phase",
+                }:
                     # An EasyInputMessageParam with an explicit `type: "message"`:
                     # string content or input-style parts can't appear in a real
                     # ResponseOutputMessage, so convert the item exactly like the
-                    # untyped easy-input shape to keep the payloads identical.
+                    # untyped easy-input shape to keep the payloads identical. Items
+                    # with unknown extra keys are rejected below, matching the
+                    # untyped shape's unknown-key handling.
                     flush_assistant_message()
                     typed_easy_asst: ChatCompletionAssistantMessageParam = {
                         "role": "assistant",
@@ -655,6 +664,11 @@ class Converter:
                     }
                     result.append(typed_easy_asst)
                     continue
+                if is_easy_input_content:
+                    # Easy-input-style content with unexpected extra keys: reject it
+                    # like the untyped easy-input shape does, rather than falling
+                    # into the output-message loop below.
+                    raise UserError(f"Unhandled item type or structure: {item}")
 
                 # A reasoning item can be followed by an assistant message and then tool calls
                 # in the same turn, so preserve pending reasoning_content across this flush.
