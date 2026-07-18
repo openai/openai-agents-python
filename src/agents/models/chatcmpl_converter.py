@@ -658,9 +658,12 @@ class Converter:
                     # with unknown extra keys are rejected below, matching the
                     # untyped shape's unknown-key handling.
                     flush_assistant_message()
+                    easy_contents = cast(
+                        "str | Iterable[ResponseInputContentWithAudioParam]", contents
+                    )
                     typed_easy_asst: ChatCompletionAssistantMessageParam = {
                         "role": "assistant",
-                        "content": cls.extract_text_content(contents),
+                        "content": cls.extract_text_content(easy_contents),
                     }
                     result.append(typed_easy_asst)
                     continue
