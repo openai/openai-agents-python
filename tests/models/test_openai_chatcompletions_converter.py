@@ -191,6 +191,26 @@ def test_items_to_messages_with_easy_input_message():
     assert out["content"] == "How are you?"
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "hello",
+        "",
+        [],
+        [{"type": "input_text", "text": "hello"}],
+    ],
+)
+def test_typed_easy_input_assistant_message_matches_untyped_shape(content: Any):
+    """The optional message discriminator must not change easy-input conversion."""
+    untyped = cast(TResponseInputItem, {"role": "assistant", "content": content})
+    typed = cast(
+        TResponseInputItem,
+        {"role": "assistant", "content": content, "type": "message"},
+    )
+
+    assert Converter.items_to_messages([typed]) == Converter.items_to_messages([untyped])
+
+
 def test_items_to_messages_accepts_raw_chat_completions_user_content_parts():
     """
     Raw Chat Completions content parts should be accepted as aliases for the SDK's
