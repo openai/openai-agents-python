@@ -759,26 +759,44 @@ def test_assistant_messages_in_history():
 def test_assistant_easy_input_message_optional_keys():
     """EasyInputMessageParam allows optional `type` and `phase` keys and an
     input-style content list on assistant messages; all variants should convert
-    like the bare {role, content} shape rather than crashing.
+    exactly like the equivalent bare {role, content} shape rather than crashing
+    or producing a divergent payload.
     """
-    items: list = [
-        {"role": "assistant", "content": "hello", "type": "message"},
-        {"role": "assistant", "content": "hello", "phase": "final_answer"},
-        {
-            "role": "assistant",
-            "content": "hello",
-            "type": "message",
-            "phase": "final_answer",
-        },
-        {
-            "role": "assistant",
-            "content": [{"type": "input_text", "text": "hello"}],
-            "type": "message",
-        },
+    contents: list = [
+        "hello",
+        "",  # empty content must be preserved, not dropped
+        [{"type": "input_text", "text": "hello"}],
+        [
+            {"type": "input_text", "text": "part one"},
+            {"type": "input_text", "text": "part two"},
+        ],
     ]
-    for item in items:
-        messages = Converter.items_to_messages([item])
-        assert messages == [{"role": "assistant", "content": "hello"}], item
+    optional_keys: list[dict] = [
+        {"type": "message"},
+        {"phase": "final_answer"},
+        {"type": "message", "phase": "final_answer"},
+    ]
+    for content in contents:
+        untyped = Converter.items_to_messages([{"role": "assistant", "content": content}])
+        for extra in optional_keys:
+            item = {"role": "assistant", "content": content, **extra}
+            assert Converter.items_to_messages([item]) == untyped, item
+    # Concrete shapes, for clarity:
+    assert Converter.items_to_messages(
+        [{"role": "assistant", "content": "hello", "type": "message"}]
+    ) == [{"role": "assistant", "content": "hello"}]
+    assert Converter.items_to_messages(
+        [{"role": "assistant", "content": "", "type": "message"}]
+    ) == [{"role": "assistant", "content": ""}]
+    assert Converter.items_to_messages(
+        [
+            {
+                "role": "assistant",
+                "content": [{"type": "input_text", "text": "hello"}],
+                "type": "message",
+            }
+        ]
+    ) == [{"role": "assistant", "content": [{"type": "text", "text": "hello"}]}]
 
 
 def test_easy_input_message_rejects_unknown_extra_keys():

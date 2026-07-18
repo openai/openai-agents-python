@@ -634,25 +634,36 @@ class Converter:
 
             # 3) response output message => assistant
             elif resp_msg := cls.maybe_response_output_message(item):
+                contents = resp_msg["content"]
+
+                if isinstance(contents, str) or (
+                    isinstance(contents, list)
+                    and len(contents) > 0
+                    and all(
+                        isinstance(c, dict) and str(c.get("type", "")).startswith("input_")
+                        for c in contents
+                    )
+                ):
+                    # An EasyInputMessageParam with an explicit `type: "message"`:
+                    # string content or input-style parts can't appear in a real
+                    # ResponseOutputMessage, so convert the item exactly like the
+                    # untyped easy-input shape to keep the payloads identical.
+                    flush_assistant_message()
+                    typed_easy_asst: ChatCompletionAssistantMessageParam = {
+                        "role": "assistant",
+                        "content": cls.extract_text_content(contents),
+                    }
+                    result.append(typed_easy_asst)
+                    continue
+
                 # A reasoning item can be followed by an assistant message and then tool calls
                 # in the same turn, so preserve pending reasoning_content across this flush.
                 flush_assistant_message(clear_pending_reasoning_content=False)
                 new_asst = ChatCompletionAssistantMessageParam(role="assistant")
-                contents = resp_msg["content"]
 
                 text_segments = []
-                if isinstance(contents, str):
-                    # EasyInputMessageParam allows `role: "assistant"` with string content
-                    # and an explicit `type: "message"`; treat it like the untyped
-                    # easy-input shape.
-                    if contents:
-                        text_segments.append(contents)
-                    contents = []
                 for c in contents:
                     if c["type"] == "output_text":
-                        text_segments.append(c["text"])
-                    elif c["type"] == "input_text":
-                        # Easy input assistant messages carry input-style text parts.
                         text_segments.append(c["text"])
                     elif c["type"] == "refusal":
                         new_asst["refusal"] = c["refusal"]
