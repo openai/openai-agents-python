@@ -754,3 +754,35 @@ def test_assistant_messages_in_history():
     assert messages[1]["content"] == "Hello?"
     assert messages[2]["role"] == "user"
     assert messages[2]["content"] == "What was my Name?"
+
+
+def test_assistant_easy_input_message_optional_keys():
+    """EasyInputMessageParam allows optional `type` and `phase` keys and an
+    input-style content list on assistant messages; all variants should convert
+    like the bare {role, content} shape rather than crashing.
+    """
+    items: list = [
+        {"role": "assistant", "content": "hello", "type": "message"},
+        {"role": "assistant", "content": "hello", "phase": "final_answer"},
+        {
+            "role": "assistant",
+            "content": "hello",
+            "type": "message",
+            "phase": "final_answer",
+        },
+        {
+            "role": "assistant",
+            "content": [{"type": "input_text", "text": "hello"}],
+            "type": "message",
+        },
+    ]
+    for item in items:
+        messages = Converter.items_to_messages([item])
+        assert messages == [{"role": "assistant", "content": "hello"}], item
+
+
+def test_easy_input_message_rejects_unknown_extra_keys():
+    with pytest.raises(UserError):
+        Converter.items_to_messages(
+            [{"role": "assistant", "content": "hello", "unexpected_key": True}]
+        )

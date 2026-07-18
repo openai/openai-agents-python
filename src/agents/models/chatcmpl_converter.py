@@ -243,9 +243,10 @@ class Converter:
         if not isinstance(item, dict):
             return None
 
-        keys = item.keys()
-        # EasyInputMessageParam only has these two keys
-        if keys != {"content", "role"}:
+        keys = set(item.keys())
+        # EasyInputMessageParam requires content/role; assistant messages may also
+        # carry an optional `phase` label.
+        if not {"content", "role"} <= keys or keys - {"content", "role", "phase"}:
             return None
 
         role = item.get("role", None)
@@ -640,8 +641,18 @@ class Converter:
                 contents = resp_msg["content"]
 
                 text_segments = []
+                if isinstance(contents, str):
+                    # EasyInputMessageParam allows `role: "assistant"` with string content
+                    # and an explicit `type: "message"`; treat it like the untyped
+                    # easy-input shape.
+                    if contents:
+                        text_segments.append(contents)
+                    contents = []
                 for c in contents:
                     if c["type"] == "output_text":
+                        text_segments.append(c["text"])
+                    elif c["type"] == "input_text":
+                        # Easy input assistant messages carry input-style text parts.
                         text_segments.append(c["text"])
                     elif c["type"] == "refusal":
                         new_asst["refusal"] = c["refusal"]
