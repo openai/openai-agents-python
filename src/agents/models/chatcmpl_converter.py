@@ -246,9 +246,11 @@ class Converter:
         keys = set(item)
         if not {"content", "role"} <= keys:
             return None
-        if not keys <= {"content", "role", "type"}:
+        if not keys <= {"content", "role", "type", "phase"}:
             return None
         if "type" in item and item["type"] != "message":
+            return None
+        if item.get("phase") not in (None, "commentary", "final_answer"):
             return None
 
         role = item.get("role", None)

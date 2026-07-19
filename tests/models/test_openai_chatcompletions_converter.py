@@ -200,15 +200,26 @@ def test_items_to_messages_with_easy_input_message():
         [{"type": "input_text", "text": "hello"}],
     ],
 )
-def test_typed_easy_input_assistant_message_matches_untyped_shape(content: Any):
-    """The optional message discriminator must not change easy-input conversion."""
+@pytest.mark.parametrize(
+    "optional_keys",
+    [
+        {"type": "message"},
+        {"phase": "commentary"},
+        {"type": "message", "phase": "final_answer"},
+    ],
+)
+def test_easy_input_assistant_optional_keys_match_bare_shape(
+    content: Any,
+    optional_keys: dict[str, Any],
+):
+    """Optional message fields must not change easy-input conversion."""
     untyped = cast(TResponseInputItem, {"role": "assistant", "content": content})
-    typed = cast(
+    extended = cast(
         TResponseInputItem,
-        {"role": "assistant", "content": content, "type": "message"},
+        {"role": "assistant", "content": content, **optional_keys},
     )
 
-    assert Converter.items_to_messages([typed]) == Converter.items_to_messages([untyped])
+    assert Converter.items_to_messages([extended]) == Converter.items_to_messages([untyped])
 
 
 def test_items_to_messages_accepts_raw_chat_completions_user_content_parts():
