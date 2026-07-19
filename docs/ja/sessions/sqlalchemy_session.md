@@ -4,11 +4,11 @@ search:
 ---
 # SQLAlchemy セッション
 
-`SQLAlchemySession` は SQLAlchemy を使用して、本番環境に対応したセッション実装を提供します。これにより、セッションストレージとして SQLAlchemy がサポートする任意のデータベース (PostgreSQL、MySQL、SQLite など) を使用できます。
+`SQLAlchemySession` は SQLAlchemy を使用して、本番環境に対応したセッション実装を提供します。これにより、SQLAlchemy がサポートする任意のデータベース（PostgreSQL、MySQL、SQLite など）をセッションストレージとして使用できます。
 
 ## インストール
 
-SQLAlchemy セッションには `sqlalchemy` extra が必要です:
+SQLAlchemy セッションには、`sqlalchemy` extra が必要です。
 
 ```bash
 pip install openai-agents[sqlalchemy]
@@ -18,7 +18,7 @@ pip install openai-agents[sqlalchemy]
 
 ### データベース URL の使用
 
-始めるための最も簡単な方法です:
+最も簡単に使い始める方法は次のとおりです。
 
 ```python
 import asyncio
@@ -44,7 +44,7 @@ if __name__ == "__main__":
 
 ### 既存エンジンの使用
 
-既存の SQLAlchemy エンジンを持つアプリケーション向けです:
+既存の SQLAlchemy エンジンを使用するアプリケーションの場合は、次のようにします。
 
 ```python
 import asyncio
@@ -72,6 +72,23 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 ```
+
+## 非 ASCII テキストの保存
+
+デフォルトでは、`SQLAlchemySession` はセッション項目を JSON にシリアライズする際に、非 ASCII 文字をエスケープします。これにより、項目の読み込み時に元のテキストへ復元できる状態を維持しながら、従来の保存形式が保持されます。
+
+保存される JSON 内で多言語テキストを読みやすい状態に保つには、`ensure_ascii=False` を設定します。
+
+```python
+session = SQLAlchemySession.from_url(
+    "user-123",
+    url="sqlite+aiosqlite:///conversations.db",
+    create_tables=True,
+    ensure_ascii=False,
+)
+```
+
+既存のエンジンを使用する場合は、同じオプションを `SQLAlchemySession(...)` に直接渡すこともできます。この設定で変更されるのは、データベースに保存される JSON 表現のみです。セッションメソッドが返す値は変更されません。
 
 
 ## API リファレンス

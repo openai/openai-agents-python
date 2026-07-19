@@ -40,6 +40,8 @@ class FuncSchema:
     strict_json_schema: bool = True
     """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
     as it increases the likelihood of correct JSON input."""
+    return_annotation: Any = inspect.Signature.empty
+    """The resolved return annotation, including `Annotated` metadata when present."""
 
     def to_call_args(self, data: BaseModel) -> tuple[list[Any], dict[str, Any]]:
         """
@@ -145,6 +147,58 @@ def _suppress_griffe_logging():
         logger.setLevel(previous_level)
 
 
+# Aliases of the Google-style parameter section header ("Args:") — the only section kind
+# that generate_func_documentation below consumes for parameter descriptions. A header only
+# counts when the whole line is exactly ``Header:`` (griffe anchors these at column 0), so
+# inline mentions such as "see Args: below" never match.
+_GOOGLE_SECTION_HEADER_RE = re.compile(
+    r"^(args|arguments|params|parameters):\s*$",
+    re.IGNORECASE,
+)
+
+
+def _ensure_blank_line_before_google_sections(doc: str) -> str:
+    """Insert a blank line before a Google-style parameter section header (``Args:`` or an
+    alias) that directly follows a non-blank line, such as a summary line or the indented body
+    of a preceding section.
+
+    griffe's Google parser silently skips a section header when there is no blank line above
+    it and the following line is indented (it logs "Missing blank line above section"). That
+    drops every parameter description and leaks the raw ``Args:`` block into the description.
+    griffe applies that gate no matter how the line above is indented, so a header that follows
+    another section's indented body (for example ``Note:`` or ``Example:``) needs the same
+    normalization as one that follows the summary. numpy/sphinx parsing already tolerates the
+    missing blank line, so this normalizes the Google case to match. Only the parameter section
+    is normalized because generate_func_documentation only consumes parameter sections (plus
+    the first text block); other griffe sections are intentionally left alone. The string is
+    returned unchanged when no insertion is needed, which keeps well-formed docstrings
+    byte-identical.
+    """
+    lines = doc.splitlines()
+    output: list[str] = []
+    inserted = False
+    for index, line in enumerate(lines):
+        if (
+            index > 0
+            and _GOOGLE_SECTION_HEADER_RE.match(line)
+            # Preceding line is non-blank, so griffe would skip the header. Its indentation does
+            # not matter, because the header itself is anchored at column 0 by the regex above.
+            and output
+            and output[-1].strip()
+            # Following line is an indented block, matching griffe's "indented line below" gate.
+            and index + 1 < len(lines)
+            and lines[index + 1].startswith((" ", "\t"))
+        ):
+            output.append("")
+            inserted = True
+        output.append(line)
+
+    if not inserted:
+        # Preserve the original object (splitlines/join would drop a trailing newline).
+        return doc
+    return "\n".join(output)
+
+
 def generate_func_documentation(
     func: Callable[..., Any], style: DocstringStyle | None = None
 ) -> FuncDocumentation:
@@ -165,8 +219,13 @@ def generate_func_documentation(
     if not doc:
         return FuncDocumentation(name=name, description=None, param_descriptions=None)
 
+    # Resolve the style against the original docstring before any normalization.
+    resolved_style = style or _detect_docstring_style(doc)
+    if resolved_style == "google":
+        doc = _ensure_blank_line_before_google_sections(doc)
+
     with _suppress_griffe_logging():
-        docstring = Docstring(doc, lineno=1, parser=style or _detect_docstring_style(doc))
+        docstring = Docstring(doc, lineno=1, parser=resolved_style)
         parsed = docstring.parse()
 
     description: str | None = next(
@@ -421,4 +480,5 @@ def function_schema(
         signature=sig,
         takes_context=takes_context,
         strict_json_schema=strict_json_schema,
+        return_annotation=type_hints_with_extras.get("return", sig.return_annotation),
     )

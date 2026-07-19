@@ -1,27 +1,36 @@
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+from openai.types.responses.response_computer_tool_call import (
+    ActionScreenshot,
+    ResponseComputerToolCall,
+)
 
 from agents import (
     Agent,
     ComputerProvider,
     ComputerTool,
+    RunConfig,
     RunContextWrapper,
+    RunHooks,
     Runner,
     dispose_resolved_computers,
     resolve_computer,
 )
 from agents.computer import Button, Computer, Environment
+from agents.models.openai_responses import Converter
 from tests.fake_model import FakeModel
 
 
 class FakeComputer(Computer):
-    def __init__(self, label: str = "computer") -> None:
+    def __init__(self, label: str = "computer", dimensions: tuple[int, int] = (1, 1)) -> None:
         self.label = label
+        self._dimensions = dimensions
 
     @property
     def environment(self) -> Environment:
@@ -29,7 +38,7 @@ class FakeComputer(Computer):
 
     @property
     def dimensions(self) -> tuple[int, int]:
-        return (1, 1)
+        return self._dimensions
 
     def screenshot(self) -> str:
         return "img"
@@ -130,6 +139,143 @@ async def test_runner_disposes_computer_after_run() -> None:
     create.assert_awaited_once()
     dispose.assert_awaited_once()
     dispose.assert_awaited_with(run_context=result.context_wrapper, computer=created)
+    resolved_tool = cast(ComputerTool[Any], model.last_turn_args["tools"][0])
+    assert resolved_tool is not tool
+    assert resolved_tool.computer is created
+
+
+@pytest.mark.asyncio
+async def test_runner_preserves_concrete_computer_tool_identity_for_hooks() -> None:
+    class IdentityHooks(RunHooks[Any]):
+        def __init__(self) -> None:
+            self.started: list[Any] = []
+            self.ended: list[Any] = []
+
+        async def on_tool_start(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
+        ) -> None:
+            self.started.append(tool)
+
+        async def on_tool_end(
+            self,
+            context: RunContextWrapper[Any],
+            agent: Agent[Any],
+            tool: Any,
+            result: object,
+        ) -> None:
+            self.ended.append(tool)
+
+    tool = ComputerTool(computer=FakeComputer("concrete"))
+    model = FakeModel(
+        initial_output=[
+            ResponseComputerToolCall(
+                id="computer-call",
+                type="computer_call",
+                action=ActionScreenshot(type="screenshot"),
+                call_id="computer-call",
+                pending_safety_checks=[],
+                status="completed",
+            )
+        ]
+    )
+    model.set_next_output([_make_message("done")])
+    agent = Agent(name="ComputerAgent", model=model, tools=[tool])
+    hooks = IdentityHooks()
+
+    result = await Runner.run(agent, "hello", hooks=hooks)
+
+    assert result.final_output == "done"
+    assert model.first_turn_args is not None
+    assert model.first_turn_args["tools"][0] is tool
+    assert hooks.started == [tool]
+    assert hooks.ended == [tool]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_runs_keep_computer_provider_instances_isolated() -> None:
+    created: list[FakeComputer] = []
+    disposed: list[FakeComputer] = []
+
+    async def create(*_: Any, **__: Any) -> FakeComputer:
+        computer = FakeComputer(
+            label=f"computer-{len(created) + 1}",
+            dimensions=(1001 + len(created), 700),
+        )
+        created.append(computer)
+        return computer
+
+    async def dispose(*_: Any, computer: FakeComputer, **__: Any) -> None:
+        disposed.append(computer)
+
+    entered_model = [asyncio.Event(), asyncio.Event()]
+    release_model = [asyncio.Event(), asyncio.Event()]
+    serialized_widths: list[int] = []
+
+    class GatedSerializationModel(FakeModel):
+        def __init__(self) -> None:
+            super().__init__(initial_output=[_make_message("done")])
+            self.set_next_output([_make_message("done")])
+            self.call_count = 0
+
+        async def get_response(
+            self,
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            *,
+            previous_response_id,
+            conversation_id,
+            prompt,
+        ):
+            call_index = self.call_count
+            self.call_count += 1
+            entered_model[call_index].set()
+            await release_model[call_index].wait()
+
+            converted = Converter.convert_tools(
+                tools=tools,
+                handoffs=handoffs,
+                model="computer-use-preview",
+            )
+            serialized_tool = cast(dict[str, Any], converted.tools[0])
+            serialized_widths.append(cast(int, serialized_tool["display_width"]))
+
+            return await super().get_response(
+                system_instructions,
+                input,
+                model_settings,
+                tools,
+                output_schema,
+                handoffs,
+                tracing,
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                prompt=prompt,
+            )
+
+    tool = ComputerTool(computer=ComputerProvider[FakeComputer](create=create, dispose=dispose))
+    agent = Agent(name="ComputerAgent", model=GatedSerializationModel(), tools=[tool])
+    run_config = RunConfig(tracing_disabled=True)
+
+    task_a = asyncio.create_task(Runner.run(agent, "run-a", run_config=run_config))
+    await entered_model[0].wait()
+    task_b = asyncio.create_task(Runner.run(agent, "run-b", run_config=run_config))
+    await entered_model[1].wait()
+
+    release_model[0].set()
+    result_a = await task_a
+    release_model[1].set()
+    result_b = await task_b
+
+    assert result_a.final_output == "done"
+    assert result_b.final_output == "done"
+    assert serialized_widths == [1001, 1002]
+    assert [computer.label for computer in created] == ["computer-1", "computer-2"]
+    assert disposed == created
 
 
 @pytest.mark.asyncio
@@ -168,3 +314,6 @@ async def test_streamed_run_disposes_computer_after_completion() -> None:
     create.assert_awaited_once()
     dispose.assert_awaited_once()
     dispose.assert_awaited_with(run_context=streamed_result.context_wrapper, computer=created)
+    resolved_tool = cast(ComputerTool[Any], model.last_turn_args["tools"][0])
+    assert resolved_tool is not tool
+    assert resolved_tool.computer is created

@@ -668,3 +668,11 @@ LiteLLM support is included on a best-effort, beta basis for cases where you nee
 If you need LiteLLM, install `openai-agents[litellm]`, then start from [`examples/model_providers/litellm_auto.py`](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/litellm_auto.py) or [`examples/model_providers/litellm_provider.py`](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/litellm_provider.py). You can use `litellm/...` model names or instantiate [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] directly.
 
 Some LiteLLM-backed providers do not populate SDK usage metrics by default. If you need usage reporting, pass `ModelSettings(include_usage=True)` and validate the exact provider backend you plan to deploy if you depend on structured outputs, tool calling, usage reporting, or adapter-specific routing behavior.
+
+If LiteLLM emits Pydantic serializer warnings for response objects, you can opt in to the SDK's compatibility patch before importing the LiteLLM adapter:
+
+```bash
+export OPENAI_AGENTS_ENABLE_LITELLM_SERIALIZER_PATCH=true
+```
+
+The patch is disabled by default and is enabled only for `1` or `true` values. It suppresses a specific class of LiteLLM response-serialization warnings by wrapping a private LiteLLM logging helper, so treat it as a targeted workaround rather than a general serialization setting. Because it depends on a private LiteLLM API, validate it again when upgrading LiteLLM and remove the environment variable when the upstream warning no longer occurs.

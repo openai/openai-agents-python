@@ -482,16 +482,17 @@ async def _query_runloop_network_policy(
         limit=10,
     )
     for policy in policies:
-        if getattr(policy, "name", None) != name:
+        policy_id = cast(str | None, getattr(policy, "id", None))
+        if policy_id is None:
             continue
-        info = cast(
-            Any, await client.platform.network_policies.get(cast(str, policy.id)).get_info()
-        )
+        info = cast(Any, await client.platform.network_policies.get(policy_id).get_info())
+        if getattr(info, "name", None) != name:
+            continue
         return RunloopResourceQueryResult(
             resource_type="network_policy",
             name=name,
             found=True,
-            id=cast(str | None, getattr(policy, "id", None)),
+            id=cast(str | None, getattr(info, "id", None)) or policy_id,
             description=cast(str | None, getattr(info, "description", None)),
         )
 
@@ -634,9 +635,23 @@ async def _bootstrap_persistent_resources(
             policy_result.action = "reused"
             policy_result.found_before_bootstrap = True
             refreshed_policy = await _query_runloop_network_policy(client, name=network_policy_name)
+            if not refreshed_policy.found or refreshed_policy.id is None:
+                raise RuntimeError(
+                    "Runloop reported a network policy conflict, but the existing policy "
+                    f"{network_policy_name!r} could not be resolved."
+                ) from exc
             policy_result.id = refreshed_policy.id
         else:
             policy_result.id = cast(str | None, getattr(created_policy, "id", None))
+            if policy_result.id is None:
+                refreshed_policy = await _query_runloop_network_policy(
+                    client, name=network_policy_name
+                )
+                policy_result.id = refreshed_policy.id
+    if policy_result.id is None:
+        raise RuntimeError(
+            f"Runloop network policy {network_policy_name!r} did not resolve to an ID."
+        )
     print(
         "persistent network policy bootstrap:",
         policy_result.model_dump(mode="json"),

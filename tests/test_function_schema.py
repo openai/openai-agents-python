@@ -6,9 +6,9 @@ import pytest
 from pydantic import BaseModel, Field, ValidationError
 from typing_extensions import TypedDict
 
-from agents import RunContextWrapper
+from agents import RunContextWrapper, function_tool
 from agents.exceptions import UserError
-from agents.function_schema import function_schema
+from agents.function_schema import function_schema, generate_func_documentation
 
 
 def no_args_function():
@@ -885,3 +885,126 @@ def test_function_with_annotated_field_multiple_constraints():
 
     with pytest.raises(ValidationError):  # zero factor
         fs.params_pydantic_model(**{"score": 50, "factor": 0.0})
+
+
+def missing_blank_line_google_function(city: str, units: str):
+    """Get the weather for a city.
+    Args:
+        city: The city to get weather for.
+        units: Temperature units to use.
+    """
+    return f"{city} {units}"
+
+
+def blank_line_google_function(city: str, units: str):
+    """Get the weather for a city.
+
+    Args:
+        city: The city to get weather for.
+        units: Temperature units to use.
+    """
+    return f"{city} {units}"
+
+
+def test_google_docstring_missing_blank_line_before_args():
+    """A Google docstring whose summary is immediately followed by ``Args:`` (no blank line)
+    should still yield parameter descriptions and a clean function description."""
+    fs = function_schema(missing_blank_line_google_function, strict_json_schema=False)
+
+    properties = fs.params_json_schema.get("properties", {})
+    assert properties["city"]["description"] == "The city to get weather for."
+    assert properties["units"]["description"] == "Temperature units to use."
+
+    assert fs.description == "Get the weather for a city."
+    assert "Args:" not in (fs.description or "")
+
+
+def test_google_docstring_missing_blank_line_matches_blank_line_form():
+    """The missing-blank-line variant must produce the exact same schema as the well-formed
+    variant that includes the blank line."""
+    fixed = function_schema(missing_blank_line_google_function, strict_json_schema=False)
+    control = function_schema(blank_line_google_function, strict_json_schema=False)
+
+    assert fixed.description == control.description
+    assert fixed.params_json_schema["properties"] == control.params_json_schema["properties"]
+
+
+def test_google_docstring_blank_line_form_is_unchanged():
+    """Well-formed docstrings (with the blank line already present) must be parsed
+    byte-identically before and after the normalization: this guards against the helper
+    accidentally rewriting docstrings that do not need it."""
+    doc = generate_func_documentation(blank_line_google_function)
+    assert doc.description == "Get the weather for a city."
+    assert doc.param_descriptions == {
+        "city": "The city to get weather for.",
+        "units": "Temperature units to use.",
+    }
+
+
+def test_google_docstring_missing_blank_line_function_tool():
+    """End-to-end: a @function_tool-decorated function with the missing-blank-line docstring
+    must expose parameter descriptions and a clean tool description."""
+
+    @function_tool
+    def weather(city: str, units: str) -> str:
+        """Get the weather for a city.
+        Args:
+            city: The city to get weather for.
+            units: Temperature units to use.
+        """
+        return f"{city} {units}"
+
+    properties = weather.params_json_schema.get("properties", {})
+    assert properties["city"]["description"] == "The city to get weather for."
+    assert properties["units"]["description"] == "Temperature units to use."
+    assert "Args:" not in (weather.description or "")
+
+
+def section_body_before_args_google_function(city: str, units: str):
+    """Get the weather for a city.
+
+    Note:
+        Results are cached.
+    Args:
+        city: The city to get weather for.
+        units: Temperature units to use.
+    """
+    return f"{city} {units}"
+
+
+def section_body_before_args_blank_line_google_function(city: str, units: str):
+    """Get the weather for a city.
+
+    Note:
+        Results are cached.
+
+    Args:
+        city: The city to get weather for.
+        units: Temperature units to use.
+    """
+    return f"{city} {units}"
+
+
+def test_google_docstring_missing_blank_line_after_section_body():
+    """A Google docstring whose ``Args:`` directly follows another section's indented body
+    (no blank line) should still yield parameter descriptions. griffe skips the header
+    whenever no blank line sits above it, regardless of how the preceding line is indented."""
+    fs = function_schema(section_body_before_args_google_function, strict_json_schema=False)
+
+    properties = fs.params_json_schema.get("properties", {})
+    assert properties["city"]["description"] == "The city to get weather for."
+    assert properties["units"]["description"] == "Temperature units to use."
+
+    assert "Args:" not in (fs.description or "")
+
+
+def test_google_docstring_after_section_body_matches_blank_line_form():
+    """The variant missing the blank line after a preceding section's body must produce the
+    exact same schema as the well-formed variant that includes it."""
+    fixed = function_schema(section_body_before_args_google_function, strict_json_schema=False)
+    control = function_schema(
+        section_body_before_args_blank_line_google_function, strict_json_schema=False
+    )
+
+    assert fixed.description == control.description
+    assert fixed.params_json_schema["properties"] == control.params_json_schema["properties"]

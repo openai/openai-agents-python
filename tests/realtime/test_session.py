@@ -2568,6 +2568,92 @@ class TestToolCallExecution:
         assert approval_event.call_id == tool_call_event.call_id
         assert approval_event.tool == mock_function_tool
 
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            '{"subject": "refund"',
+            "null",
+            "[]",
+            '{"amount": NaN}',
+            '{"amount": Infinity}',
+            '{"amount": -Infinity}',
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_callable_function_approval_fails_closed_for_invalid_arguments(
+        self, mock_model, arguments: str
+    ) -> None:
+        approval_inputs: list[dict[str, Any]] = []
+        tool_inputs: list[str] = []
+
+        async def needs_approval(_ctx: Any, params: dict[str, Any], _call_id: str) -> bool:
+            approval_inputs.append(params)
+            return False
+
+        async def invoke_tool(_ctx: ToolContext[Any], raw_arguments: str) -> str:
+            tool_inputs.append(raw_arguments)
+            return "sent"
+
+        tool = FunctionTool(
+            name="send_email",
+            description="Send an email.",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=invoke_tool,
+            needs_approval=needs_approval,
+        )
+        agent = RealtimeAgent(name="agent", tools=[tool])
+        session = RealtimeSession(mock_model, agent, None, run_config={"async_tool_calls": False})
+        tool_call_event = RealtimeModelToolCallEvent(
+            name=tool.name,
+            call_id="call-invalid",
+            arguments=arguments,
+        )
+
+        await session._handle_tool_call(tool_call_event)
+
+        assert tool_call_event.call_id in session._pending_tool_calls
+        assert approval_inputs == []
+        assert tool_inputs == []
+        approval_event = await session._event_queue.get()
+        assert isinstance(approval_event, RealtimeToolApprovalRequired)
+
+    @pytest.mark.asyncio
+    async def test_callable_function_approval_receives_valid_object_arguments(
+        self, mock_model
+    ) -> None:
+        approval_inputs: list[dict[str, Any]] = []
+        tool_inputs: list[str] = []
+
+        async def needs_approval(_ctx: Any, params: dict[str, Any], _call_id: str) -> bool:
+            approval_inputs.append(params)
+            return False
+
+        async def invoke_tool(_ctx: ToolContext[Any], raw_arguments: str) -> str:
+            tool_inputs.append(raw_arguments)
+            return "sent"
+
+        tool = FunctionTool(
+            name="send_email",
+            description="Send an email.",
+            params_json_schema={"type": "object", "properties": {"subject": {"type": "string"}}},
+            on_invoke_tool=invoke_tool,
+            needs_approval=needs_approval,
+        )
+        agent = RealtimeAgent(name="agent", tools=[tool])
+        session = RealtimeSession(mock_model, agent, None, run_config={"async_tool_calls": False})
+        arguments = '{"subject": "status update"}'
+        tool_call_event = RealtimeModelToolCallEvent(
+            name=tool.name,
+            call_id="call-valid",
+            arguments=arguments,
+        )
+
+        await session._handle_tool_call(tool_call_event)
+
+        assert approval_inputs == [{"subject": "status update"}]
+        assert tool_inputs == [arguments]
+        assert tool_call_event.call_id not in session._pending_tool_calls
+
     @pytest.mark.asyncio
     async def test_tool_input_guardrail_rejects_before_realtime_function_execution(
         self, mock_model

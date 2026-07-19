@@ -171,6 +171,30 @@ High-value session events include:
 
 The most useful events for UI state are usually `history_added` and `history_updated`. They expose the session's local history as `RealtimeItem` objects, including user messages, assistant messages, and tool calls.
 
+### Usage accounting
+
+When a completed model response includes usage, the OpenAI realtime model emits a [`RealtimeModelUsageEvent`][agents.realtime.model_events.RealtimeModelUsageEvent] inside a `raw_model_event`. Its `usage` field contains the token counts for that response, while `input_tokens_details` and `output_tokens_details` provide optional modality breakdowns.
+
+The session also adds each response's usage to the shared [`RunContextWrapper.usage`][agents.run_context.RunContextWrapper.usage]. Read it from `event.info.context.usage` on a subsequent high-level event such as `agent_end` to inspect cumulative usage for the live session.
+
+```python
+from agents.realtime import RealtimeModelUsageEvent
+
+async for event in session:
+    if event.type == "raw_model_event" and isinstance(
+        event.data, RealtimeModelUsageEvent
+    ):
+        response_usage = event.data.usage
+        print("Response tokens:", response_usage.total_tokens)
+        print("Input modalities:", event.data.input_tokens_details)
+        print("Output modalities:", event.data.output_tokens_details)
+    elif event.type == "agent_end":
+        session_usage = event.info.context.usage
+        print("Session tokens:", session_usage.total_tokens)
+```
+
+Usage is reported only when the model provider includes it in the completed response. The cumulative value covers responses received by that `RealtimeSession`; it is not a cross-session total.
+
 ### Interruptions and playback tracking
 
 When the user interrupts the assistant, the session emits `audio_interrupted` and updates history so the server-side conversation stays aligned with what the user actually heard.

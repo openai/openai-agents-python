@@ -45,7 +45,7 @@ The most common properties of an agent are:
 | `reset_tool_choice` | no | Reset `tool_choice` after a tool call (default: `True`) to avoid tool-use loops. See [Forcing tool use](#forcing-tool-use). |
 
 ```python
-from agents import Agent, ModelSettings, function_tool
+from agents import Agent, function_tool
 
 @function_tool
 def get_weather(city: str) -> str:
@@ -128,14 +128,21 @@ Agents are generic on their `context` type. Context is a dependency-injection to
 Read the [context guide](context.md) for the full `RunContextWrapper` surface, shared usage tracking, nested `tool_input`, and serialization caveats.
 
 ```python
+from dataclasses import dataclass
+
+@dataclass
+class Purchase:
+    id: str
+
 @dataclass
 class UserContext:
     name: str
     uid: str
     is_pro_user: bool
 
-    async def fetch_purchases() -> list[Purchase]:
-        return ...
+    async def fetch_purchases(self) -> list[Purchase]:
+        # implement your logic here
+        return []
 
 agent = Agent[UserContext](
     ...,

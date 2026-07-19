@@ -6,7 +6,8 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from tests.testing_processor import fetch_events
+from agents import trace
+from tests.testing_processor import fetch_events, fetch_span_errors
 
 try:
     from agents.voice import (
@@ -80,6 +81,45 @@ async def test_streamed_audio_result_preserves_cross_chunk_sample_boundaries() -
             break
 
     assert audio_chunks == [np.array([1], dtype=np.int16).tobytes()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("trace_include_sensitive_data", "expected_error"),
+    [
+        (False, "Error details are redacted."),
+        (True, "sensitive-tts-error"),
+    ],
+)
+async def test_streamed_audio_error_respects_sensitive_data_setting(
+    trace_include_sensitive_data: bool,
+    expected_error: str,
+) -> None:
+    class FailingTTS(FakeTTS):
+        async def run(self, text: str, settings: TTSModelSettings):
+            del text, settings
+            raise RuntimeError("sensitive-tts-error")
+            yield b""  # pragma: no cover
+
+    result = StreamedAudioResult(
+        FailingTTS(),
+        TTSModelSettings(),
+        VoicePipelineConfig(trace_include_sensitive_data=trace_include_sensitive_data),
+    )
+    local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
+
+    with trace("tts-error"):
+        with pytest.raises(RuntimeError, match="sensitive-tts-error"):
+            await result._stream_audio("sensitive input", local_queue)
+
+    assert fetch_span_errors("speech") == [
+        {
+            "message": expected_error,
+            "data": {
+                "text": "sensitive input" if trace_include_sensitive_data else "",
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio

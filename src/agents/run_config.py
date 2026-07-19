@@ -234,9 +234,10 @@ class RunConfig:
     """
 
     nest_handoff_history: bool = False
-    """Opt-in beta: wrap prior run history in a single assistant message before handing off when no
-    custom input filter is set. This is disabled by default while we stabilize nested handoffs; set
-    to True to enable the collapsed transcript behavior. Server-managed conversations
+    """Opt-in beta: compact prior run history into ordered assistant summary segments while
+    preserving lossless message items in their original positions. This is disabled by default
+    while we stabilize nested handoffs; set to True to enable the compacted transcript behavior.
+    Server-managed conversations
     (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`) automatically
     disable this behavior with a warning.
     """
@@ -244,7 +245,8 @@ class RunConfig:
     handoff_history_mapper: HandoffHistoryMapper | None = None
     """Optional function that receives the normalized transcript (history + handoff items) and
     returns the input history that should be passed to the next agent. When left as `None`, the
-    runner collapses the transcript into a single assistant message. This function only runs when
+    runner uses ordered summary segments around lossless message items. When supplied, the
+    function's return value is used as the exact input history. This function only runs when
     `nest_handoff_history` is True.
     """
 

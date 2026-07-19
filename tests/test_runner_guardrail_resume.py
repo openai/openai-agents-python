@@ -126,8 +126,10 @@ async def test_runner_resume_preserves_guardrail_results(monkeypatch: pytest.Mon
     async def fake_get_all_tools(*_: object, **__: object) -> list[object]:
         return []
 
-    async def fake_initialize_computer_tools(*_: object, **__: object) -> None:
-        return None
+    async def fake_initialize_computer_tools(
+        *args: object, tools: list[object], **kwargs: object
+    ) -> list[object]:
+        return tools
 
     monkeypatch.setattr(run_module, "run_single_turn", fake_run_single_turn)
     monkeypatch.setattr(run_module, "run_output_guardrails", fake_run_output_guardrails)

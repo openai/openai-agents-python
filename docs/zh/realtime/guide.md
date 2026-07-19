@@ -4,48 +4,48 @@ search:
 ---
 # 实时智能体指南
 
-本指南说明OpenAI Agents SDK的实时层如何映射到OpenAI Realtime API，以及 Python SDK 在其之上添加了哪些额外行为。
+本指南介绍 OpenAI Agents SDK的实时层如何映射到 OpenAI Realtime API，以及 Python SDK 在此基础上增加的行为。
 
 !!! note "从这里开始"
 
-    如果你想使用默认的 Python 路径，请先阅读[快速入门](quickstart.md)。如果你正在决定应用应使用服务端 WebSocket 还是 SIP，请阅读[实时传输](transport.md)。浏览器 WebRTC 传输不属于 Python SDK。
+    如果你希望使用默认的 Python 路径，请先阅读[快速入门](quickstart.md)。如果你正在确定应用应使用服务端 WebSocket 还是 SIP，请阅读[实时传输](transport.md)。浏览器 WebRTC 传输不属于 Python SDK。
 
-## 概览
+## 概述
 
-实时智能体会与Realtime API保持一个长连接，以便模型可以增量处理文本和音频、流式传输音频输出、调用工具，并处理中断，而无需在每一轮都重新发起请求。
+实时智能体会与 Realtime API 保持长期连接，使模型能够增量处理文本和音频、以流式传输方式输出音频、调用工具并处理中断，而无需在每轮对话时重新发起请求。
 
-主要 SDK 组件包括：
+SDK 的主要组件包括：
 
--   **RealtimeAgent**：一个实时专家智能体的 instructions、tools、输出安全防护措施和任务转移
--   **RealtimeRunner**：会话工厂，用于将起始智能体连接到实时传输
--   **RealtimeSession**：实时会话，用于发送输入、接收事件、跟踪历史记录并执行工具
--   **RealtimeModel**：传输抽象层。默认使用OpenAI的服务端 WebSocket 实现。
+-   **RealtimeAgent**：单个实时专家智能体的指令、工具、输出安全防护措施和任务转移
+-   **RealtimeRunner**：将起始智能体连接到实时传输层的会话工厂
+-   **RealtimeSession**：用于发送输入、接收事件、追踪历史记录和执行工具的实时会话
+-   **RealtimeModel**：传输抽象。默认实现是 OpenAI的服务端 WebSocket。
 
 ## 会话生命周期
 
-典型的实时会话如下：
+典型的实时会话流程如下：
 
 1. 创建一个或多个 `RealtimeAgent`。
-2. 使用起始智能体创建一个 `RealtimeRunner`。
-3. 调用 `await runner.run()` 获取一个 `RealtimeSession`。
+2. 使用起始智能体创建 `RealtimeRunner`。
+3. 调用 `await runner.run()` 获取 `RealtimeSession`。
 4. 使用 `async with session:` 或 `await session.enter()` 进入会话。
 5. 使用 `send_message()` 或 `send_audio()` 发送用户输入。
-6. 迭代会话事件，直到对话结束。
+6. 迭代处理会话事件，直到对话结束。
 
-与纯文本运行不同，`runner.run()` 不会立即生成最终结果。它会返回一个实时会话对象，该对象会将本地历史记录、后台工具执行、安全防护措施状态以及活动智能体配置与传输层保持同步。
+与纯文本运行不同，`runner.run()` 不会立即生成最终结果。它会返回一个实时会话对象，使本地历史记录、后台工具执行、安全防护措施状态和当前智能体配置与传输层保持同步。
 
-默认情况下，`RealtimeRunner` 使用 `OpenAIRealtimeWebSocketModel`，因此默认的 Python 路径是到Realtime API的服务端 WebSocket 连接。如果你传入不同的 `RealtimeModel`，相同的会话生命周期和智能体功能仍然适用，而连接机制可以发生变化。
+默认情况下，`RealtimeRunner` 使用 `OpenAIRealtimeWebSocketModel`，因此默认的 Python 路径是通过服务端 WebSocket 连接到 Realtime API。如果传入其他 `RealtimeModel`，仍会使用相同的会话生命周期和智能体功能，但连接机制可以有所不同。
 
-## 智能体和会话配置
+## 智能体与会话配置
 
-`RealtimeAgent` 的范围有意比常规 `Agent` 类型更窄：
+`RealtimeAgent` 的设计范围有意比常规 `Agent` 类型更窄：
 
--   模型选择在会话层级配置，而不是按智能体配置。
--   不支持structured outputs。
--   可以配置音色，但在会话已经生成过语音音频后就不能再更改。
--   instructions、工具调用、任务转移、钩子和输出安全防护措施仍然都可用。
+-   模型选择在会话级别配置，而不是为每个智能体单独配置。
+-   不支持 structured outputs。
+-   可以配置语音，但会话生成口语音频后便无法更改。
+-   指令、工具调用、任务转移、钩子和输出安全防护措施仍然可用。
 
-`RealtimeSessionModelSettings` 同时支持较新的嵌套式 `audio` 配置和较旧的扁平别名。新代码建议优先使用嵌套形式，并为新的实时智能体从 `gpt-realtime-2.1` 开始：
+`RealtimeSessionModelSettings` 同时支持较新的嵌套 `audio` 配置和旧版扁平别名。新代码应优先使用嵌套结构，并为新的实时智能体从 `gpt-realtime-2.1` 开始：
 
 ```python
 runner = RealtimeRunner(
@@ -67,19 +67,19 @@ runner = RealtimeRunner(
 )
 ```
 
-有用的会话级设置包括：
+常用的会话级设置包括：
 
--   `audio.input.format`、`audio.output.format`
+-   `audio.input.format`, `audio.output.format`
 -   `audio.input.transcription`
 -   `audio.input.noise_reduction`
 -   `audio.input.turn_detection`
--   `audio.output.voice`、`audio.output.speed`
+-   `audio.output.voice`, `audio.output.speed`
 -   `output_modalities`
 -   `tool_choice`
 -   `prompt`
 -   `tracing`
 
-`RealtimeRunner(config=...)` 上有用的运行级设置包括：
+`RealtimeRunner(config=...)` 中常用的运行级设置包括：
 
 -   `async_tool_calls`
 -   `output_guardrails`
@@ -91,7 +91,7 @@ runner = RealtimeRunner(
 
 ## 输入与输出
 
-### 文本和结构化用户消息
+### 文本与结构化用户消息
 
 使用 [`session.send_message()`][agents.realtime.session.RealtimeSession.send_message] 发送纯文本或结构化实时消息。
 
@@ -111,31 +111,31 @@ message: RealtimeUserInputMessage = {
 await session.send_message(message)
 ```
 
-结构化消息是在实时对话中包含图像输入的主要方式。[`examples/realtime/app/server.py`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/app/server.py) 中的示例 Web 演示就是以这种方式转发 `input_image` 消息。
+结构化消息是在实时对话中包含图像输入的主要方式。[`examples/realtime/app/server.py`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/app/server.py) 中的 Web 演示示例以这种方式转发 `input_image` 消息。
 
 ### 音频输入
 
-使用 [`session.send_audio()`][agents.realtime.session.RealtimeSession.send_audio] 流式传输原始音频字节：
+使用 [`session.send_audio()`][agents.realtime.session.RealtimeSession.send_audio] 以流式传输方式发送原始音频字节：
 
 ```python
 await session.send_audio(audio_bytes)
 ```
 
-如果禁用了服务端轮次检测，你需要自行标记轮次边界。高层便捷方法是：
+如果禁用了服务端轮次检测，你需要负责标记轮次边界。高级便捷用法如下：
 
 ```python
 await session.send_audio(audio_bytes, commit=True)
 ```
 
-如果需要更低层级的控制，也可以通过底层模型传输发送原始客户端事件，例如 `input_audio_buffer.commit`。
+如果需要更底层的控制，也可以通过底层模型传输层发送原始客户端事件，例如 `input_audio_buffer.commit`。
 
 ### 手动响应控制
 
-`session.send_message()` 使用高层路径发送用户输入，并为你启动响应。原始音频缓冲并**不会**在所有配置中自动执行同样操作。
+`session.send_message()` 使用高级路径发送用户输入，并为你启动响应。原始音频缓冲在所有配置下**并不会**自动执行相同操作。
 
-在Realtime API层面，手动轮次控制意味着用原始 `session.update` 清除 `turn_detection`，然后自行发送 `input_audio_buffer.commit` 和 `response.create`。
+在 Realtime API 层面，手动轮次控制意味着使用原始 `session.update` 清除 `turn_detection`，然后自行发送 `input_audio_buffer.commit` 和 `response.create`。
 
-如果你正在手动管理轮次，可以通过模型传输发送原始客户端事件：
+如果你要手动管理轮次，可以通过模型传输层发送原始客户端事件：
 
 ```python
 from agents.realtime.model_inputs import RealtimeModelSendRawMessage
@@ -149,41 +149,65 @@ await session.model.send_event(
 )
 ```
 
-此模式适用于以下场景：
+此模式适用于以下情况：
 
--   `turn_detection` 已禁用，并且你想自行决定模型应在何时响应
--   你想在触发响应之前检查用户输入或对其进行门控
--   你需要为带外响应使用自定义提示词
+-   已禁用 `turn_detection`，且你希望自行决定模型何时响应
+-   希望在触发响应前检查或限制用户输入
+-   需要为带外响应使用自定义提示词
 
-[`examples/realtime/twilio_sip/server.py`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/twilio_sip/server.py) 中的 SIP 示例使用原始 `response.create` 来强制发送开场问候。
+[`examples/realtime/twilio_sip/server.py`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/twilio_sip/server.py) 中的 SIP 示例使用原始 `response.create` 强制发送开场问候语。
 
-## 事件、历史记录和中断
+## 事件、历史记录与中断
 
-`RealtimeSession` 会发出更高层级的 SDK 事件，同时在需要时仍会转发原始模型事件。
+`RealtimeSession` 会发出更高级的 SDK 事件，同时在需要时仍会转发原始模型事件。
 
 重要的会话事件包括：
 
--   `audio`、`audio_end`、`audio_interrupted`
--   `agent_start`、`agent_end`
--   `tool_start`、`tool_end`、`tool_approval_required`
+-   `audio`, `audio_end`, `audio_interrupted`
+-   `agent_start`, `agent_end`
+-   `tool_start`, `tool_end`, `tool_approval_required`
 -   `handoff`
--   `history_added`、`history_updated`
+-   `history_added`, `history_updated`
 -   `guardrail_tripped`
 -   `input_audio_timeout_triggered`
 -   `error`
 -   `raw_model_event`
 
-对 UI 状态最有用的事件通常是 `history_added` 和 `history_updated`。它们会以 `RealtimeItem` 对象形式公开会话的本地历史记录，包括用户消息、助手消息和工具调用。
+对 UI 状态最有用的事件通常是 `history_added` 和 `history_updated`。它们会以 `RealtimeItem` 对象形式公开会话的本地历史记录，其中包括用户消息、助手消息和工具调用。
 
-### 中断和播放跟踪
+### 用量统计
+
+当已完成的模型响应包含用量信息时，OpenAI实时模型会在 `raw_model_event` 中发出 [`RealtimeModelUsageEvent`][agents.realtime.model_events.RealtimeModelUsageEvent]。其 `usage` 字段包含该响应的 token 数量，而 `input_tokens_details` 和 `output_tokens_details` 提供可选的模态细分数据。
+
+会话还会将每个响应的用量添加到共享的 [`RunContextWrapper.usage`][agents.run_context.RunContextWrapper.usage] 中。可在后续的高级事件（例如 `agent_end`）中通过 `event.info.context.usage` 读取它，以查看实时会话的累计用量。
+
+```python
+from agents.realtime import RealtimeModelUsageEvent
+
+async for event in session:
+    if event.type == "raw_model_event" and isinstance(
+        event.data, RealtimeModelUsageEvent
+    ):
+        response_usage = event.data.usage
+        print("Response tokens:", response_usage.total_tokens)
+        print("Input modalities:", event.data.input_tokens_details)
+        print("Output modalities:", event.data.output_tokens_details)
+    elif event.type == "agent_end":
+        session_usage = event.info.context.usage
+        print("Session tokens:", session_usage.total_tokens)
+```
+
+仅当模型提供方在已完成的响应中包含用量信息时，才会报告用量。累计值涵盖该 `RealtimeSession` 收到的响应，并非跨会话总计。
+
+### 中断与播放追踪
 
 当用户打断助手时，会话会发出 `audio_interrupted` 并更新历史记录，使服务端对话与用户实际听到的内容保持一致。
 
-在低延迟本地播放中，默认播放跟踪器通常已经足够。在远程或延迟播放场景中，尤其是电话通信，请使用 [`RealtimePlaybackTracker`][agents.realtime.model.RealtimePlaybackTracker]，以便中断截断基于实际播放进度，而不是假设所有已生成音频都已经被听到。
+对于低延迟本地播放，默认播放追踪器通常已足够。在远程或延迟播放场景中，尤其是电话场景，应使用 [`RealtimePlaybackTracker`][agents.realtime.model.RealtimePlaybackTracker]，使中断截断基于实际播放进度，而不是假设所有已生成的音频都已播放给用户。
 
 [`examples/realtime/twilio/twilio_handler.py`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/twilio/twilio_handler.py) 中的 Twilio 示例展示了此模式。
 
-## 工具、审批、任务转移和安全防护措施
+## 工具、审批、任务转移与安全防护措施
 
 ### 工具调用
 
@@ -208,9 +232,9 @@ agent = RealtimeAgent(
 
 ### 工具审批
 
-工具调用可以要求在执行前获得人工审批。发生这种情况时，会话会发出 `tool_approval_required`，并暂停工具运行，直到你调用 `approve_tool_call()` 或 `reject_tool_call()`。
+工具调用可以要求在执行前进行人工审批。发生这种情况时，会话会发出 `tool_approval_required`，并暂停工具运行，直到你调用 `approve_tool_call()` 或 `reject_tool_call()`。
 
-如果该工具还具有输入安全防护措施，这些安全防护措施会在审批通过后、执行前立即运行。若要在发出审批事件之前运行它们，请使用 `RealtimeRunner(..., config={"tool_execution": {"pre_approval_tool_input_guardrails": True}})` 创建 runner。通过此预审批检查的调用，在审批后、执行前仍会再次检查。
+如果工具还具有输入安全防护措施，则这些安全防护措施会在审批后、执行前立即运行。若要在发出审批事件之前运行它们，请使用 `RealtimeRunner(..., config={"tool_execution": {"pre_approval_tool_input_guardrails": True}})` 创建运行器。通过该预审批检查的调用仍会在审批后、执行前再次接受检查。
 
 ```python
 async for event in session:
@@ -218,11 +242,11 @@ async for event in session:
         await session.approve_tool_call(event.call_id)
 ```
 
-有关具体的服务端审批循环，请参阅 [`examples/realtime/app/server.py`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/app/server.py)。人在环路文档也会在[人在环路](../human_in_the_loop.md)中回指此流程。
+有关具体的服务端审批循环，请参阅 [`examples/realtime/app/server.py`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/app/server.py)。[人工介入](../human_in_the_loop.md)文档也介绍了此流程。
 
 ### 任务转移
 
-实时任务转移让一个智能体可以将实时对话转移给另一位专家：
+实时任务转移允许一个智能体将实时对话转交给另一个专家智能体：
 
 ```python
 from agents.realtime import RealtimeAgent, realtime_handoff
@@ -244,11 +268,11 @@ main_agent = RealtimeAgent(
 )
 ```
 
-裸 `RealtimeAgent` 任务转移会被自动包装，而 `realtime_handoff(...)` 可用于自定义名称、描述、验证、回调和可用性。实时任务转移不支持常规任务转移的 `input_filter`。
+直接使用的 `RealtimeAgent` 任务转移会被自动封装，而 `realtime_handoff(...)` 允许你自定义名称、描述、验证、回调和可用性。实时任务转移**不**支持常规任务转移的 `input_filter`。
 
 ### 安全防护措施
 
-实时智能体支持针对智能体响应的输出安全防护措施，以及针对工具调用的输入安全防护措施。输出安全防护措施在经过防抖的转写累积文本上运行，而不是在每个部分 token 上运行，并且它们会发出 `guardrail_tripped`，而不是抛出异常。
+实时智能体支持对智能体响应使用输出安全防护措施，并支持对工具调用使用输入安全防护措施。输出安全防护措施基于经过防抖处理的转录文本累积结果运行，而不是针对每个部分 token 运行；触发时会发出 `guardrail_tripped`，而不是引发异常。
 
 ```python
 from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
@@ -268,13 +292,13 @@ agent = RealtimeAgent(
 )
 ```
 
-当实时输出安全防护措施触发时，会话会中断活动响应，强制执行 `response.cancel`，发出 `guardrail_tripped`，并发送一条后续用户消息，指明被触发的安全防护措施，以便模型生成替代响应。你的音频播放器仍应监听 `audio_interrupted` 并立即停止本地播放，因为安全防护措施是在经过防抖的转写文本上运行的，触发条件触发时可能已有部分音频被缓冲。
+当实时输出安全防护措施被触发时，会话会中断当前响应，强制执行 `response.cancel`，发出 `guardrail_tripped`，并发送一条后续用户消息，其中包含被触发的安全防护措施名称，以便模型生成替代响应。你的音频播放器仍应监听 `audio_interrupted` 并立即停止本地播放，因为安全防护措施基于经过防抖处理的转录文本运行，触发机制生效时可能已有部分音频进入缓冲区。
 
-## SIP 和电话通信
+## SIP 与电话
 
-Python SDK 通过 [`OpenAIRealtimeSIPModel`][agents.realtime.openai_realtime.OpenAIRealtimeSIPModel] 提供一等的 SIP 附加流程。
+Python SDK 通过 [`OpenAIRealtimeSIPModel`][agents.realtime.openai_realtime.OpenAIRealtimeSIPModel] 提供一流的 SIP 挂接流程。
 
-当呼叫通过 Realtime Calls API 到达，并且你想将智能体会话附加到生成的 `call_id` 时，请使用它：
+当呼叫通过 Realtime Calls API 到达，且你希望将智能体会话挂接到生成的 `call_id` 时，请使用此流程：
 
 ```python
 from agents.realtime import RealtimeRunner
@@ -291,18 +315,18 @@ async with await runner.run(
         ...
 ```
 
-如果你需要先接受呼叫，并希望接受载荷与从智能体派生出的会话配置相匹配，请使用 `OpenAIRealtimeSIPModel.build_initial_session_payload(...)`。完整流程展示在 [`examples/realtime/twilio_sip/server.py`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/twilio_sip/server.py) 中。
+如果需要先接听呼叫，并希望接听载荷与基于智能体生成的会话配置保持一致，请使用 `OpenAIRealtimeSIPModel.build_initial_session_payload(...)`。完整流程可参阅 [`examples/realtime/twilio_sip/server.py`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/twilio_sip/server.py)。
 
-## 低层访问和自定义端点
+## 底层访问与自定义端点
 
-你可以通过 `session.model` 访问底层传输对象。
+可以通过 `session.model` 访问底层传输对象。
 
-在以下情况下使用它：
+以下情况需要使用此对象：
 
--   通过 `session.model.add_listener(...)` 使用自定义监听器
--   使用原始客户端事件，例如 `response.create` 或 `session.update`
--   通过 `model_config` 处理自定义 `url`、`headers` 或 `api_key`
--   将 `call_id` 附加到现有实时通话
+-   通过 `session.model.add_listener(...)` 添加自定义监听器
+-   发送原始客户端事件，例如 `response.create` 或 `session.update`
+-   通过 `model_config` 自定义 `url`、`headers` 或 `api_key` 处理
+-   使用 `call_id` 挂接到现有实时呼叫
 
 `RealtimeModelConfig` 支持：
 
@@ -313,9 +337,9 @@ async with await runner.run(
 -   `playback_tracker`
 -   `call_id`
 
-本仓库随附的 `call_id` 示例是 SIP。更广泛的Realtime API也会在某些服务端控制流中使用 `call_id`，但这里没有将这些流程打包为 Python 代码示例。
+此代码仓库提供的 `call_id` 示例使用 SIP。更广泛的 Realtime API 也会在某些服务端控制流程中使用 `call_id`，但此处未将这些流程打包为 Python 示例。
 
-连接到Azure OpenAI时，请传入 GA Realtime 端点 URL 和显式 headers。例如：
+连接 Azure OpenAI 时，请传入正式发布版（GA）的 Realtime 端点 URL 和显式请求头。例如：
 
 ```python
 session = await runner.run(
@@ -337,12 +361,12 @@ session = await runner.run(
 )
 ```
 
-如果传入 `headers`，SDK 不会自动添加 `Authorization`。在实时智能体中避免使用旧版 beta 路径（`/openai/realtime?api-version=...`）。
+如果传入 `headers`，SDK 不会自动添加 `Authorization`。使用实时智能体时，应避免使用旧版 beta 路径（`/openai/realtime?api-version=...`）。
 
-## 更多阅读
+## 延伸阅读
 
 -   [实时传输](transport.md)
 -   [快速入门](quickstart.md)
--   [OpenAI Realtime 对话](https://developers.openai.com/api/docs/guides/realtime-conversations/)
--   [OpenAI Realtime 服务端控制](https://developers.openai.com/api/docs/guides/realtime-server-controls/)
+-   [OpenAI实时对话](https://developers.openai.com/api/docs/guides/realtime-conversations/)
+-   [OpenAI实时服务端控制](https://developers.openai.com/api/docs/guides/realtime-server-controls/)
 -   [`examples/realtime`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime)

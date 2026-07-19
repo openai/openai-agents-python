@@ -745,8 +745,8 @@ orchestrator = Agent(
 )
 
 async def main():
-    context = RunContextWrapper(LanguageContext(language_preference="french_spanish"))
-    result = await Runner.run(orchestrator, "How are you?", context=context.context)
+    context = LanguageContext(language_preference="french_spanish")
+    result = await Runner.run(orchestrator, "How are you?", context=context)
     print(result.final_output)
 
 asyncio.run(main())

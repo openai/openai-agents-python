@@ -31,6 +31,8 @@ The Agents SDK includes built-in tracing, collecting a comprehensive record of e
 By default, the SDK traces the following:
 
 -   The entire `Runner.{run, run_sync, run_streamed}()` is wrapped in a `trace()`.
+-   Each runner invocation is wrapped in a `task_span()`.
+-   Each model turn is wrapped in a `turn_span()`.
 -   Each time an agent runs, it is wrapped in `agent_span()`
 -   LLM generations are wrapped in `generation_span()`
 -   Function tool calls are each wrapped in `function_span()`
@@ -41,6 +43,18 @@ By default, the SDK traces the following:
 -   Related audio spans may be parented under a `speech_group_span()`
 
 By default, the trace is named "Agent workflow". You can set this name if you use `trace`, or you can configure the name and other properties with the [`RunConfig`][agents.run.RunConfig].
+
+If you want a more compact hierarchy, disable the automatic task and turn spans for a run. Agent, generation, function, guardrail, handoff, and custom spans are still recorded.
+
+```python
+from agents import RunConfig, Runner
+
+result = await Runner.run(
+    agent,
+    "Hello",
+    run_config=RunConfig(tracing={"include_task_and_turn_spans": False}),
+)
+```
 
 In addition, you can set up [custom trace processors](#custom-tracing-processors) to push traces to other destinations (as a replacement, or secondary destination).
 

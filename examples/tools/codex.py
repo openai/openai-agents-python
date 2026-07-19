@@ -64,9 +64,11 @@ async def on_codex_stream(payload: CodexToolStreamEvent) -> None:
     if isinstance(item, CommandExecutionItem):
         command = item.command
         output = item.aggregated_output
-        output_preview = output[-200:] if isinstance(output, str) else ""
+        output_tail = output[-200:] if isinstance(output, str) else ""
         status = item.status
-        log(f"codex command {event.type}: {command} | status={status} | output={output_preview}")
+        log(
+            f"codex command {event.type}: {command} | status={status} | output_tail={output_tail!r}"
+        )
         return
     if isinstance(item, McpToolCallItem):
         server = item.server

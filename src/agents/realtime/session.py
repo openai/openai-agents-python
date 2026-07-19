@@ -25,7 +25,7 @@ from ..run_context import RunContextWrapper, TContext
 from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, Tool, invoke_function_tool
 from ..tool_context import ToolContext
 from ..tool_guardrails import ToolInputGuardrailData
-from ..util._approvals import evaluate_needs_approval_setting
+from ..util._approvals import evaluate_needs_approval_setting, parse_function_tool_arguments
 from ._tool_filtering import filter_enabled_tools
 from ._tool_validation import validate_realtime_tool_names
 from .agent import RealtimeAgent
@@ -550,10 +550,10 @@ class RealtimeSession(RealtimeModelListener):
         needs_setting = getattr(function_tool, "needs_approval", False)
         parsed_args: dict[str, Any] = {}
         if callable(needs_setting):
-            try:
-                parsed_args = json.loads(tool_call.arguments or "{}")
-            except json.JSONDecodeError:
-                parsed_args = {}
+            parsed_args_result = parse_function_tool_arguments(tool_call.arguments)
+            if parsed_args_result is None:
+                return True
+            parsed_args = parsed_args_result
         return await evaluate_needs_approval_setting(
             needs_setting,
             self._context_wrapper,

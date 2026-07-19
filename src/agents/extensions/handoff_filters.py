@@ -105,6 +105,8 @@ def _remove_tool_types_from_input(
         "custom_tool_call",
         "custom_tool_call_output",
         "hosted_tool_call",
+        "program",
+        "program_output",
     ]
 
     filtered_items: list[TResponseInputItem] = []

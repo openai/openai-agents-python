@@ -88,7 +88,7 @@ class Converter:
         else:
             ensure_tool_choice_supports_backend(
                 tool_choice,
-                backend_name="OpenAI Responses models",
+                backend_name="Chat Completions-compatible models",
             )
             return {
                 "type": "function",
@@ -243,16 +243,18 @@ class Converter:
         if not isinstance(item, dict):
             return None
 
-        keys = item.keys()
-        # EasyInputMessageParam only has these two keys
-        if keys != {"content", "role"}:
+        keys = set(item)
+        if not {"content", "role"} <= keys:
+            return None
+        if not keys <= {"content", "role", "type", "phase"}:
+            return None
+        if "type" in item and item["type"] != "message":
+            return None
+        if item.get("phase") not in (None, "commentary", "final_answer"):
             return None
 
         role = item.get("role", None)
         if role not in ("user", "assistant", "system", "developer"):
-            return None
-
-        if "content" not in item:
             return None
 
         return cast(EasyInputMessageParam, item)
@@ -307,6 +309,7 @@ class Converter:
             isinstance(item, dict)
             and item.get("type") == "message"
             and item.get("role") == "assistant"
+            and {"id", "content"} <= set(item)
         ):
             return cast(ResponseOutputMessageParam, item)
         return None

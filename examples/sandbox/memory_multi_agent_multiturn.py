@@ -123,7 +123,9 @@ def _build_engineering_agent(*, model: str, manifest: Manifest) -> SandboxAgent:
         model=model,
         instructions=(
             "You are an engineer. Inspect files before editing, make minimal changes, and verify "
-            "with tests. Use a non-login POSIX shell for commands. Make one focused pytest attempt; "
+            "with tests. Use a non-login POSIX shell for commands. Keep searches inside the "
+            "workspace, and use `grep` or `find .` instead of `rg` or parent-directory searches. "
+            "Make one focused pytest attempt; "
             "if the local sandbox blocks Python or toolchain access, report that validation was "
             "blocked and finish instead of retrying repeatedly."
         ),

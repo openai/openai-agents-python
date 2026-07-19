@@ -271,6 +271,7 @@ class _FakeE2BAsyncCommandHandle:
 class _FakeE2BFiles:
     def __init__(self) -> None:
         self.make_dir_calls: list[tuple[str, float | None]] = []
+        self.make_dir_error: BaseException | None = None
 
     async def write(
         self,
@@ -285,6 +286,8 @@ class _FakeE2BFiles:
 
     async def make_dir(self, path: str, request_timeout: float | None = None) -> bool:
         self.make_dir_calls.append((path, request_timeout))
+        if self.make_dir_error is not None:
+            raise self.make_dir_error
         return True
 
     async def read(self, path: str, format: str = "bytes") -> bytes:
@@ -888,9 +891,17 @@ async def test_e2b_start_prepares_workspace_root_for_command_cwd() -> None:
     result = await session._exec_internal("pwd", timeout=0.01)  # noqa: SLF001
 
     assert result.ok()
+    assert sandbox.files.make_dir_calls == [("/workspace", 10)]
     assert session.state.workspace_root_ready is True
     assert session._workspace_root_ready is True  # noqa: SLF001
     assert _visible_command_calls(sandbox) == [
+        {
+            "command": "test -d /workspace",
+            "timeout": 10.0,
+            "cwd": None,
+            "envs": {},
+            "user": None,
+        },
         {
             "command": "mkdir -p -- /workspace",
             "timeout": 10,
@@ -906,6 +917,49 @@ async def test_e2b_start_prepares_workspace_root_for_command_cwd() -> None:
             "user": None,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_e2b_start_skips_files_api_when_workspace_root_exists() -> None:
+    session, sandbox = _session(workspace_root_ready=False)
+    sandbox.commands.exec_root_ready = True
+    sandbox.files.make_dir_error = TimeoutError("files API unavailable")
+
+    await session.start()
+
+    assert sandbox.files.make_dir_calls == []
+    assert session.state.workspace_root_ready is True
+    assert session._workspace_root_ready is True  # noqa: SLF001
+    assert _visible_command_calls(sandbox)[:2] == [
+        {
+            "command": "test -d /workspace",
+            "timeout": 10.0,
+            "cwd": None,
+            "envs": {},
+            "user": None,
+        },
+        {
+            "command": "mkdir -p -- /workspace",
+            "timeout": 10,
+            "cwd": "/",
+            "envs": {},
+            "user": None,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_e2b_mkdir_recreates_workspace_root_when_readiness_is_stale() -> None:
+    session, sandbox = _session(workspace_root_ready=False)
+    sandbox.commands.exec_root_ready = True
+
+    await session.start()
+    sandbox.commands.exec_root_ready = False
+    command_calls_before_recovery = list(sandbox.commands.calls)
+    await session.mkdir("/workspace", parents=True)
+
+    assert sandbox.files.make_dir_calls == [("/workspace", 10)]
+    assert sandbox.commands.calls == command_calls_before_recovery
 
 
 @pytest.mark.asyncio

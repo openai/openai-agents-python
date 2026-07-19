@@ -74,7 +74,7 @@ flowchart LR
 
 ## サンドボックスクライアントの選択
 
-ローカル開発では `UnixLocalSandboxClient` から始めてください。コンテナ分離やイメージの同等性が必要な場合は `DockerSandboxClient` に移行します。プロバイダー管理の実行が必要な場合は、ホステッドプロバイダーに移行します。
+macOS または Linux でのローカル開発には、`UnixLocalSandboxClient` から始めてください。Windows では、代わりに `DockerSandboxClient` またはホスト型プロバイダーを使用します。サポートされているどのプラットフォームでも、コンテナ分離やイメージの同等性が必要な場合は `DockerSandboxClient` に移行し、プロバイダー管理の実行が必要な場合はホスト型プロバイダーに移行してください。
 
 ほとんどの場合、`SandboxAgent` の定義はそのまま維持し、[`SandboxRunConfig`][agents.run_config.SandboxRunConfig] 内のサンドボックスクライアントとそのオプションのみを変更します。ローカル、Docker、ホステッド、リモートマウントのオプションについては、[サンドボックスクライアント](clients.md)を参照してください。
 

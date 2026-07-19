@@ -45,13 +45,15 @@ from openai.types.responses.response_output_item import (
     McpApprovalRequest,
     McpCall,
     McpListTools,
+    Program,
+    ProgramOutput,
 )
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from pydantic import BaseModel
 from typing_extensions import assert_never
 
 from ._tool_identity import FunctionToolLookupKey, get_function_tool_lookup_key, tool_trace_name
-from .exceptions import AgentsException, ModelBehaviorError
+from .exceptions import AgentsException, ModelBehaviorError, UserError
 from .logger import logger
 from .tool import (
     ToolOrigin,
@@ -60,6 +62,7 @@ from .tool import (
     ToolOutputText,
     ValidToolOutputPydanticModels,
     ValidToolOutputPydanticModelsTypeAdapter,
+    _is_programmatic_tool_call,
 )
 from .usage import Usage
 from .util._json import _to_dump_compatible
@@ -85,6 +88,7 @@ ToolSearchOutputRawItem: TypeAlias = ResponseToolSearchOutputItem | dict[str, An
 
 # Distinguish a missing dict entry from an explicit None value.
 _MISSING_ATTR_SENTINEL = object()
+_JSON_OUTPUT_ADAPTER = pydantic.TypeAdapter(Any)
 
 
 @dataclass
@@ -339,6 +343,7 @@ ToolCallItemTypes: TypeAlias = (
     | ResponseCodeInterpreterToolCall
     | ImageGenerationCall
     | LocalShellCall
+    | Program
     | dict[str, Any]
 )
 """A type that represents a tool call item."""
@@ -382,6 +387,7 @@ ToolCallOutputTypes: TypeAlias = (
     | ComputerCallOutput
     | LocalShellCallOutput
     | ResponseFunctionShellToolCallOutput
+    | ProgramOutput
     | dict[str, Any]
 )
 
@@ -785,7 +791,12 @@ class ItemHelpers:
 
     @classmethod
     def tool_call_output_item(
-        cls, tool_call: ResponseFunctionToolCall, output: Any
+        cls,
+        tool_call: ResponseFunctionToolCall,
+        output: Any,
+        *,
+        output_json_schema: dict[str, Any] | None = None,
+        output_type_adapter: pydantic.TypeAdapter[Any] | None = None,
     ) -> FunctionCallOutput:
         """Creates a tool call output item from a tool call and its output.
 
@@ -794,20 +805,108 @@ class ItemHelpers:
         provided as Pydantic models or dicts, or an iterable of such items.
         """
 
-        converted_output = cls._convert_tool_output(output)
+        converted_output: str | ResponseFunctionCallOutputItemListParam
+        if output_type_adapter is not None:
+            try:
+                validated_output = (
+                    output_type_adapter.validate_json(output)
+                    if isinstance(output, str)
+                    else output_type_adapter.validate_python(output)
+                )
+            except pydantic.ValidationError as error:
+                raise UserError(
+                    "Function tool output does not match its declared output schema."
+                ) from error
+            dumped_output = output_type_adapter.dump_python(
+                validated_output,
+                mode="json",
+                by_alias=True,
+            )
+            if not isinstance(dumped_output, Mapping):
+                raise UserError("Function tool output schema requires a JSON object.")
+            converted_output = json.dumps(
+                dict(dumped_output),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        elif output_json_schema is not None:
+            if isinstance(output, str):
+                try:
+                    dumped_output = json.loads(output)
+                except json.JSONDecodeError as error:
+                    raise UserError(
+                        "Function tool output schema requires a JSON object."
+                    ) from error
+            else:
+                dumped_output = _JSON_OUTPUT_ADAPTER.dump_python(output, mode="json")
+            if not isinstance(dumped_output, Mapping):
+                raise UserError("Function tool output schema requires a JSON object.")
+            converted_output = json.dumps(
+                dict(dumped_output),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        elif isinstance(output, str):
+            converted_output = output
+        elif _is_programmatic_tool_call(tool_call):
+            structured_output = cls._convert_tool_output_as_structured(output)
+            if structured_output is not None:
+                converted_output = structured_output
+            else:
+                try:
+                    converted_output = _JSON_OUTPUT_ADAPTER.dump_json(output).decode("utf-8")
+                except Exception as error:
+                    raise UserError(
+                        "Programmatic function tool outputs must be strings, structured tool "
+                        "outputs, or JSON-serializable values."
+                    ) from error
+        else:
+            converted_output = cls._convert_tool_output(output)
 
-        return {
+        output_item: FunctionCallOutput = {
             "call_id": tool_call.call_id,
             "output": converted_output,
             "type": "function_call_output",
         }
+        return cast(FunctionCallOutput, cls.copy_tool_call_caller(tool_call, output_item))
+
+    @classmethod
+    def copy_tool_call_caller(
+        cls,
+        tool_call: Any,
+        output_item: Any,
+    ) -> Any:
+        """Copy a program caller relationship from a tool call to its output item."""
+        caller = (
+            tool_call.get("caller")
+            if isinstance(tool_call, Mapping)
+            else getattr(tool_call, "caller", None)
+        )
+        if caller is not None:
+            model_dump = getattr(caller, "model_dump", None)
+            output_item["caller"] = (
+                model_dump(mode="json", exclude_none=True)
+                if callable(model_dump)
+                else _to_dump_compatible(caller)
+            )
+        return output_item
 
     @classmethod
     def _convert_tool_output(cls, output: Any) -> str | ResponseFunctionCallOutputItemListParam:
         """Converts a tool return value into an output acceptable by the Responses API."""
 
+        structured_output = cls._convert_tool_output_as_structured(output)
+        return structured_output if structured_output is not None else str(output)
+
+    @classmethod
+    def _convert_tool_output_as_structured(
+        cls,
+        output: Any,
+    ) -> ResponseFunctionCallOutputItemListParam | None:
+        """Convert known structured tool outputs without stringifying other values."""
+
         # If the output is either a single or list of the known structured output types, convert to
-        # ResponseFunctionCallOutputItemListParam. Else, just stringify.
+        # ResponseFunctionCallOutputItemListParam.
         if isinstance(output, list | tuple):
             maybe_converted_output_list = [
                 cls._maybe_get_output_as_structured_function_output(item) for item in output
@@ -821,14 +920,12 @@ class ItemHelpers:
                     for item in maybe_converted_output_list
                     if item is not None
                 ]
-            else:
-                return str(output)
-        else:
-            maybe_converted_output = cls._maybe_get_output_as_structured_function_output(output)
-            if maybe_converted_output:
-                return [cls._convert_single_tool_output_pydantic_model(maybe_converted_output)]
-            else:
-                return str(output)
+            return None
+
+        maybe_converted_output = cls._maybe_get_output_as_structured_function_output(output)
+        if maybe_converted_output:
+            return [cls._convert_single_tool_output_pydantic_model(maybe_converted_output)]
+        return None
 
     @classmethod
     def _maybe_get_output_as_structured_function_output(

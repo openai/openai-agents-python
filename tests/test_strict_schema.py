@@ -162,3 +162,28 @@ def test_chained_ref_with_sibling_keys_is_resolved():
     assert a_schema["type"] == "string"
     assert a_schema["description"] == "desc"
     assert "$ref" not in a_schema
+
+
+def test_ref_expansion_bomb_is_rejected():
+    # A $ref ladder where each level references the next twice expands exponentially
+    # (2**N nodes) when inlined. Strict conversion must reject it with a UserError
+    # instead of exhausting CPU and memory.
+    depth = 30
+    defs: dict[str, object] = {
+        f"L{i}": {
+            "type": "object",
+            "properties": {
+                "a": {"$ref": f"#/$defs/L{i + 1}", "title": "t"},
+                "b": {"$ref": f"#/$defs/L{i + 1}", "title": "t"},
+            },
+        }
+        for i in range(depth)
+    }
+    defs[f"L{depth}"] = {"type": "string"}
+    schema = {
+        "$defs": defs,
+        "type": "object",
+        "properties": {"root": {"$ref": "#/$defs/L0", "title": "t"}},
+    }
+    with pytest.raises(UserError):
+        ensure_strict_json_schema(schema)
