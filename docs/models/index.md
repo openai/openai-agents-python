@@ -322,7 +322,9 @@ You can integrate other LLM providers with these built-in paths:
 In cases where you do not have an API key from `platform.openai.com`, we recommend disabling tracing via `set_tracing_disabled()`, or setting up a [different tracing processor](../tracing.md).
 
 ``` python
-from agents import Agent, AsyncOpenAI, OpenAIChatCompletionsModel, set_tracing_disabled
+from openai import AsyncOpenAI
+
+from agents import Agent, OpenAIChatCompletionsModel, set_tracing_disabled
 
 set_tracing_disabled(disabled=True)
 
@@ -349,7 +351,9 @@ Within a single workflow, you may want to use different models for each agent. F
     While our SDK supports both the [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] and the [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] shapes, we recommend using a single model shape for each workflow because the two shapes support a different set of features and tools. If your workflow requires mixing and matching model shapes, make sure that all the features you're using are available on both.
 
 ```python
-from agents import Agent, Runner, AsyncOpenAI, OpenAIChatCompletionsModel
+from openai import AsyncOpenAI
+
+from agents import Agent, Runner, OpenAIChatCompletionsModel
 import asyncio
 
 spanish_agent = Agent(
