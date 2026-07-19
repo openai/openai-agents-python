@@ -91,7 +91,7 @@ from ..tool_guardrails import (
 )
 from ..tracing import Span, SpanError, function_span, get_current_trace
 from ..util import _coro, _error_tracing
-from ..util._approvals import evaluate_needs_approval_setting
+from ..util._approvals import evaluate_needs_approval_setting, parse_function_tool_arguments
 from ..util._custom_data import maybe_extract_custom_data, merge_custom_data
 from ..util._tool_errors import get_trace_tool_error
 from ..util._types import MaybeAwaitable
@@ -1211,10 +1211,10 @@ async def function_needs_approval(
     """Evaluate a function tool's needs_approval setting with parsed args."""
     parsed_args: dict[str, Any] = {}
     if callable(function_tool.needs_approval):
-        try:
-            parsed_args = json.loads(tool_call.arguments or "{}")
-        except json.JSONDecodeError:
-            parsed_args = {}
+        parsed_args_result = parse_function_tool_arguments(tool_call.arguments)
+        if parsed_args_result is None:
+            return True
+        parsed_args = parsed_args_result
     needs_approval = await evaluate_needs_approval_setting(
         function_tool.needs_approval,
         context_wrapper,

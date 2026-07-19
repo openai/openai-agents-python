@@ -47,6 +47,10 @@ from ..agent_output import AgentOutputSchemaBase
 from ..agent_tool_state import get_agent_tool_state_scope, peek_agent_tool_run_result
 from ..exceptions import ModelBehaviorError, ModelRefusalError, UserError
 from ..handoffs import Handoff, HandoffInputData, HandoffInputFilter, nest_handoff_history
+from ..handoffs.history import (
+    _get_nested_history_owned_items,
+    _nest_handoff_history_with_provenance,
+)
 from ..items import (
     CompactionItem,
     HandoffCallItem,
@@ -104,6 +108,7 @@ from .error_handlers import (
 )
 from .items import (
     REJECTION_MESSAGE,
+    NestedHistoryOwnedItem,
     apply_patch_rejection_item,
     function_rejection_item,
     shell_rejection_item,
@@ -160,6 +165,8 @@ from .tool_planning import (
     _make_unique_item_appender,
     _select_function_tool_runs_for_resume,
 )
+
+_DEFAULT_NEST_HANDOFF_HISTORY = nest_handoff_history
 
 __all__ = [
     "execute_final_output_step",
@@ -462,10 +469,22 @@ async def execute_handoffs(
 ) -> SingleStepResult:
     """Execute a handoff and prepare the next turn for the new agent."""
 
-    def nest_history(data: HandoffInputData, mapper: Any | None = None) -> HandoffInputData:
-        if nest_handoff_history_fn is None:
-            return nest_handoff_history(data, history_mapper=mapper)
-        return nest_handoff_history_fn(data, mapper)
+    def nest_history(
+        data: HandoffInputData,
+        mapper: Any | None = None,
+    ) -> tuple[HandoffInputData, list[NestedHistoryOwnedItem]]:
+        if (
+            nest_handoff_history_fn is None
+            and nest_handoff_history is _DEFAULT_NEST_HANDOFF_HISTORY
+        ):
+            nested, history_owned_items = _nest_handoff_history_with_provenance(
+                data,
+                history_mapper=mapper,
+            )
+            return nested, list(history_owned_items)
+        if nest_handoff_history_fn is not None:
+            return nest_handoff_history_fn(data, mapper), []
+        return nest_handoff_history(data, history_mapper=mapper), []
 
     multiple_handoffs = len(run_handoffs) > 1
     if multiple_handoffs:
@@ -548,6 +567,7 @@ async def execute_handoffs(
         )
         handoff_input_data: HandoffInputData | None = None
         session_step_items: list[RunItem] | None = None
+        nested_history_owned_items: list[NestedHistoryOwnedItem] | None = None
         if input_filter or should_nest_history:
             handoff_input_data = HandoffInputData(
                 input_history=tuple(original_input)
@@ -604,8 +624,14 @@ async def execute_handoffs(
                 new_step_items = list(filtered.input_items)
             else:
                 session_step_items = None
+            nested_history_owned_items = list(
+                _get_nested_history_owned_items(filtered, source_data=handoff_input_data)
+            )
         elif should_nest_history and handoff_input_data is not None:
-            nested = nest_history(handoff_input_data, run_config.handoff_history_mapper)
+            nested, nested_history_owned_items = nest_history(
+                handoff_input_data,
+                run_config.handoff_history_mapper,
+            )
             original_input = (
                 nested.input_history
                 if isinstance(nested.input_history, str)
@@ -632,6 +658,7 @@ async def execute_handoffs(
         tool_input_guardrail_results=list(tool_input_guardrail_results or []),
         tool_output_guardrail_results=list(tool_output_guardrail_results or []),
         session_step_items=session_step_items,
+        nested_history_owned_items=nested_history_owned_items,
     )
 
 
@@ -985,11 +1012,6 @@ async def resolve_interrupted_turn(
     execution_agent = bindings.execution_agent
 
     execute_handoffs_call = execute_handoffs
-
-    def nest_history(data: HandoffInputData, mapper: Any | None = None) -> HandoffInputData:
-        if nest_handoff_history_fn is None:
-            return nest_handoff_history(data, history_mapper=mapper)
-        return nest_handoff_history_fn(data, mapper)
 
     def _pending_approvals_from_state() -> list[ToolApprovalItem]:
         if (
@@ -1638,7 +1660,7 @@ async def resolve_interrupted_turn(
 
     executed_handoff_call_ids: set[str] = set()
     for item in original_pre_step_items:
-        if isinstance(item, HandoffCallItem):
+        if isinstance(item, HandoffOutputItem):
             handoff_call_id = extract_tool_call_id(item.raw_item)
             if handoff_call_id:
                 executed_handoff_call_ids.add(handoff_call_id)
@@ -1662,7 +1684,7 @@ async def resolve_interrupted_turn(
             context_wrapper=context_wrapper,
             run_config=run_config,
             server_manages_conversation=server_manages_conversation,
-            nest_handoff_history_fn=nest_history,
+            nest_handoff_history_fn=nest_handoff_history_fn,
             tool_input_guardrail_results=tool_input_guardrail_results,
             tool_output_guardrail_results=tool_output_guardrail_results,
         )

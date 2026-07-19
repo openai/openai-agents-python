@@ -59,7 +59,7 @@ from .guardrail import (
     OutputGuardrail,
     OutputGuardrailResult,
 )
-from .handoffs import Handoff
+from .handoffs import Handoff, handoff as create_handoff
 from .items import (
     CompactionItem,
     HandoffCallItem,
@@ -83,6 +83,13 @@ from .items import (
 )
 from .logger import logger
 from .run_context import RunContextWrapper
+from .run_internal.items import (
+    NestedHistoryOwnedItemRef,
+    digest_input_item,
+    ensure_nested_history_run_item_occurrence_key,
+    nested_history_run_item_occurrence_key,
+    run_item_to_input_item,
+)
 from .run_internal.tool_caller import (
     ensure_programmatic_tool_call_parent,
     ensure_tool_caller_allowed,
@@ -158,7 +165,10 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.10": "Allows serialized RunState snapshots to disable max_turns with null.",
     "1.11": "Persists SDK-only custom data on tool output items across resume flows.",
     "1.12": "Persists input cache-write token usage across resume flows.",
-    "1.13": "Persists programmatic tool calls, outputs, and caller relationships.",
+    "1.13": (
+        "Persists programmatic tool calling and nested handoff history ownership across resume "
+        "flows."
+    ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -233,6 +243,11 @@ class RunState(Generic[TContext, TAgent]):
 
     _session_items: list[RunItem] = field(default_factory=list)
     """Full, unfiltered run items for session history."""
+
+    _nested_history_owned_session_item_refs: list[NestedHistoryOwnedItemRef] = field(
+        default_factory=list
+    )
+    """Session-item occurrences also present verbatim in SDK-default nested input history."""
 
     _max_turns: int | None = 10
     """Maximum allowed turns before forcing termination, or ``None`` for no limit."""
@@ -316,6 +331,7 @@ class RunState(Generic[TContext, TAgent]):
         self._model_responses = []
         self._generated_items = []
         self._session_items = []
+        self._nested_history_owned_session_item_refs = []
         self._input_guardrail_results = []
         self._output_guardrail_results = []
         self._tool_input_guardrail_results = []
@@ -422,6 +438,44 @@ class RunState(Generic[TContext, TAgent]):
                         normalized_item["status"] = "completed"
             normalized_items.append(normalized_item)
         return normalized_items
+
+    def _generated_session_item_indexes(
+        self,
+        generated_items: Sequence[RunItem],
+    ) -> list[int | None]:
+        """Map generated occurrences to the same live occurrences in session history."""
+        session_indexes_by_identity: dict[int, deque[int]] = {}
+        session_indexes_by_occurrence_key: dict[str, deque[int]] = {}
+        for index, session_item in enumerate(self._session_items):
+            session_indexes_by_identity.setdefault(id(session_item), deque()).append(index)
+            occurrence_key = nested_history_run_item_occurrence_key(session_item)
+            if occurrence_key is not None:
+                session_indexes_by_occurrence_key.setdefault(occurrence_key, deque()).append(index)
+
+        used_session_indexes: set[int] = set()
+        indexes: list[int | None] = []
+
+        def _take_unused(candidates: deque[int] | None) -> int | None:
+            while candidates:
+                candidate = candidates.popleft()
+                if candidate not in used_session_indexes:
+                    return candidate
+            return None
+
+        for generated_item in generated_items:
+            session_index = _take_unused(
+                session_indexes_by_identity.get(id(generated_item)),
+            )
+            if session_index is None:
+                occurrence_key = nested_history_run_item_occurrence_key(generated_item)
+                if occurrence_key is not None:
+                    session_index = _take_unused(
+                        session_indexes_by_occurrence_key.get(occurrence_key),
+                    )
+            if session_index is not None:
+                used_session_indexes.add(session_index)
+            indexes.append(session_index)
+        return indexes
 
     def _serialize_context_payload(
         self,
@@ -723,6 +777,7 @@ class RunState(Generic[TContext, TAgent]):
             cast(Agent[Any], self._current_agent),
             agent_identity_keys_by_id=agent_identity_keys_by_id,
         )
+        generated_items = self._merge_generated_items_with_processed()
 
         result = {
             "$schemaVersion": CURRENT_SCHEMA_VERSION,
@@ -753,9 +808,17 @@ class RunState(Generic[TContext, TAgent]):
             "auto_previous_response_id": self._auto_previous_response_id,
             "generated_prompt_cache_key": self._generated_prompt_cache_key,
             "reasoning_item_id_policy": self._reasoning_item_id_policy,
+            "nested_history_owned_session_item_refs": [
+                {
+                    "index": item_ref.session_index,
+                    "digest": item_ref.digest,
+                    "input_index": item_ref.input_index,
+                }
+                for item_ref in self._nested_history_owned_session_item_refs
+            ],
+            "generated_session_item_indexes": self._generated_session_item_indexes(generated_items),
         }
 
-        generated_items = self._merge_generated_items_with_processed()
         result["generated_items"] = [
             self._serialize_item(item, agent_identity_keys_by_id=agent_identity_keys_by_id)
             for item in generated_items
@@ -1660,12 +1723,16 @@ def _build_handoffs_map(current_agent: Agent[Any]) -> dict[str, Handoff[Any, Age
     if not hasattr(current_agent, "handoffs"):
         return handoffs_map
 
-    for handoff in current_agent.handoffs:
-        if not isinstance(handoff, Handoff):
+    for handoff_item in current_agent.handoffs:
+        if isinstance(handoff_item, Agent):
+            handoff_item = create_handoff(handoff_item)
+        elif not isinstance(handoff_item, Handoff):
             continue
-        handoff_name = getattr(handoff, "tool_name", None) or getattr(handoff, "name", None)
+        handoff_name = getattr(handoff_item, "tool_name", None) or getattr(
+            handoff_item, "name", None
+        )
         if handoff_name:
-            handoffs_map[handoff_name] = handoff
+            handoffs_map[handoff_name] = handoff_item
     return handoffs_map
 
 
@@ -2133,16 +2200,23 @@ def _deserialize_tool_call_raw_item(normalized_raw_item: Mapping[str, Any]) -> A
 
 
 def _can_construct_statusless_message(exc: ValidationError) -> bool:
-    missing_fields = {
-        str(error["loc"][0])
-        for error in exc.errors()
-        if error.get("type") == "missing"
-        and isinstance(error.get("loc"), tuple)
-        and error.get("loc")
-    }
-    if not missing_fields:
+    errors = exc.errors()
+    if not errors:
         return False
-    return missing_fields <= _ALLOWED_MISSING_MESSAGE_FIELDS
+
+    for error in errors:
+        location = error.get("loc")
+        field = str(location[0]) if isinstance(location, tuple) and location else None
+        if error.get("type") == "missing" and field in _ALLOWED_MISSING_MESSAGE_FIELDS:
+            continue
+        if (
+            error.get("type") == "literal_error"
+            and field == "status"
+            and error.get("input") is None
+        ):
+            continue
+        return False
+    return True
 
 
 def _deserialize_message_content_part(value: object) -> object:
@@ -2158,6 +2232,17 @@ def _deserialize_message_content_part(value: object) -> object:
 
 
 def _deserialize_message_output_item(payload: Mapping[str, Any]) -> ResponseOutputMessage:
+    if payload.get("role") == "assistant" and isinstance(payload.get("content"), str):
+        normalized_payload = dict(payload)
+        normalized_payload["content"] = [
+            ResponseOutputText.model_construct(
+                type="output_text",
+                text=cast(str, payload["content"]),
+            )
+        ]
+        normalized_payload.setdefault("status", "completed")
+        return ResponseOutputMessage.model_construct(**normalized_payload)
+
     try:
         return ResponseOutputMessage(**payload)
     except ValidationError as exc:
@@ -2720,8 +2805,9 @@ async def _build_run_state_from_json(
 
     state._current_turn = state_json["current_turn"]
     state._model_responses = _deserialize_model_responses(state_json.get("model_responses", []))
-    state._generated_items = _deserialize_items(
-        state_json.get("generated_items", []),
+    serialized_generated_items = state_json.get("generated_items", [])
+    state._generated_items, generated_source_indexes = _deserialize_items_with_source_indexes(
+        serialized_generated_items,
         agent_map,
         agent_identity_map=agent_identity_map,
     )
@@ -2745,13 +2831,121 @@ async def _build_run_state_from_json(
         state._last_processed_response = None
 
     if "session_items" in state_json:
-        state._session_items = _deserialize_items(
-            state_json.get("session_items", []),
+        serialized_session_items = state_json.get("session_items", [])
+        state._session_items, session_source_indexes = _deserialize_items_with_source_indexes(
+            serialized_session_items,
             agent_map,
             agent_identity_map=agent_identity_map,
         )
     else:
+        serialized_session_items = []
         state._session_items = state._merge_generated_items_with_processed()
+        session_source_indexes = list(range(len(state._session_items)))
+    restored_session_indexes = {
+        source_index: restored_index
+        for restored_index, source_index in enumerate(session_source_indexes)
+    }
+
+    generated_session_indexes = state_json.get("generated_session_item_indexes")
+    if generated_session_indexes is not None:
+        mapping_is_valid = not (
+            not isinstance(serialized_generated_items, list)
+            or not isinstance(serialized_session_items, list)
+            or not isinstance(generated_session_indexes, list)
+            or len(generated_session_indexes) != len(serialized_generated_items)
+        )
+        used_session_indexes: set[int] = set()
+        if mapping_is_valid:
+            for session_index_value in generated_session_indexes:
+                if session_index_value is None:
+                    continue
+                if (
+                    type(session_index_value) is not int
+                    or session_index_value < 0
+                    or session_index_value >= len(serialized_session_items)
+                    or session_index_value in used_session_indexes
+                ):
+                    mapping_is_valid = False
+                    break
+                used_session_indexes.add(session_index_value)
+
+        if not mapping_is_valid:
+            logger.warning("Ignoring invalid generated_session_item_indexes in serialized RunState")
+        else:
+            for restored_generated_index, generated_source_index in enumerate(
+                generated_source_indexes
+            ):
+                session_source_index = generated_session_indexes[generated_source_index]
+                if session_source_index is None:
+                    continue
+                restored_session_index = restored_session_indexes.get(session_source_index)
+                if restored_session_index is None:
+                    continue
+                if (
+                    serialized_generated_items[generated_source_index]
+                    != serialized_session_items[session_source_index]
+                ):
+                    logger.warning(
+                        "Ignoring mismatched generated/session occurrence in serialized RunState"
+                    )
+                    continue
+                state._generated_items[restored_generated_index] = state._session_items[
+                    restored_session_index
+                ]
+
+    nested_history_refs_json = state_json.get("nested_history_owned_session_item_refs", [])
+    if not isinstance(nested_history_refs_json, list):
+        raise UserError(
+            "Run state nested_history_owned_session_item_refs must be a list of objects"
+        )
+    nested_history_refs: list[NestedHistoryOwnedItemRef] = []
+    for item_ref in nested_history_refs_json:
+        if (
+            not isinstance(item_ref, Mapping)
+            or type(item_ref.get("index")) is not int
+            or cast(int, item_ref["index"]) < 0
+            or not isinstance(item_ref.get("digest"), str)
+            or len(cast(str, item_ref["digest"])) != 64
+            or type(item_ref.get("input_index")) is not int
+            or cast(int, item_ref["input_index"]) < 0
+        ):
+            raise UserError(
+                "Run state nested_history_owned_session_item_refs entries must contain a "
+                "non-negative integer index and input_index, and 64-character digest"
+            )
+        session_source_index = cast(int, item_ref["index"])
+        input_index = cast(int, item_ref["input_index"])
+        digest = cast(str, item_ref["digest"])
+        if "session_items" in state_json and session_source_index >= len(serialized_session_items):
+            raise UserError("Run state nested history ownership references a missing session item")
+        session_index = restored_session_indexes.get(session_source_index)
+        if session_index is None:
+            logger.warning(
+                "Ignoring nested history ownership for skipped session item at index %s",
+                session_source_index,
+            )
+            continue
+        if not isinstance(state._original_input, list) or input_index >= len(state._original_input):
+            raise UserError("Run state nested history ownership references a missing input item")
+
+        run_item = state._session_items[session_index]
+        run_input_item = run_item_to_input_item(run_item)
+        if run_input_item is None or digest_input_item(run_input_item) != digest:
+            raise UserError("Run state nested history ownership session digest does not match")
+        ensure_nested_history_run_item_occurrence_key(run_item)
+        input_item = cast(TResponseInputItem, state._original_input[input_index])
+        if digest_input_item(input_item) != digest:
+            raise UserError("Run state nested history ownership input digest does not match")
+        nested_history_refs.append(
+            NestedHistoryOwnedItemRef(
+                session_index=session_index,
+                digest=digest,
+                input_index=input_index,
+                run_item=run_item,
+                input_item=input_item,
+            )
+        )
+    state._nested_history_owned_session_item_refs = nested_history_refs
 
     state._mark_generated_items_merged_with_last_processed()
 
@@ -3562,6 +3756,26 @@ def _deserialize_items(
             continue
 
     return result
+
+
+def _deserialize_items_with_source_indexes(
+    items_data: list[dict[str, Any]],
+    agent_map: dict[str, Agent[Any]],
+    *,
+    agent_identity_map: Mapping[str, Agent[Any]] | None = None,
+) -> tuple[list[RunItem], list[int]]:
+    """Deserialize items while retaining indexes of source entries that survived."""
+    items: list[RunItem] = []
+    source_indexes: list[int] = []
+    for source_index, item_data in enumerate(items_data):
+        deserialized = _deserialize_items(
+            [item_data],
+            agent_map,
+            agent_identity_map=agent_identity_map,
+        )
+        items.extend(deserialized)
+        source_indexes.extend([source_index] * len(deserialized))
+    return items, source_indexes
 
 
 def _clone_original_input(original_input: str | list[Any]) -> str | list[Any]:

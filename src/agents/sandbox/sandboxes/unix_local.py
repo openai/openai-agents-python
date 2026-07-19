@@ -624,7 +624,12 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         return rewritten
 
     @staticmethod
-    def _darwin_allowable_read_roots(path: Path, *, host_home: Path) -> list[Path]:
+    def _darwin_allowable_read_roots(
+        path: Path,
+        *,
+        host_home: Path,
+        allow_virtual_environment_root: bool = False,
+    ) -> list[Path]:
         candidates: set[Path] = set()
         normalized = path.expanduser()
         try:
@@ -641,6 +646,14 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             candidates.add(resolved)
         else:
             candidates.add(resolved.parent)
+
+        if allow_virtual_environment_root:
+            for candidate in (normalized, resolved):
+                if candidate.name != "bin":
+                    continue
+                virtual_env_root = candidate.parent
+                if (virtual_env_root / "pyvenv.cfg").is_file():
+                    candidates.add(virtual_env_root)
 
         resolved_text = resolved.as_posix()
         if resolved_text == "/opt/homebrew" or resolved_text.startswith("/opt/homebrew/"):
@@ -680,13 +693,21 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         allowed: list[Path] = []
         seen: set[str] = set()
 
-        def _append(path: str | Path | None) -> None:
+        def _append(
+            path: str | Path | None,
+            *,
+            allow_virtual_environment_root: bool = False,
+        ) -> None:
             if path is None:
                 return
             candidate = Path(path).expanduser()
             if not candidate.is_absolute():
                 return
-            for root in self._darwin_allowable_read_roots(candidate, host_home=host_home):
+            for root in self._darwin_allowable_read_roots(
+                candidate,
+                host_home=host_home,
+                allow_virtual_environment_root=allow_virtual_environment_root,
+            ):
                 key = root.as_posix()
                 if key in seen:
                     continue
@@ -699,6 +720,12 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
         executable = shutil.which(command_parts[0], path=env.get("PATH"))
         _append(executable)
+
+        # Only host-controlled PATH entries may widen a bin grant to its virtual environment
+        # root. Manifest environment overrides must not authorize broader host filesystem reads.
+        for path_entry in os.environ.get("PATH", "").split(os.pathsep):
+            if path_entry:
+                _append(path_entry, allow_virtual_environment_root=True)
         return allowed
 
     def _darwin_extra_path_grant_roots(self) -> list[tuple[Path, bool]]:

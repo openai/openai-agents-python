@@ -5,7 +5,7 @@ import asyncio
 import copy
 import weakref
 from collections.abc import AsyncIterator
-from dataclasses import InitVar, dataclass, field
+from dataclasses import InitVar, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from pydantic import GetCoreSchemaHandler
@@ -30,7 +30,14 @@ from .items import (
 )
 from .logger import logger
 from .run_context import RunContextWrapper
-from .run_internal.items import run_items_to_input_items
+from .run_internal.items import (
+    NestedHistoryOwnedItemRef,
+    digest_input_item,
+    filter_nested_history_owned_item_refs_for_input,
+    rebase_nested_history_owned_item_refs,
+    resolve_nested_history_owned_item_indexes,
+    run_items_to_input_items,
+)
 from .run_internal.run_steps import (
     NextStepInterruption,
     ProcessedResponse,
@@ -68,6 +75,33 @@ class AgentToolInvocation:
     """The raw JSON arguments for the nested invocation."""
 
 
+def _reconciled_result_owned_item_refs(
+    result: RunResultBase,
+    public_input: str | list[TResponseInputItem],
+) -> list[NestedHistoryOwnedItemRef]:
+    """Retain ownership only for the exact public-input occurrences."""
+    owned_item_refs = getattr(result, "_nested_history_owned_session_item_refs", [])
+    return filter_nested_history_owned_item_refs_for_input(
+        public_input,
+        owned_item_refs,
+    )
+
+
+def _state_snapshot_owned_item_refs(
+    result: RunResultBase,
+    state_input: str | list[TResponseInputItem],
+) -> list[NestedHistoryOwnedItemRef]:
+    """Rebind validated ownership coordinates to the input snapshot stored in RunState."""
+    if isinstance(state_input, str):
+        return []
+    return [
+        replace(item_ref, input_item=state_input[item_ref.input_index])
+        for item_ref in getattr(result, "_nested_history_owned_session_item_refs", [])
+        if 0 <= item_ref.input_index < len(state_input)
+        and digest_input_item(state_input[item_ref.input_index]) == item_ref.digest
+    ]
+
+
 def _populate_state_from_result(
     state: RunState[Any],
     result: RunResultBase,
@@ -88,6 +122,13 @@ def _populate_state_from_result(
     else:
         state._generated_items = result.new_items
     state._session_items = list(result.new_items)
+    snapshot_refs = _state_snapshot_owned_item_refs(result, state._original_input)
+    live_refs = rebase_nested_history_owned_item_refs(
+        state._original_input,
+        state._session_items,
+        snapshot_refs,
+    )
+    state._nested_history_owned_session_item_refs = live_refs
     state._model_responses = result.raw_responses
     state._input_guardrail_results = result.input_guardrail_results
     state._output_guardrail_results = result.output_guardrail_results
@@ -127,11 +168,35 @@ def _populate_state_from_result(
 ToInputListMode = Literal["preserve_all", "normalized"]
 
 
+def _preserve_all_session_items(
+    result: RunResultBase,
+    reasoning_item_id_policy: Literal["preserve", "omit"] | None,
+    public_input: str | list[TResponseInputItem],
+    owned_item_refs: list[NestedHistoryOwnedItemRef],
+) -> list[TResponseInputItem]:
+    """Avoid replaying session items already moved into ordered nested history."""
+    retained_refs = filter_nested_history_owned_item_refs_for_input(
+        public_input,
+        owned_item_refs,
+    )
+    excluded = resolve_nested_history_owned_item_indexes(
+        result.new_items,
+        retained_refs,
+    )
+    if not excluded:
+        return run_items_to_input_items(result.new_items, reasoning_item_id_policy)
+
+    filtered_items = [item for index, item in enumerate(result.new_items) if index not in excluded]
+    return run_items_to_input_items(filtered_items, reasoning_item_id_policy)
+
+
 def _input_items_for_result(
     result: RunResultBase,
     *,
     mode: ToInputListMode,
     reasoning_item_id_policy: Literal["preserve", "omit"] | None,
+    public_input: str | list[TResponseInputItem],
+    owned_item_refs: list[NestedHistoryOwnedItemRef],
 ) -> list[TResponseInputItem]:
     """Return input items for the requested result view.
 
@@ -139,11 +204,16 @@ def _input_items_for_result(
     the canonical continuation input when handoff filtering rewrote model history, otherwise it
     falls back to the same converted history.
     """
-    session_items = run_items_to_input_items(result.new_items, reasoning_item_id_policy)
     if mode == "preserve_all":
-        return session_items
+        return _preserve_all_session_items(
+            result,
+            reasoning_item_id_policy,
+            public_input,
+            owned_item_refs,
+        )
     if mode != "normalized":
         raise ValueError(f"Unsupported to_input_list mode: {mode}")
+    session_items = run_items_to_input_items(result.new_items, reasoning_item_id_policy)
     if not getattr(result, "_replay_from_model_input_items", False):
         # Most runs never rewrite continuation history, so normalized stays identical to the
         # historical preserve-all view unless the runner explicitly marked a divergence.
@@ -213,6 +283,12 @@ class RunResultBase(abc.ABC):
     This is only set when the runner preserved extra session history items that should not be
     replayed into the next local run, such as nested handoff history or filtered handoff input.
     """
+    _nested_history_owned_session_item_refs: list[NestedHistoryOwnedItemRef] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+    )
+    """Session item occurrences already represented verbatim in SDK-default nested history."""
     _sandbox_resume_state: dict[str, object] | None = field(default=None, init=False, repr=False)
     """Serialized sandbox session state captured during the run."""
     _sandbox_session: BaseSandboxSession | None = field(default=None, init=False, repr=False)
@@ -295,12 +371,16 @@ class RunResultBase(abc.ABC):
         full plain-item history. ``mode="normalized"`` prefers the canonical continuation input
         when handoff filtering rewrote model history, while remaining identical for ordinary runs.
         """
-        original_items: list[TResponseInputItem] = ItemHelpers.input_to_new_input_list(self.input)
+        public_input = self.input
+        owned_item_refs = _reconciled_result_owned_item_refs(self, public_input)
+        original_items = ItemHelpers.input_to_new_input_list(public_input)
         reasoning_item_id_policy = getattr(self, "_reasoning_item_id_policy", None)
         replay_items = _input_items_for_result(
             self,
             mode=mode,
             reasoning_item_id_policy=reasoning_item_id_policy,
+            public_input=public_input,
+            owned_item_refs=owned_item_refs,
         )
         return original_items + replay_items
 

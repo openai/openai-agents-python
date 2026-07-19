@@ -883,11 +883,12 @@ wheels = [
 
 [[package]]
 name = "e2b"
-version = "2.20.0"
+version = "2.31.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
     { name = "dockerfile-parse" },
+    { name = "h2" },
     { name = "httpcore" },
     { name = "httpx" },
     { name = "packaging" },
@@ -897,23 +898,23 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "wcmatch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8c/87/e9b3bd252a4fe2b3fd6967ff985c7a5a15a31b2d5b8c37e50afb18797b17/e2b-2.20.0.tar.gz", hash = "sha256:52b3a00ac7015bbdce84913b2a57664d2def33d5a4069e34fa2354de31759173", size = 156575, upload-time = "2026-04-02T19:20:32.375Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c2/b3/811fa25263d0745a3571c0b4f55ed7b865d12f618d866ada1f37ed007a3b/e2b-2.31.0.tar.gz", hash = "sha256:0d695e4a73e8a46db0ceca16cac042efffddeee9e0d4fc1e80a7e65427ae4756", size = 184598, upload-time = "2026-07-08T13:37:06.245Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c2/ce/e402e2ecebe40ed9af20cddb862386f2ce20336e35c0dea257812129020e/e2b-2.20.0-py3-none-any.whl", hash = "sha256:66f6edcf6b742ca180f3aadcff7966fda86d68430fa6b2becdfa0fcc72224988", size = 296483, upload-time = "2026-04-02T19:20:30.573Z" },
+    { url = "https://files.pythonhosted.org/packages/40/02/18f9440951b4c14433c4a8509f8550ed488acac98d2ef389d6d55041bdc2/e2b-2.31.0-py3-none-any.whl", hash = "sha256:532631b1b5d13d3bc6b7f8a81730f4c54e021b724cc3ec21efd000c84f58a87a", size = 336189, upload-time = "2026-07-08T13:37:04.75Z" },
 ]
 
 [[package]]
 name = "e2b-code-interpreter"
-version = "2.4.1"
+version = "2.8.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
     { name = "e2b" },
     { name = "httpx" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1e/eb/db6e51edd9f3402fd68d026572579b9b1bd833b10d990376a1e4c05d5b8d/e2b_code_interpreter-2.4.1.tar.gz", hash = "sha256:4b15014ee0d0dfcdc3072e1f409cbb87ca48f48d53d75629b7257e5513b9e7dd", size = 10700, upload-time = "2025-11-26T18:12:38.086Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d9/9b/e24eeb48fba1342f6a81e98bf6ff51622a7d5c3353a89d452623f158bcb8/e2b_code_interpreter-2.8.1.tar.gz", hash = "sha256:900bc847a4a6f90a571e0de4112531c79c550fbdb1ec94a1d2b2c9f0d058a674", size = 11467, upload-time = "2026-06-17T09:58:51.217Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1b/e7/09b9106ead227f7be14bd97c3181391ee498bb38933b1a9c566b72c8567a/e2b_code_interpreter-2.4.1-py3-none-any.whl", hash = "sha256:15d35f025b4a15033e119f2e12e7ac65657ad2b5a013fa9149e74581fbee778a", size = 13719, upload-time = "2025-11-26T18:12:36.7Z" },
+    { url = "https://files.pythonhosted.org/packages/df/47/c9acfeb0a63925d5b2e782b496be1287665bb649eee48d947fc46b9bdeee/e2b_code_interpreter-2.8.1-py3-none-any.whl", hash = "sha256:8449ff1abb507e4c28134c9cbc4e59f76c09fadceab879c8c4031399b31a126a", size = 15210, upload-time = "2026-06-17T09:58:50.043Z" },
 ]
 
 [[package]]
@@ -2552,8 +2553,8 @@ requires-dist = [
     { name = "dapr", marker = "extra == 'dapr'", specifier = ">=1.16.0" },
     { name = "daytona", marker = "extra == 'daytona'", specifier = ">=0.155.0" },
     { name = "docker", marker = "extra == 'docker'", specifier = ">=6.1" },
-    { name = "e2b", marker = "extra == 'e2b'", specifier = "==2.20.0" },
-    { name = "e2b-code-interpreter", marker = "extra == 'e2b'", specifier = "==2.4.1" },
+    { name = "e2b", marker = "extra == 'e2b'", specifier = "==2.31.0" },
+    { name = "e2b-code-interpreter", marker = "extra == 'e2b'", specifier = "==2.8.1" },
     { name = "graphviz", marker = "extra == 'viz'", specifier = ">=0.17" },
     { name = "griffelib", specifier = ">=2,<3" },
     { name = "grpcio", marker = "extra == 'dapr'", specifier = ">=1.60.0" },

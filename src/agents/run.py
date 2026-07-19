@@ -77,6 +77,7 @@ from .run_internal.error_handlers import (
 from .run_internal.items import (
     copy_input_items,
     normalize_resumed_input,
+    reconcile_nested_history_owned_input_after_rewrite,
 )
 from .run_internal.oai_conversation import OpenAIServerConversationTracker
 from .run_internal.prompt_cache_key import PromptCacheKeyResolver
@@ -104,6 +105,7 @@ from .run_internal.run_steps import (
 from .run_internal.session_persistence import (
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
+    reconcile_nested_history_owned_session_item_refs,
     resumed_turn_items,
     save_result_to_session,
     save_resumed_turn_items,
@@ -619,6 +621,15 @@ class AgentRunner:
                 current_turn = run_state._current_turn
                 raw_original_input = run_state._original_input
                 original_input = normalize_resumed_input(raw_original_input)
+                (
+                    original_input,
+                    run_state._nested_history_owned_session_item_refs,
+                ) = reconcile_nested_history_owned_input_after_rewrite(
+                    raw_original_input,
+                    original_input,
+                    run_state._nested_history_owned_session_item_refs,
+                )
+                run_state._original_input = copy_input_items(original_input)
                 generated_items = run_state._generated_items
                 session_items = list(run_state._session_items)
                 model_responses = run_state._model_responses
@@ -701,6 +712,9 @@ class AgentRunner:
                     if run_state is not None:
                         finalized_result._generated_prompt_cache_key = (
                             run_state._generated_prompt_cache_key
+                        )
+                        finalized_result._nested_history_owned_session_item_refs = list(
+                            run_state._nested_history_owned_session_item_refs
                         )
                     completed_result = finalized_result
                     return finalized_result
@@ -810,6 +824,7 @@ class AgentRunner:
 
                     current_bindings = bind_public_agent(current_agent)
                     execution_agent = current_bindings.execution_agent
+                    input_before_sandbox = copy_input_items(original_input)
                     prepared_sandbox = await sandbox_runtime.prepare_agent(
                         current_agent=current_agent,
                         current_input=original_input,
@@ -818,9 +833,19 @@ class AgentRunner:
                     )
                     current_bindings = prepared_sandbox.bindings
                     execution_agent = current_bindings.execution_agent
-                    original_input = copy_input_items(prepared_sandbox.input)
+                    if run_state is not None:
+                        (
+                            original_input,
+                            run_state._nested_history_owned_session_item_refs,
+                        ) = reconcile_nested_history_owned_input_after_rewrite(
+                            input_before_sandbox,
+                            prepared_sandbox.input,
+                            run_state._nested_history_owned_session_item_refs,
+                        )
+                    else:
+                        original_input = copy_input_items(prepared_sandbox.input)
                     if starting_input is not None and not isinstance(starting_input, RunState):
-                        starting_input = copy_input_items(prepared_sandbox.input)
+                        starting_input = copy_input_items(original_input)
                     if run_state is not None:
                         run_state._original_input = copy_input_items(original_input)
 
@@ -872,10 +897,21 @@ class AgentRunner:
                                     run_state._last_processed_response,
                                 )
 
+                            input_before_turn_rewrite = original_input
                             original_input = turn_result.original_input
                             generated_items, turn_session_items = resumed_turn_items(turn_result)
                             session_items.extend(turn_session_items)
                             if run_state is not None:
+                                if turn_result.nested_history_owned_items is not None:
+                                    run_state._nested_history_owned_session_item_refs = (
+                                        reconcile_nested_history_owned_session_item_refs(
+                                            session_items,
+                                            run_state._nested_history_owned_session_item_refs,
+                                            input_before_turn_rewrite,
+                                            turn_result.original_input,
+                                            turn_result.nested_history_owned_items,
+                                        )
+                                    )
                                 update_run_state_after_resume(
                                     run_state,
                                     turn_result=turn_result,
@@ -885,7 +921,7 @@ class AgentRunner:
 
                             if (
                                 session_persistence_enabled
-                                and turn_result.new_step_items
+                                and turn_session_items
                                 and run_state is not None
                             ):
                                 run_state._current_turn_persisted_item_count = (
@@ -1296,12 +1332,23 @@ class AgentRunner:
                     should_run_agent_start_hooks = False
 
                     model_responses.append(turn_result.model_response)
+                    input_before_turn_rewrite = original_input
                     original_input = turn_result.original_input
                     # For model input, use new_step_items (filtered on handoffs).
                     generated_items = turn_result.pre_step_items + turn_result.new_step_items
                     # Accumulate unfiltered items for observability.
                     turn_session_items = session_items_for_turn(turn_result)
                     session_items.extend(turn_session_items)
+                    if run_state is not None and turn_result.nested_history_owned_items is not None:
+                        run_state._nested_history_owned_session_item_refs = (
+                            reconcile_nested_history_owned_session_item_refs(
+                                session_items,
+                                run_state._nested_history_owned_session_item_refs,
+                                input_before_turn_rewrite,
+                                turn_result.original_input,
+                                turn_result.nested_history_owned_items,
+                            )
+                        )
                     if server_conversation_tracker is not None:
                         pending_server_items = list(turn_result.new_step_items)
                         server_conversation_tracker.track_server_items(turn_result.model_response)
@@ -1723,6 +1770,15 @@ class AgentRunner:
             # primeFromState will mark items as sent so prepareInput skips them
             raw_input_for_result = run_state._original_input
             input_for_result = normalize_resumed_input(raw_input_for_result)
+            (
+                input_for_result,
+                run_state._nested_history_owned_session_item_refs,
+            ) = reconcile_nested_history_owned_input_after_rewrite(
+                raw_input_for_result,
+                input_for_result,
+                run_state._nested_history_owned_session_item_refs,
+            )
+            run_state._original_input = copy_input_items(input_for_result)
             # Use context from RunState if not provided, otherwise override it.
             context_wrapper = resolve_resumed_context(
                 run_state=run_state,

@@ -120,6 +120,7 @@ from .items import (
     ensure_input_item_format,
     normalize_resumed_input,
     prepare_model_input_items,
+    reconcile_nested_history_owned_input_after_rewrite,
     run_items_to_input_items,
 )
 from .model_retry import (
@@ -148,6 +149,7 @@ from .run_steps import (
 from .session_persistence import (
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
+    reconcile_nested_history_owned_session_item_refs,
     resumed_turn_items,
     rewind_session_items,
     save_result_to_session,
@@ -551,6 +553,9 @@ async def start_streaming(
             streamed_result._state = run_state
         if run_state is not None:
             streamed_result._model_input_items = list(run_state._generated_items)
+            streamed_result._nested_history_owned_session_item_refs = list(
+                run_state._nested_history_owned_session_item_refs
+            )
             # Streamed follow-ups need the same normalized replay signal as sync runs when the
             # runner's continuation differs from the richer session history.
             streamed_result._replay_from_model_input_items = list(
@@ -605,6 +610,18 @@ async def start_streaming(
         prepared_input: str | list[TResponseInputItem]
         if is_resumed_state and run_state is not None:
             prepared_input = normalize_resumed_input(starting_input)
+            (
+                prepared_input,
+                run_state._nested_history_owned_session_item_refs,
+            ) = reconcile_nested_history_owned_input_after_rewrite(
+                starting_input,
+                prepared_input,
+                run_state._nested_history_owned_session_item_refs,
+            )
+            run_state._original_input = copy_input_items(prepared_input)
+            streamed_result._nested_history_owned_session_item_refs = list(
+                run_state._nested_history_owned_session_item_refs
+            )
             streamed_result.input = prepared_input
             streamed_result._original_input_for_persistence = []
             streamed_result._stream_input_persisted = True
@@ -726,6 +743,7 @@ async def start_streaming(
                 sequential_guardrails = []
 
             if sandbox_runtime is not None:
+                input_before_sandbox = copy_input_items(prepared_turn_input)
                 prepared_sandbox = await sandbox_runtime.prepare_agent(
                     current_agent=current_agent,
                     current_input=prepared_turn_input,
@@ -734,11 +752,19 @@ async def start_streaming(
                 )
                 current_bindings = prepared_sandbox.bindings
                 execution_agent = current_bindings.execution_agent
-                prepared_turn_input = copy_input_items(prepared_sandbox.input)
+                prepared_turn_input, retained_owned_refs = (
+                    reconcile_nested_history_owned_input_after_rewrite(
+                        input_before_sandbox,
+                        prepared_sandbox.input,
+                        streamed_result._nested_history_owned_session_item_refs,
+                    )
+                )
+                streamed_result._nested_history_owned_session_item_refs = retained_owned_refs
                 streamed_result.input = prepared_turn_input
                 streamed_result._original_input = copy_input_items(prepared_turn_input)
                 if run_state is not None:
                     run_state._original_input = copy_input_items(prepared_turn_input)
+                    run_state._nested_history_owned_session_item_refs = list(retained_owned_refs)
                 sandbox_runtime.apply_result_metadata(streamed_result)
 
             if is_resumed_state and run_state is not None and run_state._current_step is not None:
@@ -773,6 +799,7 @@ async def start_streaming(
                         ),
                     )
 
+                    input_before_turn_rewrite = streamed_result.input
                     streamed_result.input = turn_result.original_input
                     streamed_result._original_input = copy_input_items(turn_result.original_input)
                     generated_items, turn_session_items = resumed_turn_items(turn_result)
@@ -781,6 +808,17 @@ async def start_streaming(
                     )
                     streamed_result._model_input_items = generated_items
                     streamed_result.new_items = base_session_items + list(turn_session_items)
+                    if turn_result.nested_history_owned_items is not None:
+                        owned_refs = reconcile_nested_history_owned_session_item_refs(
+                            streamed_result.new_items,
+                            streamed_result._nested_history_owned_session_item_refs,
+                            input_before_turn_rewrite,
+                            turn_result.original_input,
+                            turn_result.nested_history_owned_items,
+                        )
+                        streamed_result._nested_history_owned_session_item_refs = owned_refs
+                        if run_state is not None:
+                            run_state._nested_history_owned_session_item_refs = list(owned_refs)
                     streamed_result._replay_from_model_input_items = list(
                         streamed_result._model_input_items
                     ) != list(streamed_result.new_items)
@@ -815,6 +853,11 @@ async def start_streaming(
                         break
 
                     if isinstance(turn_result.next_step, NextStepHandoff):
+                        await _save_resumed_items(
+                            list(turn_session_items),
+                            turn_result.model_response.response_id,
+                            store_setting,
+                        )
                         current_agent = turn_result.next_step.new_agent
                         if run_state is not None:
                             run_state._current_agent = current_agent
@@ -1079,6 +1122,7 @@ async def start_streaming(
                 streamed_result.raw_responses = streamed_result.raw_responses + [
                     turn_result.model_response
                 ]
+                input_before_turn_rewrite = streamed_result.input
                 streamed_result.input = turn_result.original_input
                 if isinstance(turn_result.next_step, NextStepHandoff):
                     streamed_result._original_input = copy_input_items(turn_result.original_input)
@@ -1089,6 +1133,17 @@ async def start_streaming(
                 )
                 turn_session_items = session_items_for_turn(turn_result)
                 streamed_result.new_items.extend(turn_session_items)
+                if turn_result.nested_history_owned_items is not None:
+                    owned_refs = reconcile_nested_history_owned_session_item_refs(
+                        streamed_result.new_items,
+                        streamed_result._nested_history_owned_session_item_refs,
+                        input_before_turn_rewrite,
+                        turn_result.original_input,
+                        turn_result.nested_history_owned_items,
+                    )
+                    streamed_result._nested_history_owned_session_item_refs = owned_refs
+                    if run_state is not None:
+                        run_state._nested_history_owned_session_item_refs = list(owned_refs)
                 streamed_result._replay_from_model_input_items = list(
                     streamed_result._model_input_items
                 ) != list(streamed_result.new_items)

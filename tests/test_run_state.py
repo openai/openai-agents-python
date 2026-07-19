@@ -7,6 +7,7 @@ import io
 import json
 import logging
 from collections.abc import AsyncIterator, Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -67,7 +68,13 @@ from agents.items import (
 )
 from agents.run_context import RunContextWrapper
 from agents.run_internal.agent_runner_helpers import resolve_trace_settings
-from agents.run_internal.items import run_items_to_input_items
+from agents.run_internal.items import (
+    NestedHistoryOwnedItemRef,
+    digest_input_item,
+    ensure_nested_history_run_item_occurrence_key,
+    run_item_to_input_item,
+    run_items_to_input_items,
+)
 from agents.run_internal.run_loop import (
     NextStepInterruption,
     ProcessedResponse,
@@ -4277,6 +4284,44 @@ class TestRunStateSerializationEdgeCases:
         assert result is not None
         assert len(result.handoffs) == 1
 
+    async def test_deserialize_processed_response_handoff_from_direct_agent(self):
+        """Pending handoffs configured with a direct Agent must survive RunState restoration."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent_b = Agent(name="AgentB")
+        agent_a = Agent(name="AgentA", handoffs=[agent_b])
+        handoff_name = Handoff.default_tool_name(agent_b)
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [
+                {
+                    "tool_call": {
+                        "type": "function_call",
+                        "name": handoff_name,
+                        "call_id": "call123",
+                        "status": "completed",
+                        "arguments": "{}",
+                    },
+                    "handoff": {"tool_name": handoff_name},
+                }
+            ],
+            "functions": [],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        result = await _deserialize_processed_response(
+            processed_response_data,
+            agent_a,
+            context,
+            {"AgentA": agent_a, "AgentB": agent_b},
+        )
+
+        assert len(result.handoffs) == 1
+        assert result.handoffs[0].handoff.agent_name == "AgentB"
+
     async def test_deserialize_processed_response_function_in_tools_map(self):
         """Test deserialization of ProcessedResponse with function in tools_map."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
@@ -5403,6 +5448,418 @@ class TestRunStateSerializationEdgeCases:
         assert frozenset(SCHEMA_VERSION_SUMMARIES) == SUPPORTED_SCHEMA_VERSIONS
         assert CURRENT_SCHEMA_VERSION in SCHEMA_VERSION_SUMMARIES
         assert all(summary.strip() for summary in SCHEMA_VERSION_SUMMARIES.values())
+
+    @pytest.mark.asyncio
+    async def test_nested_history_ownership_round_trips_and_defaults_for_schema_1_12(self):
+        """New snapshots persist ownership while released 1.12 snapshots default safely."""
+        agent = Agent(name="TestAgent")
+        message_item = MessageOutputItem(agent=agent, raw_item=make_message_output(text="owned"))
+        input_item = run_item_to_input_item(message_item)
+        assert input_item is not None
+        digest = digest_input_item(input_item)
+        assert digest is not None
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input=[input_item],
+        )
+        state._session_items = [message_item]
+        state._generated_items = [message_item]
+        item_ref = NestedHistoryOwnedItemRef(
+            session_index=0,
+            digest=digest,
+            input_index=0,
+            run_item=message_item,
+            input_item=input_item,
+        )
+        state._nested_history_owned_session_item_refs = [item_ref]
+
+        serialized = state.to_json()
+        restored = await RunState.from_json(agent, serialized)
+
+        assert serialized["nested_history_owned_session_item_refs"] == [
+            {
+                "index": 0,
+                "digest": digest,
+                "input_index": 0,
+            }
+        ]
+        assert serialized["generated_session_item_indexes"] == [0]
+        assert restored._nested_history_owned_session_item_refs == [item_ref]
+        assert restored._generated_items[0] is restored._session_items[0]
+        assert isinstance(restored._original_input, list)
+        assert (
+            restored._nested_history_owned_session_item_refs[0].input_item
+            is (restored._original_input[0])
+        )
+
+        serialized["$schemaVersion"] = "1.12"
+        serialized.pop("nested_history_owned_session_item_refs")
+        serialized.pop("generated_session_item_indexes")
+        restored_1_12 = await RunState.from_json(agent, serialized)
+
+        assert restored_1_12._nested_history_owned_session_item_refs == []
+        assert restored_1_12._generated_items[0] is not restored_1_12._session_items[0]
+
+    @pytest.mark.asyncio
+    async def test_nested_history_ownership_normalizes_raw_assistant_input_digest(self):
+        """Ownership digests must match the normalized original input written to JSON."""
+        agent = Agent(name="TestAgent")
+        raw_message = {
+            "id": "msg_raw",
+            "type": "message",
+            "role": "assistant",
+            "content": "owned",
+        }
+        message_item = MessageOutputItem(agent=agent, raw_item=cast(Any, raw_message))
+        input_item = run_item_to_input_item(message_item)
+        assert input_item is not None
+        digest = digest_input_item(input_item)
+        assert digest is not None
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input=[input_item],
+        )
+        state._session_items = [message_item]
+        state._generated_items = [message_item]
+        state._nested_history_owned_session_item_refs = [
+            NestedHistoryOwnedItemRef(
+                session_index=0,
+                digest=digest,
+                input_index=0,
+                run_item=message_item,
+                input_item=input_item,
+            )
+        ]
+
+        serialized = state.to_json()
+
+        assert serialized["nested_history_owned_session_item_refs"][0]["digest"] == (
+            digest_input_item(serialized["original_input"][0])
+        )
+        restored = await RunState.from_json(agent, serialized)
+        assert (
+            restored._nested_history_owned_session_item_refs[0].input_item
+            == (restored._original_input[0])
+        )
+
+    @pytest.mark.asyncio
+    async def test_nested_history_ownership_remaps_after_skipped_session_item(self):
+        """A skipped unrelated item must not shift a surviving ownership reference."""
+        agent = Agent(name="TestAgent")
+        skipped_item = MessageOutputItem(
+            agent=agent,
+            raw_item=make_message_output(text="skip me"),
+        )
+        owned_item = MessageOutputItem(
+            agent=agent,
+            raw_item=make_message_output(text="owned"),
+        )
+        owned_input = run_item_to_input_item(owned_item)
+        assert owned_input is not None
+        digest = digest_input_item(owned_input)
+        assert digest is not None
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input=[owned_input],
+        )
+        state._generated_items = [owned_item]
+        state._session_items = [skipped_item, owned_item]
+        state._nested_history_owned_session_item_refs = [
+            NestedHistoryOwnedItemRef(
+                session_index=1,
+                digest=digest,
+                input_index=0,
+                run_item=owned_item,
+                input_item=owned_input,
+            )
+        ]
+        serialized = state.to_json()
+        serialized["session_items"][0]["agent"]["name"] = "UnknownAgent"
+
+        restored = await RunState.from_json(agent, serialized)
+
+        assert len(restored._session_items) == 1
+        assert restored._generated_items[0] is restored._session_items[0]
+        assert restored._nested_history_owned_session_item_refs[0].session_index == 0
+        assert (
+            restored._nested_history_owned_session_item_refs[0].run_item
+            is (restored._session_items[0])
+        )
+
+    @pytest.mark.asyncio
+    async def test_copied_generated_item_round_trips_to_its_session_occurrence(self):
+        """The generated/session sidecar must recognize an explicitly copied occurrence."""
+        agent = Agent(name="TestAgent")
+        session_item = MessageOutputItem(
+            agent=agent,
+            raw_item=make_message_output(text="copied"),
+        )
+        ensure_nested_history_run_item_occurrence_key(session_item)
+        generated_copy = deepcopy(session_item)
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+        )
+        state._generated_items = [generated_copy]
+        state._session_items = [session_item]
+
+        serialized = state.to_json()
+        restored = await RunState.from_json(agent, serialized)
+
+        assert serialized["generated_session_item_indexes"] == [0]
+        assert "_agents_nested_history_occurrence_key" not in json.dumps(serialized)
+        assert restored._generated_items[0] is restored._session_items[0]
+
+    @pytest.mark.asyncio
+    async def test_repeated_generated_item_identity_maps_to_distinct_session_occurrences(self):
+        """Repeated references must retain multiplicity in generated/session coordinates."""
+        agent = Agent(name="TestAgent")
+        repeated = MessageOutputItem(
+            agent=agent,
+            raw_item=make_message_output(text="same"),
+        )
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+        )
+        state._generated_items = [repeated, repeated]
+        state._session_items = [repeated, repeated]
+
+        serialized = state.to_json()
+        restored = await RunState.from_json(agent, serialized)
+
+        assert serialized["generated_session_item_indexes"] == [0, 1]
+        assert restored._generated_items[0] is restored._session_items[0]
+        assert restored._generated_items[1] is restored._session_items[1]
+
+    @pytest.mark.parametrize(
+        "invalid_mapping",
+        [
+            "not-a-list",
+            [0],
+            [-1, None],
+            [2, None],
+            [True, None],
+            [0, 0],
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_invalid_generated_session_item_indexes_are_ignored(
+        self,
+        invalid_mapping: object,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A malformed alias sidecar must not partially bind generated and session items."""
+        agent = Agent(name="TestAgent")
+        first = MessageOutputItem(agent=agent, raw_item=make_message_output(text="first"))
+        second = MessageOutputItem(agent=agent, raw_item=make_message_output(text="second"))
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+        )
+        state._generated_items = [first, second]
+        state._session_items = [first, second]
+        serialized = state.to_json()
+        serialized["generated_session_item_indexes"] = invalid_mapping
+
+        with caplog.at_level(logging.WARNING, logger="openai.agents"):
+            restored = await RunState.from_json(agent, serialized)
+
+        assert all(
+            generated is not session
+            for generated, session in zip(
+                restored._generated_items,
+                restored._session_items,
+                strict=True,
+            )
+        )
+        assert "Ignoring invalid generated_session_item_indexes" in caplog.text
+
+    @pytest.mark.parametrize(
+        "invalid_sidecar",
+        [
+            {},
+            ["not-an-object"],
+            [{"index": -1, "digest": "a" * 64, "input_index": 0}],
+            [{"index": 0, "digest": "short", "input_index": 0}],
+            [{"index": 0, "digest": "a" * 64, "input_index": -1}],
+            [{"index": 9, "digest": "a" * 64, "input_index": 0}],
+            [{"index": 0, "digest": "a" * 64, "input_index": 9}],
+            [{"index": 0, "digest": "a" * 64, "input_index": 0}],
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_invalid_nested_history_ownership_sidecars_are_rejected(
+        self,
+        invalid_sidecar: object,
+    ) -> None:
+        """Malformed or mismatched ownership must fail closed during RunState restore."""
+        agent = Agent(name="TestAgent")
+        item = MessageOutputItem(agent=agent, raw_item=make_message_output(text="owned"))
+        input_item = run_item_to_input_item(item)
+        assert input_item is not None
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input=[input_item],
+        )
+        state._generated_items = [item]
+        state._session_items = [item]
+        serialized = state.to_json()
+        serialized["nested_history_owned_session_item_refs"] = invalid_sidecar
+
+        with pytest.raises(UserError):
+            await RunState.from_json(agent, serialized)
+
+    @pytest.mark.asyncio
+    async def test_mismatched_generated_session_occurrence_is_not_aliased(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A valid coordinate cannot alias generated and session items with different payloads."""
+        agent = Agent(name="TestAgent")
+        item = MessageOutputItem(agent=agent, raw_item=make_message_output(text="same"))
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+        )
+        state._generated_items = [item]
+        state._session_items = [item]
+        serialized = state.to_json()
+        serialized["session_items"][0]["raw_item"]["content"][0]["text"] = "changed"
+
+        with caplog.at_level(logging.WARNING, logger="openai.agents"):
+            restored = await RunState.from_json(agent, serialized)
+
+        assert restored._generated_items[0] is not restored._session_items[0]
+        assert "Ignoring mismatched generated/session occurrence" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_nested_history_ownership_with_changed_input_digest_is_rejected(self) -> None:
+        """A sidecar cannot claim an input occurrence whose payload changed after serialization."""
+        agent = Agent(name="TestAgent")
+        item = MessageOutputItem(agent=agent, raw_item=make_message_output(text="owned"))
+        input_item = run_item_to_input_item(item)
+        assert input_item is not None
+        digest = digest_input_item(input_item)
+        assert digest is not None
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input=[input_item],
+        )
+        state._generated_items = [item]
+        state._session_items = [item]
+        state._nested_history_owned_session_item_refs = [
+            NestedHistoryOwnedItemRef(
+                session_index=0,
+                digest=digest,
+                input_index=0,
+                run_item=item,
+                input_item=input_item,
+            )
+        ]
+        serialized = state.to_json()
+        serialized["original_input"][0]["content"][0]["text"] = "changed"
+
+        with pytest.raises(UserError, match="input digest does not match"):
+            await RunState.from_json(agent, serialized)
+
+    @pytest.mark.asyncio
+    async def test_nested_history_ownership_for_skipped_session_item_is_ignored(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Ownership for an item that cannot be restored must not shift to another occurrence."""
+        agent = Agent(name="TestAgent")
+        skipped = MessageOutputItem(agent=agent, raw_item=make_message_output(text="skipped"))
+        kept = MessageOutputItem(agent=agent, raw_item=make_message_output(text="kept"))
+        skipped_input = run_item_to_input_item(skipped)
+        assert skipped_input is not None
+        digest = digest_input_item(skipped_input)
+        assert digest is not None
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input=[skipped_input],
+        )
+        state._generated_items = [skipped]
+        state._session_items = [skipped, kept]
+        state._nested_history_owned_session_item_refs = [
+            NestedHistoryOwnedItemRef(
+                session_index=0,
+                digest=digest,
+                input_index=0,
+                run_item=skipped,
+                input_item=skipped_input,
+            )
+        ]
+        serialized = state.to_json()
+        serialized["session_items"][0]["agent"]["name"] = "UnknownAgent"
+
+        with caplog.at_level(logging.WARNING, logger="openai.agents"):
+            restored = await RunState.from_json(agent, serialized)
+
+        assert len(restored._session_items) == 1
+        assert restored._session_items[0].raw_item == kept.raw_item
+        assert restored._generated_items[0].raw_item == skipped.raw_item
+        assert restored._generated_items[0] is not restored._session_items[0]
+        assert restored._nested_history_owned_session_item_refs == []
+        assert "Ignoring nested history ownership for skipped session item" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_equal_generated_replacement_does_not_claim_session_occurrence(self):
+        """Equal payloads without explicit lineage must serialize as distinct occurrences."""
+        agent = Agent(name="TestAgent")
+        session_item = MessageOutputItem(
+            agent=agent,
+            raw_item=make_message_output(text="same"),
+        )
+        generated_replacement = MessageOutputItem(
+            agent=agent,
+            raw_item=deepcopy(session_item.raw_item),
+        )
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+        )
+        state._generated_items = [generated_replacement]
+        state._session_items = [session_item]
+
+        serialized = state.to_json()
+        restored = await RunState.from_json(agent, serialized)
+
+        assert serialized["generated_session_item_indexes"] == [None]
+        assert restored._generated_items[0] is not restored._session_items[0]
+
+        serialized["$schemaVersion"] = "1.12"
+        serialized.pop("nested_history_owned_session_item_refs")
+        serialized.pop("generated_session_item_indexes")
+        restored_1_12 = await RunState.from_json(agent, serialized)
+
+        assert restored_1_12._generated_items[0] is not restored_1_12._session_items[0]
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_copied_generated_item_does_not_claim_equal_session_occurrence(self):
+        """An equal partial copy must remain separate when its session occurrence is ambiguous."""
+        agent = Agent(name="TestAgent")
+        first = MessageOutputItem(agent=agent, raw_item=make_message_output(text="same"))
+        second = MessageOutputItem(agent=agent, raw_item=make_message_output(text="same"))
+        state: RunState[Any] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+        )
+        state._generated_items = [deepcopy(second)]
+        state._session_items = [first, second]
+
+        serialized = state.to_json()
+        restored = await RunState.from_json(agent, serialized)
+
+        assert serialized["generated_session_item_indexes"] == [None]
+        assert all(restored._generated_items[0] is not item for item in restored._session_items)
 
     @pytest.mark.asyncio
     async def test_from_json_accepts_schema_version_1_5_without_sandbox_payload(self):

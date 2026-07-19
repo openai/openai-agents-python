@@ -518,6 +518,21 @@ def _as_message(item: Any) -> dict[str, Any]:
     return cast(dict[str, Any], item)
 
 
+def _input_message_text(item: Any) -> str:
+    message = _as_message(item)
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    assert isinstance(content, list)
+    texts: list[str] = []
+    for part in content:
+        assert isinstance(part, dict)
+        text = part.get("text")
+        if isinstance(text, str):
+            texts.append(text)
+    return "".join(texts)
+
+
 def _find_reasoning_input_item(
     items: str | list[TResponseInputItem] | Any,
 ) -> dict[str, Any] | None:
@@ -1331,13 +1346,13 @@ async def test_structured_output():
 
     assert result.final_output == Foo(bar="baz")
     assert len(result.raw_responses) == 4, "should have four model responses"
-    assert len(result.to_input_list()) == 10, (
-        "should have input: conversation summary, function call, function call result, message, "
-        "handoff, handoff output, preamble message, tool call, tool call result, final output"
+    assert len(result.to_input_list()) == 11, (
+        "should preserve ordered history segments plus function calls, messages, handoff items, "
+        "and the final output without replaying the carried-forward message twice"
     )
-    assert len(result.to_input_list(mode="normalized")) == 6, (
+    assert len(result.to_input_list(mode="normalized")) == 7, (
         "should have normalized replay input: conversation summary, carried-forward message, "
-        "preamble message, tool call, tool call result, final output"
+        "handoff summary, preamble message, tool call, tool call result, final output"
     )
 
     assert result.last_agent == agent_1, "should have handed off to agent_1"
@@ -1414,14 +1429,21 @@ async def test_opt_in_handoff_history_nested_and_filters_respected():
     )
 
     assert isinstance(result.input, list)
-    assert len(result.input) == 1
+    assert len(result.input) == 3
     summary = _as_message(result.input[0])
     assert summary["role"] == "assistant"
     summary_content = summary["content"]
     assert isinstance(summary_content, str)
     assert "<CONVERSATION HISTORY>" in summary_content
-    assert "triage summary" in summary_content
+    assert "triage summary" not in summary_content
     assert "user_message" in summary_content
+    assert _input_message_text(result.input[1]) == "triage summary"
+    handoff_summary = _input_message_text(result.input[2])
+    assert "transfer_to_delegate" in handoff_summary
+    delegate_input = model.last_turn_args["input"]
+    assert isinstance(delegate_input, list)
+    assert len(delegate_input) == 3
+    assert _input_message_text(delegate_input[1]) == "triage summary"
 
     passthrough_model = FakeModel()
     delegate = Agent(name="delegate", model=passthrough_model)
@@ -1486,8 +1508,12 @@ async def test_opt_in_handoff_history_accumulates_across_multiple_handoffs():
     assert isinstance(summary_content, str)
     assert summary_content.count("<CONVERSATION HISTORY>") == 1
     assert "triage summary" in summary_content
-    assert "delegate update" in summary_content
+    assert "delegate update" not in summary_content
     assert "user_question" in summary_content
+    assert len(closer_input) == 3
+    assert _input_message_text(closer_input[1]) == "delegate update"
+    handoff_summary = _input_message_text(closer_input[2])
+    assert "transfer_to_closer" in handoff_summary
 
 
 @pytest.mark.asyncio
