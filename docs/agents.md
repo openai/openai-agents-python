@@ -351,7 +351,7 @@ The `tool_use_behavior` parameter in the `Agent` configuration controls how tool
 - `"stop_on_first_tool"`: The output of the first tool call is used as the final response, without further LLM processing.
 
 ```python
-from agents import Agent, Runner, function_tool, ModelSettings
+from agents import Agent, Runner, function_tool
 
 @function_tool
 def get_weather(city: str) -> str:
