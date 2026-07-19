@@ -231,6 +231,60 @@ def test_removes_tools_from_history():
     assert len(filtered_data.new_items) == 1
 
 
+def test_removes_programmatic_tool_transcript_from_history() -> None:
+    handoff_input_data = handoff_data(
+        input_history=(
+            _get_user_input_item("Check inventory."),
+            cast(
+                TResponseInputItem,
+                {
+                    "id": "program_1",
+                    "call_id": "call_program",
+                    "code": 'lookup_inventory(sku="A-1")',
+                    "type": "program",
+                },
+            ),
+            cast(
+                TResponseInputItem,
+                {
+                    "call_id": "call_lookup",
+                    "name": "lookup_inventory",
+                    "arguments": '{"sku":"A-1"}',
+                    "type": "function_call",
+                    "caller": {"type": "program", "caller_id": "call_program"},
+                },
+            ),
+            cast(
+                TResponseInputItem,
+                {
+                    "call_id": "call_lookup",
+                    "output": '{"sku":"A-1","available_units":42}',
+                    "type": "function_call_output",
+                    "caller": {"type": "program", "caller_id": "call_program"},
+                },
+            ),
+            cast(
+                TResponseInputItem,
+                {
+                    "id": "program_output_1",
+                    "call_id": "call_program",
+                    "result": '{"sku":"A-1","available_units":42}',
+                    "status": "completed",
+                    "type": "program_output",
+                },
+            ),
+            _get_message_input_item("42 units are available."),
+        )
+    )
+
+    filtered_data = remove_all_tools(handoff_input_data)
+
+    assert filtered_data.input_history == (
+        _get_user_input_item("Check inventory."),
+        _get_message_input_item("42 units are available."),
+    )
+
+
 def test_removes_tools_from_new_items():
     handoff_input_data = handoff_data(
         new_items=(
