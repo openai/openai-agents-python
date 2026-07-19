@@ -130,7 +130,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         # cache for incremental candidate tracking
         self._compaction_candidate_items: list[TResponseInputItem] | None = None
         self._session_items: list[TResponseInputItem] | None = None
-        self._response_id: str | None = None
         self._deferred_response_id: str | None = None
         self._last_unstored_response_id: str | None = None
 
@@ -159,15 +158,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def run_compaction(self, args: OpenAIResponsesCompactionArgs | None = None) -> None:
         """Run compaction using responses.compact API."""
-        # Capture this call's response id locally (like ``input_covered_full_history`` and
-        # the mode below) so the decision stays attempt-local across the awaits that follow.
-        # ``self._response_id`` is shared, so an interleaved run could otherwise overwrite it
-        # and make this call compact under another call's id and coverage.
+        # Everything this attempt decides on -- its response id, coverage, store flag, and the
+        # resulting mode -- is captured in locals before the first await. run_compaction can run
+        # concurrently on a shared session, so reading any of these back from the instance after
+        # an await would let a different run's values leak in (e.g. compacting under another
+        # call's response id and dropping older history when the session is replaced).
         response_id = args.get("response_id") if args else None
-        if response_id is not None:
-            self._response_id = response_id
-        else:
-            response_id = self._response_id
         requested_mode = args.get("compaction_mode") if args else None
         input_history_limit = args.get("input_history_limit") if args else None
         input_covered_full_history = args.get("input_covered_full_history") if args else None
@@ -179,13 +175,17 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 self._last_unstored_response_id = None
         else:
             store = None
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
 
+        # Resolve the mode from this attempt's own values before awaiting candidate loading, so a
+        # concurrent run cannot change the shared unstored-id hint between the check and the
+        # decision.
         resolved_mode = self._resolve_compaction_mode_for_response(
             response_id=response_id,
             store=store,
             requested_mode=requested_mode,
         )
+
+        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
 
         # A limit-bounded session view hides older items from previous_response_id
         # compaction, which drops them when the session is cleared and replaced. Fall
@@ -368,12 +368,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     ) -> None:
         if self._deferred_response_id is not None:
             return
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
+        # Match run_compaction: resolve the mode from this attempt's own values before the
+        # candidate-loading await, so a concurrent run cannot shift the decision.
         resolved_mode = self._resolve_compaction_mode_for_response(
             response_id=response_id,
             store=store,
             requested_mode=None,
         )
+        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
         # Mirror run_compaction: a limited view means previous_response_id would drop older
         # items on replace, so the deferred turn also compacts from full-history input.
         if (

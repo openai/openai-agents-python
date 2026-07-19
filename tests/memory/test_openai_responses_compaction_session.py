@@ -388,15 +388,16 @@ class TestOpenAIResponsesCompactionSession:
         assert "previous_response_id" not in mock_client.responses.compact.call_args.kwargs
 
     @pytest.mark.asyncio
-    async def test_run_compaction_keeps_response_id_and_coverage_attempt_local(
+    async def test_run_compaction_no_response_id_does_not_inherit_concurrent_response_id(
         self, tmp_path: Path
     ) -> None:
-        # One session instance can be shared by concurrent runs. Each run_compaction call
-        # must compact under its OWN response id and coverage, held locally across the awaits
-        # it performs. Regression: run_compaction read the shared self._response_id after
-        # awaiting candidate loading, so a call that suspended could resume and compact under
-        # a response id another run left in the shared field -- e.g. a full-coverage call
-        # inheriting a limited call's id and dropping the older history on replace.
+        # One session instance can be shared by concurrent runs, and each run_compaction call
+        # must decide from its OWN attempt state. A call that carries no response id must never
+        # pick up an id another concurrent run left on the session. Regression: run_compaction
+        # published each call's id to a shared self._response_id and, when a later call arrived
+        # without one, read that shared field back -- so a no-id call could compact under a
+        # concurrent call's previous_response_id and drop the older history that only a
+        # full-history input compaction preserves.
         underlying = SQLiteSession("test", db_path=str(tmp_path / "history.db"))
         items: list[TResponseInputItem] = [
             cast(
@@ -420,46 +421,47 @@ class TestOpenAIResponsesCompactionSession:
             client=mock_client,
         )
 
-        # Park the first run_compaction (call B) inside its first await so call A runs to
-        # completion in between and overwrites the shared self._response_id.
-        b_parked = asyncio.Event()
-        a_done = asyncio.Event()
+        # Park call A inside candidate loading -- past the point where the old code published
+        # its id to the session -- so the no-id call B runs to completion in between.
+        a_parked = asyncio.Event()
+        release_a = asyncio.Event()
         real_ensure = session._ensure_compaction_candidates
-        gated: dict[str, bool] = {"seen": False}
+        gate: dict[str, bool] = {"parked": False}
 
         async def gated_ensure() -> Any:
-            if not gated["seen"]:
-                gated["seen"] = True
-                b_parked.set()
-                await a_done.wait()
+            if not gate["parked"]:
+                gate["parked"] = True
+                a_parked.set()
+                await release_a.wait()
             return await real_ensure()
 
         session._ensure_compaction_candidates = gated_ensure  # type: ignore[method-assign]
 
-        # B saw the full history -> previous_response_id with resp_B.
-        b_task = asyncio.create_task(
+        # A carries its own id and saw the full history -> previous_response_id with resp_A.
+        a_task = asyncio.create_task(
             session.run_compaction(
-                {"response_id": "resp_B", "force": True, "input_covered_full_history": True}
+                {"response_id": "resp_A", "force": True, "input_covered_full_history": True}
             )
         )
-        await b_parked.wait()
+        await a_parked.wait()
 
-        # A saw a limited window -> must compact via full-history input, and sets the shared
-        # self._response_id to resp_A while B is suspended.
-        await session.run_compaction(
-            {"response_id": "resp_A", "force": True, "input_covered_full_history": False}
-        )
-        a_done.set()
-        await b_task
+        # B has no id of its own. It must fall back to full-history input compaction, never to
+        # the resp_A that A left on the shared session while suspended.
+        await session.run_compaction({"force": True})
+        release_a.set()
+        await a_task
 
         calls = mock_client.responses.compact.call_args_list
-        sent_previous_ids = {c.kwargs.get("previous_response_id") for c in calls}
-        # B compacted under its own id, not the resp_A that A left in the shared field.
-        assert "resp_B" in sent_previous_ids
-        assert "resp_A" not in sent_previous_ids
-        # A used full-history input compaction and kept every stored item.
-        a_call = next(c for c in calls if "input" in c.kwargs)
-        assert len(a_call.kwargs["input"]) == len(items)
+        # The no-id call compacted via input over the full stored history -- it did not inherit
+        # A's response id.
+        input_calls = [c for c in calls if "input" in c.kwargs]
+        assert len(input_calls) == 1
+        assert len(input_calls[0].kwargs["input"]) == len(items)
+        # Only A ever compacted under a previous_response_id, and only under its own.
+        previous_ids = [
+            c.kwargs["previous_response_id"] for c in calls if "previous_response_id" in c.kwargs
+        ]
+        assert previous_ids == ["resp_A"]
 
     @pytest.mark.asyncio
     async def test_save_result_to_session_carries_run_limit_to_fresh_wrapper_on_resume(
