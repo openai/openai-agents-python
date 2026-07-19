@@ -4033,6 +4033,115 @@ def test_unix_local_confined_exec_command_allows_common_darwin_interpreter_roots
     assert '(allow file-write* (subpath "/opt/homebrew"))' not in profile
 
 
+def test_unix_local_confined_exec_command_allows_python_virtual_environment_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    host_project_root = tmp_path / "host-project"
+    virtual_env_root = host_project_root / ".venv"
+    virtual_env_bin = virtual_env_root / "bin"
+    virtual_env_bin.mkdir(parents=True)
+    (virtual_env_root / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    python_executable = virtual_env_bin / "python"
+    python_executable.write_text("", encoding="utf-8")
+    session = UnixLocalSandboxSession.from_state(
+        UnixLocalSandboxSessionState(
+            session_id=uuid.uuid4(),
+            manifest=_unix_local_manifest(root=str(workspace_root)),
+            snapshot=NoopSnapshot(id="darwin-virtual-environment"),
+            workspace_root_owned=False,
+        )
+    )
+    unix_local = cast(Any, unix_local_module)
+    path_env = str(virtual_env_bin)
+
+    def _fake_which(name: str, path: str | None = None) -> str | None:
+        if name == "sandbox-exec":
+            return "/usr/bin/sandbox-exec"
+        if name == "python":
+            assert path == path_env
+            return str(python_executable)
+        return None
+
+    monkeypatch.setattr(unix_local.sys, "platform", "darwin")
+    monkeypatch.setattr(unix_local.shutil, "which", _fake_which)
+    monkeypatch.setenv("PATH", path_env)
+
+    command = session._confined_exec_command(
+        command_parts=["python", "-V"],
+        workspace_root=workspace_root,
+        env={"PATH": path_env},
+    )
+    profile_lines = set(command[2].splitlines())
+
+    assert (
+        f'(allow file-read-data file-read-metadata (subpath "{virtual_env_root}"))' in profile_lines
+    )
+    assert (
+        f'(allow file-read-data file-read-metadata (subpath "{host_project_root}"))'
+        not in profile_lines
+    )
+    assert f'(allow file-write* (subpath "{virtual_env_root}"))' not in profile_lines
+
+
+def test_unix_local_confined_exec_command_does_not_expand_manifest_virtual_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    host_project_root = tmp_path / "host-project"
+    virtual_env_root = host_project_root / ".venv"
+    virtual_env_bin = virtual_env_root / "bin"
+    virtual_env_bin.mkdir(parents=True)
+    (virtual_env_root / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    python_executable = virtual_env_bin / "python"
+    python_executable.write_text("", encoding="utf-8")
+    session = UnixLocalSandboxSession.from_state(
+        UnixLocalSandboxSessionState(
+            session_id=uuid.uuid4(),
+            manifest=_unix_local_manifest(root=str(workspace_root)),
+            snapshot=NoopSnapshot(id="darwin-manifest-virtual-environment"),
+            workspace_root_owned=False,
+        )
+    )
+    unix_local = cast(Any, unix_local_module)
+    manifest_path = str(virtual_env_bin)
+
+    def _fake_which(name: str, path: str | None = None) -> str | None:
+        if name == "sandbox-exec":
+            return "/usr/bin/sandbox-exec"
+        if name == "python":
+            assert path == manifest_path
+            return str(python_executable)
+        return None
+
+    monkeypatch.setattr(unix_local.sys, "platform", "darwin")
+    monkeypatch.setattr(unix_local.shutil, "which", _fake_which)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    command = session._confined_exec_command(
+        command_parts=["python", "-V"],
+        workspace_root=workspace_root,
+        env={"PATH": manifest_path},
+    )
+    profile_lines = set(command[2].splitlines())
+
+    assert (
+        f'(allow file-read-data file-read-metadata (subpath "{virtual_env_bin}"))' in profile_lines
+    )
+    assert (
+        f'(allow file-read-data file-read-metadata (subpath "{virtual_env_root}"))'
+        not in profile_lines
+    )
+    assert (
+        f'(allow file-read-data file-read-metadata (subpath "{host_project_root}"))'
+        not in profile_lines
+    )
+
+
 def test_unix_local_darwin_exec_profile_allows_extra_path_grants(tmp_path: Path) -> None:
     workspace_root = tmp_path / "workspace"
     read_write_root = tmp_path / "read-write"
