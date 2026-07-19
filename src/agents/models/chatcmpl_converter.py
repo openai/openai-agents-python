@@ -309,7 +309,7 @@ class Converter:
             isinstance(item, dict)
             and item.get("type") == "message"
             and item.get("role") == "assistant"
-            and {"id", "status", "content"} <= set(item)
+            and {"id", "content"} <= set(item)
         ):
             return cast(ResponseOutputMessageParam, item)
         return None

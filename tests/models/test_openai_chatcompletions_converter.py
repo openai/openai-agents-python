@@ -323,6 +323,29 @@ def test_items_to_messages_with_output_message_and_function_call():
     assert tool_call["function"]["arguments"] == "{}"
 
 
+def test_items_to_messages_accepts_statusless_output_message():
+    """Output messages remain recognizable after replay normalization removes null status."""
+    statusless_message = cast(
+        TResponseInputItem,
+        {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "hello",
+                    "annotations": [],
+                }
+            ],
+        },
+    )
+
+    assert Converter.items_to_messages([statusless_message]) == [
+        {"role": "assistant", "content": "hello"}
+    ]
+
+
 def test_convert_tool_choice_handles_standard_and_named_options() -> None:
     """
     The `Converter.convert_tool_choice` method should return the omit sentinel
