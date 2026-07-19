@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import deque
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
@@ -602,6 +603,8 @@ def _split_role_and_name(role_text: str) -> tuple[str, str | None]:
 
 def _should_forward_pre_item(input_item: TResponseInputItem) -> bool:
     """Return False when the previous transcript item is represented in the summary."""
+    if _is_programmatic_transcript_item(input_item):
+        return False
     role_candidate = input_item.get("role")
     if isinstance(role_candidate, str) and role_candidate == "assistant":
         return False
@@ -611,9 +614,22 @@ def _should_forward_pre_item(input_item: TResponseInputItem) -> bool:
 
 def _should_forward_new_item(input_item: TResponseInputItem) -> bool:
     """Return False for tool or side-effect items that the summary already covers."""
+    if _is_programmatic_transcript_item(input_item):
+        return False
     # Items with a role should always be forwarded.
     role_candidate = input_item.get("role")
     if isinstance(role_candidate, str) and role_candidate:
         return True
     type_candidate = input_item.get("type")
     return not (isinstance(type_candidate, str) and type_candidate in _SUMMARY_ONLY_INPUT_TYPES)
+
+
+def _is_programmatic_transcript_item(input_item: TResponseInputItem) -> bool:
+    """Return whether an item belongs to an indivisible hosted-program transcript."""
+    if input_item.get("type") in {"program", "program_output"}:
+        return True
+
+    caller = input_item.get("caller")
+    if isinstance(caller, Mapping):
+        return caller.get("type") == "program"
+    return getattr(caller, "type", None) == "program"

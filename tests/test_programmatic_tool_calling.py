@@ -71,7 +71,7 @@ from agents.run_internal.turn_resolution import process_model_response
 from agents.tool_context import ToolContext
 
 from .fake_model import FakeModel
-from .test_responses import get_text_message
+from .test_responses import get_handoff_tool_call, get_text_message
 
 PROGRAM_CALL_ID = "call_program"
 FUNCTION_CALL_ID = "call_lookup"
@@ -2523,6 +2523,81 @@ async def test_sqlite_session_round_trip_preserves_program_history_and_caller() 
             if _raw_item_type(item) == "function_call_output"
         )
         assert _caller_dict(function_output["caller"]) == PROGRAM_CALLER
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_nested_handoff_summarizes_complete_programmatic_transcript() -> None:
+    model = FakeModel()
+    delegate = Agent(name="delegate", model=model)
+    model.add_multiple_turn_outputs(
+        [
+            [_program(), _function_call()],
+            [_program_output(), get_handoff_tool_call(delegate)],
+            [get_text_message("done")],
+        ]
+    )
+
+    @function_tool(allowed_callers=["programmatic"])
+    def lookup_inventory(sku: str) -> InventoryOutput:
+        return InventoryOutput(sku=sku, available_units=42)
+
+    triage = Agent(
+        name="triage",
+        model=model,
+        handoffs=[delegate],
+        tools=[ProgrammaticToolCallingTool(), lookup_inventory],
+    )
+    captured_inputs: list[list[Any]] = []
+
+    def capture_model_input(data: Any) -> Any:
+        captured_inputs.append(list(data.model_data.input))
+        return data.model_data
+
+    session = SQLiteSession("programmatic-tool-calling-nested-handoff")
+    try:
+        result = await Runner.run(
+            triage,
+            "Check inventory and delegate the final response.",
+            run_config=RunConfig(
+                nest_handoff_history=True,
+                call_model_input_filter=capture_model_input,
+            ),
+            session=session,
+        )
+
+        assert result.final_output == "done"
+        handoff_input = captured_inputs[-1]
+        handoff_types = [_raw_item_type(item) for item in handoff_input]
+        assert not {
+            "program",
+            "function_call",
+            "function_call_output",
+            "program_output",
+        }.intersection(handoff_types)
+
+        summary_text = "\n".join(
+            cast(str, item.get("content"))
+            for item in handoff_input
+            if isinstance(item, dict) and isinstance(item.get("content"), str)
+        )
+        assert '"type": "program"' in summary_text
+        assert '"type": "function_call"' in summary_text
+        assert '"type": "function_call_output"' in summary_text
+        assert '"type": "program_output"' in summary_text
+
+        session_items = await session.get_items()
+        assert [_raw_item_type(item) for item in session_items] == [
+            None,
+            "program",
+            "function_call",
+            "function_call_output",
+            "program_output",
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
     finally:
         session.close()
 
