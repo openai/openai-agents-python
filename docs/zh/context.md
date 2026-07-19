@@ -101,7 +101,7 @@ if __name__ == "__main__":
 ```python
 from typing import Annotated
 from pydantic import BaseModel, Field
-from agents import Agent, Runner, function_tool
+from agents import Agent, function_tool
 from agents.tool_context import ToolContext
 
 class WeatherContext(BaseModel):

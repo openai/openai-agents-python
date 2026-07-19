@@ -462,7 +462,7 @@ You can set per-call timeouts for async function tools with `@function_tool(time
 
 ```python
 import asyncio
-from agents import Agent, Runner, function_tool
+from agents import Agent, function_tool
 
 
 @function_tool(timeout=2.0)
@@ -545,8 +545,9 @@ If you are manually creating a `FunctionTool` object, then you must handle error
 In some workflows, you may want a central agent to orchestrate a network of specialized agents, instead of handing off control. You can do this by modeling agents as tools.
 
 ```python
-from agents import Agent, Runner
 import asyncio
+
+from agents import Agent, Runner
 
 spanish_agent = Agent(
     name="Spanish agent",
@@ -579,6 +580,10 @@ orchestrator_agent = Agent(
 async def main():
     result = await Runner.run(orchestrator_agent, input="Say 'Hello, how are you?' in Spanish.")
     print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ### Customizing tool-agents

@@ -13,7 +13,7 @@ This page focuses on the manual approval flow via `interruptions`. If your app c
 Set `needs_approval` to `True` to always require approval or provide an async function that decides per call. The callable receives the run context, parsed tool parameters, and the tool call ID.
 
 ```python
-from agents import Agent, Runner, function_tool
+from agents import Agent, function_tool
 
 
 @function_tool(needs_approval=True)

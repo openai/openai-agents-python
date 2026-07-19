@@ -51,7 +51,6 @@ graph LR
 まず、いくつかのエージェントをセットアップします。この SDK でエージェントを構築した経験があれば、馴染みのある作業でしょう。ここでは、2 つのエージェント、1 つのハンドオフ、1 つのツールを用意します。
 
 ```python
-import asyncio
 import random
 
 from agents import (
@@ -136,7 +135,6 @@ import sounddevice as sd
 from agents import (
     Agent,
     function_tool,
-    set_tracing_disabled,
 )
 from agents.voice import (
     AudioInput,

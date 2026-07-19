@@ -17,7 +17,7 @@ search:
 将 `needs_approval` 设置为 `True` 可始终要求审批，或提供一个异步函数按每次调用做出决定。该可调用对象会接收运行上下文、解析后的工具参数以及工具调用 ID。
 
 ```python
-from agents import Agent, Runner, function_tool
+from agents import Agent, function_tool
 
 
 @function_tool(needs_approval=True)

@@ -49,7 +49,7 @@ search:
 | `reset_tool_choice` | 否 | 在工具调用后重置`tool_choice`（默认值：`True`），以避免工具使用循环。请参阅[强制使用工具](#forcing-tool-use)。 |
 
 ```python
-from agents import Agent, ModelSettings, function_tool
+from agents import Agent, function_tool
 
 @function_tool
 def get_weather(city: str) -> str:
@@ -332,7 +332,7 @@ robot_agent = pirate_agent.clone(
 使用OpenAI Responses工具搜索时，具名工具选择的限制更多：你不能通过`tool_choice`将裸命名空间名称或仅延迟加载的工具设为目标，并且`tool_choice="tool_search"`不会以[`ToolSearchTool`][agents.tool.ToolSearchTool]为目标。在这些情况下，建议使用`auto`或`required`。有关Responses特有的限制，请参阅[托管工具搜索](tools.md#hosted-tool-search)。
 
 ```python
-from agents import Agent, Runner, function_tool, ModelSettings
+from agents import Agent, function_tool, ModelSettings
 
 @function_tool
 def get_weather(city: str) -> str:
@@ -355,7 +355,7 @@ agent = Agent(
 - `"stop_on_first_tool"`：将首次工具调用的输出用作最终响应，不再由LLM进一步处理。
 
 ```python
-from agents import Agent, Runner, function_tool, ModelSettings
+from agents import Agent, function_tool
 
 @function_tool
 def get_weather(city: str) -> str:
@@ -373,7 +373,7 @@ agent = Agent(
 - `StopAtTools(stop_at_tool_names=[...])`：如果调用了任何指定工具，则停止运行，并将其输出用作最终响应。
 
 ```python
-from agents import Agent, Runner, function_tool
+from agents import Agent, function_tool
 from agents.agent import StopAtTools
 
 @function_tool
@@ -397,7 +397,7 @@ agent = Agent(
 - `ToolsToFinalOutputFunction`：处理工具结果并决定是停止还是继续调用LLM的自定义函数。
 
 ```python
-from agents import Agent, Runner, function_tool, FunctionToolResult, RunContextWrapper
+from agents import Agent, function_tool, FunctionToolResult, RunContextWrapper
 from agents.agent import ToolsToFinalOutputResult
 from typing import List, Any
 

@@ -17,7 +17,7 @@ search:
 常に承認を要求するには `needs_approval` を `True` に設定するか、呼び出しごとに判定する async 関数を指定します。この呼び出し可能オブジェクトは、実行コンテキスト、解析済みのツールパラメーター、ツール呼び出し ID を受け取ります。
 
 ```python
-from agents import Agent, Runner, function_tool
+from agents import Agent, function_tool
 
 
 @function_tool(needs_approval=True)

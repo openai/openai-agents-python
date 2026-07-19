@@ -466,7 +466,7 @@ def score_b(score: Annotated[int, Field(..., ge=0, le=100, description="Score fr
 
 ```python
 import asyncio
-from agents import Agent, Runner, function_tool
+from agents import Agent, function_tool
 
 
 @function_tool(timeout=2.0)
@@ -549,8 +549,9 @@ def get_user_profile(user_id: str) -> str:
 일부 워크플로에서는 제어를 핸드오프하는 대신 중앙 에이전트가 전문 에이전트 네트워크를 오케스트레이션하도록 할 수 있습니다. 에이전트를 도구로 모델링하여 이를 구현할 수 있습니다.
 
 ```python
-from agents import Agent, Runner
 import asyncio
+
+from agents import Agent, Runner
 
 spanish_agent = Agent(
     name="Spanish agent",
@@ -583,6 +584,10 @@ orchestrator_agent = Agent(
 async def main():
     result = await Runner.run(orchestrator_agent, input="Say 'Hello, how are you?' in Spanish.")
     print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ### 도구 에이전트 사용자 지정

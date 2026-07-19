@@ -51,7 +51,6 @@ graph LR
 首先，我们来设置一些智能体。如果你曾使用此 SDK 构建过智能体，这部分应该会很熟悉。我们将使用两个智能体、一次任务转移和一个工具。
 
 ```python
-import asyncio
 import random
 
 from agents import (
@@ -136,7 +135,6 @@ import sounddevice as sd
 from agents import (
     Agent,
     function_tool,
-    set_tracing_disabled,
 )
 from agents.voice import (
     AudioInput,

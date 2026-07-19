@@ -64,7 +64,7 @@ session = AdvancedSQLiteSession(
 # With persistent storage
 session = AdvancedSQLiteSession(
     session_id="user_123",
-    db_path="path/to/conversations.db",
+    db_path="conversations.db",
     create_tables=True
 )
 

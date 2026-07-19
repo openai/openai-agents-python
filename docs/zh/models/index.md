@@ -353,8 +353,9 @@ agent= Agent(name="Helping Agent", instructions="You are a Helping Agent", model
     尽管我们的 SDK 同时支持 [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] 和 [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] 形式，但我们建议每个工作流使用单一模型形式，因为这两种形式支持的功能和工具集合不同。如果您的工作流需要混用不同模型形式，请确保您使用的所有功能均受两者支持。
 
 ```python
-from agents import Agent, Runner, AsyncOpenAI, OpenAIChatCompletionsModel
 import asyncio
+
+from agents import Agent, Runner, AsyncOpenAI, OpenAIChatCompletionsModel
 
 spanish_agent = Agent(
     name="Spanish agent",
@@ -381,6 +382,10 @@ triage_agent = Agent(
 async def main():
     result = await Runner.run(triage_agent, input="Hola, ¿cómo estás?")
     print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 1.  直接设置 OpenAI 模型的名称。

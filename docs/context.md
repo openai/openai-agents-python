@@ -97,7 +97,7 @@ For this, you can use the [`ToolContext`][agents.tool_context.ToolContext] class
 ```python
 from typing import Annotated
 from pydantic import BaseModel, Field
-from agents import Agent, Runner, function_tool
+from agents import Agent, function_tool
 from agents.tool_context import ToolContext
 
 class WeatherContext(BaseModel):

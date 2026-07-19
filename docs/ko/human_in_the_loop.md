@@ -17,7 +17,7 @@ search:
 항상 승인을 요구하려면 `needs_approval`을 `True`로 설정하거나, 호출마다 결정하는 비동기 함수를 제공합니다. 호출 가능한 함수는 실행 컨텍스트, 파싱된 도구 매개변수, 도구 호출 ID를 받습니다.
 
 ```python
-from agents import Agent, Runner, function_tool
+from agents import Agent, function_tool
 
 
 @function_tool(needs_approval=True)

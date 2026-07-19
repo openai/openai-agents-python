@@ -353,8 +353,9 @@ agent= Agent(name="Helping Agent", instructions="You are a Helping Agent", model
     SDK는 [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel]과 [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] 형식을 모두 지원하지만, 두 형식이 서로 다른 기능과 도구 집합을 지원하므로 각 워크플로에서는 하나의 모델 형식만 사용하는 것이 좋습니다. 워크플로에서 모델 형식을 혼합해야 한다면 사용하는 모든 기능을 양쪽 모두에서 사용할 수 있는지 확인하세요.
 
 ```python
-from agents import Agent, Runner, AsyncOpenAI, OpenAIChatCompletionsModel
 import asyncio
+
+from agents import Agent, Runner, AsyncOpenAI, OpenAIChatCompletionsModel
 
 spanish_agent = Agent(
     name="Spanish agent",
@@ -381,6 +382,10 @@ triage_agent = Agent(
 async def main():
     result = await Runner.run(triage_agent, input="Hola, ¿cómo estás?")
     print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 1.  OpenAI 모델의 이름을 직접 설정합니다.

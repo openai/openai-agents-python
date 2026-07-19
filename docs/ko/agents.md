@@ -49,7 +49,7 @@ SDK는 OpenAI 모델에 기본적으로 Responses API를 사용하지만, 여기
 | `reset_tool_choice` | 아니요 | 도구 사용 루프를 방지하기 위해 도구 호출 후 `tool_choice`를 재설정합니다(기본값: `True`). [도구 사용 강제](#forcing-tool-use)를 참조하세요. |
 
 ```python
-from agents import Agent, ModelSettings, function_tool
+from agents import Agent, function_tool
 
 @function_tool
 def get_weather(city: str) -> str:
@@ -332,7 +332,7 @@ robot_agent = pirate_agent.clone(
 OpenAI Responses 도구 검색을 사용할 때는 이름이 지정된 도구 선택에 더 많은 제한이 있습니다. `tool_choice`로 단독 네임스페이스 이름이나 지연 전용 도구를 지정할 수 없으며, `tool_choice="tool_search"`는 [`ToolSearchTool`][agents.tool.ToolSearchTool]을 대상으로 하지 않습니다. 이러한 경우에는 `auto` 또는 `required`를 사용하는 것이 좋습니다. Responses 전용 제약 조건은 [호스티드 툴 검색](tools.md#hosted-tool-search)을 참조하세요.
 
 ```python
-from agents import Agent, Runner, function_tool, ModelSettings
+from agents import Agent, function_tool, ModelSettings
 
 @function_tool
 def get_weather(city: str) -> str:
@@ -355,7 +355,7 @@ agent = Agent(
 - `"stop_on_first_tool"`: 추가적인 LLM 처리 없이 첫 번째 도구 호출의 출력을 최종 응답으로 사용합니다.
 
 ```python
-from agents import Agent, Runner, function_tool, ModelSettings
+from agents import Agent, function_tool
 
 @function_tool
 def get_weather(city: str) -> str:
@@ -373,7 +373,7 @@ agent = Agent(
 - `StopAtTools(stop_at_tool_names=[...])`: 지정된 도구 중 하나가 호출되면 해당 출력을 최종 응답으로 사용하고 중지합니다.
 
 ```python
-from agents import Agent, Runner, function_tool
+from agents import Agent, function_tool
 from agents.agent import StopAtTools
 
 @function_tool
@@ -397,7 +397,7 @@ agent = Agent(
 - `ToolsToFinalOutputFunction`: 도구 결과를 처리하고 LLM을 중지할지 계속 실행할지 결정하는 사용자 지정 함수입니다.
 
 ```python
-from agents import Agent, Runner, function_tool, FunctionToolResult, RunContextWrapper
+from agents import Agent, function_tool, FunctionToolResult, RunContextWrapper
 from agents.agent import ToolsToFinalOutputResult
 from typing import List, Any
 

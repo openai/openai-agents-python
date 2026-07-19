@@ -47,7 +47,6 @@ graph LR
 First, let's set up some Agents. This should feel familiar to you if you've built any agents with this SDK. We'll have a couple of Agents, a handoff, and a tool.
 
 ```python
-import asyncio
 import random
 
 from agents import (
@@ -132,7 +131,6 @@ import sounddevice as sd
 from agents import (
     Agent,
     function_tool,
-    set_tracing_disabled,
 )
 from agents.voice import (
     AudioInput,

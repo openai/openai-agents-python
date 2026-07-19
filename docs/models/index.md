@@ -349,8 +349,9 @@ Within a single workflow, you may want to use different models for each agent. F
     While our SDK supports both the [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] and the [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] shapes, we recommend using a single model shape for each workflow because the two shapes support a different set of features and tools. If your workflow requires mixing and matching model shapes, make sure that all the features you're using are available on both.
 
 ```python
-from agents import Agent, Runner, AsyncOpenAI, OpenAIChatCompletionsModel
 import asyncio
+
+from agents import Agent, Runner, AsyncOpenAI, OpenAIChatCompletionsModel
 
 spanish_agent = Agent(
     name="Spanish agent",
@@ -377,6 +378,10 @@ triage_agent = Agent(
 async def main():
     result = await Runner.run(triage_agent, input="Hola, ¿cómo estás?")
     print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 1.  Sets the name of an OpenAI model directly.

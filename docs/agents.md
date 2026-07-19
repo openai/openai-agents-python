@@ -328,7 +328,7 @@ Supplying a list of tools doesn't always mean the LLM will use a tool. You can f
 When you are using OpenAI Responses tool search, named tool choices are more limited: you cannot target bare namespace names or deferred-only tools with `tool_choice`, and `tool_choice="tool_search"` does not target [`ToolSearchTool`][agents.tool.ToolSearchTool]. In those cases, prefer `auto` or `required`. See [Hosted tool search](tools.md#hosted-tool-search) for the Responses-specific constraints.
 
 ```python
-from agents import Agent, Runner, function_tool, ModelSettings
+from agents import Agent, function_tool, ModelSettings
 
 @function_tool
 def get_weather(city: str) -> str:
@@ -351,7 +351,7 @@ The `tool_use_behavior` parameter in the `Agent` configuration controls how tool
 - `"stop_on_first_tool"`: The output of the first tool call is used as the final response, without further LLM processing.
 
 ```python
-from agents import Agent, Runner, function_tool, ModelSettings
+from agents import Agent, function_tool
 
 @function_tool
 def get_weather(city: str) -> str:
@@ -369,7 +369,7 @@ agent = Agent(
 - `StopAtTools(stop_at_tool_names=[...])`: Stops if any specified tool is called, using its output as the final response.
 
 ```python
-from agents import Agent, Runner, function_tool
+from agents import Agent, function_tool
 from agents.agent import StopAtTools
 
 @function_tool
@@ -393,7 +393,7 @@ agent = Agent(
 - `ToolsToFinalOutputFunction`: A custom function that processes tool results and decides whether to stop or continue with the LLM.
 
 ```python
-from agents import Agent, Runner, function_tool, FunctionToolResult, RunContextWrapper
+from agents import Agent, function_tool, FunctionToolResult, RunContextWrapper
 from agents.agent import ToolsToFinalOutputResult
 from typing import List, Any
 

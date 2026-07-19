@@ -466,7 +466,7 @@ def score_b(score: Annotated[int, Field(..., ge=0, le=100, description="Score fr
 
 ```python
 import asyncio
-from agents import Agent, Runner, function_tool
+from agents import Agent, function_tool
 
 
 @function_tool(timeout=2.0)
@@ -549,8 +549,9 @@ def get_user_profile(user_id: str) -> str:
 在某些工作流中，你可能希望由一个中央智能体编排由多个专用智能体组成的网络，而不是转移控制权。你可以通过将智能体建模为工具来实现这一点。
 
 ```python
-from agents import Agent, Runner
 import asyncio
+
+from agents import Agent, Runner
 
 spanish_agent = Agent(
     name="Spanish agent",
@@ -583,6 +584,10 @@ orchestrator_agent = Agent(
 async def main():
     result = await Runner.run(orchestrator_agent, input="Say 'Hello, how are you?' in Spanish.")
     print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ### 工具智能体自定义
