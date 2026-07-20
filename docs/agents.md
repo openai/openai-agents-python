@@ -233,7 +233,6 @@ In most cases, you can provide instructions when you create the agent. However, 
 ```python
 from agents import Agent, RunContextWrapper
 
-
 def dynamic_instructions(
     context: RunContextWrapper[UserContext], agent: Agent[UserContext]
 ) -> str:
