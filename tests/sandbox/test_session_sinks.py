@@ -32,6 +32,7 @@ from agents.sandbox.session import (
     WorkspaceJsonlSink,
 )
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.session.sandbox_session import expected_sandbox_error
 from agents.sandbox.snapshot import LocalSnapshot
 from agents.tracing import custom_span, trace
 from tests.testing_processor import fetch_normalized_spans, fetch_ordered_spans
@@ -453,6 +454,28 @@ async def test_sandbox_session_error_events_and_traces_include_retryability(
     error_payload = span_error["data"]
     assert isinstance(error_payload, dict)
     assert error_payload["error_retryable"] is False
+
+
+@pytest.mark.asyncio
+async def test_sandbox_session_expected_read_not_found_is_not_an_error_event(
+    tmp_path: Path,
+) -> None:
+    events: list[SandboxSessionEvent] = []
+    instrumentation = Instrumentation(
+        sinks=[CallbackSink(lambda e, _sess: events.append(e), mode="sync")]
+    )
+    inner = _build_unix_local_session(tmp_path)
+
+    async with SandboxSession(inner, instrumentation=instrumentation) as session:
+        with expected_sandbox_error(WorkspaceReadNotFoundError):
+            with pytest.raises(WorkspaceReadNotFoundError):
+                await session.read(Path("missing.txt"))
+
+    read_finish = [event for event in events if event.op == "read" and event.phase == "finish"][0]
+    assert isinstance(read_finish, SandboxSessionFinishEvent)
+    assert read_finish.ok is True
+    assert read_finish.error_type is None
+    assert read_finish.error_code is None
 
 
 @pytest.mark.asyncio

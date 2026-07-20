@@ -4,8 +4,9 @@ import io
 import ipaddress
 import time
 import uuid
-from collections.abc import Callable, Coroutine
-from contextlib import nullcontext
+from collections.abc import Callable, Coroutine, Iterator
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
 from typing import Any, TypeVar, cast
@@ -28,6 +29,25 @@ from .utils import (
 
 T = TypeVar("T")
 F = TypeVar("F", bound=Callable[..., Coroutine[object, object, object]])
+_expected_sandbox_errors: ContextVar[tuple[type[BaseException], ...]] = ContextVar(
+    "expected_sandbox_errors",
+    default=(),
+)
+
+
+@contextmanager
+def expected_sandbox_error(error_type: type[BaseException]) -> Iterator[None]:
+    """Mark one sandbox operation error as expected by its caller."""
+
+    token = _expected_sandbox_errors.set((*_expected_sandbox_errors.get(), error_type))
+    try:
+        yield
+    finally:
+        _expected_sandbox_errors.reset(token)
+
+
+def _is_expected_sandbox_error(error: BaseException) -> bool:
+    return isinstance(error, _expected_sandbox_errors.get())
 
 
 def instrumented_op(
@@ -403,12 +423,13 @@ class SandboxSession(BaseSandboxSession):
                 value = await run()
             except Exception as e:
                 duration_ms = (time.monotonic() - t0) * 1000.0
+                expected_error = _is_expected_sandbox_error(e)
                 self._apply_trace_finish_data(
                     span=trace_span,
                     op=op,
-                    ok=False,
+                    ok=expected_error,
                     data=start_data,
-                    exc=e,
+                    exc=None if expected_error else e,
                 )
                 await self._emit_finish_event(
                     op=op,
@@ -416,8 +437,8 @@ class SandboxSession(BaseSandboxSession):
                     parent_span_id=parent_span_id,
                     trace_id=trace_id,
                     duration_ms=duration_ms,
-                    ok=False,
-                    exc=e,
+                    ok=expected_error,
+                    exc=None if expected_error else e,
                     data=start_data,
                     stdout=None,
                     stderr=None,
