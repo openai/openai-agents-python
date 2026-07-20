@@ -63,6 +63,7 @@ Tool search lets OpenAI Responses models defer large tool surfaces until runtime
 Start with hosted tool search when the candidate tools are already known when you build the agent. If your application needs to decide what to load dynamically, the Responses API also supports client-executed tool search, but the standard `Runner` does not auto-execute that mode.
 
 ```python
+import asyncio
 from typing import Annotated
 
 from agents import Agent, Runner, ToolSearchTool, function_tool, tool_namespace
@@ -98,8 +99,13 @@ agent = Agent(
     tools=[*crm_tools, ToolSearchTool()],
 )
 
-result = await Runner.run(agent, "Look up customer_42 and list their open orders.")
-print(result.final_output)
+
+async def main():
+    result = await Runner.run(agent, "Look up customer_42 and list their open orders.")
+    print(result.final_output)
+
+
+asyncio.run(main())
 ```
 
 What to know:
@@ -124,6 +130,8 @@ What to know:
 `ShellTool` also supports OpenAI-hosted container execution. Use this mode when you want the model to run shell commands in a managed container instead of your local runtime.
 
 ```python
+import asyncio
+
 from agents import Agent, Runner, ShellTool, ShellToolSkillReference
 
 csv_skill: ShellToolSkillReference = {
@@ -147,11 +155,16 @@ agent = Agent(
     ],
 )
 
-result = await Runner.run(
-    agent,
-    "Use the configured skill to analyze CSV files in /mnt/data and summarize totals by region.",
-)
-print(result.final_output)
+
+async def main():
+    result = await Runner.run(
+        agent,
+        "Use the configured skill to analyze CSV files in /mnt/data and summarize totals by region.",
+    )
+    print(result.final_output)
+
+
+asyncio.run(main())
 ```
 
 To reuse an existing container in later runs, set `environment={"type": "container_reference", "container_id": "cntr_..."}`.
@@ -499,10 +512,15 @@ async def slow_tool() -> str:
 
 agent = Agent(name="Timeout hard-fail", tools=[slow_tool])
 
-try:
-    await Runner.run(agent, "Run the tool")
-except ToolTimeoutError as e:
-    print(f"{e.tool_name} timed out in {e.timeout_seconds} seconds")
+
+async def main():
+    try:
+        await Runner.run(agent, "Run the tool")
+    except ToolTimeoutError as e:
+        print(f"{e.tool_name} timed out in {e.timeout_seconds} seconds")
+
+
+asyncio.run(main())
 ```
 
 !!! note

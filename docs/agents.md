@@ -94,6 +94,7 @@ agent = Agent(
 You can also generate the prompt dynamically at run time:
 
 ```python
+import asyncio
 from dataclasses import dataclass
 
 from agents import Agent, GenerateDynamicPromptData, Runner
@@ -114,11 +115,17 @@ async def build_prompt(data: GenerateDynamicPromptData):
 
 
 agent = Agent(name="Prompted assistant", prompt=build_prompt)
-result = await Runner.run(
-    agent,
-    "Say hello",
-    context=PromptContext(prompt_id="pmpt_123", poem_style="limerick"),
-)
+
+
+async def main():
+    result = await Runner.run(
+        agent,
+        "Say hello",
+        context=PromptContext(prompt_id="pmpt_123", poem_style="limerick"),
+    )
+
+
+asyncio.run(main())
 ```
 
 ## Context
@@ -274,6 +281,8 @@ Typical hook timing:
 Use `RunHooks` when you want a single observer for the whole workflow, and `AgentHooks` when one agent needs custom side effects.
 
 ```python
+import asyncio
+
 from agents import Agent, RunHooks, Runner
 
 
@@ -289,8 +298,14 @@ class LoggingHooks(RunHooks):
 
 
 agent = Agent(name="Assistant", instructions="Be concise.")
-result = await Runner.run(agent, "Explain quines", hooks=LoggingHooks())
-print(result.final_output)
+
+
+async def main():
+    result = await Runner.run(agent, "Explain quines", hooks=LoggingHooks())
+    print(result.final_output)
+
+
+asyncio.run(main())
 ```
 
 For the full callback surface, see the [Lifecycle API reference](ref/lifecycle.md).
