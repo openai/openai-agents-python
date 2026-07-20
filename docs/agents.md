@@ -128,6 +128,11 @@ Agents are generic on their `context` type. Context is a dependency-injection to
 Read the [context guide](context.md) for the full `RunContextWrapper` surface, shared usage tracking, nested `tool_input`, and serialization caveats.
 
 ```python
+from dataclasses import dataclass
+
+from agents import Agent
+
+
 @dataclass
 class UserContext:
     name: str
