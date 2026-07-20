@@ -322,7 +322,8 @@ You can integrate other LLM providers with these built-in paths:
 In cases where you do not have an API key from `platform.openai.com`, we recommend disabling tracing via `set_tracing_disabled()`, or setting up a [different tracing processor](../tracing.md).
 
 ``` python
-from agents import Agent, AsyncOpenAI, OpenAIChatCompletionsModel, set_tracing_disabled
+from openai import AsyncOpenAI
+from agents import Agent, OpenAIChatCompletionsModel, set_tracing_disabled
 
 set_tracing_disabled(disabled=True)
 
