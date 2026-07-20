@@ -38,6 +38,8 @@ Advanced hosted search options:
 -   `WebSearchTool` supports `filters`, `user_location`, and `search_context_size`.
 
 ```python
+import asyncio
+
 from agents import Agent, FileSearchTool, Runner, WebSearchTool
 
 agent = Agent(
@@ -54,6 +56,9 @@ agent = Agent(
 async def main():
     result = await Runner.run(agent, "Which coffee shop should I go to, taking into account my preferences and the weather today in SF?")
     print(result.final_output)
+
+
+asyncio.run(main())
 ```
 
 ### Hosted tool search
