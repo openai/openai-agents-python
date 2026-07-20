@@ -2746,3 +2746,259 @@ async def test_mixed_function_calls_before_text_keep_tracked_order(
     assert isinstance(completed_event.response.output[0], ResponseFunctionToolCall)
     assert isinstance(completed_event.response.output[1], ResponseFunctionToolCall)
     assert isinstance(completed_event.response.output[2], ResponseOutputMessage)
+
+
+async def _buffered_stream_events(monkeypatch, chunks: list[ChatCompletionChunk]) -> list[Any]:
+    """Run the given chunks through the Chat Completions model with tool-call
+    buffering enabled, returning the streamed events."""
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for chunk in chunks:
+            yield chunk
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return _empty_response(), fake_stream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(
+        use_responses=False,
+        buffer_streamed_tool_calls=True,
+    ).get_model("gpt-4")
+
+    return [
+        event
+        async for event in model.stream_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+    ]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_buffered_stream_synthesizes_refusal_on_content_filter(monkeypatch) -> None:
+    """With tool-call buffering enabled, a stream that terminates with
+    finish_reason == "content_filter" and no emitted content must still
+    synthesize a ResponseOutputRefusal.
+
+    The buffering layer only forwarded choices whose delta carried output, so the
+    terminal empty-delta chunk was dropped before the handler could see the
+    finish_reason, turning a safety block into a silently empty turn.
+    """
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(role="assistant", content=""))],
+    )
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(), finish_reason="content_filter")],
+        usage=CompletionUsage(completion_tokens=0, prompt_tokens=7, total_tokens=7),
+    )
+
+    output_events = await _buffered_stream_events(monkeypatch, [chunk1, chunk2])
+
+    types = [e.type for e in output_events]
+    assert "response.refusal.delta" in types
+    assert types[-1] == "response.completed"
+
+    refusal_deltas = [e for e in output_events if e.type == "response.refusal.delta"]
+    assert refusal_deltas and refusal_deltas[0].delta
+
+    # The assistant message is announced once and every opened part is closed.
+    assert types.count("response.output_item.added") == 1
+    assert types.count("response.content_part.added") == types.count("response.content_part.done")
+
+    # The empty "" content delta must not open a text content part.
+    assert "response.output_text.delta" not in types
+    added_parts = [e for e in output_events if e.type == "response.content_part.added"]
+    assert len(added_parts) == 1
+    assert isinstance(added_parts[0].part, ResponseOutputRefusal)
+
+    completed_event = output_events[-1]
+    assert isinstance(completed_event, ResponseCompletedEvent)
+    assistant_msg = completed_event.response.output[0]
+    assert isinstance(assistant_msg, ResponseOutputMessage)
+    assert len(assistant_msg.content) == 1
+    refusal_part = assistant_msg.content[0]
+    assert isinstance(refusal_part, ResponseOutputRefusal)
+    assert refusal_part.refusal
+
+    # Streamed content_index matches the refusal's position in the completed response.
+    assert added_parts[0].content_index == 0
+    assert refusal_deltas[0].content_index == 0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_buffered_stream_content_filter_does_not_clobber_text(monkeypatch) -> None:
+    """A content_filter finish_reason arriving after real text was streamed must
+    not synthesize a refusal, even with buffering enabled."""
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(content="answer"))],
+    )
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(), finish_reason="content_filter")],
+        usage=CompletionUsage(completion_tokens=1, prompt_tokens=7, total_tokens=8),
+    )
+
+    output_events = await _buffered_stream_events(monkeypatch, [chunk1, chunk2])
+
+    assert "response.refusal.delta" not in [e.type for e in output_events]
+    completed_event = output_events[-1]
+    assert isinstance(completed_event, ResponseCompletedEvent)
+    assistant_msg = completed_event.response.output[0]
+    assert isinstance(assistant_msg, ResponseOutputMessage)
+    text_part = assistant_msg.content[0]
+    assert isinstance(text_part, ResponseOutputText)
+    assert text_part.text == "answer"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_buffered_stream_content_filter_refusal_after_reasoning(monkeypatch) -> None:
+    """A buffered content_filter turn preceded by reasoning still places the
+    synthesized refusal at content_index 0 of the assistant message, which is
+    output_index 1 (the reasoning item is a separate output item)."""
+    reasoning_delta = ChoiceDelta(role="assistant", content=None)
+    # reasoning_content is a provider extra field the handler reads via hasattr.
+    reasoning_delta.reasoning_content = "thinking..."  # type: ignore[attr-defined]
+    chunk_reasoning = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=reasoning_delta)],
+    )
+    chunk_empty = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(content=""))],
+    )
+    chunk_filter = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(), finish_reason="content_filter")],
+        usage=CompletionUsage(completion_tokens=0, prompt_tokens=7, total_tokens=7),
+    )
+
+    output_events = await _buffered_stream_events(
+        monkeypatch, [chunk_reasoning, chunk_empty, chunk_filter]
+    )
+
+    completed_event = output_events[-1]
+    assert isinstance(completed_event, ResponseCompletedEvent)
+    completed_resp = completed_event.response
+    assert isinstance(completed_resp.output[0], ResponseReasoningItem)
+    assistant_msg = completed_resp.output[1]
+    assert isinstance(assistant_msg, ResponseOutputMessage)
+    assert len(assistant_msg.content) == 1
+    assert isinstance(assistant_msg.content[0], ResponseOutputRefusal)
+
+    added = [
+        e
+        for e in output_events
+        if e.type == "response.content_part.added" and isinstance(e.part, ResponseOutputRefusal)
+    ]
+    deltas = [e for e in output_events if e.type == "response.refusal.delta"]
+    assert len(added) == 1
+    assert added[0].content_index == 0
+    assert added[0].output_index == 1
+    assert deltas and all(d.content_index == 0 and d.output_index == 1 for d in deltas)
+    assert "response.output_text.delta" not in [e.type for e in output_events]
+
+
+def _chunk_with(choices: list[Choice], usage: CompletionUsage | None = None):
+    return ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=choices,
+        usage=usage,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_reason", ["content_filter", "length", "stop"])
+async def test_buffer_tool_call_stream_forwards_terminal_finish_reason(finish_reason) -> None:
+    """The buffering layer must forward a terminal choice even when its delta is
+    empty, so stream-level signals (content_filter, length, stop) reach the
+    handler instead of being swallowed. The delta is stripped, preserving
+    buffering semantics."""
+    chunks = [
+        _chunk_with([Choice(index=0, delta=ChoiceDelta(content=""))]),
+        _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason=finish_reason)]),
+    ]
+
+    async def source() -> AsyncIterator[ChatCompletionChunk]:
+        for chunk in chunks:
+            yield chunk
+
+    buffered = [c async for c in ChatCmplStreamHandler.buffer_tool_call_stream(source())]
+
+    terminal_choices = [
+        choice
+        for chunk in buffered
+        for choice in chunk.choices
+        if choice.finish_reason == finish_reason
+    ]
+    assert len(terminal_choices) == 1
+    # The forwarded copy carries no delta output.
+    assert not ChatCmplStreamHandler._delta_has_passthrough_output(terminal_choices[0].delta)
+
+
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_does_not_duplicate_tool_calls_finish() -> None:
+    """finish_reason == "tool_calls" is still emitted only by the synthesized
+    buffered chunk, so the terminal choice is not forwarded twice."""
+    tool_call_delta = ChoiceDeltaToolCall(
+        index=0,
+        id="tool-id",
+        function=ChoiceDeltaToolCallFunction(name="my_func", arguments='{"a": 1}'),
+        type="function",
+    )
+    chunks = [
+        _chunk_with([Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call_delta]))]),
+        _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="tool_calls")]),
+    ]
+
+    async def source() -> AsyncIterator[ChatCompletionChunk]:
+        for chunk in chunks:
+            yield chunk
+
+    buffered = [c async for c in ChatCmplStreamHandler.buffer_tool_call_stream(source())]
+
+    finish_choices = [
+        choice
+        for chunk in buffered
+        for choice in chunk.choices
+        if choice.finish_reason == "tool_calls"
+    ]
+    assert len(finish_choices) == 1
+    assert finish_choices[0].delta.tool_calls
