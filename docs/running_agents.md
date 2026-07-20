@@ -7,6 +7,8 @@ You can run agents via the [`Runner`][agents.run.Runner] class. You have 3 optio
 3. [`Runner.run_streamed()`][agents.run.Runner.run_streamed], which runs async and returns a [`RunResultStreaming`][agents.result.RunResultStreaming]. It calls the LLM in streaming mode, and streams those events to you as they are received.
 
 ```python
+import asyncio
+
 from agents import Agent, Runner
 
 async def main():
@@ -17,6 +19,9 @@ async def main():
     # Code within the code,
     # Functions calling themselves,
     # Infinite loop's dance
+
+
+asyncio.run(main())
 ```
 
 Read more in the [results guide](results.md).
