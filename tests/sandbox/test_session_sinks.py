@@ -459,6 +459,7 @@ async def test_sandbox_session_error_events_and_traces_include_retryability(
 @pytest.mark.asyncio
 async def test_sandbox_session_expected_read_not_found_is_not_an_error_event(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[SandboxSessionEvent] = []
     instrumentation = Instrumentation(
@@ -466,9 +467,15 @@ async def test_sandbox_session_expected_read_not_found_is_not_an_error_event(
     )
     inner = _build_unix_local_session(tmp_path)
 
+    async def raw_missing_read(path: Path, *, user: object = None) -> io.IOBase:
+        _ = (path, user)
+        raise FileNotFoundError("missing.txt")
+
+    monkeypatch.setattr(inner, "read", raw_missing_read)
+
     async with SandboxSession(inner, instrumentation=instrumentation) as session:
-        with expected_sandbox_error(WorkspaceReadNotFoundError):
-            with pytest.raises(WorkspaceReadNotFoundError):
+        with expected_sandbox_error(FileNotFoundError):
+            with pytest.raises(FileNotFoundError):
                 await session.read(Path("missing.txt"))
 
     read_finish = [event for event in events if event.op == "read" and event.phase == "finish"][0]

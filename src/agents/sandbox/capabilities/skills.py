@@ -237,7 +237,10 @@ class LocalDirLazySkillSource(LazySkillSource):
         skill_dest = workspace_root / metadata.path
         skill_md_path = skill_dest / "SKILL.md"
         try:
-            with expected_sandbox_error(WorkspaceReadNotFoundError):
+            with (
+                expected_sandbox_error(FileNotFoundError),
+                expected_sandbox_error(WorkspaceReadNotFoundError),
+            ):
                 handle = await session.read(skill_md_path, user=user)
         except (FileNotFoundError, WorkspaceReadNotFoundError):
             handle = None
