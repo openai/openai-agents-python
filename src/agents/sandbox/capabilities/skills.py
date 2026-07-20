@@ -24,6 +24,24 @@ from ..workspace_paths import (
 )
 from .capability import Capability
 
+
+def _unwrap_session_wrapper(session: BaseSandboxSession) -> BaseSandboxSession:
+    """
+    If `session` is the SDK SandboxSession wrapper that instruments operations,
+    return the underlying unwrapped session (`_inner`) so callers can perform
+    a raw operation without creating instrumented spans. Defensive: do not
+    import the wrapper type to avoid dependency cycles; detect by name/module.
+    """
+    cls = type(session)
+    if not (
+        cls.__name__ == "SandboxSession"
+        and cls.__module__ == "agents.sandbox.session.sandbox_session"
+    ):
+        return session
+    inner = getattr(session, "_inner", None)
+    return inner if isinstance(inner, BaseSandboxSession) else session
+
+
 _SKILLS_SECTION_INTRO = (
     "A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. "
     "Below is the list of skills that can be used. Each entry includes a name, description, "
@@ -235,8 +253,14 @@ class LocalDirLazySkillSource(LazySkillSource):
         workspace_root = Path(session.state.manifest.root)
         skill_dest = workspace_root / metadata.path
         skill_md_path = skill_dest / "SKILL.md"
+        # Probe for an existing SKILL.md. On first lazy load this is expected
+        # to raise a not-found error. Using the instrumented SandboxSession.read()
+        # records that as a failed trace span even though we handle the exception.
+        # Unwrap to the inner session implementation (when available) to avoid
+        # creating a noisy failed span for the expected probe.
+        probe_session = _unwrap_session_wrapper(session)
         try:
-            handle = await session.read(skill_md_path, user=user)
+            handle = await probe_session.read(skill_md_path, user=user)
         except Exception:
             handle = None
         if handle is not None:
