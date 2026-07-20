@@ -12,7 +12,7 @@ from typing import Any, TypeVar, cast
 
 from ...run_config import SandboxArchiveLimits, SandboxConcurrencyLimits
 from ...tracing import Span, custom_span, get_current_trace
-from ..errors import OpName, SandboxError
+from ..errors import OpName, SandboxError, WorkspaceReadNotFoundError
 from ..files import FileEntry
 from ..types import ExecResult, ExposedPortEndpoint, User
 from .base_sandbox_session import BaseSandboxSession
@@ -39,6 +39,7 @@ def instrumented_op(
     ) = None,
     ok: Callable[[object], bool] | None = None,
     outputs: Callable[[object], tuple[bytes | None, bytes | None]] | None = None,
+    expected_errors: tuple[type[BaseException], ...] = (),
 ) -> Callable[[F], F]:
     """Decorator to emit SandboxSessionEvents around a SandboxSession operation."""
 
@@ -64,6 +65,7 @@ def instrumented_op(
                 finish_data=finish_cb,
                 ok=ok,
                 outputs=outputs,
+                expected_errors=expected_errors,
             )
 
         return cast(F, _wrapped)
@@ -378,6 +380,7 @@ class SandboxSession(BaseSandboxSession):
         finish_data: Callable[[T], dict[str, object]] | None = None,
         ok: Callable[[T], bool] | None = None,
         outputs: Callable[[T], tuple[bytes | None, bytes | None]] | None = None,
+        expected_errors: tuple[type[BaseException], ...] = (),
     ) -> T:
         span_cm = (
             custom_span(
@@ -403,13 +406,25 @@ class SandboxSession(BaseSandboxSession):
                 value = await run()
             except Exception as e:
                 duration_ms = (time.monotonic() - t0) * 1000.0
-                self._apply_trace_finish_data(
-                    span=trace_span,
-                    op=op,
-                    ok=False,
-                    data=start_data,
-                    exc=e,
-                )
+                # Expected errors are reported through the audit finish event but must not
+                # flag the trace span as errored (for example a probe read of a not-yet
+                # materialized file).
+                if isinstance(e, expected_errors):
+                    self._apply_trace_finish_data(
+                        span=trace_span,
+                        op=op,
+                        ok=True,
+                        data=start_data,
+                        exc=None,
+                    )
+                else:
+                    self._apply_trace_finish_data(
+                        span=trace_span,
+                        op=op,
+                        ok=False,
+                        data=start_data,
+                        exc=e,
+                    )
                 await self._emit_finish_event(
                     op=op,
                     span_id=span_id,
@@ -599,7 +614,11 @@ class SandboxSession(BaseSandboxSession):
     ) -> None:
         await self._inner.mkdir(path, parents=parents, user=user)
 
-    @instrumented_op("read", data=_read_start_data)
+    @instrumented_op(
+        "read",
+        data=_read_start_data,
+        expected_errors=(WorkspaceReadNotFoundError,),
+    )
     async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
         return await self._inner.read(path, user=user)
 

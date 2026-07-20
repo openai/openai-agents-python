@@ -10,14 +10,17 @@ import pytest
 from agents.sandbox import Manifest, SandboxPathGrant
 from agents.sandbox.capabilities import LocalDirLazySkillSource, Skill, Skills
 from agents.sandbox.entries import Dir, File, LocalDir
-from agents.sandbox.errors import SkillsConfigError
+from agents.sandbox.errors import SkillsConfigError, WorkspaceReadNotFoundError
 from agents.sandbox.files import EntryKind, FileEntry
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.session.sandbox_session import SandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, Permissions, User
 from agents.sandbox.workspace_paths import coerce_posix_path
 from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
+from agents.tracing import trace
+from tests.testing_processor import fetch_ordered_spans
 from tests.utils.factories import TestSessionState
 
 
@@ -125,6 +128,16 @@ class _SkillsSession(BaseSandboxSession):
                 )
             )
         return entries
+
+
+class _NotFoundReadSkillsSession(_SkillsSession):
+    async def read(self, path: Path, *, user: object = None) -> io.BytesIO:
+        self.read_users.append(_user_name(user))
+        normalized = self.normalize_path(path)
+        try:
+            return io.BytesIO(normalized.read_bytes())
+        except FileNotFoundError as e:
+            raise WorkspaceReadNotFoundError(path=path, cause=e) from e
 
 
 class TestSkillValidation:
@@ -686,3 +699,40 @@ class TestSkillsLazyLoading:
             "- cached-skill: old description (file: .agents/dynamic-skill)" in second_instructions
         )
         assert "- cached-skill: new description (file: .agents/dynamic-skill)" in third_instructions
+
+    @pytest.mark.asyncio
+    async def test_first_time_load_skill_does_not_flag_read_span_as_errored(
+        self, tmp_path: Path
+    ) -> None:
+        workspace_root = tmp_path / "workspace"
+        workspace_root.mkdir()
+        src_root = tmp_path / "skills"
+        skill_dir = src_root / "dynamic-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# dynamic skill\n", encoding="utf-8")
+
+        capability = Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)))
+        inner = _NotFoundReadSkillsSession(
+            _source_granted_manifest(workspace_root, source=src_root)
+        )
+        session = SandboxSession(inner)
+        capability.bind(session)
+
+        with trace("skills_lazy_load_test"):
+            output = await capability.load_skill("dynamic-skill")
+
+        assert output == {
+            "status": "loaded",
+            "skill_name": "dynamic-skill",
+            "path": ".agents/dynamic-skill",
+        }
+        loaded_skill = workspace_root / ".agents" / "dynamic-skill" / "SKILL.md"
+        assert loaded_skill.read_text(encoding="utf-8") == "# dynamic skill\n"
+
+        read_spans = [
+            span
+            for span in fetch_ordered_spans()
+            if span.span_data.export().get("name") == "sandbox.read"
+        ]
+        assert len(read_spans) == 1
+        assert read_spans[0].error is None

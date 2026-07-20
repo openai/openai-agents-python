@@ -435,24 +435,18 @@ async def test_sandbox_session_error_events_and_traces_include_retryability(
     assert isinstance(read_finish, SandboxSessionFinishEvent)
     assert read_finish.error_retryable is False
 
+    # A not-found read is an expected error, so the audit event still records retryability
+    # while the trace span is not flagged as errored.
     spans = fetch_normalized_spans()
     read_span = next(
         child for child in spans[0]["children"] if child["data"]["name"] == "sandbox.read"
     )
-    span_data = read_span["data"]
-    assert isinstance(span_data, dict)
-    span_payload = span_data["data"]
-    assert isinstance(span_payload, dict)
-    assert span_payload["error_retryable"] is False
+    assert "error" not in read_span
 
     raw_read_span = next(
         span for span in fetch_ordered_spans() if span.span_data.export()["name"] == "sandbox.read"
     )
-    span_error = raw_read_span.error
-    assert span_error is not None
-    error_payload = span_error["data"]
-    assert isinstance(error_payload, dict)
-    assert error_payload["error_retryable"] is False
+    assert raw_read_span.error is None
 
 
 @pytest.mark.asyncio
