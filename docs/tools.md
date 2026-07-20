@@ -602,6 +602,9 @@ orchestrator_agent = Agent(
 async def main():
     result = await Runner.run(orchestrator_agent, input="Say 'Hello, how are you?' in Spanish.")
     print(result.final_output)
+
+
+asyncio.run(main())
 ```
 
 ### Customizing tool-agents
