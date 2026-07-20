@@ -312,6 +312,36 @@ def test_validate_tar_bytes_specific_symlink_rejection_does_not_reject_children(
     )
 
 
+@pytest.mark.parametrize(
+    "member",
+    [
+        _file("remote/data.txt"),
+        _symlink("remote/link", "../outside"),
+        _file("remote"),
+    ],
+)
+def test_validate_tar_bytes_rejects_members_overlapping_protected_path(
+    member: _Member,
+) -> None:
+    raw = _tar_bytes(member)
+
+    with pytest.raises(UnsafeTarMemberError, match="overlaps protected path: remote"):
+        validate_tar_bytes(raw, reject_rel_paths={"remote"})
+
+
+def test_validate_tar_bytes_rejects_non_directory_ancestor_of_protected_path() -> None:
+    raw = _tar_bytes(_file("remote"))
+
+    with pytest.raises(UnsafeTarMemberError, match="overlaps protected path: remote/nested"):
+        validate_tar_bytes(raw, reject_rel_paths={"remote/nested"})
+
+
+def test_validate_tar_bytes_allows_directory_ancestor_of_protected_path() -> None:
+    raw = _tar_bytes(_dir("remote"))
+
+    validate_tar_bytes(raw, reject_rel_paths={"remote/nested"})
+
+
 def test_safe_extract_tarfile_rejects_preexisting_symlink_parent(
     tmp_path: Path,
 ) -> None:

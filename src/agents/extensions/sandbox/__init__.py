@@ -99,6 +99,7 @@ except Exception:  # pragma: no cover
 
 try:
     from .vercel import (
+        VercelCloudBucketMountStrategy as VercelCloudBucketMountStrategy,
         VercelSandboxClient as VercelSandboxClient,
         VercelSandboxClientOptions as VercelSandboxClientOptions,
         VercelSandboxSession as VercelSandboxSession,
@@ -180,6 +181,7 @@ if _HAS_CLOUDFLARE:
 if _HAS_VERCEL:
     __all__.extend(
         [
+            "VercelCloudBucketMountStrategy",
             "VercelSandboxClient",
             "VercelSandboxClientOptions",
             "VercelSandboxSession",

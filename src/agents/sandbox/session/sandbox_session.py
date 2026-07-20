@@ -14,6 +14,7 @@ from ...run_config import SandboxArchiveLimits, SandboxConcurrencyLimits
 from ...tracing import Span, custom_span, get_current_trace
 from ..errors import OpName, SandboxError
 from ..files import FileEntry
+from ..materialization import MaterializationResult
 from ..types import ExecResult, ExposedPortEndpoint, User
 from .base_sandbox_session import BaseSandboxSession
 from .dependencies import Dependencies
@@ -523,6 +524,9 @@ class SandboxSession(BaseSandboxSession):
     @instrumented_op("shutdown")
     async def shutdown(self) -> None:
         await self._inner.shutdown()
+
+    async def apply_manifest(self, *, only_ephemeral: bool = False) -> MaterializationResult:
+        return await self._inner.apply_manifest(only_ephemeral=only_ephemeral)
 
     @instrumented_op(
         "exec",

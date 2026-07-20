@@ -327,6 +327,7 @@ def test_core_sandbox_public_export_surface_is_stable() -> None:
         (
             "agents.extensions.sandbox.vercel",
             {
+                "VercelCloudBucketMountStrategy",
                 "VercelSandboxClient",
                 "VercelSandboxClientOptions",
                 "VercelSandboxSession",
@@ -508,6 +509,7 @@ def test_optional_sandbox_dataclass_constructor_field_order_is_stable(
                 "workspace_persistence",
                 "snapshot_expiration_ms",
                 "network_policy",
+                "allow_s3_credential_exposure",
             ),
         ),
     ],
@@ -743,6 +745,7 @@ def test_optional_sandbox_client_options_positional_field_order_is_stable(
                 "workspace_persistence",
                 "snapshot_expiration_ms",
                 "network_policy",
+                "s3_mounts_non_resumable",
             ),
         ),
     ],
@@ -958,6 +961,11 @@ def test_mount_strategy_type_strings_round_trip_through_registry(
             "agents.extensions.sandbox.runloop",
             "RunloopCloudBucketMountStrategy",
             "runloop_cloud_bucket",
+        ),
+        (
+            "agents.extensions.sandbox.vercel",
+            "VercelCloudBucketMountStrategy",
+            "vercel_cloud_bucket",
         ),
     ],
 )
