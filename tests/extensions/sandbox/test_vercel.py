@@ -1232,6 +1232,39 @@ async def test_vercel_s3_aclose_shuts_down_after_snapshot_persist_failure(
 
 
 @pytest.mark.asyncio
+async def test_vercel_s3_aclose_shuts_down_after_pre_stop_hook_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    package_module = importlib.import_module("agents.extensions.sandbox.vercel")
+    client = vercel_module.VercelSandboxClient()
+    session = await client.create(
+        manifest=_vercel_s3_manifest(package_module),
+        options=vercel_module.VercelSandboxClientOptions(),
+    )
+    sandbox = cast(_FakeAsyncSandbox, session._inner._sandbox)
+    _queue_successful_s3_mounts(sandbox)
+    sandbox.command_results.update(
+        {
+            "/usr/bin/findmnt": [_FakeCommandFinished(stdout="mountpoint-s3")],
+            "/usr/bin/umount": [_FakeCommandFinished()],
+        }
+    )
+
+    async def failing_hook() -> None:
+        raise RuntimeError("pre-stop hook failed")
+
+    session.register_pre_stop_hook(failing_hook)
+    with pytest.raises(RuntimeError, match="pre-stop hook failed"):
+        async with session:
+            pass
+
+    assert sandbox.stop_calls == 1
+    assert sandbox.stop_blocking_calls == [True]
+    assert session._inner._sandbox is None
+
+
+@pytest.mark.asyncio
 async def test_vercel_s3_mount_cancellation_stops_and_marks_session_unusable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1393,14 +1426,19 @@ async def test_vercel_s3_rejects_state_topology_changes_and_cleans_fixed_path(
 
 
 @pytest.mark.asyncio
-async def test_vercel_s3_rejects_logical_path_change_with_explicit_mount_path(
+async def test_vercel_s3_rejects_logical_path_and_root_changes_with_explicit_mount_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     vercel_module = _load_vercel_module(monkeypatch)
     package_module = importlib.import_module("agents.extensions.sandbox.vercel")
     client = vercel_module.VercelSandboxClient()
+    manifest = _vercel_s3_manifest(
+        package_module,
+        mount_path=Path("/vercel/sandbox/actual"),
+    )
+    manifest.root = vercel_module.DEFAULT_VERCEL_WORKSPACE_ROOT
     session = await client.create(
-        manifest=_vercel_s3_manifest(package_module, mount_path=Path("actual")),
+        manifest=manifest,
         options=vercel_module.VercelSandboxClientOptions(),
     )
     sandbox = cast(_FakeAsyncSandbox, session._inner._sandbox)
@@ -1414,6 +1452,12 @@ async def test_vercel_s3_rejects_logical_path_change_with_explicit_mount_path(
     assert not any(call[0] == "/usr/bin/findmnt" for call in sandbox.run_command_calls)
 
     session.state.manifest.entries["remote"] = session.state.manifest.entries.pop("durable")
+    session.state.manifest.root = "/moved-workspace"
+    with pytest.raises(MountConfigError, match="cannot change after sandbox creation"):
+        await session._inner.persist_workspace()
+    assert not any(call[0] == "/usr/bin/findmnt" for call in sandbox.run_command_calls)
+
+    session.state.manifest.root = vercel_module.DEFAULT_VERCEL_WORKSPACE_ROOT
     sandbox.command_results.update(
         {
             "/usr/bin/findmnt": [_FakeCommandFinished(stdout="mountpoint-s3")],

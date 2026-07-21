@@ -404,6 +404,7 @@ class VercelSandboxSession(BaseSandboxSession):
         tuple[str | None, str | None, str | None],
     ]
     _trusted_s3_mount_logical_paths: set[str]
+    _trusted_manifest_root: str
     _s3_mount_failure: str | None
     _s3_mount_operation_lock: asyncio.Lock
     _s3_mount_operation_owner: asyncio.Task[Any] | None
@@ -470,6 +471,7 @@ class VercelSandboxSession(BaseSandboxSession):
         self._trusted_s3_mounts = resolved_trusted_s3_mounts
         self._trusted_s3_mount_credentials = trusted_s3_mount_credentials
         self._trusted_s3_mount_logical_paths = _vercel_s3_mount_logical_paths(state.manifest)
+        self._trusted_manifest_root = posixpath.normpath(state.manifest.root)
         self._s3_mount_failure = None
         self._s3_mount_operation_lock = asyncio.Lock()
         self._s3_mount_operation_owner = None
@@ -556,8 +558,10 @@ class VercelSandboxSession(BaseSandboxSession):
         declared_paths = set(declared_mounts)
         trusted_paths = set(self._trusted_s3_mounts)
         declared_logical_paths = _vercel_s3_mount_logical_paths(self.state.manifest)
+        declared_root = posixpath.normpath(self.state.manifest.root)
         if (
-            declared_paths != trusted_paths
+            declared_root != self._trusted_manifest_root
+            or declared_paths != trusted_paths
             or declared_logical_paths != self._trusted_s3_mount_logical_paths
             or any(
                 declared_mounts[path].ephemeral != self._trusted_s3_mounts[path].ephemeral
@@ -568,6 +572,8 @@ class VercelSandboxSession(BaseSandboxSession):
                 message="Vercel S3 mount topology cannot change after sandbox creation",
                 context={
                     "backend": "vercel",
+                    "declared_root": declared_root,
+                    "trusted_root": self._trusted_manifest_root,
                     "declared_mount_paths": sorted(declared_paths),
                     "trusted_mount_paths": sorted(trusted_paths),
                     "declared_logical_paths": sorted(declared_logical_paths),
@@ -1180,6 +1186,24 @@ class VercelSandboxSession(BaseSandboxSession):
         await sandbox.write_files(files)
 
 
+class _VercelSandboxSessionWrapper(SandboxSession):
+    async def aclose(self) -> None:
+        try:
+            await super().aclose()
+        except BaseException as error:
+            inner = cast(VercelSandboxSession, self._inner)
+            if inner._trusted_s3_mounts and inner._sandbox is not None:
+                try:
+                    await self.shutdown()
+                except BaseException as cleanup_error:
+                    if isinstance(cleanup_error, asyncio.CancelledError):
+                        raise cleanup_error from error
+                    raise error from cleanup_error
+                finally:
+                    await self._instrumentation.flush()
+            raise
+
+
 class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
     """Vercel-backed sandbox client."""
 
@@ -1204,6 +1228,18 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
         self._team_id = team_id
         self._instrumentation = instrumentation or Instrumentation()
         self._dependencies = dependencies
+
+    def _wrap_session(
+        self,
+        inner: BaseSandboxSession,
+        *,
+        instrumentation: Instrumentation | None = None,
+    ) -> SandboxSession:
+        return _VercelSandboxSessionWrapper(
+            inner,
+            instrumentation=instrumentation,
+            dependencies=self._resolve_dependencies(),
+        )
 
     async def create(
         self,
