@@ -35,6 +35,8 @@ from agents.sandbox.manifest import EnvEntry, Environment, StrEnvValue
 from agents.sandbox.materialization import MaterializedFile
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.session.dependencies import Dependencies
+from agents.sandbox.session.manager import Instrumentation
+from agents.sandbox.session.sinks import CallbackSink
 from agents.sandbox.snapshot import NoopSnapshot, SnapshotBase
 from agents.sandbox.types import User
 from tests._fake_workspace_paths import resolve_fake_workspace_path
@@ -641,6 +643,23 @@ async def test_vercel_rejects_root_and_overlapping_s3_mounts(
     with pytest.raises(MountConfigError, match="must not overlap"):
         await client.create(
             manifest=overlapping_manifest,
+            options=vercel_module.VercelSandboxClientOptions(),
+        )
+
+    physical_overlap_manifest = Manifest(
+        root="/workspace",
+        entries={
+            "remote": S3Mount(
+                bucket="physical-overlap",
+                mount_path=Path("actual"),
+                mount_strategy=strategy(),
+            ),
+            "actual/config.json": File(content=b"{}"),
+        },
+    )
+    with pytest.raises(MountConfigError, match="must not overlap manifest entries"):
+        await client.create(
+            manifest=physical_overlap_manifest,
             options=vercel_module.VercelSandboxClientOptions(),
         )
 
@@ -1275,6 +1294,44 @@ async def test_vercel_s3_aclose_shuts_down_after_pre_stop_hook_failure(
     with pytest.raises(RuntimeError, match="pre-stop hook failed"):
         async with session:
             pass
+
+    assert sandbox.stop_calls == 1
+    assert sandbox.stop_blocking_calls == [True]
+    assert session._inner._sandbox is None
+
+
+@pytest.mark.asyncio
+async def test_vercel_s3_aclose_bypasses_failing_instrumentation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    package_module = importlib.import_module("agents.extensions.sandbox.vercel")
+
+    def fail_stop_start(event: Any, _session: BaseSandboxSession) -> None:
+        if event.op == "stop" and event.phase == "start":
+            raise RuntimeError("stop sink failed")
+
+    client = vercel_module.VercelSandboxClient(
+        instrumentation=Instrumentation(
+            sinks=[CallbackSink(fail_stop_start, mode="sync", on_error="raise")]
+        )
+    )
+    session = await client.create(
+        manifest=_vercel_s3_manifest(package_module),
+        options=vercel_module.VercelSandboxClientOptions(),
+    )
+    sandbox = cast(_FakeAsyncSandbox, session._inner._sandbox)
+    _queue_successful_s3_mounts(sandbox)
+    sandbox.command_results.update(
+        {
+            "/usr/bin/findmnt": [_FakeCommandFinished(stdout="mountpoint-s3")],
+            "/usr/bin/umount": [_FakeCommandFinished()],
+        }
+    )
+    await session.start()
+
+    with pytest.raises(RuntimeError, match="sandbox event sink failed"):
+        await session.aclose()
 
     assert sandbox.stop_calls == 1
     assert sandbox.stop_blocking_calls == [True]

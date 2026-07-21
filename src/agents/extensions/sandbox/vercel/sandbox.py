@@ -28,7 +28,7 @@ import httpx
 from pydantic import TypeAdapter, field_serializer, field_validator
 from vercel import sandbox as vercel_sandbox
 
-from ....sandbox.entries import Mount, S3Mount
+from ....sandbox.entries import Dir, S3Mount
 from ....sandbox.errors import (
     ConfigurationError,
     ErrorCode,
@@ -208,6 +208,13 @@ def _vercel_s3_mount_map(manifest: Manifest) -> dict[str, S3Mount]:
     targets = manifest.mount_targets()
     root = posixpath.normpath(manifest.root)
     root_path = PurePosixPath(root)
+    entry_targets = [
+        (
+            entry,
+            PurePosixPath(posixpath.normpath(posixpath.join(root, logical_path.as_posix()))),
+        )
+        for logical_path, entry in manifest.iter_entries()
+    ]
     mounts: dict[str, S3Mount] = {}
     for index, (mount, mount_path) in enumerate(targets):
         if mount.mount_strategy.type != "vercel_cloud_bucket":
@@ -229,6 +236,18 @@ def _vercel_s3_mount_map(manifest: Manifest) -> dict[str, S3Mount]:
                     "workspace_root": root,
                 },
             )
+        for entry, entry_path in entry_targets:
+            if entry is mount or isinstance(entry, Dir) and entry_path in path.parents:
+                continue
+            if path == entry_path or path in entry_path.parents or entry_path in path.parents:
+                raise MountConfigError(
+                    message="Vercel S3 mount paths must not overlap manifest entries",
+                    context={
+                        "backend": "vercel",
+                        "mount_path": path_text,
+                        "overlapping_entry_path": entry_path.as_posix(),
+                    },
+                )
         for other_index, (_other_mount, other_path) in enumerate(targets):
             if other_index == index:
                 continue
@@ -244,14 +263,6 @@ def _vercel_s3_mount_map(manifest: Manifest) -> dict[str, S3Mount]:
                 )
         mounts[path_text] = mount
     return mounts
-
-
-def _vercel_s3_mount_logical_paths(manifest: Manifest) -> set[str]:
-    return {
-        posixpath.normpath(logical_path.as_posix())
-        for logical_path, entry in manifest.iter_entries()
-        if isinstance(entry, Mount) and entry.mount_strategy.type == "vercel_cloud_bucket"
-    }
 
 
 def _strip_vercel_mount_inline_credentials(value: object) -> None:
@@ -413,8 +424,7 @@ class VercelSandboxSession(BaseSandboxSession):
         str,
         tuple[str | None, str | None, str | None],
     ]
-    _trusted_s3_mount_logical_paths: set[str]
-    _trusted_manifest_root: str
+    _trusted_manifest: Manifest
     _s3_mount_session_closed: bool
     _s3_mount_failure: str | None
     _s3_mount_operation_lock: asyncio.Lock
@@ -481,8 +491,7 @@ class VercelSandboxSession(BaseSandboxSession):
         self._detached_s3_mount_paths = set()
         self._trusted_s3_mounts = resolved_trusted_s3_mounts
         self._trusted_s3_mount_credentials = trusted_s3_mount_credentials
-        self._trusted_s3_mount_logical_paths = _vercel_s3_mount_logical_paths(state.manifest)
-        self._trusted_manifest_root = state.manifest.root
+        self._trusted_manifest = state.manifest.model_copy(deep=True)
         self._s3_mount_session_closed = False
         self._s3_mount_failure = None
         self._s3_mount_operation_lock = asyncio.Lock()
@@ -566,31 +575,10 @@ class VercelSandboxSession(BaseSandboxSession):
         await stop_task
 
     def _runtime_assert_s3_mount_topology(self) -> None:
-        declared_mounts = _vercel_s3_mount_map(self.state.manifest)
-        declared_paths = set(declared_mounts)
-        trusted_paths = set(self._trusted_s3_mounts)
-        declared_logical_paths = _vercel_s3_mount_logical_paths(self.state.manifest)
-        declared_root = self.state.manifest.root
-        if (
-            declared_root != self._trusted_manifest_root
-            or declared_paths != trusted_paths
-            or declared_logical_paths != self._trusted_s3_mount_logical_paths
-            or any(
-                declared_mounts[path].ephemeral != self._trusted_s3_mounts[path].ephemeral
-                for path in declared_paths & trusted_paths
-            )
-        ):
+        if self.state.manifest != self._trusted_manifest:
             raise MountConfigError(
                 message="Vercel S3 mount topology cannot change after sandbox creation",
-                context={
-                    "backend": "vercel",
-                    "declared_root": declared_root,
-                    "trusted_root": self._trusted_manifest_root,
-                    "declared_mount_paths": sorted(declared_paths),
-                    "trusted_mount_paths": sorted(trusted_paths),
-                    "declared_logical_paths": sorted(declared_logical_paths),
-                    "trusted_logical_paths": sorted(self._trusted_s3_mount_logical_paths),
-                },
+                context={"backend": "vercel"},
             )
 
     @asynccontextmanager
@@ -1227,13 +1215,11 @@ class _VercelSandboxSessionWrapper(SandboxSession):
             inner = cast(VercelSandboxSession, self._inner)
             if inner._trusted_s3_mounts and inner._sandbox is not None:
                 try:
-                    await self.shutdown()
+                    await inner.shutdown()
                 except BaseException as cleanup_error:
                     if isinstance(cleanup_error, asyncio.CancelledError):
                         raise cleanup_error from error
                     raise error from cleanup_error
-                finally:
-                    await self._instrumentation.flush()
             raise
 
 

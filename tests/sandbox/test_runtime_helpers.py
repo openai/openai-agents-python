@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -8,6 +9,7 @@ import pytest
 
 from agents.sandbox.session.runtime_helpers import (
     RESOLVE_WORKSPACE_PATH_HELPER,
+    WORKSPACE_FINGERPRINT_HELPER,
     RuntimeHelperScript,
 )
 
@@ -24,6 +26,13 @@ def _install_resolve_helper(tmp_path: Path) -> Path:
     return helper_path
 
 
+def _install_fingerprint_helper(tmp_path: Path) -> Path:
+    helper_path = tmp_path / "workspace-fingerprint"
+    helper_path.write_text(WORKSPACE_FINGERPRINT_HELPER.content, encoding="utf-8")
+    helper_path.chmod(0o755)
+    return helper_path
+
+
 def test_runtime_helper_from_content_uses_posix_install_path() -> None:
     helper = RuntimeHelperScript.from_content(
         name="test-helper",
@@ -33,6 +42,43 @@ def test_runtime_helper_from_content_uses_posix_install_path() -> None:
     assert isinstance(helper.install_path, PurePosixPath)
     assert helper.install_path.as_posix().startswith("/tmp/openai-agents/bin/test-helper-")
     assert str(helper.install_path).startswith("/tmp/openai-agents/bin/test-helper-")
+
+
+@requires_posix_shell
+def test_workspace_fingerprint_helper_treats_exclusions_as_literal(tmp_path: Path) -> None:
+    helper_path = _install_fingerprint_helper(tmp_path)
+    workspace = tmp_path / "workspace"
+    excluded = workspace / "cache[1]"
+    durable = workspace / "cache1"
+    excluded.mkdir(parents=True)
+    durable.mkdir()
+    excluded_file = excluded / "remote.txt"
+    durable_file = durable / "durable.txt"
+    excluded_file.write_text("remote-one", encoding="utf-8")
+    durable_file.write_text("durable-one", encoding="utf-8")
+
+    def fingerprint() -> str:
+        result = subprocess.run(
+            [
+                str(helper_path),
+                str(workspace),
+                "test-version",
+                str(tmp_path / "fingerprint.json"),
+                "manifest-digest",
+                "cache[1]",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return str(json.loads(result.stdout)["fingerprint"])
+
+    first = fingerprint()
+    excluded_file.write_text("remote-two", encoding="utf-8")
+    assert fingerprint() == first
+
+    durable_file.write_text("durable-two", encoding="utf-8")
+    assert fingerprint() != first
 
 
 @requires_posix_shell
