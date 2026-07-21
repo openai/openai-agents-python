@@ -1257,6 +1257,39 @@ async def test_vercel_s3_missing_tracked_mount_stops_session(
 
 
 @pytest.mark.asyncio
+async def test_vercel_s3_mount_disappearing_during_unmount_stops_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    package_module = importlib.import_module("agents.extensions.sandbox.vercel")
+    session = await vercel_module.VercelSandboxClient().create(
+        snapshot=_MemorySnapshot(id="snapshot"),
+        manifest=_vercel_s3_manifest(package_module),
+        options=vercel_module.VercelSandboxClientOptions(),
+    )
+    sandbox = cast(_FakeAsyncSandbox, session._inner._sandbox)
+    _queue_successful_s3_mounts(sandbox)
+    await session.start()
+    sandbox.command_results.update(
+        {
+            "/usr/bin/findmnt": [
+                _FakeCommandFinished(stdout="mountpoint-s3"),
+                _FakeCommandFinished(exit_code=1),
+            ],
+            "/usr/bin/umount": [_FakeCommandFinished(stderr="missing", exit_code=32)],
+        }
+    )
+
+    with pytest.raises(vercel_module.WorkspaceArchiveReadError):
+        await session.persist_workspace()
+
+    assert sandbox.stop_calls == 1
+    assert sandbox.stop_blocking_calls == [True]
+    assert session._inner._sandbox is None
+    await session.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_vercel_s3_unexpected_persist_error_stops_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -451,8 +451,17 @@ async def _unmount_s3(session: VercelSandboxSession, mount_path: Path) -> None:
         args,
         sudo=True,
     )
-    if result.ok() or not await _is_mounted(session, mount_path):
+    if result.ok():
         return
+    if not await _is_mounted(session, mount_path):
+        # A mount can move with a renamed ancestor, so disappearance after umount is ambiguous.
+        raise MountConfigError(
+            message="Vercel S3 mount state became ambiguous during unmount",
+            context={
+                "backend": "vercel",
+                "mount_path": mount_path_text,
+            },
+        )
     _raise_command_failure(
         "/usr/bin/umount",
         args,

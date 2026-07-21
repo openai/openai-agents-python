@@ -640,10 +640,10 @@ class VercelSandboxSession(BaseSandboxSession):
         validate_topology: bool = True,
     ) -> AsyncIterator[None]:
         if not self._trusted_s3_mounts or (
-            not self._active_s3_mount_paths
+            self._runtime_s3_mount_activation_allowed()
+            and not self._active_s3_mount_paths
             and not self._detached_s3_mount_paths
             and not force_lock
-            and not self._s3_mount_operation_lock.locked()
         ):
             if validate_topology and self._trusted_s3_mounts:
                 self._runtime_assert_s3_workspace_root()
