@@ -204,6 +204,12 @@ class _LiveSessionDeltaRecorder(_FakeSession):
         return []
 
 
+class _RejectingLiveSessionDeltaRecorder(_LiveSessionDeltaRecorder):
+    async def _validate_manifest_application(self, *, only_ephemeral: bool = False) -> None:
+        _ = only_ephemeral
+        raise RuntimeError("live manifest update rejected")
+
+
 class _PathGuardingSession(_FakeSession):
     def __init__(self, manifest: Manifest) -> None:
         super().__init__(manifest)
@@ -3370,6 +3376,31 @@ async def test_session_manager_materializes_running_injected_session_manifest_mu
     assert live_session.stop_calls == 0
     assert live_session.shutdown_calls == 0
     assert payload is None
+
+
+@pytest.mark.asyncio
+async def test_session_manager_validates_running_manifest_update_before_materialization() -> None:
+    inner = _RejectingLiveSessionDeltaRecorder(Manifest())
+    inner._running = True
+    live_session = SandboxSession(inner)
+    capability = _ManifestMutationCapability()
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(session=live_session),
+        run_state=None,
+    )
+
+    manager.acquire_agent(agent)
+    with pytest.raises(RuntimeError, match="live manifest update rejected"):
+        await manager.ensure_session(
+            agent=agent,
+            capabilities=[capability],
+            is_resumed_state=False,
+        )
+
+    assert inner.applied_entry_batches == []
+    assert live_session.state.manifest.entries == {}
 
 
 @pytest.mark.asyncio

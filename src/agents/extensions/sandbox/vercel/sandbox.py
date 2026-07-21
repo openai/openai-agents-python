@@ -575,7 +575,12 @@ class VercelSandboxSession(BaseSandboxSession):
         await stop_task
 
     def _runtime_assert_s3_mount_topology(self) -> None:
-        if self.state.manifest != self._trusted_manifest:
+        topology_changed = (
+            self.state.manifest != self._trusted_manifest
+            if self._trusted_s3_mounts
+            else bool(_vercel_s3_mounts(self.state.manifest))
+        )
+        if topology_changed:
             raise MountConfigError(
                 message="Vercel S3 mount topology cannot change after sandbox creation",
                 context={"backend": "vercel"},
@@ -588,6 +593,8 @@ class VercelSandboxSession(BaseSandboxSession):
         validate_topology: bool = True,
     ) -> AsyncIterator[None]:
         if not self._trusted_s3_mounts:
+            if validate_topology:
+                self._runtime_assert_s3_mount_topology()
             yield
             return
 

@@ -300,6 +300,8 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                 session=sandbox_config.session,
                 running=running,
             )
+            if manifest_update.processed_manifest is not None:
+                await sandbox_config.session._validate_manifest_application()
             if manifest_update.entries_to_apply:
                 await sandbox_config.session._apply_entry_batch(
                     manifest_update.entries_to_apply,

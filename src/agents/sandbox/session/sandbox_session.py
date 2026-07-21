@@ -525,8 +525,10 @@ class SandboxSession(BaseSandboxSession):
     async def shutdown(self) -> None:
         await self._inner.shutdown()
 
-    async def apply_manifest(self, *, only_ephemeral: bool = False) -> MaterializationResult:
+    async def _validate_manifest_application(self, *, only_ephemeral: bool = False) -> None:
         await self._inner._validate_manifest_application(only_ephemeral=only_ephemeral)
+
+    async def apply_manifest(self, *, only_ephemeral: bool = False) -> MaterializationResult:
         return await super().apply_manifest(only_ephemeral=only_ephemeral)
 
     @instrumented_op(

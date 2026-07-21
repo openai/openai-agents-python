@@ -754,6 +754,8 @@ async def test_vercel_s3_dynamic_mount_is_rejected_before_materialization(
         await session.apply_manifest(only_ephemeral=True)
 
     assert sandbox.write_files_calls == []
+    with pytest.raises(MountConfigError, match="topology cannot change"):
+        await session.persist_workspace()
     await session.shutdown()
 
 
