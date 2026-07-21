@@ -368,7 +368,7 @@ async def test_sandbox_session_aclose_runs_public_cleanup_lifecycle() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sandbox_session_aclose_closes_dependencies_when_stop_fails() -> None:
+async def test_sandbox_session_aclose_continues_cleanup_when_stop_fails() -> None:
     inner = _FailingStopSession(Manifest())
     session = SandboxSession(inner)
 
@@ -376,7 +376,7 @@ async def test_sandbox_session_aclose_closes_dependencies_when_stop_fails() -> N
         await session.aclose()
 
     assert inner.stop_calls == 1
-    assert inner.shutdown_calls == 0
+    assert inner.shutdown_calls == 1
     assert inner.close_dependency_calls == 1
 
 

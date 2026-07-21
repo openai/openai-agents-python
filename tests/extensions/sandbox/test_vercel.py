@@ -134,6 +134,22 @@ class _MemorySnapshot(SnapshotBase):
         return self.is_restorable
 
 
+class _FailingPersistSnapshot(SnapshotBase):
+    type: Literal["test-vercel-failing-persist"] = "test-vercel-failing-persist"
+
+    async def persist(self, data: io.IOBase, *, dependencies: Dependencies | None = None) -> None:
+        _ = (data, dependencies)
+        raise RuntimeError("snapshot persist failed")
+
+    async def restore(self, *, dependencies: Dependencies | None = None) -> io.IOBase:
+        _ = dependencies
+        return io.BytesIO()
+
+    async def restorable(self, *, dependencies: Dependencies | None = None) -> bool:
+        _ = dependencies
+        return False
+
+
 class _FakeCommandFinished:
     def __init__(self, *, stdout: str = "", stderr: str = "", exit_code: int = 0) -> None:
         self._stdout = stdout
@@ -487,6 +503,7 @@ def _vercel_s3_manifest(
     package_module: Any,
     *,
     credentials: bool = False,
+    mount_path: Path | None = None,
 ) -> Manifest:
     return Manifest(
         root="/workspace",
@@ -497,6 +514,7 @@ def _vercel_s3_manifest(
                 secret_access_key="test-secret-key" if credentials else None,
                 session_token="test-session-token" if credentials else None,
                 region="us-west-2",
+                mount_path=mount_path,
                 mount_strategy=package_module.VercelCloudBucketMountStrategy(),
             )
         },
@@ -1142,6 +1160,42 @@ async def test_vercel_s3_unexpected_persist_error_stops_session(
 
 
 @pytest.mark.asyncio
+async def test_vercel_s3_aclose_shuts_down_after_snapshot_persist_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    package_module = importlib.import_module("agents.extensions.sandbox.vercel")
+    client = vercel_module.VercelSandboxClient()
+    session = await client.create(
+        snapshot=_FailingPersistSnapshot(id="snapshot"),
+        manifest=_vercel_s3_manifest(package_module),
+        options=vercel_module.VercelSandboxClientOptions(),
+    )
+    sandbox = cast(_FakeAsyncSandbox, session._inner._sandbox)
+    _queue_successful_s3_mounts(sandbox, count=2)
+    sandbox.command_results.update(
+        {
+            "/usr/bin/findmnt": [
+                _FakeCommandFinished(stdout="mountpoint-s3"),
+                _FakeCommandFinished(stdout="mountpoint-s3"),
+            ],
+            "/usr/bin/umount": [
+                _FakeCommandFinished(),
+                _FakeCommandFinished(),
+            ],
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="snapshot persist failed"):
+        async with session:
+            pass
+
+    assert sandbox.stop_calls == 1
+    assert sandbox.stop_blocking_calls == [True]
+    assert session._inner._sandbox is None
+
+
+@pytest.mark.asyncio
 async def test_vercel_s3_mount_cancellation_stops_and_marks_session_unusable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1300,6 +1354,37 @@ async def test_vercel_s3_rejects_state_topology_changes_and_cleans_fixed_path(
     await session.shutdown()
     unmount_call = next(call for call in sandbox.run_command_calls if call[0] == "/usr/bin/umount")
     assert unmount_call[1] == ["/vercel/sandbox/remote"]
+
+
+@pytest.mark.asyncio
+async def test_vercel_s3_rejects_logical_path_change_with_explicit_mount_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    package_module = importlib.import_module("agents.extensions.sandbox.vercel")
+    client = vercel_module.VercelSandboxClient()
+    session = await client.create(
+        manifest=_vercel_s3_manifest(package_module, mount_path=Path("actual")),
+        options=vercel_module.VercelSandboxClientOptions(),
+    )
+    sandbox = cast(_FakeAsyncSandbox, session._inner._sandbox)
+    _queue_successful_s3_mounts(sandbox)
+    await session.start()
+
+    mount = session.state.manifest.entries.pop("remote")
+    session.state.manifest.entries["durable"] = mount
+    with pytest.raises(MountConfigError, match="cannot change after sandbox creation"):
+        await session._inner.persist_workspace()
+    assert not any(call[0] == "/usr/bin/findmnt" for call in sandbox.run_command_calls)
+
+    session.state.manifest.entries["remote"] = session.state.manifest.entries.pop("durable")
+    sandbox.command_results.update(
+        {
+            "/usr/bin/findmnt": [_FakeCommandFinished(stdout="mountpoint-s3")],
+            "/usr/bin/umount": [_FakeCommandFinished()],
+        }
+    )
+    await session.shutdown()
 
 
 @pytest.mark.asyncio
@@ -2047,7 +2132,7 @@ async def test_vercel_resume_recreates_sandbox_after_wait_timeout(
     vercel_module = _load_vercel_module(monkeypatch)
     # Use "pending" so that the code enters the wait path (not already RUNNING).
     existing = _FakeAsyncSandbox(sandbox_id="sandbox-existing", status="pending")
-    existing.wait_for_status_error = TimeoutError()
+    existing.wait_for_status_error = asyncio.TimeoutError()
     _FakeAsyncSandbox.sandboxes[existing.sandbox_id] = existing
 
     state = vercel_module.VercelSandboxSessionState(

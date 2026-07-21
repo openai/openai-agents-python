@@ -28,7 +28,7 @@ import httpx
 from pydantic import TypeAdapter, field_serializer, field_validator
 from vercel import sandbox as vercel_sandbox
 
-from ....sandbox.entries import S3Mount
+from ....sandbox.entries import Mount, S3Mount
 from ....sandbox.errors import (
     ConfigurationError,
     ErrorCode,
@@ -44,7 +44,6 @@ from ....sandbox.errors import (
     WorkspaceWriteTypeError,
 )
 from ....sandbox.manifest import Manifest
-from ....sandbox.materialization import MaterializationResult
 from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.session.dependencies import Dependencies
@@ -237,6 +236,14 @@ def _vercel_s3_mount_map(manifest: Manifest) -> dict[str, S3Mount]:
     return mounts
 
 
+def _vercel_s3_mount_logical_paths(manifest: Manifest) -> set[str]:
+    return {
+        posixpath.normpath(logical_path.as_posix())
+        for logical_path, entry in manifest.iter_entries()
+        if isinstance(entry, Mount) and entry.mount_strategy.type == "vercel_cloud_bucket"
+    }
+
+
 def _strip_vercel_mount_inline_credentials(value: object) -> None:
     if isinstance(value, dict):
         mount_strategy = value.get("mount_strategy")
@@ -392,6 +399,7 @@ class VercelSandboxSession(BaseSandboxSession):
     _active_s3_mount_paths: set[str]
     _detached_s3_mount_paths: set[str]
     _trusted_s3_mounts: dict[str, S3Mount]
+    _trusted_s3_mount_logical_paths: set[str]
     _s3_mount_failure: str | None
     _s3_mount_operation_lock: asyncio.Lock
     _s3_mount_operation_owner: asyncio.Task[Any] | None
@@ -446,6 +454,7 @@ class VercelSandboxSession(BaseSandboxSession):
         self._active_s3_mount_paths = set()
         self._detached_s3_mount_paths = set()
         self._trusted_s3_mounts = resolved_trusted_s3_mounts
+        self._trusted_s3_mount_logical_paths = _vercel_s3_mount_logical_paths(state.manifest)
         self._s3_mount_failure = None
         self._s3_mount_operation_lock = asyncio.Lock()
         self._s3_mount_operation_owner = None
@@ -506,9 +515,14 @@ class VercelSandboxSession(BaseSandboxSession):
         declared_mounts = _vercel_s3_mount_map(self.state.manifest)
         declared_paths = set(declared_mounts)
         trusted_paths = set(self._trusted_s3_mounts)
-        if declared_paths != trusted_paths or any(
-            declared_mounts[path].ephemeral != self._trusted_s3_mounts[path].ephemeral
-            for path in declared_paths & trusted_paths
+        declared_logical_paths = _vercel_s3_mount_logical_paths(self.state.manifest)
+        if (
+            declared_paths != trusted_paths
+            or declared_logical_paths != self._trusted_s3_mount_logical_paths
+            or any(
+                declared_mounts[path].ephemeral != self._trusted_s3_mounts[path].ephemeral
+                for path in declared_paths & trusted_paths
+            )
         ):
             raise MountConfigError(
                 message="Vercel S3 mount topology cannot change after sandbox creation",
@@ -516,6 +530,8 @@ class VercelSandboxSession(BaseSandboxSession):
                     "backend": "vercel",
                     "declared_mount_paths": sorted(declared_paths),
                     "trusted_mount_paths": sorted(trusted_paths),
+                    "declared_logical_paths": sorted(declared_logical_paths),
+                    "trusted_logical_paths": sorted(self._trusted_s3_mount_logical_paths),
                 },
             )
 
@@ -582,7 +598,8 @@ class VercelSandboxSession(BaseSandboxSession):
             _VERCEL_S3_MOUNT_START_SESSION.reset(activation_token)
         self._s3_mounts_started = True
 
-    async def apply_manifest(self, *, only_ephemeral: bool = False) -> MaterializationResult:
+    async def _validate_manifest_application(self, *, only_ephemeral: bool = False) -> None:
+        _ = only_ephemeral
         if not self._runtime_s3_mount_activation_allowed() and (
             self._trusted_s3_mounts or _vercel_s3_mounts(self.state.manifest)
         ):
@@ -593,7 +610,6 @@ class VercelSandboxSession(BaseSandboxSession):
                 ),
                 context={"backend": "vercel"},
             )
-        return await super().apply_manifest(only_ephemeral=only_ephemeral)
 
     def supports_pty(self) -> bool:
         return False
@@ -816,7 +832,7 @@ class VercelSandboxSession(BaseSandboxSession):
 
         try:
             return await asyncio.wait_for(run_and_collect_output(), timeout=timeout)
-        except TimeoutError as exc:
+        except asyncio.TimeoutError as exc:
             raise ExecTimeoutError(command=normalized, timeout_s=timeout, cause=exc) from exc
         except ExecTimeoutError:
             raise
@@ -1265,7 +1281,7 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
                     # ABORTED, SNAPSHOTTING). Drop the handle and recreate below.
                     await sandbox.client.aclose()
                     sandbox = None
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 if sandbox is not None:
                     await sandbox.client.aclose()
                     sandbox = None

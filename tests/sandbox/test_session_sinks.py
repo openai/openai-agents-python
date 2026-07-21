@@ -34,6 +34,7 @@ from agents.sandbox.session import (
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.session.sandbox_session import _read_with_expected_span_errors
 from agents.sandbox.snapshot import LocalSnapshot
+from agents.sandbox.types import ExecResult
 from agents.tracing import custom_span, trace
 from tests.testing_processor import fetch_normalized_spans, fetch_ordered_spans
 
@@ -96,6 +97,33 @@ async def test_sandbox_session_write_does_not_include_bytes_when_disabled(
 
     write_start = [event for event in events if event.op == "write" and event.phase == "start"][0]
     assert "bytes" not in write_start.data
+
+
+@pytest.mark.asyncio
+async def test_sandbox_session_apply_manifest_preserves_write_instrumentation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[SandboxSessionEvent] = []
+    instrumentation = Instrumentation(
+        sinks=[CallbackSink(lambda e, _sess: events.append(e), mode="sync")],
+    )
+    inner = _build_unix_local_session(
+        tmp_path,
+        manifest=Manifest(entries={"materialized.txt": File(content=b"hello")}),
+    )
+
+    async def successful_exec(*_command: str | Path, timeout: float | None = None) -> ExecResult:
+        _ = timeout
+        return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+    monkeypatch.setattr(inner, "_exec_internal", successful_exec)
+    session = SandboxSession(inner, instrumentation=instrumentation)
+
+    await session.apply_manifest()
+
+    write_events = [event for event in events if event.op == "write"]
+    assert [event.phase for event in write_events] == ["start", "finish"]
 
 
 @pytest.mark.asyncio
