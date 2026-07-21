@@ -301,6 +301,9 @@ At the end of the agent run, you can choose what to show to the user. For exampl
 You can manually manage conversation history using the [`RunResultBase.to_input_list()`][agents.result.RunResultBase.to_input_list] method to get the inputs for the next turn:
 
 ```python
+from agents import Agent, Runner, trace
+
+
 async def main():
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
 
@@ -323,7 +326,7 @@ async def main():
 For a simpler approach, you can use [Sessions](sessions/index.md) to automatically handle conversation history without manually calling `.to_input_list()`:
 
 ```python
-from agents import Agent, Runner, SQLiteSession
+from agents import Agent, Runner, SQLiteSession, trace
 
 async def main():
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
