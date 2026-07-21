@@ -720,6 +720,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     )
                 else:
                     await self._send_raw_message(converted)
+            elif _debug.DONT_LOG_MODEL_DATA:
+                logger.error("Failed to convert raw message type=%s", event.message.get("type"))
             else:
                 logger.error("Failed to convert raw message: %s", event)
         elif isinstance(event, RealtimeModelSendUserInput):

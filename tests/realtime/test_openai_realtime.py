@@ -478,6 +478,31 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         assert error_event.type == "error"
 
     @pytest.mark.asyncio
+    async def test_send_raw_message_conversion_failure_redacts_payload_from_logs(
+        self, model, monkeypatch
+    ):
+        """A raw client message that fails to convert must not leak its payload to the logs
+        when model-data logging is disabled."""
+        monkeypatch.setattr(
+            "agents.realtime.openai_realtime._debug.DONT_LOG_MODEL_DATA",
+            True,
+        )
+        raw = RealtimeModelSendRawMessage(
+            message={
+                "type": "invalid.event.type",
+                "other_data": {"transcript": "secret transcript"},
+            }
+        )
+
+        with patch("agents.realtime.openai_realtime.logger") as mock_logger:
+            await model.send_event(raw)
+
+        mock_logger.error.assert_called_once()
+        logged_call = str(mock_logger.error.call_args)
+        assert "secret transcript" not in logged_call
+        assert "invalid.event.type" in logged_call
+
+    @pytest.mark.asyncio
     async def test_custom_voice_response_events_update_response_sequencer(self, model, monkeypatch):
         """Dict-shaped custom voices should not block response.create sequencing."""
         payload_types: list[str] = []
