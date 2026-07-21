@@ -444,20 +444,12 @@ class BaseSandboxSession(abc.ABC):
         ``delete()`` separately for backend-specific deletion such as removing a Docker container
         or deleting a temporary host workspace.
         """
-        cleanup_error: BaseException | None = None
-        for cleanup in (self.run_pre_stop_hooks, self.stop, self.shutdown):
-            try:
-                await cleanup()
-            except BaseException as exc:
-                if cleanup_error is None:
-                    cleanup_error = exc
         try:
+            await self.run_pre_stop_hooks()
+            await self.stop()
+            await self.shutdown()
+        finally:
             await self._aclose_dependencies()
-        except BaseException as exc:
-            if cleanup_error is None:
-                cleanup_error = exc
-        if cleanup_error is not None:
-            raise cleanup_error
 
     async def __aexit__(
         self,

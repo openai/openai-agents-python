@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import shlex
 from pathlib import Path
-from typing import Any, Literal, NoReturn
+from typing import Literal, NoReturn
 
 from ....sandbox.entries import Mount, S3Mount
 from ....sandbox.entries.mounts.base import MountStrategyBase
@@ -44,27 +44,15 @@ def _redact_sensitive_values(text: str, values: tuple[str, ...]) -> str:
     return redacted
 
 
-def _raise_sanitized_mount_command_error(
-    *,
-    command: str,
-    stderr: str,
-    context: dict[str, object],
-) -> NoReturn:
-    raise MountCommandError(command=command, stderr=stderr, context=context) from None
-
-
 async def _run_vercel_command(
     session: VercelSandboxSession,
     command: str,
     args: list[str],
     *,
-    env: dict[str, str] | None = None,
     sudo: bool = False,
     timeout: float = _MOUNTPOINT_COMMAND_TIMEOUT_S,
 ) -> ExecResult:
-    sensitive_values = tuple((env or {}).values())
     command_text = shlex.join([command, *args])
-    sandbox: Any = None
     try:
         sandbox = await session._ensure_sandbox()
 
@@ -72,7 +60,6 @@ async def _run_vercel_command(
             finished = await sandbox.run_command(
                 command,
                 args,
-                env=env or None,
                 sudo=sudo,
             )
             stdout = (await finished.stdout()).encode("utf-8")
@@ -81,23 +68,11 @@ async def _run_vercel_command(
 
         return await asyncio.wait_for(run_and_collect_output(), timeout=timeout)
     except Exception as exc:
-        failure_message = _redact_sensitive_values(
-            f"{type(exc).__name__}: {exc}",
-            sensitive_values,
-        )
-        exc.__traceback__ = None
-        exc.__context__ = None
-        exc.__cause__ = None
-
-    env = None
-    sensitive_values = ()
-    sandbox = None
-    del session
-    _raise_sanitized_mount_command_error(
-        command=command_text,
-        stderr=failure_message,
-        context={"backend": "vercel"},
-    )
+        raise MountCommandError(
+            command=command_text,
+            stderr=f"{type(exc).__name__}: {exc}",
+            context={"backend": "vercel"},
+        ) from None
 
 
 def _raise_command_failure(
@@ -105,25 +80,16 @@ def _raise_command_failure(
     args: list[str],
     result: ExecResult,
     *,
-    env: dict[str, str] | None = None,
     context: dict[str, object] | None = None,
 ) -> NoReturn:
-    failure_command = shlex.join([command, *args])
-    failure_stderr = _redact_sensitive_values(
-        result.stderr.decode("utf-8", errors="replace"),
-        tuple((env or {}).values()),
-    )
-    failure_context = {
-        "backend": "vercel",
-        "exit_code": result.exit_code,
-        **(context or {}),
-    }
-    env = None
-    del result
-    _raise_sanitized_mount_command_error(
-        command=failure_command,
-        stderr=failure_stderr,
-        context=failure_context,
+    raise MountCommandError(
+        command=shlex.join([command, *args]),
+        stderr=result.stderr.decode("utf-8", errors="replace"),
+        context={
+            "backend": "vercel",
+            "exit_code": result.exit_code,
+            **(context or {}),
+        },
     )
 
 
@@ -132,7 +98,6 @@ async def _run_required_command(
     command: str,
     args: list[str],
     *,
-    env: dict[str, str] | None = None,
     sudo: bool = False,
     timeout: float = _MOUNTPOINT_COMMAND_TIMEOUT_S,
     context: dict[str, object] | None = None,
@@ -141,24 +106,75 @@ async def _run_required_command(
         session,
         command,
         args,
-        env=env,
         sudo=sudo,
         timeout=timeout,
     )
     if not result.ok():
-        sanitized_result = ExecResult(
-            stdout=b"",
-            stderr=_redact_sensitive_values(
-                result.stderr.decode("utf-8", errors="replace"),
-                tuple((env or {}).values()),
-            ).encode(),
-            exit_code=result.exit_code,
-        )
-        result = sanitized_result
-        env = None
-        del session
         _raise_command_failure(command, args, result, context=context)
     return result
+
+
+async def _run_credentialed_mount_command(
+    session: VercelSandboxSession,
+    mount_path: Path,
+    args: list[str],
+    *,
+    context: dict[str, object],
+) -> ExecResult | MountCommandError | asyncio.CancelledError:
+    env = session._runtime_s3_mount_environment(mount_path)
+    sensitive_values = tuple(env.values())
+    command_text = shlex.join([_MOUNTPOINT_BINARY, *args])
+    try:
+        sandbox = await session._ensure_sandbox()
+
+        async def run_and_collect_output() -> ExecResult:
+            finished = await sandbox.run_command(
+                _MOUNTPOINT_BINARY,
+                args,
+                env=env,
+                sudo=True,
+            )
+            stdout = (await finished.stdout()).encode("utf-8")
+            stderr = (await finished.stderr()).encode("utf-8")
+            return ExecResult(stdout=stdout, stderr=stderr, exit_code=finished.exit_code)
+
+        result = await asyncio.wait_for(
+            run_and_collect_output(),
+            timeout=_MOUNTPOINT_COMMAND_TIMEOUT_S,
+        )
+    except (Exception, asyncio.CancelledError) as exc:
+        cancelled = isinstance(exc, asyncio.CancelledError)
+        failure_message = _redact_sensitive_values(
+            f"{type(exc).__name__}: {exc}",
+            sensitive_values,
+        )
+        exc.__traceback__ = None
+        exc.__context__ = None
+        exc.__cause__ = None
+        if cancelled:
+            return asyncio.CancelledError()
+        return MountCommandError(
+            command=command_text,
+            stderr=failure_message,
+            context={"backend": "vercel", **context},
+        )
+
+    if result.ok():
+        return result
+
+    failure_message = _redact_sensitive_values(
+        result.stderr.decode("utf-8", errors="replace"),
+        sensitive_values,
+    )
+    return MountCommandError(
+        command=command_text,
+        stderr=failure_message,
+        context={
+            "backend": "vercel",
+            "exit_code": result.exit_code,
+            **context,
+        },
+    )
 
 
 def _parse_mountpoint_version(raw: str) -> tuple[int, int, int] | None:
@@ -250,18 +266,6 @@ def _validate_s3_mount(mount: Mount) -> S3Mount:
     return mount
 
 
-def _mount_env(mount: S3Mount) -> dict[str, str]:
-    env: dict[str, str] = {}
-    if mount.access_key_id is not None and mount.secret_access_key is not None:
-        env["AWS_ACCESS_KEY_ID"] = mount.access_key_id
-        env["AWS_SECRET_ACCESS_KEY"] = mount.secret_access_key
-    if mount.session_token is not None:
-        env["AWS_SESSION_TOKEN"] = mount.session_token
-    if mount.region is not None:
-        env["AWS_REGION"] = mount.region
-    return env
-
-
 async def _command_user_ids(session: VercelSandboxSession) -> tuple[str, str]:
     uid_result = await _run_required_command(session, "/usr/bin/id", ["-u"])
     gid_result = await _run_required_command(session, "/usr/bin/id", ["-g"])
@@ -280,10 +284,11 @@ def _mount_args(
     mount: S3Mount,
     mount_path: Path,
     *,
+    authenticated: bool,
     user_ids: tuple[str, str] | None,
 ) -> list[str]:
     args = [mount.bucket, sandbox_path_str(mount_path), "--allow-other"]
-    if mount.access_key_id is None:
+    if not authenticated:
         args.append("--no-sign-request")
     if mount.read_only:
         args.append("--read-only")
@@ -363,15 +368,19 @@ async def _mount_s3(
     await _assert_empty_mount_directory(session, normalized_path)
     user_ids = await _command_user_ids(session) if not mount.read_only else None
     await _assert_canonical_mount_path(session, normalized_path)
-    env = _mount_env(mount)
-    await _run_required_command(
+    outcome = await _run_credentialed_mount_command(
         session,
-        _MOUNTPOINT_BINARY,
-        _mount_args(mount, normalized_path, user_ids=user_ids),
-        env=env,
-        sudo=True,
+        normalized_path,
+        _mount_args(
+            mount,
+            normalized_path,
+            authenticated=session._runtime_s3_mount_is_authenticated(normalized_path),
+            user_ids=user_ids,
+        ),
         context={"bucket": mount.bucket, "mount_path": mount_path_text},
     )
+    if isinstance(outcome, BaseException):
+        raise outcome from None
 
 
 async def _is_mounted(session: VercelSandboxSession, mount_path: Path) -> bool:

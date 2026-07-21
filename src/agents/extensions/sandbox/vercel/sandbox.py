@@ -399,6 +399,10 @@ class VercelSandboxSession(BaseSandboxSession):
     _active_s3_mount_paths: set[str]
     _detached_s3_mount_paths: set[str]
     _trusted_s3_mounts: dict[str, S3Mount]
+    _trusted_s3_mount_credentials: dict[
+        str,
+        tuple[str | None, str | None, str | None],
+    ]
     _trusted_s3_mount_logical_paths: set[str]
     _s3_mount_failure: str | None
     _s3_mount_operation_lock: asyncio.Lock
@@ -413,17 +417,27 @@ class VercelSandboxSession(BaseSandboxSession):
         allow_s3_credential_exposure: bool = False,
         trusted_s3_mounts: dict[str, S3Mount] | None = None,
     ) -> None:
-        resolved_trusted_s3_mounts = {
-            path: mount.model_copy(deep=True) for path, mount in (trusted_s3_mounts or {}).items()
-        }
+        resolved_trusted_s3_mounts: dict[str, S3Mount] = {}
+        trusted_s3_mount_credentials: dict[
+            str,
+            tuple[str | None, str | None, str | None],
+        ] = {}
+        for path, mount in (trusted_s3_mounts or {}).items():
+            trusted_mount = mount.model_copy(deep=True)
+            credentials = (
+                trusted_mount.access_key_id,
+                trusted_mount.secret_access_key,
+                trusted_mount.session_token,
+            )
+            trusted_mount.access_key_id = None
+            trusted_mount.secret_access_key = None
+            trusted_mount.session_token = None
+            resolved_trusted_s3_mounts[path] = trusted_mount
+            trusted_s3_mount_credentials[path] = credentials
         has_trusted_credentials = any(
             credential is not None
-            for mount in resolved_trusted_s3_mounts.values()
-            for credential in (
-                mount.access_key_id,
-                mount.secret_access_key,
-                mount.session_token,
-            )
+            for credentials in trusted_s3_mount_credentials.values()
+            for credential in credentials
         )
         if has_trusted_credentials and not allow_s3_credential_exposure:
             raise MountConfigError(
@@ -454,6 +468,7 @@ class VercelSandboxSession(BaseSandboxSession):
         self._active_s3_mount_paths = set()
         self._detached_s3_mount_paths = set()
         self._trusted_s3_mounts = resolved_trusted_s3_mounts
+        self._trusted_s3_mount_credentials = trusted_s3_mount_credentials
         self._trusted_s3_mount_logical_paths = _vercel_s3_mount_logical_paths(state.manifest)
         self._s3_mount_failure = None
         self._s3_mount_operation_lock = asyncio.Lock()
@@ -499,6 +514,31 @@ class VercelSandboxSession(BaseSandboxSession):
                 context={"backend": "vercel", "mount_path": key},
             )
         return mount
+
+    def _runtime_s3_mount_is_authenticated(self, path: Path) -> bool:
+        key = self._s3_mount_path_key(path)
+        credentials = self._trusted_s3_mount_credentials.get(key)
+        return credentials is not None and credentials[0] is not None
+
+    def _runtime_s3_mount_environment(self, path: Path) -> dict[str, str]:
+        key = self._s3_mount_path_key(path)
+        credentials = self._trusted_s3_mount_credentials.get(key)
+        mount = self._trusted_s3_mounts.get(key)
+        if credentials is None or mount is None:
+            raise MountConfigError(
+                message="Vercel S3 mount configuration is unavailable outside sandbox creation",
+                context={"backend": "vercel", "mount_path": key},
+            )
+        access_key_id, secret_access_key, session_token = credentials
+        env: dict[str, str] = {}
+        if access_key_id is not None and secret_access_key is not None:
+            env["AWS_ACCESS_KEY_ID"] = access_key_id
+            env["AWS_SECRET_ACCESS_KEY"] = secret_access_key
+        if session_token is not None:
+            env["AWS_SESSION_TOKEN"] = session_token
+        if mount.region is not None:
+            env["AWS_REGION"] = mount.region
+        return env
 
     async def _runtime_fail_s3_mount_transition(self, error: BaseException) -> None:
         self._s3_mount_failure = type(error).__name__
@@ -945,6 +985,14 @@ class VercelSandboxSession(BaseSandboxSession):
                 retryable=_vercel_provider_retryability(exc),
             ) from exc
 
+    async def _persist_snapshot(self) -> None:
+        try:
+            await super()._persist_snapshot()
+        except (Exception, asyncio.CancelledError):
+            if self._trusted_s3_mounts and self._s3_mount_failure is None:
+                await self.shutdown()
+            raise
+
     async def persist_workspace(self) -> io.IOBase:
         async with self._s3_mount_operation():
             self._runtime_assert_s3_mount_topology()
@@ -1178,6 +1226,8 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
                 context={"backend": "vercel"},
             )
         trusted_s3_mounts = _vercel_s3_mount_map(resolved_manifest)
+        for mount in trusted_s3_mounts.values():
+            mount.mount_strategy.validate_mount(mount)
         state_manifest = _manifest_without_vercel_s3_credentials(resolved_manifest)
         resolved_token = self._token
         resolved_project_id = options.project_id or self._project_id
