@@ -353,7 +353,13 @@ async def _is_mounted(session: VercelSandboxSession, mount_path: Path) -> bool:
 
 async def _unmount_s3(session: VercelSandboxSession, mount_path: Path) -> None:
     if not await _is_mounted(session, mount_path):
-        return
+        raise MountConfigError(
+            message="tracked Vercel S3 mount is missing from its configured path",
+            context={
+                "backend": "vercel",
+                "mount_path": sandbox_path_str(mount_path),
+            },
+        )
 
     mount_path_text = sandbox_path_str(mount_path)
     args = [mount_path_text]

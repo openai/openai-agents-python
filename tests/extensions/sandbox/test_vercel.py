@@ -1077,6 +1077,32 @@ async def test_vercel_s3_mount_failure_stops_and_marks_session_unusable(
 
 
 @pytest.mark.asyncio
+async def test_vercel_s3_missing_tracked_mount_stops_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    package_module = importlib.import_module("agents.extensions.sandbox.vercel")
+    client = vercel_module.VercelSandboxClient()
+    session = await client.create(
+        snapshot=_MemorySnapshot(id="snapshot"),
+        manifest=_vercel_s3_manifest(package_module),
+        options=vercel_module.VercelSandboxClientOptions(),
+    )
+    sandbox = cast(_FakeAsyncSandbox, session._inner._sandbox)
+    _queue_successful_s3_mounts(sandbox)
+    await session.start()
+    sandbox.command_results["/usr/bin/findmnt"] = [_FakeCommandFinished(exit_code=1)]
+
+    with pytest.raises(vercel_module.WorkspaceArchiveReadError):
+        await session.persist_workspace()
+
+    assert sandbox.stop_calls == 1
+    assert sandbox.stop_blocking_calls == [True]
+    assert session._inner._sandbox is None
+    await session.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_vercel_s3_unexpected_persist_error_stops_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1376,6 +1402,41 @@ async def test_vercel_mount_command_timeout_includes_output_collection(
             timeout=0.01,
         )
     assert exc_info.value.context["stderr"] == "TimeoutError: "
+
+
+@pytest.mark.asyncio
+async def test_vercel_exec_timeout_includes_output_collection_and_releases_mount_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    package_module = importlib.import_module("agents.extensions.sandbox.vercel")
+    client = vercel_module.VercelSandboxClient()
+    session = await client.create(
+        manifest=_vercel_s3_manifest(package_module),
+        options=vercel_module.VercelSandboxClientOptions(),
+    )
+    sandbox = cast(_FakeAsyncSandbox, session._inner._sandbox)
+    _queue_successful_s3_mounts(sandbox)
+    await session.start()
+    hold_output = asyncio.Event()
+
+    class _BlockingOutputResult(_FakeCommandFinished):
+        async def stdout(self) -> str:
+            await hold_output.wait()
+            return ""
+
+    sandbox.command_results["slow"] = [_BlockingOutputResult()]
+
+    with pytest.raises(vercel_module.ExecTimeoutError):
+        await session.exec("slow", timeout=0.01, shell=False)
+
+    sandbox.command_results.update(
+        {
+            "/usr/bin/findmnt": [_FakeCommandFinished(stdout="mountpoint-s3")],
+            "/usr/bin/umount": [_FakeCommandFinished()],
+        }
+    )
+    await asyncio.wait_for(session.shutdown(), timeout=1)
 
 
 def test_vercel_supports_pty_is_disabled_until_provider_methods_exist(

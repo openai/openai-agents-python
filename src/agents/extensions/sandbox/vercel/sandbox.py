@@ -804,18 +804,18 @@ class VercelSandboxSession(BaseSandboxSession):
         if not normalized:
             return ExecResult(stdout=b"", stderr=b"", exit_code=0)
 
-        try:
-            finished = await asyncio.wait_for(
-                sandbox.run_command(
-                    normalized[0],
-                    normalized[1:],
-                    cwd=self.state.manifest.root,
-                ),
-                timeout=timeout,
+        async def run_and_collect_output() -> ExecResult:
+            finished = await sandbox.run_command(
+                normalized[0],
+                normalized[1:],
+                cwd=self.state.manifest.root,
             )
             stdout = (await finished.stdout()).encode("utf-8")
             stderr = (await finished.stderr()).encode("utf-8")
             return ExecResult(stdout=stdout, stderr=stderr, exit_code=finished.exit_code)
+
+        try:
+            return await asyncio.wait_for(run_and_collect_output(), timeout=timeout)
         except TimeoutError as exc:
             raise ExecTimeoutError(command=normalized, timeout_s=timeout, cause=exc) from exc
         except ExecTimeoutError:
