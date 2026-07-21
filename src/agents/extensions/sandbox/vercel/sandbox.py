@@ -207,6 +207,7 @@ def _vercel_s3_mount_map(manifest: Manifest) -> dict[str, S3Mount]:
     _vercel_s3_mounts(manifest)
     targets = manifest.mount_targets()
     root = posixpath.normpath(manifest.root)
+    root_path = PurePosixPath(root)
     mounts: dict[str, S3Mount] = {}
     for index, (mount, mount_path) in enumerate(targets):
         if mount.mount_strategy.type != "vercel_cloud_bucket":
@@ -219,6 +220,15 @@ def _vercel_s3_mount_map(manifest: Manifest) -> dict[str, S3Mount]:
                 context={"backend": "vercel", "mount_path": path_text},
             )
         path = PurePosixPath(path_text)
+        if root_path not in path.parents:
+            raise MountConfigError(
+                message="Vercel S3 mount paths must stay within the workspace root",
+                context={
+                    "backend": "vercel",
+                    "mount_path": path_text,
+                    "workspace_root": root,
+                },
+            )
         for other_index, (_other_mount, other_path) in enumerate(targets):
             if other_index == index:
                 continue
@@ -405,6 +415,7 @@ class VercelSandboxSession(BaseSandboxSession):
     ]
     _trusted_s3_mount_logical_paths: set[str]
     _trusted_manifest_root: str
+    _s3_mount_session_closed: bool
     _s3_mount_failure: str | None
     _s3_mount_operation_lock: asyncio.Lock
     _s3_mount_operation_owner: asyncio.Task[Any] | None
@@ -471,7 +482,8 @@ class VercelSandboxSession(BaseSandboxSession):
         self._trusted_s3_mounts = resolved_trusted_s3_mounts
         self._trusted_s3_mount_credentials = trusted_s3_mount_credentials
         self._trusted_s3_mount_logical_paths = _vercel_s3_mount_logical_paths(state.manifest)
-        self._trusted_manifest_root = posixpath.normpath(state.manifest.root)
+        self._trusted_manifest_root = state.manifest.root
+        self._s3_mount_session_closed = False
         self._s3_mount_failure = None
         self._s3_mount_operation_lock = asyncio.Lock()
         self._s3_mount_operation_owner = None
@@ -558,7 +570,7 @@ class VercelSandboxSession(BaseSandboxSession):
         declared_paths = set(declared_mounts)
         trusted_paths = set(self._trusted_s3_mounts)
         declared_logical_paths = _vercel_s3_mount_logical_paths(self.state.manifest)
-        declared_root = posixpath.normpath(self.state.manifest.root)
+        declared_root = self.state.manifest.root
         if (
             declared_root != self._trusted_manifest_root
             or declared_paths != trusted_paths
@@ -582,7 +594,11 @@ class VercelSandboxSession(BaseSandboxSession):
             )
 
     @asynccontextmanager
-    async def _s3_mount_operation(self) -> AsyncIterator[None]:
+    async def _s3_mount_operation(
+        self,
+        *,
+        validate_topology: bool = True,
+    ) -> AsyncIterator[None]:
         if not self._trusted_s3_mounts:
             yield
             return
@@ -594,6 +610,8 @@ class VercelSandboxSession(BaseSandboxSession):
             return
 
         async with self._s3_mount_operation_lock:
+            if validate_topology:
+                self._runtime_assert_s3_mount_topology()
             self._s3_mount_operation_owner = current_task
             try:
                 yield
@@ -730,6 +748,14 @@ class VercelSandboxSession(BaseSandboxSession):
             )
 
     async def _ensure_sandbox(self, *, source: Any | None = None) -> Any:
+        if self._s3_mount_session_closed:
+            raise WorkspaceStartError(
+                path=self._workspace_root_path(),
+                context={
+                    "backend": "vercel",
+                    "reason": "mounted_session_closed",
+                },
+            )
         if self._s3_mount_failure is not None:
             raise WorkspaceStartError(
                 path=self._workspace_root_path(),
@@ -824,8 +850,15 @@ class VercelSandboxSession(BaseSandboxSession):
         return bool(sandbox.status == SandboxStatus.RUNNING)
 
     async def shutdown(self) -> None:
-        async with self._s3_mount_operation():
+        async with self._s3_mount_operation(validate_topology=False):
+            if self._s3_mount_session_closed:
+                return
             await self._shutdown_with_s3_mounts()
+
+    async def stop(self) -> None:
+        if self._s3_mount_session_closed:
+            return
+        await super().stop()
 
     async def _shutdown_with_s3_mounts(self) -> None:
         first_error: Exception | None = None
@@ -845,6 +878,8 @@ class VercelSandboxSession(BaseSandboxSession):
             raise
         self._active_s3_mount_paths.clear()
         self._detached_s3_mount_paths.clear()
+        if self._trusted_s3_mounts:
+            self._s3_mount_session_closed = True
         if first_error is not None:
             raise first_error
 
@@ -1001,7 +1036,6 @@ class VercelSandboxSession(BaseSandboxSession):
 
     async def persist_workspace(self) -> io.IOBase:
         async with self._s3_mount_operation():
-            self._runtime_assert_s3_mount_topology()
             try:
                 return await with_ephemeral_mounts_removed(
                     self,
@@ -1111,7 +1145,6 @@ class VercelSandboxSession(BaseSandboxSession):
                     cause=exc,
                 ) from exc
 
-        self._runtime_assert_s3_mount_topology()
         try:
             await with_ephemeral_mounts_removed(
                 self,

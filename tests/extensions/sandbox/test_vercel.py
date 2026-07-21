@@ -614,6 +614,23 @@ async def test_vercel_rejects_root_and_overlapping_s3_mounts(
             options=vercel_module.VercelSandboxClientOptions(),
         )
 
+    outside_manifest = Manifest(
+        root="/workspace",
+        entries={
+            "remote": S3Mount(
+                bucket="outside-bucket",
+                mount_path=Path("/tmp/remote"),
+                mount_strategy=strategy(),
+            )
+        },
+        extra_path_grants=(SandboxPathGrant(path="/tmp/remote"),),
+    )
+    with pytest.raises(MountConfigError, match="within the workspace root"):
+        await client.create(
+            manifest=outside_manifest,
+            options=vercel_module.VercelSandboxClientOptions(),
+        )
+
     overlapping_manifest = Manifest(
         root="/workspace",
         entries={
@@ -1265,6 +1282,42 @@ async def test_vercel_s3_aclose_shuts_down_after_pre_stop_hook_failure(
 
 
 @pytest.mark.asyncio
+async def test_vercel_s3_closed_session_does_not_recreate_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    package_module = importlib.import_module("agents.extensions.sandbox.vercel")
+    client = vercel_module.VercelSandboxClient()
+    session = await client.create(
+        manifest=_vercel_s3_manifest(package_module),
+        options=vercel_module.VercelSandboxClientOptions(),
+    )
+    sandbox = cast(_FakeAsyncSandbox, session._inner._sandbox)
+    _queue_successful_s3_mounts(sandbox)
+    sandbox.command_results.update(
+        {
+            "/usr/bin/findmnt": [_FakeCommandFinished(stdout="mountpoint-s3")],
+            "/usr/bin/umount": [_FakeCommandFinished()],
+        }
+    )
+    await session.start()
+    create_count = len(_FakeAsyncSandbox.create_calls)
+
+    await session.shutdown()
+    await session.shutdown()
+    await session.aclose()
+
+    with pytest.raises(vercel_module.WorkspaceStartError) as exec_error:
+        await session.exec("true", shell=False)
+    assert exec_error.value.context["reason"] == "mounted_session_closed"
+    with pytest.raises(vercel_module.WorkspaceStartError):
+        await session.start()
+
+    assert sandbox.stop_calls == 1
+    assert len(_FakeAsyncSandbox.create_calls) == create_count
+
+
+@pytest.mark.asyncio
 async def test_vercel_s3_mount_cancellation_stops_and_marks_session_unusable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1452,9 +1505,9 @@ async def test_vercel_s3_rejects_logical_path_and_root_changes_with_explicit_mou
     assert not any(call[0] == "/usr/bin/findmnt" for call in sandbox.run_command_calls)
 
     session.state.manifest.entries["remote"] = session.state.manifest.entries.pop("durable")
-    session.state.manifest.root = "/moved-workspace"
+    session.state.manifest.root = "/vercel/sandbox/link/.."
     with pytest.raises(MountConfigError, match="cannot change after sandbox creation"):
-        await session._inner.persist_workspace()
+        await session.exec("true", shell=False)
     assert not any(call[0] == "/usr/bin/findmnt" for call in sandbox.run_command_calls)
 
     session.state.manifest.root = vercel_module.DEFAULT_VERCEL_WORKSPACE_ROOT
