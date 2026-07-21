@@ -1511,7 +1511,7 @@ async def test_vercel_mount_command_timeout_includes_output_collection(
 
 
 @pytest.mark.asyncio
-async def test_vercel_mount_command_removes_provider_exception_chain(
+async def test_vercel_mount_command_redacts_exception_traceback_locals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     vercel_module = _load_vercel_module(monkeypatch)
@@ -1526,6 +1526,13 @@ async def test_vercel_mount_command_removes_provider_exception_chain(
     session = vercel_module.VercelSandboxSession.from_state(state, sandbox=sandbox)
     secret = "test-secret-key"
     provider_error = RuntimeError(f"provider rejected {secret}")
+
+    def assert_mount_traceback_is_redacted(error: MountCommandError) -> None:
+        traceback = error.__traceback__
+        while traceback is not None:
+            if Path(traceback.tb_frame.f_code.co_filename).name == "mounts.py":
+                assert secret not in repr(traceback.tb_frame.f_locals)
+            traceback = traceback.tb_next
 
     async def fail_command(
         _cmd: str,
@@ -1554,6 +1561,22 @@ async def test_vercel_mount_command_removes_provider_exception_chain(
     assert provider_error.__traceback__ is None
     assert provider_error.__cause__ is None
     assert provider_error.__context__ is None
+    assert_mount_traceback_is_redacted(exc_info.value)
+
+    with pytest.raises(MountCommandError) as nonzero_info:
+        mounts_module._raise_command_failure(
+            "/usr/bin/mount-s3",
+            ["bucket", "/workspace/remote"],
+            vercel_module.ExecResult(
+                stdout=b"",
+                stderr=f"provider rejected {secret}".encode(),
+                exit_code=1,
+            ),
+            env={"AWS_SECRET_ACCESS_KEY": secret},
+        )
+
+    assert nonzero_info.value.context["stderr"] == "provider rejected REDACTED"
+    assert_mount_traceback_is_redacted(nonzero_info.value)
 
 
 @pytest.mark.asyncio

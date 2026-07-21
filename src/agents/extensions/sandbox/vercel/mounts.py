@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import shlex
 from pathlib import Path
-from typing import Literal, NoReturn
+from typing import Any, Literal, NoReturn
 
 from ....sandbox.entries import Mount, S3Mount
 from ....sandbox.entries.mounts.base import MountStrategyBase
@@ -44,6 +44,15 @@ def _redact_sensitive_values(text: str, values: tuple[str, ...]) -> str:
     return redacted
 
 
+def _raise_sanitized_mount_command_error(
+    *,
+    command: str,
+    stderr: str,
+    context: dict[str, object],
+) -> NoReturn:
+    raise MountCommandError(command=command, stderr=stderr, context=context) from None
+
+
 async def _run_vercel_command(
     session: VercelSandboxSession,
     command: str,
@@ -55,6 +64,7 @@ async def _run_vercel_command(
 ) -> ExecResult:
     sensitive_values = tuple((env or {}).values())
     command_text = shlex.join([command, *args])
+    sandbox: Any = None
     try:
         sandbox = await session._ensure_sandbox()
 
@@ -79,11 +89,15 @@ async def _run_vercel_command(
         exc.__context__ = None
         exc.__cause__ = None
 
-    raise MountCommandError(
+    env = None
+    sensitive_values = ()
+    sandbox = None
+    del session
+    _raise_sanitized_mount_command_error(
         command=command_text,
         stderr=failure_message,
         context={"backend": "vercel"},
-    ) from None
+    )
 
 
 def _raise_command_failure(
@@ -94,15 +108,22 @@ def _raise_command_failure(
     env: dict[str, str] | None = None,
     context: dict[str, object] | None = None,
 ) -> NoReturn:
-    stderr = result.stderr.decode("utf-8", errors="replace")
-    raise MountCommandError(
-        command=shlex.join([command, *args]),
-        stderr=_redact_sensitive_values(stderr, tuple((env or {}).values())),
-        context={
-            "backend": "vercel",
-            "exit_code": result.exit_code,
-            **(context or {}),
-        },
+    failure_command = shlex.join([command, *args])
+    failure_stderr = _redact_sensitive_values(
+        result.stderr.decode("utf-8", errors="replace"),
+        tuple((env or {}).values()),
+    )
+    failure_context = {
+        "backend": "vercel",
+        "exit_code": result.exit_code,
+        **(context or {}),
+    }
+    env = None
+    del result
+    _raise_sanitized_mount_command_error(
+        command=failure_command,
+        stderr=failure_stderr,
+        context=failure_context,
     )
 
 
@@ -125,7 +146,18 @@ async def _run_required_command(
         timeout=timeout,
     )
     if not result.ok():
-        _raise_command_failure(command, args, result, env=env, context=context)
+        sanitized_result = ExecResult(
+            stdout=b"",
+            stderr=_redact_sensitive_values(
+                result.stderr.decode("utf-8", errors="replace"),
+                tuple((env or {}).values()),
+            ).encode(),
+            exit_code=result.exit_code,
+        )
+        result = sanitized_result
+        env = None
+        del session
+        _raise_command_failure(command, args, result, context=context)
     return result
 
 
