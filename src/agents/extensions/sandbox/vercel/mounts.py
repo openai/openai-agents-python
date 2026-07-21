@@ -12,6 +12,7 @@ from ....sandbox.entries.mounts.base import MountStrategyBase
 from ....sandbox.errors import MountCommandError, MountConfigError
 from ....sandbox.materialization import MaterializedFile
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
+from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER
 from ....sandbox.types import ExecResult
 from ....sandbox.workspace_paths import sandbox_path_str
 from .sandbox import VercelSandboxSession
@@ -70,15 +71,19 @@ async def _run_vercel_command(
 
         return await asyncio.wait_for(run_and_collect_output(), timeout=timeout)
     except Exception as exc:
-        message = _redact_sensitive_values(
+        failure_message = _redact_sensitive_values(
             f"{type(exc).__name__}: {exc}",
             sensitive_values,
         )
-        raise MountCommandError(
-            command=command_text,
-            stderr=message,
-            context={"backend": "vercel"},
-        ) from None
+        exc.__traceback__ = None
+        exc.__context__ = None
+        exc.__cause__ = None
+
+    raise MountCommandError(
+        command=command_text,
+        stderr=failure_message,
+        context={"backend": "vercel"},
+    ) from None
 
 
 def _raise_command_failure(
@@ -283,20 +288,38 @@ async def _assert_empty_mount_directory(
         )
 
 
+async def _assert_canonical_mount_path(
+    session: VercelSandboxSession,
+    mount_path: Path,
+) -> None:
+    mount_path_text = sandbox_path_str(mount_path)
+    helper_path = await session._ensure_runtime_helper_installed(RESOLVE_WORKSPACE_PATH_HELPER)
+    root_path_text = sandbox_path_str(session._workspace_root_path())
+    result = await _run_required_command(
+        session,
+        str(helper_path),
+        [root_path_text, mount_path_text, "1"],
+        context={"mount_path": mount_path_text},
+    )
+    resolved_path_text = result.stdout.decode("utf-8", errors="replace").strip()
+    if resolved_path_text != mount_path_text:
+        raise MountConfigError(
+            message="Vercel S3 mount paths must not resolve through symlinks",
+            context={
+                "backend": "vercel",
+                "mount_path": mount_path_text,
+                "resolved_path": resolved_path_text,
+            },
+        )
+
+
 async def _mount_s3(
     mount: S3Mount,
     session: VercelSandboxSession,
     mount_path: Path,
 ) -> None:
     normalized_path = await session._validate_path_access(mount_path, for_write=True)
-    if sandbox_path_str(normalized_path) != sandbox_path_str(mount_path):
-        raise MountConfigError(
-            message="Vercel S3 mount paths must not resolve through symlinks",
-            context={
-                "backend": "vercel",
-                "mount_path": sandbox_path_str(mount_path),
-            },
-        )
+    await _assert_canonical_mount_path(session, normalized_path)
     mount_path_text = sandbox_path_str(normalized_path)
     await _ensure_mountpoint(session)
     await _run_required_command(
@@ -307,12 +330,7 @@ async def _mount_s3(
     )
     await _assert_empty_mount_directory(session, normalized_path)
     user_ids = await _command_user_ids(session) if not mount.read_only else None
-    revalidated_path = await session._validate_path_access(mount_path, for_write=True)
-    if sandbox_path_str(revalidated_path) != mount_path_text:
-        raise MountConfigError(
-            message="Vercel S3 mount paths must remain canonical until mount activation",
-            context={"backend": "vercel", "mount_path": mount_path_text},
-        )
+    await _assert_canonical_mount_path(session, normalized_path)
     env = _mount_env(mount)
     await _run_required_command(
         session,

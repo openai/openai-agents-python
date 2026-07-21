@@ -776,6 +776,27 @@ async def test_vercel_s3_mount_snapshots_trusted_create_time_configuration(
 
 
 @pytest.mark.asyncio
+async def test_vercel_s3_mount_rejects_symlink_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    package_module = importlib.import_module("agents.extensions.sandbox.vercel")
+    client = vercel_module.VercelSandboxClient()
+    session = await client.create(
+        manifest=_vercel_s3_manifest(package_module, mount_path=Path("link/remote")),
+        options=vercel_module.VercelSandboxClientOptions(),
+    )
+    sandbox = cast(_FakeAsyncSandbox, session._inner._sandbox)
+    sandbox.symlinks["/vercel/sandbox/link"] = "/vercel/sandbox/durable"
+
+    with pytest.raises(MountConfigError, match="must not resolve through symlinks"):
+        await session.start()
+
+    assert not any(call[0] == "/usr/bin/mount-s3" for call in sandbox.run_command_calls)
+    await session.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_vercel_s3_partial_start_failure_stops_and_prevents_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1487,6 +1508,52 @@ async def test_vercel_mount_command_timeout_includes_output_collection(
             timeout=0.01,
         )
     assert exc_info.value.context["stderr"] == "TimeoutError: "
+
+
+@pytest.mark.asyncio
+async def test_vercel_mount_command_removes_provider_exception_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    mounts_module = importlib.import_module("agents.extensions.sandbox.vercel.mounts")
+    state = vercel_module.VercelSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000202",
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="sandbox-provider-error",
+    )
+    sandbox = _FakeAsyncSandbox(sandbox_id="sandbox-provider-error")
+    session = vercel_module.VercelSandboxSession.from_state(state, sandbox=sandbox)
+    secret = "test-secret-key"
+    provider_error = RuntimeError(f"provider rejected {secret}")
+
+    async def fail_command(
+        _cmd: str,
+        _args: list[str] | None = None,
+        *,
+        env: dict[str, str] | None = None,
+        sudo: bool = False,
+    ) -> _FakeCommandFinished:
+        _ = sudo
+        assert env == {"AWS_SECRET_ACCESS_KEY": secret}
+        raise provider_error
+
+    monkeypatch.setattr(sandbox, "run_command", fail_command)
+
+    with pytest.raises(MountCommandError) as exc_info:
+        await mounts_module._run_vercel_command(
+            session,
+            "/usr/bin/mount-s3",
+            ["bucket", "/workspace/remote"],
+            env={"AWS_SECRET_ACCESS_KEY": secret},
+        )
+
+    assert exc_info.value.context["stderr"] == "RuntimeError: provider rejected REDACTED"
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    assert provider_error.__traceback__ is None
+    assert provider_error.__cause__ is None
+    assert provider_error.__context__ is None
 
 
 @pytest.mark.asyncio
