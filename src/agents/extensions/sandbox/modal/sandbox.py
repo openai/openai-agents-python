@@ -1652,7 +1652,11 @@ class ModalSandboxSession(BaseSandboxSession):
 
         excludes: list[str] = []
         for rel in sorted(skip, key=lambda p: p.as_posix()):
-            excludes.extend(["--exclude", f"./{rel.as_posix().lstrip('./')}"])
+            # Strip a leading "./" prefix only. `lstrip("./")` strips a *set* of
+            # characters, which would eat leading dots of dot-prefixed skip paths
+            # (e.g. ".venv" -> "venv"), producing a wrong exclude pattern. Match the
+            # Cloudflare backend, which uses removeprefix here.
+            excludes.extend(["--exclude", f"./{rel.as_posix().removeprefix('./')}"])
 
         cmd: list[str] = [
             "tar",
