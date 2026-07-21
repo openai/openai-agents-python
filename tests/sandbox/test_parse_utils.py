@@ -63,6 +63,28 @@ def test_parse_ls_la_accepts_special_permission_bits() -> None:
     assert not (entries[2].permissions.other & FileMode.EXEC)
 
 
+def test_parse_ls_la_strips_trailing_alternate_access_markers() -> None:
+    # coreutils/BSD ls append a single marker after the mode field: "." (SELinux
+    # security context), "+" (ACL), or "@" (macOS extended attributes).
+    output = (
+        "drwxr-xr-x. 2 root root 4096 Jan 1 00:00 selinux-dir\n"
+        "-rw-r--r--+ 1 root root  123 Jan 1 00:00 acl-file\n"
+        "-rw-r--r--@ 1 root root  456 Jan 1 00:00 xattr-file\n"
+    )
+
+    entries = parse_ls_la(output, base="/")
+
+    assert [entry.path for entry in entries] == [
+        "/selinux-dir",
+        "/acl-file",
+        "/xattr-file",
+    ]
+    assert entries[0].permissions.directory is True
+    assert entries[0].permissions.owner & FileMode.READ
+    assert entries[1].permissions.owner & FileMode.WRITE
+    assert entries[2].permissions.owner & FileMode.READ
+
+
 @pytest.mark.parametrize(
     "permissions",
     [
