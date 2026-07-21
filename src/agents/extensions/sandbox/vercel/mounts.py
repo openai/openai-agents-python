@@ -72,6 +72,7 @@ async def _run_vercel_command(
             command=command_text,
             stderr=f"{type(exc).__name__}: {exc}",
             context={"backend": "vercel"},
+            retryable=session._runtime_provider_retryability(exc),
         ) from None
 
 
@@ -144,6 +145,7 @@ async def _run_credentialed_mount_command(
         )
     except (Exception, asyncio.CancelledError) as exc:
         cancelled = isinstance(exc, asyncio.CancelledError)
+        retryable = session._runtime_provider_retryability(exc)
         failure_message = _redact_sensitive_values(
             f"{type(exc).__name__}: {exc}",
             sensitive_values,
@@ -157,6 +159,7 @@ async def _run_credentialed_mount_command(
             command=command_text,
             stderr=failure_message,
             context={"backend": "vercel", **context},
+            retryable=retryable,
         )
 
     if result.ok():
@@ -185,12 +188,25 @@ def _parse_mountpoint_version(raw: str) -> tuple[int, int, int] | None:
 
 
 async def _ensure_mountpoint(session: VercelSandboxSession) -> None:
-    check = await _run_vercel_command(
+    version_args = ["--query", "--queryformat", "%{VERSION}", _MOUNTPOINT_PACKAGE]
+    version_result = await _run_vercel_command(
+        session,
+        "/usr/bin/rpm",
+        version_args,
+    )
+    version_text = version_result.stdout.decode("utf-8", errors="replace").strip()
+    version = _parse_mountpoint_version(version_text) if version_result.ok() else None
+    binary_check = await _run_vercel_command(
         session,
         "/usr/bin/test",
         ["-x", _MOUNTPOINT_BINARY],
     )
-    if not check.ok():
+    supported = (
+        version is not None
+        and version[0] == _MOUNTPOINT_MINIMUM_VERSION[0]
+        and version >= _MOUNTPOINT_MINIMUM_VERSION
+    )
+    if not binary_check.ok() or not supported:
         await _run_required_command(
             session,
             "/usr/bin/dnf",
@@ -205,20 +221,27 @@ async def _ensure_mountpoint(session: VercelSandboxSession) -> None:
             timeout=_MOUNTPOINT_INSTALL_TIMEOUT_S,
             context={"package": _MOUNTPOINT_PACKAGE},
         )
+        await _run_required_command(
+            session,
+            "/usr/bin/test",
+            ["-x", _MOUNTPOINT_BINARY],
+            context={"package": _MOUNTPOINT_PACKAGE},
+        )
+        version_result = await _run_required_command(
+            session,
+            "/usr/bin/rpm",
+            version_args,
+            context={"package": _MOUNTPOINT_PACKAGE},
+        )
+        version_text = version_result.stdout.decode("utf-8", errors="replace").strip()
+        version = _parse_mountpoint_version(version_text)
+        supported = (
+            version is not None
+            and version[0] == _MOUNTPOINT_MINIMUM_VERSION[0]
+            and version >= _MOUNTPOINT_MINIMUM_VERSION
+        )
 
-    version_result = await _run_required_command(
-        session,
-        "/usr/bin/rpm",
-        ["--query", "--queryformat", "%{VERSION}", _MOUNTPOINT_PACKAGE],
-        context={"package": _MOUNTPOINT_PACKAGE},
-    )
-    version_text = version_result.stdout.decode("utf-8", errors="replace").strip()
-    version = _parse_mountpoint_version(version_text)
-    if (
-        version is None
-        or version[0] != _MOUNTPOINT_MINIMUM_VERSION[0]
-        or version < _MOUNTPOINT_MINIMUM_VERSION
-    ):
+    if not supported:
         raise MountConfigError(
             message="unsupported Mountpoint for Amazon S3 version",
             context={
@@ -463,7 +486,7 @@ class VercelCloudBucketMountStrategy(MountStrategyBase):
     ) -> list[MaterializedFile]:
         _ = base_dir
         vercel_session = _require_vercel_session(session)
-        async with vercel_session._s3_mount_operation():
+        async with vercel_session._s3_mount_operation(force_lock=True):
             if not vercel_session._runtime_s3_mount_activation_allowed():
                 raise MountConfigError(
                     message=(

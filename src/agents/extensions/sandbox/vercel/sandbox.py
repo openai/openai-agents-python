@@ -28,7 +28,7 @@ import httpx
 from pydantic import TypeAdapter, field_serializer, field_validator
 from vercel import sandbox as vercel_sandbox
 
-from ....sandbox.entries import Dir, S3Mount
+from ....sandbox.entries import BaseEntry, Dir, S3Mount, resolve_workspace_path
 from ....sandbox.errors import (
     ConfigurationError,
     ErrorCode,
@@ -44,7 +44,8 @@ from ....sandbox.errors import (
     WorkspaceWriteTypeError,
 )
 from ....sandbox.manifest import Manifest
-from ....sandbox.session import SandboxSession, SandboxSessionState
+from ....sandbox.materialization import MaterializationResult
+from ....sandbox.session import SandboxSession, SandboxSessionState, manifest_ops
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
@@ -201,6 +202,41 @@ def _vercel_s3_mounts(manifest: Manifest) -> list[S3Mount]:
             )
         mounts.append(mount)
     return mounts
+
+
+def _entry_without_vercel_s3_mounts(entry: BaseEntry) -> BaseEntry | None:
+    if isinstance(entry, S3Mount) and entry.mount_strategy.type == "vercel_cloud_bucket":
+        return None
+    if not isinstance(entry, Dir):
+        return entry.model_copy(deep=True)
+
+    children: dict[str | Path, BaseEntry] = {}
+    for name, child in entry.children.items():
+        retained = _entry_without_vercel_s3_mounts(child)
+        if retained is not None:
+            children[name] = retained
+    return entry.model_copy(update={"children": children}, deep=True)
+
+
+def _manifest_without_vercel_s3_mounts(manifest: Manifest) -> Manifest:
+    entries: dict[str | Path, BaseEntry] = {}
+    for name, entry in manifest.entries.items():
+        retained = _entry_without_vercel_s3_mounts(entry)
+        if retained is not None:
+            entries[name] = retained
+    return manifest.model_copy(update={"entries": entries}, deep=True)
+
+
+def _vercel_s3_mount_activation_targets(manifest: Manifest) -> list[tuple[S3Mount, Path]]:
+    root = posix_path_as_path(coerce_posix_path(manifest.root))
+    targets: list[tuple[S3Mount, Path]] = []
+    for logical_path, entry in manifest.iter_entries():
+        if not isinstance(entry, S3Mount):
+            continue
+        if entry.mount_strategy.type != "vercel_cloud_bucket":
+            continue
+        targets.append((entry, resolve_workspace_path(root, logical_path)))
+    return targets
 
 
 def _vercel_s3_mount_map(manifest: Manifest) -> dict[str, S3Mount]:
@@ -563,6 +599,9 @@ class VercelSandboxSession(BaseSandboxSession):
             env["AWS_REGION"] = mount.region
         return env
 
+    def _runtime_provider_retryability(self, error: BaseException) -> bool | None:
+        return _vercel_provider_retryability(error)
+
     async def _runtime_fail_s3_mount_transition(self, error: BaseException) -> None:
         self._s3_mount_failure = type(error).__name__
         stop_task = asyncio.create_task(self._stop_attached_sandbox())
@@ -586,15 +625,28 @@ class VercelSandboxSession(BaseSandboxSession):
                 context={"backend": "vercel"},
             )
 
+    def _runtime_assert_s3_workspace_root(self) -> None:
+        if self._trusted_s3_mounts and self.state.manifest.root != self._trusted_manifest.root:
+            raise MountConfigError(
+                message="Vercel S3 mount topology cannot change after sandbox creation",
+                context={"backend": "vercel"},
+            )
+
     @asynccontextmanager
     async def _s3_mount_operation(
         self,
         *,
+        force_lock: bool = False,
         validate_topology: bool = True,
     ) -> AsyncIterator[None]:
-        if not self._trusted_s3_mounts:
-            if validate_topology:
-                self._runtime_assert_s3_mount_topology()
+        if not self._trusted_s3_mounts or (
+            not self._active_s3_mount_paths
+            and not self._detached_s3_mount_paths
+            and not force_lock
+            and not self._s3_mount_operation_lock.locked()
+        ):
+            if validate_topology and self._trusted_s3_mounts:
+                self._runtime_assert_s3_workspace_root()
             yield
             return
 
@@ -606,7 +658,7 @@ class VercelSandboxSession(BaseSandboxSession):
 
         async with self._s3_mount_operation_lock:
             if validate_topology:
-                self._runtime_assert_s3_mount_topology()
+                self._runtime_assert_s3_workspace_root()
             self._s3_mount_operation_owner = current_task
             try:
                 yield
@@ -648,6 +700,13 @@ class VercelSandboxSession(BaseSandboxSession):
         activation_token = _VERCEL_S3_MOUNT_START_SESSION.set(self)
         try:
             await super()._start_workspace()
+            for mount, destination in _vercel_s3_mount_activation_targets(self._trusted_manifest):
+                await mount.mount_strategy.activate(
+                    mount,
+                    self,
+                    destination,
+                    self._manifest_base_dir(),
+                )
         except (Exception, asyncio.CancelledError) as exc:
             if self._active_s3_mount_paths:
                 self._s3_mounts_started = True
@@ -656,6 +715,24 @@ class VercelSandboxSession(BaseSandboxSession):
         finally:
             _VERCEL_S3_MOUNT_START_SESSION.reset(activation_token)
         self._s3_mounts_started = True
+
+    async def _apply_manifest(
+        self,
+        *,
+        only_ephemeral: bool = False,
+        provision_accounts: bool = True,
+    ) -> MaterializationResult:
+        if self._runtime_s3_mount_activation_allowed() and self._trusted_s3_mounts:
+            return await manifest_ops.apply_manifest(
+                self,
+                manifest=_manifest_without_vercel_s3_mounts(self._trusted_manifest),
+                only_ephemeral=only_ephemeral,
+                provision_accounts=provision_accounts,
+            )
+        return await super()._apply_manifest(
+            only_ephemeral=only_ephemeral,
+            provision_accounts=provision_accounts,
+        )
 
     async def _validate_manifest_application(self, *, only_ephemeral: bool = False) -> None:
         _ = only_ephemeral
@@ -1021,16 +1098,9 @@ class VercelSandboxSession(BaseSandboxSession):
                 retryable=_vercel_provider_retryability(exc),
             ) from exc
 
-    async def _persist_snapshot(self) -> None:
-        try:
-            await super()._persist_snapshot()
-        except (Exception, asyncio.CancelledError):
-            if self._trusted_s3_mounts and self._sandbox is not None:
-                await self.shutdown()
-            raise
-
     async def persist_workspace(self) -> io.IOBase:
-        async with self._s3_mount_operation():
+        async with self._s3_mount_operation(validate_topology=False):
+            self._runtime_assert_s3_mount_topology()
             try:
                 return await with_ephemeral_mounts_removed(
                     self,
@@ -1108,7 +1178,8 @@ class VercelSandboxSession(BaseSandboxSession):
                 pass
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
-        async with self._s3_mount_operation():
+        async with self._s3_mount_operation(validate_topology=False):
+            self._runtime_assert_s3_mount_topology()
             await self._hydrate_workspace_with_s3_mounts(data)
 
     async def _hydrate_workspace_with_s3_mounts(self, data: io.IOBase) -> None:
