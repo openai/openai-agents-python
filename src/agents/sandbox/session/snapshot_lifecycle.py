@@ -23,10 +23,11 @@ async def persist_snapshot(session: BaseSandboxSession) -> None:
         return
 
     fingerprint_record: dict[str, str] | None = None
-    try:
-        fingerprint_record = await session._compute_and_cache_snapshot_fingerprint()
-    except Exception:
-        fingerprint_record = None
+    if session._should_compute_snapshot_fingerprint_on_persist():
+        try:
+            fingerprint_record = await session._compute_and_cache_snapshot_fingerprint()
+        except Exception:
+            fingerprint_record = None
 
     workspace_archive = await session.persist_workspace()
     try:

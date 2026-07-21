@@ -1250,6 +1250,11 @@ class BaseSandboxSession(abc.ABC):
 
         return snapshot_lifecycle.workspace_fingerprint_skip_relpaths(self)
 
+    def _should_compute_snapshot_fingerprint_on_persist(self) -> bool:
+        """Return whether persistence should fingerprint the workspace before archiving it."""
+
+        return True
+
     async def _compute_and_cache_snapshot_fingerprint(self) -> dict[str, str]:
         """Compute the current workspace fingerprint in-container and atomically cache it."""
 

@@ -1103,6 +1103,18 @@ async def test_vercel_s3_mount_detaches_for_tar_persistence_and_unmounts_on_shut
             workspace_persistence="snapshot",
         ),
     )
+    fingerprint_called = False
+
+    async def unexpected_fingerprint() -> dict[str, str]:
+        nonlocal fingerprint_called
+        fingerprint_called = True
+        return {"fingerprint": "unexpected", "version": "unexpected"}
+
+    monkeypatch.setattr(
+        session._inner,
+        "_compute_and_cache_snapshot_fingerprint",
+        unexpected_fingerprint,
+    )
     sandbox = cast(_FakeAsyncSandbox, session._inner._sandbox)
     sandbox.files[f"{session.state.manifest.root}/kept.txt"] = b"kept"
     sandbox.command_results = {
@@ -1124,6 +1136,7 @@ async def test_vercel_s3_mount_detaches_for_tar_persistence_and_unmounts_on_shut
     await session.stop()
     await session.shutdown()
 
+    assert fingerprint_called is False
     lifecycle_commands = [
         command
         for command, _args, _cwd in sandbox.run_command_calls

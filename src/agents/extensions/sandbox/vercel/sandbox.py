@@ -932,6 +932,9 @@ class VercelSandboxSession(BaseSandboxSession):
             return
         await super().stop()
 
+    def _should_compute_snapshot_fingerprint_on_persist(self) -> bool:
+        return not self._trusted_s3_mounts
+
     async def _shutdown_with_s3_mounts(self) -> None:
         first_error: Exception | None = None
         if self._s3_mount_failure is None:
