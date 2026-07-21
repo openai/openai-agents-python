@@ -2945,15 +2945,13 @@ def _chunk_with(choices: list[Choice], usage: CompletionUsage | None = None):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("finish_reason", ["content_filter", "length", "stop"])
-async def test_buffer_tool_call_stream_forwards_terminal_finish_reason(finish_reason) -> None:
-    """The buffering layer must forward a terminal choice even when its delta is
-    empty, so stream-level signals (content_filter, length, stop) reach the
-    handler instead of being swallowed. The delta is stripped, preserving
-    buffering semantics."""
+async def test_buffer_tool_call_stream_forwards_content_filter_finish_reason() -> None:
+    """The buffering layer must forward a content-filtered terminal choice even
+    though its delta is empty, so the finish_reason reaches the handler instead
+    of being swallowed. The delta is stripped, preserving buffering semantics."""
     chunks = [
         _chunk_with([Choice(index=0, delta=ChoiceDelta(content=""))]),
-        _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason=finish_reason)]),
+        _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="content_filter")]),
     ]
 
     async def source() -> AsyncIterator[ChatCompletionChunk]:
@@ -2966,7 +2964,7 @@ async def test_buffer_tool_call_stream_forwards_terminal_finish_reason(finish_re
         choice
         for chunk in buffered
         for choice in chunk.choices
-        if choice.finish_reason == finish_reason
+        if choice.finish_reason == "content_filter"
     ]
     assert len(terminal_choices) == 1
     # The forwarded copy carries no delta output.

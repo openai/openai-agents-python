@@ -377,15 +377,11 @@ class ChatCmplStreamHandler:
 
                 if has_passthrough_output:
                     passthrough_choices.append(choice)
-                elif choice.finish_reason is not None and not cls._choice_finished_tool_calls(
-                    choice
-                ):
-                    # A terminal choice can carry stream-level signals the handler still
-                    # needs even when its delta is empty: finish_reason == "content_filter"
-                    # drives the synthesized refusal, and "length" marks a truncated turn.
-                    # Forward a delta-stripped copy so buffering semantics are unchanged
-                    # while the finish_reason reaches the handler. "tool_calls" is excluded
-                    # because the buffered tool-call chunk below carries it instead.
+                elif choice.finish_reason == "content_filter":
+                    # A content-filtered choice ends the stream with an empty delta, so it
+                    # would otherwise be dropped here and the handler would never see the
+                    # finish_reason it needs to synthesize the refusal. Forward a
+                    # delta-stripped copy so buffering semantics are unchanged.
                     passthrough_choices.append(choice.model_copy(update={"delta": ChoiceDelta()}))
 
             if passthrough_choices or chunk.usage is not None:
