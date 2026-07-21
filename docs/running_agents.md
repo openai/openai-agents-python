@@ -303,7 +303,6 @@ You can manually manage conversation history using the [`RunResultBase.to_input_
 ```python
 from agents import Agent, Runner, trace
 
-
 async def main():
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
 
