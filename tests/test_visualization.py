@@ -207,6 +207,22 @@ def test_names_with_quotes_and_backslashes_are_escaped(mock_agent):
     assert '"__start__" -> "Weird\\"Name";' in edges
 
 
+def test_names_with_line_breaks_are_escaped(mock_agent):
+    """Line breaks in names must be encoded instead of splitting quoted DOT strings."""
+    mock_agent.name = "Agent\nName"
+    mock_agent.tools[0].name = "CRLF\r\nTool"
+    mock_agent.tools[1].name = "CR\rTool"
+
+    nodes = get_all_nodes(mock_agent)
+    edges = get_all_edges(mock_agent)
+
+    assert '"Agent\\nName" [label="Agent\\nName"' in nodes
+    assert '"CRLF\\nTool"' in nodes
+    assert '"CR\\nTool"' in nodes
+    assert '"__start__" -> "Agent\\nName";' in edges
+    assert '"Agent\nName"' not in nodes
+
+
 def test_draw_graph_with_real_agent_no_handoffs():
     """Test that draw_graph works with a real Agent object without handoffs.
 

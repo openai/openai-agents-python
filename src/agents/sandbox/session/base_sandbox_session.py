@@ -3,7 +3,7 @@ import io
 import shlex
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path, PurePath
-from typing import Literal, TypeVar
+from typing import Literal, NoReturn, TypeVar
 
 from typing_extensions import Self
 
@@ -23,6 +23,7 @@ from ..errors import (
     InvalidManifestPathError,
     MountConfigError,
     PtySessionNotFoundError,
+    WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
 )
@@ -46,10 +47,106 @@ from .runtime_helpers import (
     RuntimeHelperScript,
 )
 from .sandbox_session_state import SandboxSessionState
+from .utils import _safe_decode
 
 _PtyEntryT = TypeVar("_PtyEntryT")
 _RUNTIME_HELPER_CACHE_KEY_UNSET = object()
 _WORKSPACE_ROOT_PROBE_TIMEOUT_S = 10.0
+_READ_PATH_PROBE_TIMEOUT_S = 10.0
+_READ_PATH_PROBE_SCRIPT = """
+# READ_PATH_PROBE_V3
+LC_ALL=C
+export LC_ALL
+path=$1
+resolved_path=
+symlink_depth=0
+
+resolve_probe_path() {
+    if [ "$symlink_depth" -gt 40 ] || [ "${#1}" -gt 4095 ]; then
+        return 2
+    fi
+    if [ "$1" = "/" ]; then
+        resolved_path=/
+        return 0
+    fi
+
+    parent=${1%/*}
+    if [ -z "$parent" ] || [ "$parent" = "$1" ]; then
+        parent=/
+    fi
+    resolve_probe_path "$parent" || return 2
+    resolved_parent=$resolved_path
+    base=${1##*/}
+    if [ "${#base}" -gt 255 ]; then
+        return 2
+    fi
+    if [ "$resolved_parent" = "/" ]; then
+        candidate=/$base
+    else
+        candidate=$resolved_parent/$base
+    fi
+
+    if [ -L "$candidate" ]; then
+        target_with_marker=$(readlink -n "$candidate" && printf .) || return 2
+        target=${target_with_marker%.}
+        symlink_depth=$((symlink_depth + 1))
+        if [ "$symlink_depth" -gt 40 ]; then
+            return 2
+        fi
+        case "$target" in
+            /*)
+                resolve_probe_path "$target"
+                ;;
+            *)
+                resolve_probe_path "$resolved_parent/$target"
+                ;;
+        esac
+        return $?
+    fi
+
+    resolved_path=$candidate
+}
+
+resolve_probe_path "$path" || exit 2
+path=$resolved_path
+candidate=$path
+child=
+
+while :; do
+    if [ -e "$candidate" ]; then
+        if [ "$candidate" = "$path" ]; then
+            exit 0
+        fi
+        if [ ! -d "$candidate" ] || [ ! -x "$candidate" ]; then
+            exit 2
+        fi
+        lookup_result=$(
+            find "$child" -prune -print 2>&1 >/dev/null
+            lookup_status=$?
+            printf '.%s' "$lookup_status"
+        )
+        lookup_status=${lookup_result##*.}
+        lookup_error=${lookup_result%.*}
+        if [ "$lookup_status" -eq 1 ]; then
+            lookup_error=$(printf %s "$lookup_error")
+            case "$lookup_error" in
+                *": No such file or directory")
+                    exit 1
+                    ;;
+            esac
+        fi
+        exit 2
+    fi
+    if [ "$candidate" = "/" ]; then
+        exit 2
+    fi
+    child=$candidate
+    candidate=${candidate%/*}
+    if [ -z "$candidate" ]; then
+        candidate=/
+    fi
+done
+""".strip()
 _WRITE_ACCESS_CHECK_SCRIPT = (
     'target="$1"\n'
     'if [ -e "$target" ]; then\n'
@@ -787,15 +884,53 @@ class BaseSandboxSession(abc.ABC):
         cmd = ("sh", "-lc", '[ -r "$1" ]', "sh", path_arg)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
-            raise WorkspaceReadNotFoundError(
+            await self._raise_read_error_from_exec(
                 path=posix_path_as_path(coerce_posix_path(path)),
-                context={
-                    "command": ["sh", "-lc", "<read_access_check>", path_arg],
-                    "stdout": result.stdout.decode("utf-8", errors="replace"),
-                    "stderr": result.stderr.decode("utf-8", errors="replace"),
-                },
+                workspace_path=workspace_path,
+                command=("sh", "-lc", "<read_access_check>", path_arg),
+                result=result,
+                user=user,
             )
         return workspace_path
+
+    async def _raise_read_error_from_exec(
+        self,
+        *,
+        path: Path,
+        workspace_path: Path,
+        command: Sequence[str | Path],
+        result: ExecResult,
+        user: str | User | None = None,
+    ) -> NoReturn:
+        context: dict[str, object] = {
+            "command": [str(part) for part in command],
+            "stdout_bytes": len(result.stdout),
+            "stderr": _safe_decode(result.stderr, max_chars=4096),
+        }
+        if result.exit_code != 1:
+            raise WorkspaceArchiveReadError(path=path, context=context)
+
+        workspace_path_arg = sandbox_path_str(workspace_path)
+        try:
+            probe_result = await self.exec(
+                "sh",
+                "-c",
+                _READ_PATH_PROBE_SCRIPT,
+                "sh",
+                workspace_path_arg,
+                timeout=_READ_PATH_PROBE_TIMEOUT_S,
+                shell=False,
+                user=user,
+            )
+        except Exception as e:
+            raise WorkspaceArchiveReadError(path=path, context=context, cause=e) from e
+
+        context["existence_probe_exit_code"] = probe_result.exit_code
+        context["existence_probe_stdout_bytes"] = len(probe_result.stdout)
+        context["existence_probe_stderr"] = _safe_decode(probe_result.stderr, max_chars=4096)
+        if probe_result.exit_code == 1:
+            raise WorkspaceReadNotFoundError(path=path, context=context)
+        raise WorkspaceArchiveReadError(path=path, context=context)
 
     async def _check_write_with_exec(
         self, path: Path | str, *, user: str | User | None = None

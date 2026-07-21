@@ -12,9 +12,10 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from ...tool import FunctionTool, Tool
 from ..entries import BaseEntry, Dir, File, LocalDir, LocalFile
-from ..errors import LocalDirReadError, SkillsConfigError
+from ..errors import LocalDirReadError, SkillsConfigError, WorkspaceReadNotFoundError
 from ..manifest import Manifest
 from ..session.base_sandbox_session import BaseSandboxSession
+from ..session.sandbox_session import _read_with_expected_span_errors
 from ..types import User
 from ..workspace_paths import (
     SandboxPathGrant,
@@ -236,8 +237,13 @@ class LocalDirLazySkillSource(LazySkillSource):
         skill_dest = workspace_root / metadata.path
         skill_md_path = skill_dest / "SKILL.md"
         try:
-            handle = await session.read(skill_md_path, user=user)
-        except Exception:
+            handle = await _read_with_expected_span_errors(
+                session,
+                skill_md_path,
+                user=user,
+                expected_span_errors=(FileNotFoundError, WorkspaceReadNotFoundError),
+            )
+        except (FileNotFoundError, WorkspaceReadNotFoundError):
             handle = None
         if handle is not None:
             handle.close()

@@ -238,6 +238,8 @@ triage_agent = Agent(
 In most cases, you can provide instructions when you create the agent. However, you can also provide dynamic instructions via a function. The function will receive the agent and context, and must return the prompt. Both regular and `async` functions are accepted.
 
 ```python
+from agents import Agent, RunContextWrapper
+
 def dynamic_instructions(
     context: RunContextWrapper[UserContext], agent: Agent[UserContext]
 ) -> str:

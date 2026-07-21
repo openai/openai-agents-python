@@ -9,11 +9,17 @@ from agents.handoffs import Handoff
 def _escape_label(name: str) -> str:
     """Escape a name for use inside a Graphviz double-quoted ID or label.
 
-    Backslashes are escaped first, then double quotes, so a name containing
-    either character does not terminate the DOT string early or produce
-    malformed output.
+    Backslashes are escaped first, then double quotes and line breaks, so a name
+    containing any of these characters does not terminate the DOT string early
+    or produce malformed output.
     """
-    return name.replace("\\", "\\\\").replace('"', '\\"')
+    return (
+        name.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r\n", "\\n")
+        .replace("\r", "\\n")
+        .replace("\n", "\\n")
+    )
 
 
 def get_main_graph(agent: Agent) -> str:

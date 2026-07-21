@@ -10,14 +10,21 @@ import pytest
 from agents.sandbox import Manifest, SandboxPathGrant
 from agents.sandbox.capabilities import LocalDirLazySkillSource, Skill, Skills
 from agents.sandbox.entries import Dir, File, LocalDir
-from agents.sandbox.errors import SkillsConfigError
+from agents.sandbox.errors import (
+    SkillsConfigError,
+    WorkspaceArchiveReadError,
+    WorkspaceReadNotFoundError,
+)
 from agents.sandbox.files import EntryKind, FileEntry
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.session.sandbox_session import SandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, Permissions, User
 from agents.sandbox.workspace_paths import coerce_posix_path
 from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
+from agents.tracing import trace
+from tests.testing_processor import fetch_ordered_spans
 from tests.utils.factories import TestSessionState
 
 
@@ -125,6 +132,23 @@ class _SkillsSession(BaseSandboxSession):
                 )
             )
         return entries
+
+
+class _WorkspaceNotFoundSkillsSession(_SkillsSession):
+    async def read(self, path: Path, *, user: object = None) -> io.BytesIO:
+        try:
+            return await super().read(path, user=user)
+        except FileNotFoundError as exc:
+            raise WorkspaceReadNotFoundError(path=path, cause=exc) from exc
+
+
+class _ArchiveReadErrorSkillsSession(_SkillsSession):
+    async def read(self, path: Path, *, user: object = None) -> io.BytesIO:
+        self.read_users.append(_user_name(user))
+        raise WorkspaceArchiveReadError(
+            path=path,
+            cause=PermissionError("simulated permission failure"),
+        )
 
 
 class TestSkillValidation:
@@ -609,6 +633,72 @@ class TestSkillsLazyLoading:
         assert session.write_users == ["sandbox-user"]
         assert session.mkdir_users
         assert set(session.mkdir_users) == {"sandbox-user"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "session_type",
+        [_SkillsSession, _WorkspaceNotFoundSkillsSession],
+    )
+    async def test_first_load_omits_only_expected_probe_span_error(
+        self,
+        tmp_path: Path,
+        session_type: type[_SkillsSession],
+    ) -> None:
+        workspace_root = tmp_path / "workspace"
+        workspace_root.mkdir()
+        src_root = tmp_path / "skills"
+        skill_dir = src_root / "dynamic-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# dynamic skill\n", encoding="utf-8")
+        capability = Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)))
+        inner = session_type(_source_granted_manifest(workspace_root, source=src_root))
+
+        async with SandboxSession(inner) as session:
+            capability.bind(session)
+            with trace("lazy_skill_expected_probe_test"):
+                output = await capability.load_skill("dynamic-skill")
+
+        assert output == {
+            "status": "loaded",
+            "skill_name": "dynamic-skill",
+            "path": ".agents/dynamic-skill",
+        }
+        read_spans = [
+            span
+            for span in fetch_ordered_spans()
+            if span.span_data.export().get("name") == "sandbox.read"
+        ]
+        assert len(read_spans) == 1
+        assert read_spans[0].error is None
+
+    @pytest.mark.asyncio
+    async def test_load_skill_propagates_non_not_found_read_error(self, tmp_path: Path) -> None:
+        workspace_root = tmp_path / "workspace"
+        workspace_root.mkdir()
+        src_root = tmp_path / "skills"
+        skill_dir = src_root / "dynamic-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# dynamic skill\n", encoding="utf-8")
+        capability = Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)))
+        inner = _ArchiveReadErrorSkillsSession(
+            _source_granted_manifest(workspace_root, source=src_root)
+        )
+
+        async with SandboxSession(inner) as session:
+            capability.bind(session)
+            with trace("lazy_skill_unexpected_probe_error_test"):
+                with pytest.raises(WorkspaceArchiveReadError):
+                    await capability.load_skill("dynamic-skill")
+
+        assert inner.write_users == []
+        assert inner.mkdir_users == []
+        read_spans = [
+            span
+            for span in fetch_ordered_spans()
+            if span.span_data.export().get("name") == "sandbox.read"
+        ]
+        assert len(read_spans) == 1
+        assert read_spans[0].error is not None
 
     @pytest.mark.asyncio
     async def test_load_skill_rejects_missing_lazy_source_directory(self, tmp_path: Path) -> None:

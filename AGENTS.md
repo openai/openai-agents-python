@@ -239,6 +239,5 @@ make tests
 - ✅ Checks pass (`make format`, `make lint`, `make typecheck`, `make tests`).
 - ✅ Tests cover new behavior and edge cases.
 - ✅ Code is readable, maintainable, and consistent with existing style.
-- ✅ Public APIs and user-facing behavior changes are documented.
 - ✅ Examples are updated if behavior changes.
 - ✅ History is clean with a clear PR description.

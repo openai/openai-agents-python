@@ -31,6 +31,7 @@ from agents.sandbox.errors import (
     InvalidManifestPathError,
     MountConfigError,
     WorkspaceArchiveReadError,
+    WorkspaceReadNotFoundError,
 )
 from agents.sandbox.files import EntryKind
 from agents.sandbox.manifest import Environment
@@ -543,6 +544,57 @@ def test_modal_deserialize_session_state_defaults_missing_idle_timeout(
     )
 
     assert restored.idle_timeout is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("probe_exit_code", "expected_error"),
+    [
+        (0, WorkspaceArchiveReadError),
+        (1, WorkspaceReadNotFoundError),
+    ],
+)
+async def test_modal_read_classifies_nonzero_cat_with_path_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    probe_exit_code: int,
+    expected_error: type[Exception],
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state)
+    results = [
+        ExecResult(stdout=b"", stderr=b"cat failed", exit_code=1),
+        ExecResult(stdout=b"", stderr=b"", exit_code=probe_exit_code),
+    ]
+    commands: list[tuple[str, ...]] = []
+
+    async def validate_path(path: Path, *, for_write: bool = False) -> Path:
+        _ = (path, for_write)
+        return Path("/workspace/target.txt")
+
+    async def fake_exec(
+        *command: str | Path,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: object | None = None,
+    ) -> ExecResult:
+        _ = (timeout, shell, user)
+        commands.append(tuple(str(part) for part in command))
+        return results.pop(0)
+
+    monkeypatch.setattr(session, "_validate_path_access", validate_path)
+    monkeypatch.setattr(session, "exec", fake_exec)
+
+    with pytest.raises(expected_error):
+        await session.read(Path("target.txt"))
+
+    assert len(commands) == 2
+    assert commands[0][0:2] == ("sh", "-lc")
+    assert "READ_PATH_PROBE_V3" in commands[1][2]
 
 
 @pytest.mark.asyncio

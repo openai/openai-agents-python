@@ -43,7 +43,6 @@ from ....sandbox.errors import (
     SandboxError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
-    WorkspaceReadNotFoundError,
     WorkspaceStartError,
     WorkspaceStopError,
     WorkspaceWriteTypeError,
@@ -1175,8 +1174,11 @@ class ModalSandboxSession(BaseSandboxSession):
             raise WorkspaceArchiveReadError(path=workspace_path, cause=e) from e
 
         if not out.ok():
-            raise WorkspaceReadNotFoundError(
-                path=path, context={"stderr": out.stderr.decode("utf-8", "replace")}
+            await self._raise_read_error_from_exec(
+                path=posix_path_as_path(coerce_posix_path(path)),
+                workspace_path=workspace_path,
+                command=cmd,
+                result=out,
             )
 
         return io.BytesIO(out.stdout)

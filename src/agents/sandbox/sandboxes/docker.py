@@ -42,7 +42,6 @@ from ..errors import (
     ExposedPortUnavailableError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
-    WorkspaceReadNotFoundError,
 )
 from ..manifest import Manifest
 from ..session import SandboxSession, SandboxSessionState
@@ -788,13 +787,12 @@ class DockerSandboxSession(BaseSandboxSession):
         workspace_path_arg = sandbox_path_str(workspace_path)
         res = await self.exec("cat", "--", workspace_path_arg, shell=False, user=user)
         if not res.ok():
-            raise WorkspaceReadNotFoundError(
+            await self._raise_read_error_from_exec(
                 path=path,
-                context={
-                    "command": ["cat", "--", workspace_path_arg],
-                    "stdout": res.stdout.decode("utf-8", errors="replace"),
-                    "stderr": res.stderr.decode("utf-8", errors="replace"),
-                },
+                workspace_path=workspace_path,
+                command=("cat", "--", workspace_path_arg),
+                result=res,
+                user=user,
             )
         return io.BytesIO(res.stdout)
 

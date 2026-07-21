@@ -32,6 +32,7 @@ from agents.sandbox.session import (
     WorkspaceJsonlSink,
 )
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.session.sandbox_session import _read_with_expected_span_errors
 from agents.sandbox.snapshot import LocalSnapshot
 from agents.tracing import custom_span, trace
 from tests.testing_processor import fetch_normalized_spans, fetch_ordered_spans
@@ -453,6 +454,129 @@ async def test_sandbox_session_error_events_and_traces_include_retryability(
     error_payload = span_error["data"]
     assert isinstance(error_payload, dict)
     assert error_payload["error_retryable"] is False
+
+
+@pytest.mark.asyncio
+async def test_expected_read_span_error_is_call_scoped_and_preserves_audit_failures(
+    tmp_path: Path,
+) -> None:
+    events: list[SandboxSessionEvent] = []
+    instrumentation = Instrumentation(
+        sinks=[CallbackSink(lambda e, _sess: events.append(e), mode="sync")]
+    )
+    inner = _build_unix_local_session(tmp_path)
+    expected_path = Path("expected-missing.txt")
+    ordinary_path = Path("ordinary-missing.txt")
+
+    with trace("sandbox_expected_read_error_test"):
+        async with SandboxSession(inner, instrumentation=instrumentation) as session:
+            results = await asyncio.gather(
+                _read_with_expected_span_errors(
+                    session,
+                    expected_path,
+                    expected_span_errors=(WorkspaceReadNotFoundError,),
+                ),
+                session.read(ordinary_path),
+                return_exceptions=True,
+            )
+
+    assert all(isinstance(result, WorkspaceReadNotFoundError) for result in results)
+
+    read_starts = [
+        event
+        for event in events
+        if isinstance(event, SandboxSessionStartEvent) and event.op == "read"
+    ]
+    path_by_span_id = {event.span_id: event.data["path"] for event in read_starts}
+    read_spans = [
+        span
+        for span in fetch_ordered_spans()
+        if span.span_data.export().get("name") == "sandbox.read"
+    ]
+    error_by_path = {path_by_span_id[span.span_id]: span.error for span in read_spans}
+    assert error_by_path[str(expected_path)] is None
+    assert error_by_path[str(ordinary_path)] is not None
+
+    read_finishes = [
+        event
+        for event in events
+        if isinstance(event, SandboxSessionFinishEvent) and event.op == "read"
+    ]
+    assert len(read_finishes) == 2
+    for event in read_finishes:
+        assert event.ok is False
+        assert event.error_type == "WorkspaceReadNotFoundError"
+        assert event.error_code == "workspace_read_not_found"
+        assert event.error_retryable is False
+
+
+@pytest.mark.asyncio
+async def test_expected_read_span_records_finish_sink_failure(tmp_path: Path) -> None:
+    def fail_read_finish(event: SandboxSessionEvent, _session: BaseSandboxSession) -> None:
+        if isinstance(event, SandboxSessionFinishEvent) and event.op == "read":
+            raise ValueError("simulated sink failure")
+
+    instrumentation = Instrumentation(
+        sinks=[CallbackSink(fail_read_finish, mode="sync", on_error="raise")]
+    )
+    inner = _build_unix_local_session(tmp_path)
+
+    with trace("sandbox_expected_read_sink_failure_test"):
+        async with SandboxSession(inner, instrumentation=instrumentation) as session:
+            with pytest.raises(RuntimeError, match="sandbox event sink failed"):
+                await _read_with_expected_span_errors(
+                    session,
+                    Path("expected-missing.txt"),
+                    expected_span_errors=(WorkspaceReadNotFoundError,),
+                )
+
+    read_span = next(
+        span
+        for span in fetch_ordered_spans()
+        if span.span_data.export().get("name") == "sandbox.read"
+    )
+    assert read_span.error is not None
+    assert read_span.error["message"] == "RuntimeError"
+    assert read_span.span_data.data["error_type"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_exec_span_records_cancellation_during_finish_sink_delivery(tmp_path: Path) -> None:
+    finish_delivery_started = asyncio.Event()
+    completed_exit_codes: list[int] = []
+
+    async def block_exec_finish(event: SandboxSessionEvent, _session: BaseSandboxSession) -> None:
+        if isinstance(event, SandboxSessionFinishEvent) and event.op == "exec":
+            exit_code = event.data["exit_code"]
+            assert isinstance(exit_code, int)
+            completed_exit_codes.append(exit_code)
+            finish_delivery_started.set()
+            await asyncio.Event().wait()
+
+    instrumentation = Instrumentation(
+        sinks=[CallbackSink(block_exec_finish, mode="sync", on_error="raise")]
+    )
+    inner = _build_unix_local_session(tmp_path)
+
+    with trace("sandbox_exec_finish_cancellation_test"):
+        async with SandboxSession(inner, instrumentation=instrumentation) as session:
+            exec_task = asyncio.create_task(session.exec("exit 7"))
+            await finish_delivery_started.wait()
+            exec_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await exec_task
+
+    exec_span = next(
+        span
+        for span in fetch_ordered_spans()
+        if span.span_data.export().get("name") == "sandbox.exec"
+    )
+    assert exec_span.error is not None
+    assert exec_span.error["message"] == "CancelledError"
+    assert exec_span.span_data.data["error_type"] == "CancelledError"
+    assert completed_exit_codes
+    assert exec_span.span_data.data["exit_code"] == completed_exit_codes[0]
+    assert exec_span.span_data.data["process.exit.code"] == completed_exit_codes[0]
 
 
 @pytest.mark.asyncio
