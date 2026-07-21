@@ -989,7 +989,7 @@ class VercelSandboxSession(BaseSandboxSession):
         try:
             await super()._persist_snapshot()
         except (Exception, asyncio.CancelledError):
-            if self._trusted_s3_mounts and self._s3_mount_failure is None:
+            if self._trusted_s3_mounts and self._sandbox is not None:
                 await self.shutdown()
             raise
 

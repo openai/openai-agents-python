@@ -1093,7 +1093,7 @@ async def test_vercel_s3_hydrate_rejects_mount_overlaps_before_detach(
 
 
 @pytest.mark.asyncio
-async def test_vercel_s3_mount_failure_stops_and_marks_session_unusable(
+async def test_vercel_s3_aclose_retries_failed_transition_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     vercel_module = _load_vercel_module(monkeypatch)
@@ -1119,19 +1119,15 @@ async def test_vercel_s3_mount_failure_stops_and_marks_session_unusable(
     await session.start()
 
     with pytest.raises(vercel_module.WorkspaceArchiveReadError):
-        await session.stop()
+        await session.aclose()
     create_count = len(_FakeAsyncSandbox.create_calls)
     with pytest.raises(vercel_module.WorkspaceStartError, match="failed to start session"):
         await session.exec("true", shell=False)
 
-    assert sandbox.stop_calls == 1
-    assert sandbox.stop_blocking_calls == [True]
-    assert session._inner._sandbox is sandbox
-    assert len(_FakeAsyncSandbox.create_calls) == create_count
-    await session.shutdown()
     assert sandbox.stop_calls == 2
     assert sandbox.stop_blocking_calls == [True, True]
     assert session._inner._sandbox is None
+    assert len(_FakeAsyncSandbox.create_calls) == create_count
 
 
 @pytest.mark.asyncio
