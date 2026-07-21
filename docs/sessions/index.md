@@ -687,6 +687,7 @@ The community has developed additional session implementations:
 | Package | Description |
 |---------|-------------|
 | [openai-django-sessions](https://pypi.org/project/openai-django-sessions/) | Django ORM-based sessions for any Django-supported database (PostgreSQL, MySQL, SQLite, and more) |
+| [inspeximus](https://pypi.org/project/inspeximus/) | File-backed sessions with no server and no dependencies; the same store can erase one user's turns and leave a signed tombstone in their place |
 
 If you've built a session implementation, please feel free to submit a documentation PR to add it here!
 
