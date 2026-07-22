@@ -48,6 +48,8 @@ from openai.types.responses.response_reasoning_text_done_event import (
 )
 from openai.types.responses.response_usage import OutputTokensDetails
 
+from agents.exceptions import ModelBehaviorError
+
 from ..exceptions import ModelBehaviorError, UserError
 from ..items import TResponseStreamEvent
 from ..logger import logger
@@ -1060,6 +1062,18 @@ class ChatCmplStreamHandler:
                 # Function call was not streamed (fallback to old behavior)
                 # This handles edge cases where function name never arrived
                 output_index = output_layout.function_call_output_index(state, index)
+
+                # Guard against incomplete tool calls: if name or call_id is
+                # missing, raise ModelBehaviorError like the buffered path does.
+                if not function_call.name:
+                    raise ModelBehaviorError(
+                        "Chat Completions tool call stream ended without a function name."
+                    )
+                if not function_call.call_id:
+                    raise ModelBehaviorError(
+                        "Chat Completions tool call stream ended without a tool call id."
+                    )
+
                 fallback_func_call_item = cls._function_call_item(
                     state,
                     function_call,
