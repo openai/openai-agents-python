@@ -141,14 +141,15 @@ async def test_e2b_ensure_fuse_uses_root_chmod() -> None:
 
 
 @pytest.mark.asyncio
-async def test_e2b_ensure_rclone_installs_with_root_apt() -> None:
+async def test_e2b_ensure_rclone_installs_verified_release() -> None:
     session = _FakeMountSession(
         [
             _exec_fail(),  # rclone missing
             _exec_ok(),  # apt-get present
+            _exec_ok(stdout=b"x86_64\n"),  # supported release architecture
             _exec_ok(),  # apt-get update succeeds
-            _exec_ok(),  # package install succeeds
-            _exec_ok(),  # upstream rclone install succeeds
+            _exec_ok(),  # prerequisite install succeeds
+            _exec_ok(),  # verified rclone install succeeds
             _exec_ok(),  # rclone now present
         ]
     )
@@ -159,20 +160,20 @@ async def test_e2b_ensure_rclone_installs_with_root_apt() -> None:
         "sh -lc command -v rclone >/dev/null 2>&1 || test -x /usr/local/bin/rclone",
         "sh -lc command -v apt-get >/dev/null 2>&1",
     ]
-    assert session.exec_calls[2] == (
+    assert session.exec_calls[2] == "uname -m"
+    assert session.exec_calls[3] == (
         "sudo -u root -- sh -lc DEBIAN_FRONTEND=noninteractive "
         "DEBCONF_NOWARNINGS=yes apt-get -o Dpkg::Use-Pty=0 update -qq"
     )
-    assert session.exec_calls[3] == (
+    assert session.exec_calls[4] == (
         "sudo -u root -- sh -lc DEBIAN_FRONTEND=noninteractive "
         "DEBCONF_NOWARNINGS=yes apt-get -o Dpkg::Use-Pty=0 install -y -qq "
-        "curl unzip ca-certificates"
+        "ca-certificates coreutils curl unzip"
     )
-    assert (
-        session.exec_calls[4]
-        == "sudo -u root -- sh -lc curl -fsSL https://rclone.org/install.sh | bash"
-    )
-    assert session.exec_calls[5] == (
+    assert session.exec_calls[5].startswith("sudo -u root -- sh -lc set -eu\n")
+    assert "sha256sum --check --strict -" in session.exec_calls[5]
+    assert "rclone.org/install.sh" not in session.exec_calls[5]
+    assert session.exec_calls[6] == (
         "sh -lc command -v rclone >/dev/null 2>&1 || test -x /usr/local/bin/rclone"
     )
 

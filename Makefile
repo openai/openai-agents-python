@@ -2,6 +2,10 @@
 sync:
 	uv sync --all-extras --all-packages --group dev
 
+.PHONY: update-rclone-pin
+update-rclone-pin:
+	uv run python .github/scripts/update_rclone_pin.py --cooldown-days $(or $(RCLONE_COOLDOWN_DAYS),7) $(if $(RCLONE_VERSION),--version $(RCLONE_VERSION))
+
 .PHONY: format
 format: 
 	uv run ruff format
