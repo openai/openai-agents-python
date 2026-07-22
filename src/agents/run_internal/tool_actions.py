@@ -48,6 +48,7 @@ from .tool_execution import (
     extract_apply_patch_call_id,
     format_shell_error,
     get_trace_tool_error,
+    log_tool_action_error,
     normalize_apply_patch_result,
     normalize_max_output_length,
     normalize_shell_output,
@@ -152,7 +153,7 @@ class ComputerAction:
                             },
                         )
                     )
-                logger.error("Failed to execute computer action: %s", exc, exc_info=True)
+                log_tool_action_error("Failed to execute computer action", exc)
                 raise
 
             image_url = f"data:image/png;base64,{output}" if output else ""
@@ -557,7 +558,7 @@ class ShellAction:
                 if requested_max_output_length is not None:
                     max_output_length = requested_max_output_length
                     output_text = output_text[:max_output_length]
-                logger.error("Shell executor failed: %s", exc, exc_info=True)
+                log_tool_action_error("Shell executor failed", exc)
 
             await asyncio.gather(
                 hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text),
@@ -713,7 +714,7 @@ class CustomToolAction:
                             },
                         )
                     )
-                logger.error("Custom tool failed: %s", exc, exc_info=True)
+                log_tool_action_error("Custom tool failed", exc)
 
             raw_item = cls._raw_tool_output_item(
                 call_id,
@@ -920,7 +921,7 @@ class ApplyPatchAction:
                             },
                         )
                     )
-                logger.error("Apply patch editor failed: %s", exc, exc_info=True)
+                log_tool_action_error("Apply patch editor failed", exc)
 
             raw_item: dict[str, Any] = {
                 "type": "apply_patch_call_output",

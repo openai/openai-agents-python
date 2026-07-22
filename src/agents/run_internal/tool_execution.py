@@ -21,6 +21,7 @@ from openai.types.responses.response_input_item_param import (
 from openai.types.responses.response_input_param import McpApprovalResponse
 from openai.types.responses.response_output_item import McpApprovalRequest
 
+from .. import _debug
 from .._tool_identity import (
     FunctionToolLookupKey,
     NamedToolLookupKey,
@@ -1037,6 +1038,19 @@ def format_shell_error(error: Exception | BaseException | Any) -> str:
         return str(error)
     except Exception:  # pragma: no cover - fallback only
         return repr(error)
+
+
+def log_tool_action_error(message: str, exc: Exception | BaseException) -> None:
+    """Log a tool-action failure without leaking tool data.
+
+    Tool exceptions can embed tool call arguments or output, so the exception is
+    redacted by default (matching ``_debug.DONT_LOG_TOOL_DATA``). The full exception
+    and traceback are logged only when tool-data logging is explicitly enabled.
+    """
+    if _debug.DONT_LOG_TOOL_DATA:
+        logger.error("%s: %s", message, exc.__class__.__name__)
+    else:
+        logger.error("%s: %s", message, exc, exc_info=True)
 
 
 async def with_tool_function_span(

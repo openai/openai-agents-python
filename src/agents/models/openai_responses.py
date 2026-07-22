@@ -511,7 +511,14 @@ class OpenAIResponsesModel(Model):
                     )
                 )
                 request_id = getattr(e, "request_id", None)
-                logger.error("Error getting response: %s. (request_id: %s)", e, request_id)
+                if _debug.DONT_LOG_MODEL_DATA:
+                    logger.error(
+                        "Error getting response: %s. (request_id: %s)",
+                        e.__class__.__name__,
+                        request_id,
+                    )
+                else:
+                    logger.error("Error getting response: %s. (request_id: %s)", e, request_id)
                 raise
 
         return ModelResponse(
@@ -621,7 +628,10 @@ class OpenAIResponsesModel(Model):
                         },
                     )
                 )
-                logger.error("Error streaming response: %s", e)
+                if _debug.DONT_LOG_MODEL_DATA:
+                    logger.error("Error streaming response: %s", e.__class__.__name__)
+                else:
+                    logger.error("Error streaming response: %s", e)
                 raise
 
     @overload
