@@ -48,8 +48,6 @@ from openai.types.responses.response_reasoning_text_done_event import (
 )
 from openai.types.responses.response_usage import OutputTokensDetails
 
-from agents.exceptions import ModelBehaviorError
-
 from ..exceptions import ModelBehaviorError, UserError
 from ..items import TResponseStreamEvent
 from ..logger import logger
