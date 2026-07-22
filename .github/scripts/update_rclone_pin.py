@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -101,6 +102,47 @@ def _release_published_at(release: dict[str, object]) -> datetime:
     return published_at.astimezone(timezone.utc)
 
 
+def _asset_observed_at(release: dict[str, object], asset_name: str) -> datetime:
+    asset = _asset(release, asset_name)
+    timestamps: list[datetime] = []
+    for field in ("created_at", "updated_at"):
+        value = asset.get(field)
+        if not isinstance(value, str):
+            raise RuntimeError(f"rclone release asset {asset_name} is missing {field}")
+        try:
+            timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise RuntimeError(
+                f"rclone release asset {asset_name} has invalid {field}: {value}"
+            ) from exc
+        if timestamp.tzinfo is None:
+            raise RuntimeError(
+                f"rclone release asset {asset_name} {field} has no timezone: {value}"
+            )
+        timestamps.append(timestamp.astimezone(timezone.utc))
+    return max(timestamps)
+
+
+def _required_asset_names(version: str) -> tuple[str, ...]:
+    archives = tuple(f"rclone-v{version}-linux-{arch}.zip" for arch in _RCLONE_ARCHES)
+    return ("SHA256SUMS", *archives)
+
+
+def _validate_cooldown(
+    subject: str,
+    observed_at: datetime,
+    *,
+    cooldown_days: int,
+    now: datetime,
+) -> None:
+    eligible_at = observed_at + timedelta(days=cooldown_days)
+    if eligible_at > now:
+        raise RuntimeError(
+            f"{subject} is still in its {cooldown_days}-day cooldown "
+            f"(eligible at {eligible_at.isoformat()})"
+        )
+
+
 def _validate_stable_release(
     release: dict[str, object],
     *,
@@ -110,12 +152,18 @@ def _validate_stable_release(
     version = _release_version(release)
     if release.get("draft") is not False or release.get("prerelease") is not False:
         raise RuntimeError(f"rclone v{version} is not a stable published release")
-    published_at = _release_published_at(release)
-    eligible_at = published_at + timedelta(days=cooldown_days)
-    if eligible_at > now:
-        raise RuntimeError(
-            f"rclone v{version} is still in its {cooldown_days}-day cooldown "
-            f"(eligible at {eligible_at.isoformat()})"
+    _validate_cooldown(
+        f"rclone v{version}",
+        _release_published_at(release),
+        cooldown_days=cooldown_days,
+        now=now,
+    )
+    for asset_name in _required_asset_names(version):
+        _validate_cooldown(
+            f"rclone v{version} asset {asset_name}",
+            _asset_observed_at(release, asset_name),
+            cooldown_days=cooldown_days,
+            now=now,
         )
 
 
@@ -161,6 +209,19 @@ def _asset_sha256(release: dict[str, object], asset_name: str) -> str:
     if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest) is None:
         raise RuntimeError(f"rclone release asset {asset_name} is missing its SHA256 digest")
     return digest.removeprefix("sha256:").lower()
+
+
+def _validate_download_sha256(
+    release: dict[str, object],
+    asset_name: str,
+    content: bytes,
+) -> None:
+    expected = _asset_sha256(release, asset_name)
+    actual = hashlib.sha256(content).hexdigest()
+    if actual != expected:
+        raise RuntimeError(
+            f"downloaded rclone release asset {asset_name} does not match GitHub's digest"
+        )
 
 
 def _parse_sha256s(text: str, version: str) -> dict[str, str]:
@@ -230,7 +291,9 @@ def fetch_pin(
             f"requested rclone v{_normalized_version(version)}, got v{resolved_version}"
         )
     checksums_url = _asset_url(release, "SHA256SUMS")
-    checksums = _fetch_bytes(checksums_url).decode("utf-8")
+    checksums_content = _fetch_bytes(checksums_url)
+    _validate_download_sha256(release, "SHA256SUMS", checksums_content)
+    checksums = checksums_content.decode("utf-8")
     sha256_by_arch = _parse_sha256s(checksums, resolved_version)
     _validate_asset_sha256s(release, resolved_version, sha256_by_arch)
     return RclonePin(

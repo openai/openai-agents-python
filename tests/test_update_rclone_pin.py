@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,14 +36,24 @@ def _release(
     version: str,
     published_at: str,
     *,
+    asset_observed_at: str | None = None,
     draft: bool = False,
     prerelease: bool = False,
 ) -> dict[str, object]:
+    asset_timestamp = asset_observed_at or published_at
     return {
         "tag_name": f"v{version}",
         "published_at": published_at,
         "draft": draft,
         "prerelease": prerelease,
+        "assets": [
+            {
+                "name": asset_name,
+                "created_at": asset_timestamp,
+                "updated_at": asset_timestamp,
+            }
+            for asset_name in updater._required_asset_names(version)
+        ],
     }
 
 
@@ -63,6 +75,26 @@ def test_latest_stable_release_respects_default_cooldown() -> None:
     assert updater._release_version(selected) == "1.74.4"
 
 
+def test_latest_stable_release_skips_release_with_fresh_assets() -> None:
+    now = datetime(2026, 7, 22, tzinfo=timezone.utc)
+    releases = [
+        _release(
+            "1.75.0",
+            "2026-07-01T00:00:00Z",
+            asset_observed_at="2026-07-20T00:00:00Z",
+        ),
+        _release("1.74.4", "2026-07-08T00:00:00Z"),
+    ]
+
+    selected = updater._latest_stable_release(
+        releases,
+        cooldown_days=updater._DEFAULT_COOLDOWN_DAYS,
+        now=now,
+    )
+
+    assert updater._release_version(selected) == "1.74.4"
+
+
 def test_stable_release_cooldown_is_customizable() -> None:
     release = _release("1.75.0", "2026-07-20T00:00:00Z")
     now = datetime(2026, 7, 22, tzinfo=timezone.utc)
@@ -71,6 +103,37 @@ def test_stable_release_cooldown_is_customizable() -> None:
         updater._validate_stable_release(release, cooldown_days=7, now=now)
 
     updater._validate_stable_release(release, cooldown_days=2, now=now)
+
+
+@pytest.mark.parametrize(
+    "asset_name",
+    updater._required_asset_names("1.74.4"),
+)
+def test_stable_release_cooldown_covers_every_required_asset(asset_name: str) -> None:
+    release = _release("1.74.4", "2026-07-01T00:00:00Z")
+    asset = updater._asset(release, asset_name)
+    asset["created_at"] = "2026-07-20T00:00:00Z"
+    asset["updated_at"] = "2026-07-20T00:00:00Z"
+
+    with pytest.raises(RuntimeError, match=re.escape(f"asset {asset_name}")):
+        updater._validate_stable_release(
+            release,
+            cooldown_days=7,
+            now=datetime(2026, 7, 22, tzinfo=timezone.utc),
+        )
+
+
+def test_stable_release_cooldown_uses_latest_asset_timestamp() -> None:
+    release = _release("1.74.4", "2026-07-01T00:00:00Z")
+    asset = updater._asset(release, "SHA256SUMS")
+    asset["updated_at"] = "2026-07-20T00:00:00Z"
+
+    with pytest.raises(RuntimeError, match="asset SHA256SUMS"):
+        updater._validate_stable_release(
+            release,
+            cooldown_days=7,
+            now=datetime(2026, 7, 22, tzinfo=timezone.utc),
+        )
 
 
 @pytest.mark.parametrize(
@@ -147,6 +210,23 @@ def test_validate_asset_sha256s_requires_github_asset_match() -> None:
 
     with pytest.raises(RuntimeError, match="does not match GitHub"):
         updater._validate_asset_sha256s(release, version, sha256_by_arch)
+
+
+def test_validate_download_sha256_requires_github_asset_match() -> None:
+    content = b"rclone checksums"
+    release = {
+        "assets": [
+            {
+                "name": "SHA256SUMS",
+                "digest": f"sha256:{hashlib.sha256(content).hexdigest()}",
+            }
+        ]
+    }
+
+    updater._validate_download_sha256(release, "SHA256SUMS", content)
+
+    with pytest.raises(RuntimeError, match="does not match GitHub"):
+        updater._validate_download_sha256(release, "SHA256SUMS", b"changed")
 
 
 def test_apply_pin_updates_and_checks_both_consumers(tmp_path: Path) -> None:
