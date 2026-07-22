@@ -79,9 +79,13 @@ def _rclone_install_command(arch: str, sha256: str) -> str:
             "install -d -m 0755 /usr/local/bin",
             'target_tmp="$(mktemp /usr/local/bin/.rclone.XXXXXX)"',
             ('install -m 0755 "$tmp_dir/unpacked/${archive%.zip}/rclone" "$target_tmp"'),
+            'version_output="$("$target_tmp" version)"',
+            (
+                f"printf '%s\\n' \"$version_output\" | head -n 1 "
+                f"| grep -Fx 'rclone v{_RCLONE_VERSION}'"
+            ),
             'mv -f "$target_tmp" /usr/local/bin/rclone',
             'target_tmp=""',
-            (f"/usr/local/bin/rclone version | head -n 1 | grep -Fx 'rclone v{_RCLONE_VERSION}'"),
         ]
     )
 

@@ -60,5 +60,5 @@ RUN set -eux \
     && install -m 0755 "/tmp/rclone/${rclone_archive%.zip}/rclone" /usr/local/bin/rclone \
     && rclone version \
     && touch /etc/fuse.conf \
-    && grep -qxF 'user_allow_other' /etc/fuse.conf || echo 'user_allow_other' >> /etc/fuse.conf \
+    && (grep -qxF 'user_allow_other' /etc/fuse.conf || echo 'user_allow_other' >> /etc/fuse.conf) \
     && rm -rf /var/lib/apt/lists/* /tmp/mount-s3.deb /tmp/rclone /tmp/rclone-v*.zip

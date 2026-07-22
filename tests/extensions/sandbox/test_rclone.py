@@ -62,6 +62,11 @@ def test_rclone_install_command_pins_and_verifies_archive() -> None:
     assert f"expected_sha256='{sha256}'" in command
     assert "sha256sum --check --strict -" in command
     assert "mktemp /usr/local/bin/.rclone.XXXXXX" in command
+    verify_execution = 'version_output="$("$target_tmp" version)"'
+    verify_version = f"grep -Fx 'rclone v{_RCLONE_VERSION}'"
+    atomic_replace = 'mv -f "$target_tmp" /usr/local/bin/rclone'
+    assert command.index(verify_execution) < command.index(verify_version)
+    assert command.index(verify_version) < command.index(atomic_replace)
     assert 'mv -f "$target_tmp" /usr/local/bin/rclone' in command
     assert "curl -fsSL https://rclone.org/install.sh | bash" not in command
 

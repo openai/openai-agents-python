@@ -135,7 +135,7 @@ def test_runloop_session_guard_accepts_correct_type() -> None:
 
 @pytest.mark.asyncio
 async def test_runloop_ensure_rclone_installs_verified_release() -> None:
-    from agents.extensions.sandbox._rclone import ensure_rclone
+    from agents.extensions.sandbox._rclone import _RCLONE_VERSION, ensure_rclone
 
     session = _FakeRunloopMountSession(
         [
@@ -166,7 +166,7 @@ async def test_runloop_ensure_rclone_installs_verified_release() -> None:
         "ca-certificates coreutils curl unzip"
     )
     assert session.exec_calls[5].startswith("sudo -u root -- sh -lc set -eu\n")
-    assert "rclone-v1.74.4-linux-arm64.zip" in session.exec_calls[5]
+    assert f"rclone-v{_RCLONE_VERSION}-linux-arm64.zip" in session.exec_calls[5]
     assert "sha256sum --check --strict -" in session.exec_calls[5]
     assert session.exec_calls[6] == (
         "sh -lc command -v rclone >/dev/null 2>&1 || test -x /usr/local/bin/rclone"
