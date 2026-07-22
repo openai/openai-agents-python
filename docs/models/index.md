@@ -387,7 +387,7 @@ if __name__ == "__main__":
 1.  Sets the name of an OpenAI model directly.
 2.  Provides a [`Model`][agents.models.interface.Model] implementation.
 
-When you want to further configure the model used for an agent, you can pass [`ModelSettings`][agents.models.interface.ModelSettings], which provides optional model configuration parameters such as temperature.
+When you want to further configure the model used for an agent, you can pass [`ModelSettings`][agents.model_settings.ModelSettings], which provides optional model configuration parameters such as temperature.
 
 ```python
 from agents import Agent, ModelSettings

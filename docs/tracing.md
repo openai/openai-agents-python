@@ -149,7 +149,7 @@ By default, `trace_include_sensitive_data` is `True`. You can set the default wi
 
 The high level architecture for tracing is:
 
--   At initialization, we create a global [`TraceProvider`][agents.tracing.setup.TraceProvider], which is responsible for creating traces.
+-   At initialization, we create a global [`TraceProvider`][agents.tracing.provider.TraceProvider], which is responsible for creating traces.
 -   We configure the `TraceProvider` with a [`BatchTraceProcessor`][agents.tracing.processors.BatchTraceProcessor] that sends traces/spans in batches to a [`BackendSpanExporter`][agents.tracing.processors.BackendSpanExporter], which exports the spans and traces to the OpenAI backend in batches.
 
 To customize this default setup, to send traces to alternative or additional backends or modifying exporter behavior, you have two options:
