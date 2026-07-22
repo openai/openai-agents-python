@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
+import hashlib
+import hmac
 import json
 import threading
 from collections import deque
@@ -727,6 +729,7 @@ class RunState(Generic[TContext, TAgent]):
         context_serializer: ContextSerializer | None = None,
         strict_context: bool = False,
         include_tracing_api_key: bool = False,
+        signing_key: str | bytes | None = None,
     ) -> dict[str, Any]:
         """Serializes the run state to a JSON-compatible dictionary.
 
@@ -737,6 +740,9 @@ class RunState(Generic[TContext, TAgent]):
             context_serializer: Optional function to serialize non-mapping context values.
             strict_context: When True, require mapping contexts or a context_serializer.
             include_tracing_api_key: When True, include the tracing API key in the trace payload.
+            signing_key: When provided, add a ``$signature`` HMAC over the serialized state so
+                tampering can be detected on resume. Pass the same key to ``from_json`` /
+                ``from_string`` to verify it.
 
         Returns:
             A dictionary representation of the run state.
@@ -847,6 +853,8 @@ class RunState(Generic[TContext, TAgent]):
         if self._sandbox is not None:
             result["sandbox"] = copy.deepcopy(self._sandbox)
 
+        if signing_key is not None:
+            result[_RUN_STATE_SIGNATURE_FIELD] = _run_state_signature(result, signing_key)
         return result
 
     def _serialize_processed_response(
@@ -1046,11 +1054,14 @@ class RunState(Generic[TContext, TAgent]):
         context_serializer: ContextSerializer | None = None,
         strict_context: bool = False,
         include_tracing_api_key: bool = False,
+        signing_key: str | bytes | None = None,
     ) -> str:
         """Serializes the run state to a JSON string.
 
         Args:
             include_tracing_api_key: When True, include the tracing API key in the trace payload.
+            signing_key: When provided, sign the serialized state so tampering can be detected on
+                resume (see ``to_json``).
 
         Returns:
             JSON string representation of the run state.
@@ -1060,6 +1071,7 @@ class RunState(Generic[TContext, TAgent]):
                 context_serializer=context_serializer,
                 strict_context=strict_context,
                 include_tracing_api_key=include_tracing_api_key,
+                signing_key=signing_key,
             ),
             indent=2,
         )
@@ -1105,6 +1117,7 @@ class RunState(Generic[TContext, TAgent]):
         context_override: ContextOverride | None = None,
         context_deserializer: ContextDeserializer | None = None,
         strict_context: bool = False,
+        signing_key: str | bytes | None = None,
     ) -> RunState[Any, Agent[Any]]:
         """Deserializes a run state from a JSON string.
 
@@ -1118,12 +1131,15 @@ class RunState(Generic[TContext, TAgent]):
                 serialized context.
             context_deserializer: Optional function to rebuild non-mapping context values.
             strict_context: When True, require a deserializer or override for non-mapping contexts.
+            signing_key: When provided, verify the state's ``$signature`` before restoring and
+                raise ``UserError`` if it is missing or does not match (fails closed).
 
         Returns:
             A reconstructed RunState instance.
 
         Raises:
-            UserError: If the string is invalid JSON or has incompatible schema version.
+            UserError: If the string is invalid JSON, has an incompatible schema version, or fails
+                signature verification.
         """
         try:
             state_json = json.loads(state_string)
@@ -1136,6 +1152,7 @@ class RunState(Generic[TContext, TAgent]):
             context_override=context_override,
             context_deserializer=context_deserializer,
             strict_context=strict_context,
+            signing_key=signing_key,
         )
 
     @staticmethod
@@ -1146,6 +1163,7 @@ class RunState(Generic[TContext, TAgent]):
         context_override: ContextOverride | None = None,
         context_deserializer: ContextDeserializer | None = None,
         strict_context: bool = False,
+        signing_key: str | bytes | None = None,
     ) -> RunState[Any, Agent[Any]]:
         """Deserializes a run state from a JSON dictionary.
 
@@ -1159,13 +1177,21 @@ class RunState(Generic[TContext, TAgent]):
                 serialized context.
             context_deserializer: Optional function to rebuild non-mapping context values.
             strict_context: When True, require a deserializer or override for non-mapping contexts.
+            signing_key: When provided, verify the state's ``$signature`` before restoring and
+                raise ``UserError`` if it is missing or does not match (fails closed). This is the
+                integrity check that makes approvals and other persisted state safe to load from an
+                untrusted store.
 
         Returns:
             A reconstructed RunState instance.
 
         Raises:
-            UserError: If the dict has incompatible schema version.
+            UserError: If the dict has an incompatible schema version or fails signature
+                verification.
         """
+        if signing_key is not None:
+            _verify_run_state_signature(state_json, signing_key)
+
         return await _build_run_state_from_json(
             initial_agent=initial_agent,
             state_json=state_json,
@@ -2666,6 +2692,38 @@ def _deserialize_tool_output_guardrail_results(
         )
         deserialized.append(ToolOutputGuardrailResult(guardrail=guardrail, output=guardrail_output))
     return deserialized
+
+
+_RUN_STATE_SIGNATURE_FIELD = "$signature"
+
+
+def _run_state_signature(payload: Mapping[str, Any], signing_key: str | bytes) -> str:
+    """Return the HMAC-SHA256 of the canonical serialization of ``payload``.
+
+    The ``$signature`` field itself is excluded so signing and verification cover the same bytes.
+    """
+    key = signing_key.encode("utf-8") if isinstance(signing_key, str) else signing_key
+    body = {k: v for k, v in payload.items() if k != _RUN_STATE_SIGNATURE_FIELD}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hmac.new(key, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _verify_run_state_signature(payload: Mapping[str, Any], signing_key: str | bytes) -> None:
+    """Verify a persisted RunState's ``$signature``, raising ``UserError`` on failure.
+
+    Fails closed: an unsigned payload is rejected when a signing key is supplied.
+    """
+    provided = payload.get(_RUN_STATE_SIGNATURE_FIELD)
+    if not isinstance(provided, str):
+        raise UserError(
+            "RunState signature is missing; refusing to load state that was not signed with the "
+            "provided signing_key."
+        )
+    if not hmac.compare_digest(provided, _run_state_signature(payload, signing_key)):
+        raise UserError(
+            "RunState signature verification failed; the persisted state may have been tampered "
+            "with."
+        )
 
 
 async def _build_run_state_from_json(

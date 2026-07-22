@@ -7174,3 +7174,67 @@ async def test_resume_rejected_function_approval_emits_output() -> None:
         for item in resumed.new_items
     )
     assert calls == []
+
+
+class TestRunStateSigning:
+    """Optional HMAC integrity for persisted RunState (opt-in via ``signing_key``)."""
+
+    _KEY = "test-signing-key"
+
+    def _signed_state(self) -> tuple[Agent[Any], dict[str, Any]]:
+        agent = Agent(name="Agent1")
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        state = make_state(agent, context=context, original_input="input1", max_turns=2)
+        return agent, state.to_json(signing_key=self._KEY)
+
+    def test_to_json_omits_signature_by_default(self):
+        agent = Agent(name="Agent1")
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        assert "$signature" not in make_state(agent, context=context).to_json()
+
+    def test_to_json_adds_signature_when_signed(self):
+        _agent, signed = self._signed_state()
+        assert isinstance(signed["$signature"], str) and signed["$signature"]
+
+    @pytest.mark.asyncio
+    async def test_signed_state_round_trips_with_matching_key(self):
+        agent, signed = self._signed_state()
+        restored = await RunState.from_json(agent, signed, signing_key=self._KEY)
+        assert restored._current_turn == 0
+
+    @pytest.mark.asyncio
+    async def test_signed_string_round_trips(self):
+        agent = Agent(name="Agent1")
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        signed_str = make_state(agent, context=context).to_string(signing_key=self._KEY)
+        restored = await RunState.from_string(agent, signed_str, signing_key=self._KEY)
+        assert restored._max_turns == 3
+
+    @pytest.mark.asyncio
+    async def test_tampered_state_is_rejected(self):
+        agent, signed = self._signed_state()
+        # Forge a blanket approval into the signed payload (the HITL approval-bypass scenario).
+        signed["context"]["approvals"] = {"run_shell": {"approved": True, "rejected": []}}
+        with pytest.raises(UserError, match="signature verification failed"):
+            await RunState.from_json(agent, signed, signing_key=self._KEY)
+
+    @pytest.mark.asyncio
+    async def test_wrong_key_is_rejected(self):
+        agent, signed = self._signed_state()
+        with pytest.raises(UserError, match="signature verification failed"):
+            await RunState.from_json(agent, signed, signing_key="different-key")
+
+    @pytest.mark.asyncio
+    async def test_unsigned_state_rejected_when_key_required(self):
+        agent = Agent(name="Agent1")
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        unsigned = make_state(agent, context=context).to_json()
+        with pytest.raises(UserError, match="signature is missing"):
+            await RunState.from_json(agent, unsigned, signing_key=self._KEY)
+
+    @pytest.mark.asyncio
+    async def test_signature_ignored_when_no_key_provided(self):
+        # Backward compatible: a signed blob still loads when no key is supplied.
+        agent, signed = self._signed_state()
+        restored = await RunState.from_json(agent, signed)
+        assert restored._current_turn == 0
