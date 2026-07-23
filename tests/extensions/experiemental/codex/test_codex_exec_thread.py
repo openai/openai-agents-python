@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
 import inspect
 import json
 import os
+import signal
 import sys
 from dataclasses import fields
 from pathlib import Path
@@ -549,6 +551,71 @@ async def test_codex_exec_run_close_drains_stdout_before_wait(
         await asyncio.wait_for(stream.aclose(), timeout=5)
         assert process.returncode is not None
     finally:
+        if process is not None:
+            if process.returncode is None:
+                process.kill()
+            if process.stdout is not None:
+                while await process.stdout.read(exec_module._SUBPROCESS_DRAIN_CHUNK_BYTES):
+                    pass
+            await process.wait()
+
+
+@pytest.mark.asyncio
+async def test_codex_exec_run_close_is_bounded_when_descendant_holds_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_create_subprocess_exec = asyncio.create_subprocess_exec
+    process: asyncio.subprocess.Process | None = None
+    helper_pid: int | None = None
+    helper_code = "import time; time.sleep(10)"
+    child_code = (
+        "import os\n"
+        "import subprocess\n"
+        "import sys\n"
+        f"helper = subprocess.Popen([sys.executable, '-c', {helper_code!r}], "
+        "stdin=subprocess.DEVNULL, stdout=sys.stdout, stderr=subprocess.DEVNULL)\n"
+        "os.write(1, f'ready {helper.pid}\\n'.encode())\n"
+        "chunk = b'x' * 65536\n"
+        "while True:\n"
+        "    os.write(1, chunk)\n"
+    )
+
+    async def create_output_heavy_subprocess(
+        *_args: Any, **kwargs: Any
+    ) -> asyncio.subprocess.Process:
+        nonlocal process
+        process = await original_create_subprocess_exec(sys.executable, "-c", child_code, **kwargs)
+        return process
+
+    monkeypatch.setattr(
+        exec_module.asyncio, "create_subprocess_exec", create_output_heavy_subprocess
+    )
+    monkeypatch.setattr(exec_module, "_SUBPROCESS_CLEANUP_TIMEOUT_SECONDS", 0.05, raising=False)
+
+    exec_client = exec_module.CodexExec(
+        executable_path="unused",
+        subprocess_stream_limit_bytes=exec_module._MIN_SUBPROCESS_STREAM_LIMIT_BYTES,
+    )
+    stream = exec_client.run(exec_module.CodexExecArgs(input="hello"))
+
+    try:
+        ready_line = await asyncio.wait_for(anext(stream), timeout=5)
+        helper_pid = int(ready_line.removeprefix("ready "))
+        assert process is not None
+        assert process.stdout is not None
+        stdout = cast(Any, process.stdout)
+        for _ in range(500):
+            if stdout._paused:
+                break
+            await asyncio.sleep(0.01)
+        assert stdout._paused
+
+        await asyncio.wait_for(stream.aclose(), timeout=1)
+        assert process.returncode is not None
+    finally:
+        if helper_pid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(helper_pid, signal.SIGTERM)
         if process is not None:
             if process.returncode is None:
                 process.kill()

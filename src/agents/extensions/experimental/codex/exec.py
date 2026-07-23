@@ -21,6 +21,7 @@ _DEFAULT_SUBPROCESS_STREAM_LIMIT_BYTES = 8 * 1024 * 1024
 _MIN_SUBPROCESS_STREAM_LIMIT_BYTES = 64 * 1024
 _MAX_SUBPROCESS_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 _SUBPROCESS_DRAIN_CHUNK_BYTES = 64 * 1024
+_SUBPROCESS_CLEANUP_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,28 @@ class CodexExec:
             while await process.stdout.read(_SUBPROCESS_DRAIN_CHUNK_BYTES):
                 pass
 
+        async def _drain_stdout_and_wait() -> None:
+            await _drain_remaining_stdout()
+            await process.wait()
+
+        async def _cleanup_process() -> None:
+            try:
+                await asyncio.wait_for(
+                    _drain_stdout_and_wait(),
+                    timeout=_SUBPROCESS_CLEANUP_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                # A descendant may outlive the direct child while holding a pipe open.
+                # Close the transport so cleanup does not wait indefinitely for EOF.
+                transport = getattr(process, "_transport", None)
+                if transport is not None:
+                    transport.close()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        process.wait(),
+                        timeout=_SUBPROCESS_CLEANUP_TIMEOUT_SECONDS,
+                    )
+
         stderr_task = asyncio.create_task(_drain_stderr())
         cancel_task: asyncio.Task[None] | None = None
         try:
@@ -215,8 +238,7 @@ class CodexExec:
             if process.returncode is None:
                 with contextlib.suppress(ProcessLookupError):
                     process.kill()
-            await _drain_remaining_stdout()
-            await process.wait()
+            await _cleanup_process()
             if not stderr_task.done():
                 stderr_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
