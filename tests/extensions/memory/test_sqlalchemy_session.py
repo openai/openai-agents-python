@@ -836,7 +836,8 @@ async def test_session_settings_default():
     assert session.session_settings.limit is None
 
 
-async def test_session_settings_from_url():
+@pytest.mark.parametrize("use_dictionary", [False, True], ids=["class", "dictionary"])
+async def test_session_settings_from_url(use_dictionary: bool):
     """Test passing session_settings via from_url."""
     from agents.memory import SessionSettings
 
@@ -844,10 +845,10 @@ async def test_session_settings_from_url():
         "from_url_settings_test",
         url=DB_URL,
         create_tables=True,
-        session_settings=SessionSettings(limit=5),
+        session_settings={"limit": 5} if use_dictionary else SessionSettings(limit=5),
     )
 
-    assert session.session_settings is not None
+    assert isinstance(session.session_settings, SessionSettings)
     assert session.session_settings.limit == 5
 
 

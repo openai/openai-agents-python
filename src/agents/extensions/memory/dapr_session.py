@@ -45,7 +45,11 @@ except ImportError as e:
 from ...items import TResponseInputItem
 from ...logger import logger
 from ...memory.session import SessionABC
-from ...memory.session_settings import SessionSettings, resolve_session_limit
+from ...memory.session_settings import (
+    SessionSettings,
+    coerce_session_settings,
+    resolve_session_limit,
+)
 
 # Type alias for consistency levels
 ConsistencyLevel = Literal["eventual", "strong"]
@@ -72,7 +76,7 @@ class DaprSession(SessionABC):
         dapr_client: DaprClient,
         ttl: int | None = None,
         consistency: ConsistencyLevel = DAPR_CONSISTENCY_EVENTUAL,
-        session_settings: SessionSettings | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
     ):
         """Initializes a new DaprSession.
 
@@ -90,7 +94,11 @@ class DaprSession(SessionABC):
                 default limit for retrieving items. If None, uses default SessionSettings().
         """
         self.session_id = session_id
-        self.session_settings = session_settings or SessionSettings()
+        self.session_settings = (
+            coerce_session_settings(session_settings)
+            if session_settings is not None
+            else SessionSettings()
+        )
         self._dapr_client = dapr_client
         self._state_store_name = state_store_name
         self._ttl = ttl
@@ -109,7 +117,7 @@ class DaprSession(SessionABC):
         *,
         state_store_name: str,
         dapr_address: str = "localhost:50001",
-        session_settings: SessionSettings | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> DaprSession:
         """Create a session from a Dapr sidecar address.

@@ -27,6 +27,7 @@ from typing import Any, cast
 
 import pytest
 from openai import omit
+from openai.types.responses.web_search_tool import Filters as WebSearchToolFilters
 from pydantic import BaseModel
 
 from agents import (
@@ -466,6 +467,32 @@ def test_convert_tools_includes_explicit_false_external_web_access() -> None:
             "external_web_access": False,
         }
     ]
+
+
+@pytest.mark.parametrize("use_dictionary", [False, True], ids=["class", "dictionary"])
+def test_web_search_filters_preserve_existing_provider_payload(use_dictionary: bool) -> None:
+    filters = {"allowed_domains": ["example.com"]}
+    tool = WebSearchTool(
+        filters=filters if use_dictionary else WebSearchToolFilters.model_validate(filters)
+    )
+
+    assert isinstance(tool.filters, WebSearchToolFilters)
+    converted = Converter.convert_tools([tool], handoffs=[], model="gpt-5.4")
+    assert converted.tools == [
+        {
+            "type": "web_search",
+            "filters": filters,
+            "user_location": None,
+            "search_context_size": "medium",
+        }
+    ]
+
+
+def test_web_search_filters_preserve_openai_forward_compatible_fields() -> None:
+    tool = WebSearchTool(filters={"future_filter": ["example.com"]})
+
+    assert tool.filters is not None
+    assert tool.filters.model_extra == {"future_filter": ["example.com"]}
 
 
 def test_convert_tools_uses_preview_computer_payload_for_preview_model() -> None:

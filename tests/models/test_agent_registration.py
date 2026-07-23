@@ -17,6 +17,7 @@ from agents.models.openai_agent_registration import (
 from agents.models.openai_provider import OpenAIProvider
 from agents.run_internal.agent_runner_helpers import resolve_trace_settings
 from agents.tracing import agent_span, trace
+from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider
 
 
 def test_agent_registration_config_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,6 +90,35 @@ def test_agent_registration_provider_constructor_config() -> None:
     assert openai_provider.agent_registration.harness_id == "provider-harness"
     assert multi_provider.openai_provider.agent_registration is not None
     assert multi_provider.openai_provider.agent_registration.harness_id == "provider-harness"
+
+
+def test_agent_registration_provider_constructors_normalize_dictionaries() -> None:
+    config = {"harness_id": "dictionary-harness"}
+    openai_provider = OpenAIProvider(agent_registration=config)
+    multi_provider = MultiProvider(openai_agent_registration=config)
+    voice_provider = OpenAIVoiceModelProvider(agent_registration=config)
+
+    assert openai_provider.agent_registration is not None
+    assert openai_provider.agent_registration.harness_id == "dictionary-harness"
+    assert multi_provider.openai_provider.agent_registration is not None
+    assert multi_provider.openai_provider.agent_registration.harness_id == "dictionary-harness"
+    assert voice_provider.agent_registration is not None
+    assert voice_provider.agent_registration.harness_id == "dictionary-harness"
+
+
+def test_default_agent_registration_normalizes_dictionary() -> None:
+    set_default_openai_agent_registration({"harness_id": "dictionary-default"})
+    try:
+        resolved = resolve_openai_agent_registration_config(None)
+        assert resolved is not None
+        assert resolved.harness_id == "dictionary-default"
+    finally:
+        set_default_openai_agent_registration(None)
+
+
+def test_agent_registration_rejects_unknown_dictionary_fields() -> None:
+    with pytest.raises(TypeError, match="Unknown OpenAI agent registration settings: harness_idd"):
+        OpenAIProvider(agent_registration={"harness_idd": "invalid"})
 
 
 def test_harness_id_resolves_private_agent_registration() -> None:

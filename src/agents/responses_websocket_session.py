@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .agent import Agent
 from .items import TResponseInputItem
@@ -16,7 +16,7 @@ from .models.openai_provider import OpenAIProvider
 from .models.openai_responses import OpenAIResponsesWebSocketOptions
 from .result import RunResult, RunResultStreaming
 from .run import Runner
-from .run_config import RunConfig
+from .run_config import RunConfig, _coerce_run_config
 from .run_state import RunState
 
 
@@ -27,7 +27,16 @@ class ResponsesWebSocketSession:
     provider: OpenAIProvider
     run_config: RunConfig
 
+    if TYPE_CHECKING:
+
+        def __init__(
+            self,
+            provider: OpenAIProvider,
+            run_config: RunConfig | dict[str, Any],
+        ) -> None: ...
+
     def __post_init__(self) -> None:
+        object.__setattr__(self, "run_config", _coerce_run_config(self.run_config))
         self._validate_provider_alignment()
 
     def _validate_provider_alignment(self) -> MultiProvider:

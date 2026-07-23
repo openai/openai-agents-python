@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
+from .._config_coercion import coerce_dataclass_config
 from ..exceptions import UserError
 from ..logger import logger
 from ..tracing import TraceCtxManager
@@ -25,7 +27,7 @@ class VoicePipeline:
         workflow: VoiceWorkflowBase,
         stt_model: STTModel | str | None = None,
         tts_model: TTSModel | str | None = None,
-        config: VoicePipelineConfig | None = None,
+        config: VoicePipelineConfig | dict[str, Any] | None = None,
     ):
         """Create a new voice pipeline.
 
@@ -43,7 +45,11 @@ class VoicePipeline:
         self.tts_model = tts_model if isinstance(tts_model, TTSModel) else None
         self._stt_model_name = stt_model if isinstance(stt_model, str) else None
         self._tts_model_name = tts_model if isinstance(tts_model, str) else None
-        self.config = config or VoicePipelineConfig()
+        self.config = (
+            coerce_dataclass_config(config, VoicePipelineConfig, parameter_name="voice.pipeline")
+            if config is not None
+            else VoicePipelineConfig()
+        )
 
     async def run(self, audio_input: AudioInput | StreamedAudioInput) -> StreamedAudioResult:
         """Run the voice pipeline.

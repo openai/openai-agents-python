@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import warnings
-from typing import cast
+from typing import Any, cast
 
 from typing_extensions import Unpack
 
@@ -42,6 +42,7 @@ from .run_config import (
     ToolErrorFormatterArgs,
     ToolExecutionConfig,
     ToolNotFoundBehavior,
+    _coerce_run_config,
 )
 from .run_context import RunContextWrapper, TContext
 from .run_error_handlers import RunErrorHandlers
@@ -208,7 +209,7 @@ class Runner:
         context: TContext | None = None,
         max_turns: int | None = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
-        run_config: RunConfig | None = None,
+        run_config: RunConfig | dict[str, Any] | None = None,
         error_handlers: RunErrorHandlers[TContext] | None = None,
         previous_response_id: str | None = None,
         auto_previous_response_id: bool = False,
@@ -292,7 +293,7 @@ class Runner:
         context: TContext | None = None,
         max_turns: int | None = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
-        run_config: RunConfig | None = None,
+        run_config: RunConfig | dict[str, Any] | None = None,
         error_handlers: RunErrorHandlers[TContext] | None = None,
         previous_response_id: str | None = None,
         auto_previous_response_id: bool = False,
@@ -373,7 +374,7 @@ class Runner:
         context: TContext | None = None,
         max_turns: int | None = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
-        run_config: RunConfig | None = None,
+        run_config: RunConfig | dict[str, Any] | None = None,
         previous_response_id: str | None = None,
         auto_previous_response_id: bool = False,
         conversation_id: str | None = None,
@@ -467,8 +468,7 @@ class AgentRunner:
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        if run_config is None:
-            run_config = RunConfig()
+        run_config = RunConfig() if run_config is None else _coerce_run_config(run_config)
 
         is_resumed_state = isinstance(input, RunState)
         run_state: RunState[TContext] | None = None
@@ -1728,8 +1728,7 @@ class AgentRunner:
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        if run_config is None:
-            run_config = RunConfig()
+        run_config = RunConfig() if run_config is None else _coerce_run_config(run_config)
 
         # Handle RunState input
         is_resumed_state = isinstance(input, RunState)

@@ -68,7 +68,7 @@ class ToolContext(RunContextWrapper[TContext]):
         *,
         tool_namespace: str | None = None,
         agent: AgentBase[Any] | None = None,
-        run_config: RunConfig | None = None,
+        run_config: RunConfig | dict[str, Any] | None = None,
         turn_input: list[TResponseInputItem] | None = None,
         _approvals: dict[str, _ApprovalRecord] | None = None,
         tool_input: Any | None = None,
@@ -102,7 +102,12 @@ class ToolContext(RunContextWrapper[TContext]):
             else get_tool_call_namespace(tool_call)
         )
         self.agent = agent
-        self.run_config = run_config
+        if run_config is not None:
+            from .run_config import _coerce_run_config
+
+            self.run_config = _coerce_run_config(run_config)
+        else:
+            self.run_config = None
         # Internal adapter hook used to attach SDK-only custom data to the emitted output item.
         self._custom_data: dict[str, Any] | None = None
 
@@ -122,7 +127,7 @@ class ToolContext(RunContextWrapper[TContext]):
         tool_name: str | None = None,
         tool_arguments: str | None = None,
         tool_namespace: str | None = None,
-        run_config: RunConfig | None = None,
+        run_config: RunConfig | dict[str, Any] | None = None,
     ) -> ToolContext:
         """
         Create a ToolContext from a RunContextWrapper.

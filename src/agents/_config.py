@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from openai import AsyncOpenAI
 
@@ -40,7 +40,7 @@ def set_default_openai_responses_transport(transport: Literal["http", "websocket
 
 
 def set_default_openai_agent_registration(
-    config: OpenAIAgentRegistrationConfig | None,
+    config: OpenAIAgentRegistrationConfig | dict[str, Any] | None,
 ) -> None:
     set_default_openai_agent_registration_config(config)
 

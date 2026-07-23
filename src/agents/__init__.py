@@ -314,7 +314,7 @@ def set_default_openai_responses_transport(transport: Literal["http", "websocket
 
 
 def set_default_openai_agent_registration(
-    config: OpenAIAgentRegistrationConfig | None,
+    config: OpenAIAgentRegistrationConfig | dict[str, Any] | None,
 ) -> None:
     """Set the default OpenAI agent registration config.
 

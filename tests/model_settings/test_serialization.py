@@ -1,6 +1,7 @@
 import json
 from dataclasses import fields
 
+import pytest
 from openai.types.shared import Reasoning
 from pydantic import TypeAdapter
 from pydantic_core import to_json
@@ -28,6 +29,54 @@ def test_basic_serialization() -> None:
 
     # Now, lets serialize the ModelSettings instance to a JSON string
     verify_serialization(model_settings)
+
+
+def test_model_settings_direct_constructor_preserves_openai_reasoning_extensions() -> None:
+    settings = ModelSettings(
+        reasoning={"context": "all_turns", "future_reasoning_option": "enabled"}
+    )
+
+    assert isinstance(settings.reasoning, Reasoning)
+    assert settings.reasoning.context == "all_turns"
+    assert settings.reasoning.model_extra == {"future_reasoning_option": "enabled"}
+
+
+def test_model_settings_dictionary_override_preserves_omitted_values() -> None:
+    settings = ModelSettings(
+        temperature=0.5,
+        reasoning=Reasoning.model_validate(
+            {"context": "all_turns", "future_reasoning_option": "enabled"}
+        ),
+        retry=ModelRetrySettings(max_retries=2),
+    )
+
+    resolved = settings.resolve({"temperature": 0.0})
+
+    assert resolved.temperature == 0.0
+    assert resolved.reasoning is settings.reasoning
+    assert resolved.retry is settings.retry
+
+
+def test_model_settings_dictionary_override_merges_retry_settings() -> None:
+    settings = ModelSettings(
+        retry=ModelRetrySettings(
+            max_retries=2,
+            backoff=ModelRetryBackoffSettings(initial_delay=0.1, jitter=True),
+        )
+    )
+
+    resolved = settings.resolve({"retry": {"max_retries": 0, "backoff": {"jitter": False}}})
+
+    assert resolved.retry is not None
+    assert resolved.retry.max_retries == 0
+    assert isinstance(resolved.retry.backoff, ModelRetryBackoffSettings)
+    assert resolved.retry.backoff.initial_delay == 0.1
+    assert resolved.retry.backoff.jitter is False
+
+
+def test_model_settings_dictionary_override_rejects_unknown_fields() -> None:
+    with pytest.raises(TypeError, match="Unknown model settings: temperatur"):
+        ModelSettings().resolve({"temperatur": 0.5})
 
 
 def test_mcp_tool_choice_serialization() -> None:

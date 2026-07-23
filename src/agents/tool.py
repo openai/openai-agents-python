@@ -43,6 +43,7 @@ from pydantic import BaseModel, TypeAdapter, ValidationError, model_validator
 from typing_extensions import NotRequired, ParamSpec, TypedDict
 
 from . import _debug
+from ._config_coercion import coerce_pydantic_config
 from ._tool_identity import (
     get_explicit_function_tool_namespace,
     tool_qualified_name,
@@ -734,6 +735,22 @@ class WebSearchTool:
     When omitted, the API default is used. Set to `False` to request cached or
     indexed-only behavior where supported.
     """
+
+    if TYPE_CHECKING:
+
+        def __init__(
+            self,
+            user_location: UserLocation | None = None,
+            filters: WebSearchToolFilters | dict[str, Any] | None = None,
+            search_context_size: Literal["low", "medium", "high"] = "medium",
+            external_web_access: bool | None = None,
+        ) -> None: ...
+
+    def __post_init__(self) -> None:
+        if isinstance(self.filters, dict):
+            self.filters = coerce_pydantic_config(
+                self.filters, WebSearchToolFilters, parameter_name="web search filters"
+            )
 
     @property
     def name(self):

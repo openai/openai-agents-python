@@ -2,7 +2,7 @@ import importlib
 
 import pytest
 
-from agents import Agent, responses_websocket_session
+from agents import Agent, ResponsesWebSocketSession, RunConfig, responses_websocket_session
 from agents.models.multi_provider import MultiProvider
 from agents.models.openai_provider import OpenAIProvider
 
@@ -15,6 +15,35 @@ async def test_responses_websocket_session_builds_shared_run_config():
         assert ws.provider._use_responses_websocket is True
         assert isinstance(ws.run_config.model_provider, MultiProvider)
         assert ws.run_config.model_provider.openai_provider is ws.provider
+
+
+def test_responses_websocket_session_normalizes_dictionary_run_config() -> None:
+    provider = MultiProvider(openai_api_key="test")
+
+    session = ResponsesWebSocketSession(
+        provider=provider.openai_provider,
+        run_config={
+            "model_provider": provider,
+            "model_settings": {"temperature": 0.0, "retry": {"max_retries": 0}},
+        },
+    )
+
+    assert isinstance(session.run_config, RunConfig)
+    assert session.run_config.model_provider is provider
+    assert session.run_config.model_settings is not None
+    assert session.run_config.model_settings.temperature == 0.0
+    assert session.run_config.model_settings.retry is not None
+    assert session.run_config.model_settings.retry.max_retries == 0
+
+
+def test_responses_websocket_session_rejects_unknown_dictionary_run_config_fields() -> None:
+    provider = MultiProvider(openai_api_key="test")
+
+    with pytest.raises(TypeError, match="Unknown run_config settings: tracin_disabled"):
+        ResponsesWebSocketSession(
+            provider=provider.openai_provider,
+            run_config={"model_provider": provider, "tracin_disabled": True},
+        )
 
 
 @pytest.mark.asyncio

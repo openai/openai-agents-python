@@ -41,7 +41,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         db_path: str | Path = ":memory:",
         create_tables: bool = False,
         logger: logging.Logger | None = None,
-        session_settings: SessionSettings | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
         **kwargs,
     ):
         """Initialize the AdvancedSQLiteSession.

@@ -50,7 +50,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
-from ...memory.session_settings import SessionSettings, resolve_session_limit
+from ...memory.session_settings import (
+    SessionSettings,
+    coerce_session_settings,
+    resolve_session_limit,
+)
 
 
 class SQLAlchemySession(SessionABC):
@@ -135,7 +139,7 @@ class SQLAlchemySession(SessionABC):
         create_tables: bool = False,
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
-        session_settings: SessionSettings | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
         ensure_ascii: bool = True,
     ):
         """Initializes a new SQLAlchemySession.
@@ -155,7 +159,11 @@ class SQLAlchemySession(SessionABC):
                 session items to JSON. Defaults to True to preserve the historical storage format.
         """
         self.session_id = session_id
-        self.session_settings = session_settings or SessionSettings()
+        self.session_settings = (
+            coerce_session_settings(session_settings)
+            if session_settings is not None
+            else SessionSettings()
+        )
         self._engine = engine
         self._ensure_ascii = ensure_ascii
         self._configure_sqlite_engine(engine)
@@ -225,7 +233,7 @@ class SQLAlchemySession(SessionABC):
         *,
         url: str,
         engine_kwargs: dict[str, Any] | None = None,
-        session_settings: SessionSettings | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> SQLAlchemySession:
         """Create a session from a database URL string.

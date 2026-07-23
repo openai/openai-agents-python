@@ -7,11 +7,11 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from ..items import TResponseInputItem
 from .session import SessionABC
-from .session_settings import SessionSettings, resolve_session_limit
+from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
 
 
 class SQLiteSession(SessionABC):
@@ -33,7 +33,7 @@ class SQLiteSession(SessionABC):
         db_path: str | Path = ":memory:",
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
-        session_settings: SessionSettings | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
     ):
         """Initialize the SQLite session.
 
@@ -47,7 +47,11 @@ class SQLiteSession(SessionABC):
                 retrieving items. If None, uses default SessionSettings().
         """
         self.session_id = session_id
-        self.session_settings = session_settings or SessionSettings()
+        self.session_settings = (
+            coerce_session_settings(session_settings)
+            if session_settings is not None
+            else SessionSettings()
+        )
         self.db_path = db_path
         self.sessions_table = sessions_table
         self.messages_table = messages_table

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agents import Agent, RunConfig, Runner, SQLiteSession, TResponseInputItem
+from agents import Agent, RunConfig, Runner, SessionSettings, SQLiteSession, TResponseInputItem
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 
@@ -692,6 +692,22 @@ async def test_session_settings_constructor():
     assert session.session_settings.limit == 5
 
     session.close()
+
+
+@pytest.mark.asyncio
+async def test_session_settings_constructor_normalizes_dictionary() -> None:
+    session = SQLiteSession("dictionary_settings_test", session_settings={"limit": 0})
+
+    assert isinstance(session.session_settings, SessionSettings)
+    assert session.session_settings.limit == 0
+    assert session.session_settings.resolve({"limit": 4}).limit == 4
+
+    session.close()
+
+
+def test_session_settings_rejects_unknown_dictionary_fields() -> None:
+    with pytest.raises(TypeError, match="Unknown session settings: limitt"):
+        SQLiteSession("invalid_settings_test", session_settings={"limitt": 1})
 
 
 @pytest.mark.asyncio

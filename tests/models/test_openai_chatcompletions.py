@@ -70,7 +70,7 @@ def _minimal_chat_completion(content: str = "ok") -> ChatCompletion:
 
 
 async def _run_chat_completions_model_with_custom_base_url(
-    model_settings: ModelSettings | None = None,
+    model_settings: ModelSettings | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     class DummyCompletions:
         def __init__(self) -> None:
@@ -785,6 +785,54 @@ def test_chat_completions_rejects_responses_only_reasoning_settings_in_strict_mo
         model._handle_unsupported_reasoning_settings(
             ModelSettings(reasoning=Reasoning(mode="pro", context="all_turns"))
         )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_dictionary", [False, True], ids=["model-settings", "dictionary"])
+async def test_chat_completions_requests_normalize_dictionary_agent_settings(
+    use_dictionary: bool,
+) -> None:
+    settings: dict[str, Any] = {
+        "reasoning": {"effort": "high"},
+        "prompt_cache_options": {"mode": "explicit", "ttl": "30m"},
+        "prompt_cache_retention": "24h",
+        "verbosity": "low",
+        "store": False,
+        "temperature": 0.3,
+        "top_p": 1.0,
+        "frequency_penalty": 0.0,
+        "presence_penalty": 0.0,
+        "max_tokens": 64,
+        "parallel_tool_calls": False,
+        "extra_headers": {"x-model-settings-parity": "preserved"},
+        "extra_query": {"model_settings_parity": "verified"},
+        "extra_body": {"prompt_cache_key": "extra-body-cache-key"},
+        "retry": {
+            "max_retries": 0,
+            "backoff": {"initial_delay": 0.0, "jitter": False},
+        },
+    }
+    kwargs = await _run_chat_completions_model_with_custom_base_url(
+        model_settings=settings if use_dictionary else ModelSettings(**settings)
+    )
+
+    assert kwargs["reasoning_effort"] == "high"
+    assert kwargs["prompt_cache_options"] == settings["prompt_cache_options"]
+    assert kwargs["prompt_cache_retention"] == "24h"
+    assert kwargs["verbosity"] == "low"
+    assert kwargs["store"] is False
+    assert kwargs["temperature"] == 0.3
+    assert kwargs["top_p"] == 1.0
+    assert kwargs["frequency_penalty"] == 0.0
+    assert kwargs["presence_penalty"] == 0.0
+    assert kwargs["max_tokens"] == 64
+    assert "max_output_tokens" not in kwargs
+    assert kwargs["parallel_tool_calls"] is False
+    assert kwargs["extra_headers"]["x-model-settings-parity"] == "preserved"
+    assert kwargs["extra_query"] == {"model_settings_parity": "verified"}
+    assert kwargs["extra_body"] == {"prompt_cache_key": "extra-body-cache-key"}
+    assert "retry" not in kwargs
 
 
 @pytest.mark.allow_call_model_methods

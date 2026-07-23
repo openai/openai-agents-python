@@ -41,7 +41,11 @@ except ImportError as e:
 
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
-from ...memory.session_settings import SessionSettings, resolve_session_limit
+from ...memory.session_settings import (
+    SessionSettings,
+    coerce_session_settings,
+    resolve_session_limit,
+)
 
 
 class RedisSession(SessionABC):
@@ -56,7 +60,7 @@ class RedisSession(SessionABC):
         redis_client: Redis,
         key_prefix: str = "agents:session",
         ttl: int | None = None,
-        session_settings: SessionSettings | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
     ):
         """Initializes a new RedisSession.
 
@@ -71,7 +75,11 @@ class RedisSession(SessionABC):
                 default limit for retrieving items. If None, uses default SessionSettings().
         """
         self.session_id = session_id
-        self.session_settings = session_settings or SessionSettings()
+        self.session_settings = (
+            coerce_session_settings(session_settings)
+            if session_settings is not None
+            else SessionSettings()
+        )
         self._redis = redis_client
         self._key_prefix = key_prefix
         self._ttl = ttl
@@ -90,7 +98,7 @@ class RedisSession(SessionABC):
         *,
         url: str,
         redis_kwargs: dict[str, Any] | None = None,
-        session_settings: SessionSettings | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> RedisSession:
         """Create a session from a Redis URL string.

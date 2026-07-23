@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from openai import AsyncOpenAI
 
@@ -87,7 +87,7 @@ class MultiProvider(ModelProvider):
         openai_websocket_base_url: str | None = None,
         openai_prefix_mode: MultiProviderOpenAIPrefixMode = "alias",
         unknown_prefix_mode: MultiProviderUnknownPrefixMode = "error",
-        openai_agent_registration: OpenAIAgentRegistrationConfig | None = None,
+        openai_agent_registration: OpenAIAgentRegistrationConfig | dict[str, Any] | None = None,
         openai_responses_websocket_options: OpenAIResponsesWebSocketOptions | None = None,
         openai_buffer_streamed_tool_calls: bool = False,
     ) -> None:

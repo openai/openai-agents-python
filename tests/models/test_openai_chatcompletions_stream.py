@@ -2,6 +2,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
+import httpx
 import pytest
 from openai.types.chat.chat_completion import ChatCompletion, Choice as ChatCompletionChoice
 from openai.types.chat.chat_completion_chunk import (
@@ -97,6 +98,95 @@ async def _collect_buffered_tool_call_chunks(
             _completion_stream(*chunks)
         )
     ]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_dictionary", [False, True], ids=["model-settings", "dictionary"])
+async def test_stream_response_forwards_dictionary_agent_model_settings(
+    use_dictionary: bool,
+) -> None:
+    chunk = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="gpt-5.4-mini",
+        object="chat.completion.chunk",
+        choices=[
+            Choice(
+                index=0,
+                delta=ChoiceDelta(role="assistant", content="ok"),
+                finish_reason="stop",
+            )
+        ],
+    )
+
+    class DummyCompletions:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, Any] = {}
+
+        async def create(self, **kwargs: Any) -> AsyncIterator[ChatCompletionChunk]:
+            self.kwargs = kwargs
+            return _completion_stream(chunk)
+
+    class DummyClient:
+        def __init__(self, completions: DummyCompletions) -> None:
+            self.chat = type("_Chat", (), {"completions": completions})()
+            self.base_url = httpx.URL("https://api.openai.com/v1/")
+
+    completions = DummyCompletions()
+    model = OpenAIChatCompletionsModel(
+        model="gpt-5.4-mini", openai_client=cast(Any, DummyClient(completions))
+    )
+    settings: dict[str, Any] = {
+        "reasoning": {"effort": "low"},
+        "prompt_cache_options": {"mode": "explicit", "ttl": "30m"},
+        "prompt_cache_retention": "24h",
+        "verbosity": "low",
+        "store": False,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "frequency_penalty": 0.0,
+        "presence_penalty": 0.0,
+        "max_tokens": 64,
+        "parallel_tool_calls": False,
+        "include_usage": False,
+    }
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=settings if use_dictionary else ModelSettings(**settings),
+    )
+
+    events = [
+        event
+        async for event in model.stream_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=agent.model_settings,
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+    ]
+
+    assert any(event.type == "response.completed" for event in events)
+    assert completions.kwargs["reasoning_effort"] == "low"
+    assert completions.kwargs["prompt_cache_options"] == settings["prompt_cache_options"]
+    assert completions.kwargs["prompt_cache_retention"] == "24h"
+    assert completions.kwargs["verbosity"] == "low"
+    assert completions.kwargs["store"] is False
+    assert completions.kwargs["temperature"] == 0.0
+    assert completions.kwargs["top_p"] == 1.0
+    assert completions.kwargs["frequency_penalty"] == 0.0
+    assert completions.kwargs["presence_penalty"] == 0.0
+    assert completions.kwargs["max_tokens"] == 64
+    assert completions.kwargs["parallel_tool_calls"] is False
+    assert completions.kwargs["stream"] is True
+    assert completions.kwargs["stream_options"] == {"include_usage": False}
 
 
 @pytest.mark.allow_call_model_methods

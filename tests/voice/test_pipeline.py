@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -13,6 +15,7 @@ try:
     from agents.voice import (
         AudioInput,
         StreamedAudioResult,
+        STTModelSettings,
         TTSModelSettings,
         VoicePipeline,
         VoicePipelineConfig,
@@ -27,6 +30,22 @@ except ImportError:
     pass
 
 
+@dataclass
+class _ProviderSTTModelSettings(STTModelSettings):
+    provider_language: str | None = None
+
+
+@dataclass
+class _ProviderTTSModelSettings(TTSModelSettings):
+    provider_voice: str | None = None
+
+
+@dataclass
+class _ProviderVoicePipelineConfig(VoicePipelineConfig):
+    stt_settings: _ProviderSTTModelSettings = field(default_factory=_ProviderSTTModelSettings)
+    tts_settings: _ProviderTTSModelSettings = field(default_factory=_ProviderTTSModelSettings)
+
+
 def test_streamed_audio_result_odd_length_buffer_int16() -> None:
     result = StreamedAudioResult(
         FakeTTS(),
@@ -38,6 +57,68 @@ def test_streamed_audio_result_odd_length_buffer_int16() -> None:
 
     assert transformed.dtype == np.int16
     assert transformed.tolist() == [1]
+
+
+def test_voice_pipeline_config_normalizes_dictionary_settings() -> None:
+    config = VoicePipelineConfig(
+        stt_settings={"language": "ja", "temperature": 0.0},
+        tts_settings={"voice": "alloy", "buffer_size": 1},
+    )
+
+    assert isinstance(config.stt_settings, STTModelSettings)
+    assert config.stt_settings.language == "ja"
+    assert config.stt_settings.temperature == 0.0
+    assert isinstance(config.tts_settings, TTSModelSettings)
+    assert config.tts_settings.voice == "alloy"
+    assert config.tts_settings.buffer_size == 1
+
+
+def test_voice_pipeline_config_subclass_uses_declared_settings_types() -> None:
+    config = _ProviderVoicePipelineConfig(
+        stt_settings={"provider_language": "ja"},  # type: ignore[arg-type]
+        tts_settings={"provider_voice": "voice"},  # type: ignore[arg-type]
+    )
+
+    assert isinstance(config.stt_settings, _ProviderSTTModelSettings)
+    assert config.stt_settings.provider_language == "ja"
+    assert isinstance(config.tts_settings, _ProviderTTSModelSettings)
+    assert config.tts_settings.provider_voice == "voice"
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        ({"stt_settings": {"languge": "ja"}}, "Unknown voice.stt settings: languge"),
+        ({"tts_settings": {"voce": "alloy"}}, "Unknown voice.tts settings: voce"),
+    ],
+)
+def test_voice_pipeline_config_rejects_unknown_dictionary_settings(
+    settings: dict[str, Any], message: str
+) -> None:
+    with pytest.raises(TypeError, match=message):
+        VoicePipelineConfig(**settings)
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_normalizes_nested_dictionary_config() -> None:
+    fake_stt = FakeSTT(["first"])
+    fake_tts = FakeTTS()
+    pipeline = VoicePipeline(
+        workflow=FakeWorkflow([["out_1"]]),
+        stt_model=fake_stt,
+        tts_model=fake_tts,
+        config={
+            "stt_settings": {"language": "ja"},
+            "tts_settings": {"voice": "alloy", "buffer_size": 1},
+        },
+    )
+
+    result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
+    events, audio_chunks = await extract_events(result)
+
+    assert isinstance(pipeline.config, VoicePipelineConfig)
+    assert events == ["turn_started", "audio", "turn_ended", "session_ended"]
+    await fake_tts.verify_audio("out_1", audio_chunks[0])
 
 
 def test_streamed_audio_result_odd_length_buffer_float32() -> None:

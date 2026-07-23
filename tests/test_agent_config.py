@@ -1,9 +1,13 @@
+from typing import Any
+
 import pytest
+from openai.types.shared import Reasoning
 from pydantic import BaseModel
 
 from agents import Agent, AgentOutputSchema, Handoff, RunContextWrapper, handoff
 from agents.lifecycle import AgentHooksBase
 from agents.model_settings import ModelSettings
+from agents.retry import ModelRetryBackoffSettings
 from agents.run_internal.run_loop import get_handoffs, get_output_schema
 
 
@@ -216,11 +220,66 @@ class TestAgentValidation:
 
     def test_model_settings_validation(self):
         """Test model_settings validation - prevents runtime errors"""
-        # Valid case
+        # Typed settings and SDK-owned dictionaries are both valid.
         Agent(name="test", model_settings=ModelSettings())
+        agent = Agent(name="test", model_settings={"temperature": 0.25})
 
-        # Invalid case that could cause runtime issues
+        assert isinstance(agent.model_settings, ModelSettings)
+        assert agent.model_settings.temperature == 0.25
+
+        # Invalid values are rejected before model execution.
         with pytest.raises(
-            TypeError, match="Agent model_settings must be a ModelSettings instance"
+            TypeError, match="Agent model_settings must be a ModelSettings instance or a dict"
         ):
-            Agent(name="test", model_settings={})  # type: ignore
+            Agent(name="test", model_settings="invalid")  # type: ignore[arg-type]
+
+
+def test_agent_model_settings_dictionary_preserves_openai_reasoning_extensions() -> None:
+    agent = Agent(
+        name="test",
+        model_settings={
+            "reasoning": {"context": "all_turns", "future_reasoning_option": "enabled"},
+            "context_management": [{"type": "compaction", "compact_threshold": 244800}],
+            "retry": {"max_retries": 0, "backoff": {"jitter": False}},
+        },
+    )
+
+    assert isinstance(agent.model_settings.reasoning, Reasoning)
+    assert agent.model_settings.reasoning.context == "all_turns"
+    assert agent.model_settings.reasoning.model_extra == {"future_reasoning_option": "enabled"}
+    assert agent.model_settings.context_management == [
+        {"type": "compaction", "compact_threshold": 244800}
+    ]
+    assert agent.model_settings.retry is not None
+    assert agent.model_settings.retry.max_retries == 0
+    assert isinstance(agent.model_settings.retry.backoff, ModelRetryBackoffSettings)
+    assert agent.model_settings.retry.backoff.jitter is False
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        ({"temperatur": 0.2}, "Unknown model settings: temperatur"),
+        ({"retry": {"max_retry": 2}}, "Unknown model settings in retry: max_retry"),
+        (
+            {"retry": {"backoff": {"initial_delai": 1}}},
+            "Unknown model settings in retry.backoff: initial_delai",
+        ),
+        (
+            {"context_management": [{"type": "compaction", "compact_threshold_typo": 1}]},
+            r"Unknown model settings in context_management\[0\]: compact_threshold_typo",
+        ),
+    ],
+)
+def test_agent_rejects_unknown_first_party_dictionary_model_settings(
+    settings: dict[str, Any], message: str
+) -> None:
+    with pytest.raises(TypeError, match=message):
+        Agent(name="test", model_settings=settings)
+
+
+@pytest.mark.parametrize("setting_name", ["reasoning", "context_management", "temperature"])
+def test_agent_does_not_promote_model_settings_to_constructor(setting_name: str) -> None:
+    arguments: dict[str, Any] = {setting_name: None}
+    with pytest.raises(TypeError, match=f"unexpected keyword argument '{setting_name}'"):
+        Agent(name="test", **arguments)

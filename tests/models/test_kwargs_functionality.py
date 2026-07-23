@@ -1,3 +1,5 @@
+from typing import Any
+
 import httpx
 import litellm
 import pytest
@@ -9,6 +11,7 @@ from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.completion_usage import CompletionUsage
 
+from agents import Agent
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.model_settings import ModelSettings
 from agents.models._retry_runtime import provider_managed_retries_disabled
@@ -64,6 +67,44 @@ async def test_litellm_kwargs_forwarded(monkeypatch):
 
     # Verify regular parameters are still passed
     assert captured["temperature"] == 0.5
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_dictionary", [False, True], ids=["model-settings", "dictionary"])
+async def test_litellm_normalizes_dictionary_agent_model_settings(
+    monkeypatch, use_dictionary: bool
+):
+    captured: dict[str, object] = {}
+
+    async def fake_acompletion(model, messages=None, **kwargs):
+        captured.update(kwargs)
+        message = Message(role="assistant", content="test response")
+        return ModelResponse(choices=[Choices(index=0, message=message)], usage=Usage(0, 0, 0))
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    settings: dict[str, Any] = {"temperature": 0.0, "reasoning": {"effort": "low"}}
+    model = LitellmModel(model="test-model")
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=settings if use_dictionary else ModelSettings(**settings),
+    )
+
+    await model.get_response(
+        system_instructions=None,
+        input="test input",
+        model_settings=agent.model_settings,
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+    )
+
+    assert captured["temperature"] == 0.0
+    assert captured["reasoning_effort"] == "low"
 
 
 @pytest.mark.allow_call_model_methods

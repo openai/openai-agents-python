@@ -60,7 +60,11 @@ except ImportError as e:
 
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
-from ...memory.session_settings import SessionSettings, resolve_session_limit
+from ...memory.session_settings import (
+    SessionSettings,
+    coerce_session_settings,
+    resolve_session_limit,
+)
 
 # Identifies this library in the MongoDB handshake for server-side telemetry.
 _DRIVER_INFO = DriverInfo(name="openai-agents", version=_VERSION)
@@ -110,7 +114,7 @@ class MongoDBSession(SessionABC):
         database: str = "agents",
         sessions_collection: str = "agent_sessions",
         messages_collection: str = "agent_messages",
-        session_settings: SessionSettings | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
     ):
         """Initialize a new MongoDBSession.
 
@@ -128,7 +132,11 @@ class MongoDBSession(SessionABC):
                 is used (no item limit).
         """
         self.session_id = session_id
-        self.session_settings = session_settings or SessionSettings()
+        self.session_settings = (
+            coerce_session_settings(session_settings)
+            if session_settings is not None
+            else SessionSettings()
+        )
         self._client = client
         self._owns_client = False
 
@@ -153,7 +161,7 @@ class MongoDBSession(SessionABC):
         uri: str,
         database: str = "agents",
         client_kwargs: dict[str, Any] | None = None,
-        session_settings: SessionSettings | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> MongoDBSession:
         """Create a session from a MongoDB URI string.

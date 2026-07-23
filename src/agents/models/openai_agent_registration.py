@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from .._config_coercion import coerce_dataclass_config
+
 _ENV_HARNESS_ID = "OPENAI_AGENT_HARNESS_ID"
 OPENAI_HARNESS_ID_TRACE_METADATA_KEY = "agent_harness_id"
 
@@ -22,10 +24,12 @@ _default_agent_registration: OpenAIAgentRegistrationConfig | None = None
 
 
 def set_default_openai_agent_registration_config(
-    config: OpenAIAgentRegistrationConfig | None,
+    config: OpenAIAgentRegistrationConfig | dict[str, Any] | None,
 ) -> None:
     global _default_agent_registration
-    _default_agent_registration = config
+    _default_agent_registration = (
+        _coerce_openai_agent_registration_config(config) if config is not None else None
+    )
 
 
 def get_default_openai_agent_registration_config() -> OpenAIAgentRegistrationConfig | None:
@@ -33,8 +37,10 @@ def get_default_openai_agent_registration_config() -> OpenAIAgentRegistrationCon
 
 
 def resolve_openai_agent_registration_config(
-    config: OpenAIAgentRegistrationConfig | None,
+    config: OpenAIAgentRegistrationConfig | dict[str, Any] | None,
 ) -> ResolvedOpenAIAgentRegistrationConfig | None:
+    if config is not None:
+        config = _coerce_openai_agent_registration_config(config)
     default = get_default_openai_agent_registration_config()
     harness_id = _resolve_str(
         explicit=config.harness_id if config else None,
@@ -44,6 +50,16 @@ def resolve_openai_agent_registration_config(
     if harness_id is None:
         return None
     return ResolvedOpenAIAgentRegistrationConfig(harness_id=harness_id)
+
+
+def _coerce_openai_agent_registration_config(
+    config: OpenAIAgentRegistrationConfig | dict[str, Any],
+) -> OpenAIAgentRegistrationConfig:
+    return coerce_dataclass_config(
+        config,
+        OpenAIAgentRegistrationConfig,
+        parameter_name="OpenAI agent registration",
+    )
 
 
 def resolve_openai_harness_id_for_model_provider(model_provider: Any) -> str | None:

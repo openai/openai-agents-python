@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from openai import AsyncOpenAI
 
@@ -8,7 +9,7 @@ from agents.models._openai_shared import get_default_openai_client
 
 from ..items import TResponseInputItem
 from .session import SessionABC
-from .session_settings import SessionSettings, resolve_session_limit
+from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
 
 
 async def start_openai_conversations_session(openai_client: AsyncOpenAI | None = None) -> str:
@@ -30,11 +31,15 @@ class OpenAIConversationsSession(SessionABC):
         *,
         conversation_id: str | None = None,
         openai_client: AsyncOpenAI | None = None,
-        session_settings: SessionSettings | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
     ):
         self._session_id: str | None = conversation_id
         self._session_id_lock = asyncio.Lock()
-        self.session_settings = session_settings or SessionSettings()
+        self.session_settings = (
+            coerce_session_settings(session_settings)
+            if session_settings is not None
+            else SessionSettings()
+        )
         _openai_client = openai_client
         if _openai_client is None:
             _openai_client = get_default_openai_client() or AsyncOpenAI()

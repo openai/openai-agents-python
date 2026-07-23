@@ -31,7 +31,7 @@ from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
 from .logger import logger
 from .mcp import MCPUtil
-from .model_settings import ModelSettings
+from .model_settings import ModelSettings, _coerce_model_settings, _declared_model_settings_type
 from .models.default_models import (
     get_default_model_settings,
 )
@@ -317,6 +317,8 @@ class Agent(AgentBase, Generic[TContext]):
 
     model_settings: ModelSettings = field(default_factory=get_default_model_settings)
     """Configures model-specific tuning parameters (e.g. temperature, top_p).
+
+    Accepts a ``ModelSettings`` instance or a dictionary containing its fields.
     """
 
     input_guardrails: list[InputGuardrail[TContext]] = field(default_factory=list)
@@ -367,6 +369,39 @@ class Agent(AgentBase, Generic[TContext]):
     reset_tool_choice: bool = True
     """Whether to reset the tool choice to the default value after a tool has been called. Defaults
     to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
+
+    if TYPE_CHECKING:
+
+        def __init__(
+            self,
+            name: str,
+            handoff_description: str | None = None,
+            tools: list[Tool] = ...,
+            mcp_servers: list[MCPServer] = ...,
+            mcp_config: MCPConfig = ...,
+            instructions: (
+                str
+                | Callable[
+                    [RunContextWrapper[TContext], Agent[TContext]],
+                    MaybeAwaitable[str],
+                ]
+                | None
+            ) = None,
+            prompt: Prompt | DynamicPromptFunction | None = None,
+            handoffs: list[Agent[Any] | Handoff[TContext, Any]] = ...,
+            model: str | Model | None = None,
+            model_settings: ModelSettings | dict[str, Any] = ...,
+            input_guardrails: list[InputGuardrail[TContext]] = ...,
+            output_guardrails: list[OutputGuardrail[TContext]] = ...,
+            output_type: type[Any] | AgentOutputSchemaBase | None = None,
+            hooks: AgentHooks[TContext] | None = None,
+            tool_use_behavior: (
+                Literal["run_llm_again", "stop_on_first_tool"]
+                | StopAtTools
+                | ToolsToFinalOutputFunction
+            ) = "run_llm_again",
+            reset_tool_choice: bool = True,
+        ) -> None: ...
 
     def __post_init__(self):
         from typing import get_origin
@@ -424,11 +459,11 @@ class Agent(AgentBase, Generic[TContext]):
                     f"Agent model must be a string, Model, or None, got {type(self.model).__name__}"
                 )
 
-        if not isinstance(self.model_settings, ModelSettings):
-            raise TypeError(
-                f"Agent model_settings must be a ModelSettings instance, "
-                f"got {type(self.model_settings).__name__}"
-            )
+        self.model_settings = _coerce_model_settings(
+            self.model_settings,
+            parameter_name="Agent model_settings",
+            model_settings_type=_declared_model_settings_type(type(self), "model_settings"),
+        )
 
         if self.model is not None and self.model_settings == get_default_model_settings():
             self.model_settings = _initial_model_settings_for_model(self.model)
@@ -503,6 +538,13 @@ class Agent(AgentBase, Generic[TContext]):
             and _model_settings_match_implicit_model_defaults(self.model, self.model_settings)
         ):
             kwargs["model_settings"] = _initial_model_settings_for_model(kwargs["model"])
+        if "model_settings" in kwargs:
+            kwargs["model_settings"] = _coerce_model_settings(
+                kwargs["model_settings"],
+                parameter_name="Agent model_settings",
+                model_settings_type=type(self.model_settings),
+                inherited_model_settings=self.model_settings,
+            )
         return dataclasses.replace(self, **kwargs)
 
     def as_tool(
@@ -515,7 +557,7 @@ class Agent(AgentBase, Generic[TContext]):
         is_enabled: bool
         | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = True,
         on_stream: Callable[[AgentToolStreamEvent], MaybeAwaitable[None]] | None = None,
-        run_config: RunConfig | None = None,
+        run_config: RunConfig | dict[str, Any] | None = None,
         max_turns: int | None = None,
         hooks: RunHooks[TContext] | None = None,
         previous_response_id: str | None = None,
@@ -557,6 +599,11 @@ class Agent(AgentBase, Generic[TContext]):
             input_builder: Optional function to build the nested agent input from structured data.
             include_input_schema: Whether to include the full JSON schema in structured input.
         """
+
+        if run_config is not None:
+            from .run_config import _coerce_run_config
+
+            run_config = _coerce_run_config(run_config)
 
         def _is_supported_parameters(value: Any) -> bool:
             if not isinstance(value, type):

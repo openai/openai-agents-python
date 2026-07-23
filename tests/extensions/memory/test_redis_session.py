@@ -840,7 +840,8 @@ async def test_session_settings_default():
         await session.close()
 
 
-async def test_session_settings_constructor():
+@pytest.mark.parametrize("use_dictionary", [False, True], ids=["class", "dictionary"])
+async def test_session_settings_constructor(use_dictionary: bool):
     """Test passing session_settings via constructor."""
     from agents.memory import SessionSettings
 
@@ -849,15 +850,17 @@ async def test_session_settings_constructor():
             session_id="settings_test",
             redis_client=fake_redis,
             key_prefix="test:",
-            session_settings=SessionSettings(limit=5),
+            session_settings={"limit": 5} if use_dictionary else SessionSettings(limit=5),
         )
     else:
         session = RedisSession.from_url(
-            "settings_test", url=REDIS_URL, session_settings=SessionSettings(limit=5)
+            "settings_test",
+            url=REDIS_URL,
+            session_settings={"limit": 5} if use_dictionary else SessionSettings(limit=5),
         )
 
     try:
-        assert session.session_settings is not None
+        assert isinstance(session.session_settings, SessionSettings)
         assert session.session_settings.limit == 5
     finally:
         await session.close()

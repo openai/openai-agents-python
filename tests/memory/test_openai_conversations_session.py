@@ -553,3 +553,14 @@ class TestOpenAIConversationsSessionSettings:
 
         assert session.session_settings is not None
         assert session.session_settings.limit == 5
+
+    def test_session_settings_constructor_normalizes_dictionary(self, mock_openai_client):
+        from agents.memory import SessionSettings
+
+        session = OpenAIConversationsSession(
+            openai_client=mock_openai_client,
+            session_settings={"limit": 0},
+        )
+
+        assert isinstance(session.session_settings, SessionSettings)
+        assert session.session_settings.limit == 0

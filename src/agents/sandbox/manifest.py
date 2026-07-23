@@ -2,11 +2,12 @@ import abc
 import asyncio
 from collections.abc import Iterator, Mapping
 from pathlib import Path, PurePath, PurePosixPath
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_serializer, field_validator
 from typing_extensions import assert_never
 
+from .._config_coercion import coerce_pydantic_config
 from .entries import BaseEntry, Dir, Mount, resolve_workspace_path
 from .errors import InvalidManifestPathError
 from .manifest_render import render_manifest_description
@@ -256,3 +257,13 @@ class Manifest(BaseModel):
             coerce_rel_path=self._coerce_rel_path,
             depth=depth,
         )
+
+
+def _coerce_manifest(value: Manifest | dict[str, Any], *, parameter_name: str) -> Manifest:
+    """Normalize manifest dictionaries without granting untrusted host filesystem access."""
+    if isinstance(value, dict) and "extra_path_grants" in value:
+        raise TypeError(
+            f"{parameter_name}.extra_path_grants must be configured on a trusted "
+            "Manifest instance, not in a dictionary"
+        )
+    return coerce_pydantic_config(value, Manifest, parameter_name=parameter_name)

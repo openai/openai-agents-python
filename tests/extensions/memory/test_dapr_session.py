@@ -894,7 +894,8 @@ async def test_session_settings_default(fake_dapr_client: FakeDaprClient):
         await session.close()
 
 
-async def test_session_settings_constructor(fake_dapr_client: FakeDaprClient):
+@pytest.mark.parametrize("use_dictionary", [False, True], ids=["class", "dictionary"])
+async def test_session_settings_constructor(fake_dapr_client: FakeDaprClient, use_dictionary: bool):
     """Test passing session_settings via constructor."""
     from agents.memory import SessionSettings
 
@@ -902,11 +903,11 @@ async def test_session_settings_constructor(fake_dapr_client: FakeDaprClient):
         session_id="settings_test",
         state_store_name="statestore",
         dapr_client=fake_dapr_client,  # type: ignore[arg-type]
-        session_settings=SessionSettings(limit=5),
+        session_settings={"limit": 5} if use_dictionary else SessionSettings(limit=5),
     )
 
     try:
-        assert session.session_settings is not None
+        assert isinstance(session.session_settings, SessionSettings)
         assert session.session_settings.limit == 5
     finally:
         await session.close()

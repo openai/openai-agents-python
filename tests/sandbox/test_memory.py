@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import io
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, get_type_hints
 
 import pytest
 from openai.types.responses import ResponseCustomToolCall, ResponseFunctionToolCall
@@ -16,6 +17,7 @@ import agents.sandbox.memory.manager as memory_manager_module
 import agents.sandbox.memory.phase_one as phase_one_module
 from agents import (
     Agent,
+    ModelSettings,
     ReasoningItem,
     RunConfig,
     Runner,
@@ -68,6 +70,17 @@ from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 from tests.fake_model import FakeModel
 from tests.test_responses import get_final_output_message, get_text_message
 from tests.utils.hitl import make_shell_call
+
+
+@dataclass
+class _DeclaredProviderModelSettings(ModelSettings):
+    provider_field: str | None = None
+
+
+@dataclass
+class _DeclaredProviderMemoryGenerateConfig(MemoryGenerateConfig):
+    phase_one_model_settings: _DeclaredProviderModelSettings | None = None
+    phase_two_model_settings: _DeclaredProviderModelSettings | None = None
 
 
 class _DeleteTrackingUnixLocalSandboxClient(UnixLocalSandboxClient):
@@ -694,6 +707,93 @@ def test_memory_generate_config_accepts_renamed_limit_field() -> None:
     config = MemoryGenerateConfig(max_raw_memories_for_consolidation=123)
 
     assert config.max_raw_memories_for_consolidation == 123
+
+
+def test_memory_generate_config_normalizes_dictionary_model_settings() -> None:
+    config = MemoryGenerateConfig(
+        phase_one_model_settings={
+            "reasoning": {"effort": "low"},
+            "retry": {"max_retries": 0},
+        },
+        phase_two_model_settings={"temperature": 0.0, "store": False},
+    )
+
+    assert isinstance(config.phase_one_model_settings, ModelSettings)
+    assert config.phase_one_model_settings.reasoning is not None
+    assert config.phase_one_model_settings.reasoning.effort == "low"
+    assert config.phase_one_model_settings.retry is not None
+    assert config.phase_one_model_settings.retry.max_retries == 0
+    assert isinstance(config.phase_two_model_settings, ModelSettings)
+    assert config.phase_two_model_settings.temperature == 0.0
+    assert config.phase_two_model_settings.store is False
+
+
+def test_memory_generate_config_subclass_uses_declared_model_settings_types() -> None:
+    config = cast(Any, _DeclaredProviderMemoryGenerateConfig)(
+        phase_one_model_settings={"provider_field": "phase-one"},
+        phase_two_model_settings={"provider_field": "phase-two"},
+    )
+
+    assert isinstance(config.phase_one_model_settings, _DeclaredProviderModelSettings)
+    assert config.phase_one_model_settings.provider_field == "phase-one"
+    assert isinstance(config.phase_two_model_settings, _DeclaredProviderModelSettings)
+    assert config.phase_two_model_settings.provider_field == "phase-two"
+
+
+def test_memory_generate_config_model_settings_field_types_describe_normalized_values() -> None:
+    type_hints = get_type_hints(MemoryGenerateConfig)
+
+    assert type_hints["phase_one_model_settings"] == ModelSettings | None
+    assert type_hints["phase_two_model_settings"] == ModelSettings | None
+
+
+def test_memory_generate_config_preserves_typed_model_settings() -> None:
+    phase_one_settings = ModelSettings(reasoning={"effort": "low"})
+    phase_two_settings = ModelSettings(temperature=0.2)
+    config = MemoryGenerateConfig(
+        phase_one_model_settings=phase_one_settings,
+        phase_two_model_settings=phase_two_settings,
+    )
+
+    assert config.phase_one_model_settings is phase_one_settings
+    assert config.phase_two_model_settings is phase_two_settings
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["phase_one_model_settings", "phase_two_model_settings"],
+)
+def test_memory_generate_config_preserves_forward_compatible_reasoning_settings(
+    field_name: str,
+) -> None:
+    settings: dict[str, Any] = {field_name: {"reasoning": {"future_reasoning_option": "enabled"}}}
+
+    config = MemoryGenerateConfig(**settings)
+    model_settings = getattr(config, field_name)
+
+    assert model_settings is not None
+    assert model_settings.reasoning is not None
+    assert model_settings.reasoning.model_extra == {"future_reasoning_option": "enabled"}
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["phase_one_model_settings", "phase_two_model_settings"],
+)
+def test_memory_generate_config_rejects_invalid_model_settings(field_name: str) -> None:
+    settings: dict[str, Any] = {field_name: "invalid"}
+    with pytest.raises(
+        TypeError,
+        match=f"MemoryGenerateConfig.{field_name} must be a ModelSettings instance or a dict",
+    ):
+        MemoryGenerateConfig(**settings)
+
+
+def test_memory_generate_config_preserves_disabled_model_settings() -> None:
+    config = MemoryGenerateConfig(phase_one_model_settings=None, phase_two_model_settings=None)
+
+    assert config.phase_one_model_settings is None
+    assert config.phase_two_model_settings is None
 
 
 def test_memory_generate_config_rejects_too_many_raw_memories() -> None:

@@ -5,13 +5,17 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import aiosqlite
 
 from ...items import TResponseInputItem
 from ...memory import SessionABC
-from ...memory.session_settings import SessionSettings, resolve_session_limit
+from ...memory.session_settings import (
+    SessionSettings,
+    coerce_session_settings,
+    resolve_session_limit,
+)
 
 
 class AsyncSQLiteSession(SessionABC):
@@ -30,7 +34,7 @@ class AsyncSQLiteSession(SessionABC):
         db_path: str | Path = ":memory:",
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
-        session_settings: SessionSettings | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
     ):
         """Initialize the async SQLite session.
 
@@ -44,7 +48,11 @@ class AsyncSQLiteSession(SessionABC):
                 retrieving items. If None, uses default SessionSettings().
         """
         self.session_id = session_id
-        self.session_settings = session_settings or SessionSettings()
+        self.session_settings = (
+            coerce_session_settings(session_settings)
+            if session_settings is not None
+            else SessionSettings()
+        )
         self.db_path = db_path
         self.sessions_table = sessions_table
         self.messages_table = messages_table

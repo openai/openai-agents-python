@@ -396,15 +396,17 @@ async def test_get_items_limit_exceeds_count(session: MongoDBSession) -> None:
     assert len(result) == 1
 
 
-async def test_session_settings_limit_used_as_default() -> None:
+@pytest.mark.parametrize("use_dictionary", [False, True], ids=["class", "dictionary"])
+async def test_session_settings_limit_used_as_default(use_dictionary: bool) -> None:
     """session_settings.limit is applied when no explicit limit is given."""
     MongoDBSession._init_state.clear()
     s = MongoDBSession(
         "ls-test",
         client=FakeAsyncMongoClient(),  # type: ignore[arg-type]
         database="agents_test",
-        session_settings=SessionSettings(limit=2),
+        session_settings={"limit": 2} if use_dictionary else SessionSettings(limit=2),
     )
+    assert isinstance(s.session_settings, SessionSettings)
     await s.add_items([{"role": "user", "content": str(i)} for i in range(5)])
 
     result = await s.get_items()
