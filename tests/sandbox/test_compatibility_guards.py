@@ -216,6 +216,15 @@ def test_core_sandbox_public_export_surface_is_stable() -> None:
     ("module_name", "expected_exports"),
     [
         (
+            "agents.extensions.sandbox.aca",
+            {
+                "ACASandboxesClient",
+                "ACASandboxesClientOptions",
+                "ACASandboxesSession",
+                "ACASandboxesSessionState",
+            },
+        ),
+        (
             "agents.extensions.sandbox.e2b",
             {
                 "_E2BSandboxFactoryAPI",
@@ -415,6 +424,25 @@ def test_optional_sandbox_dataclass_constructor_field_order_is_stable(
             ("image", "exposed_ports"),
         ),
         (
+            "agents.extensions.sandbox.aca",
+            "ACASandboxesClientOptions",
+            (
+                "disk",
+                "cpu",
+                "memory",
+                "disk_size",
+                "auto_suspend_seconds",
+                "auto_suspend_mode",
+                "labels",
+                "environment",
+                "exposed_ports",
+                "exposed_port_anonymous",
+                "polling_interval_seconds",
+                "polling_timeout_seconds",
+                "ensure_running_timeout_seconds",
+            ),
+        ),
+        (
             "agents.extensions.sandbox.e2b",
             "E2BSandboxClientOptions",
             (
@@ -569,6 +597,33 @@ def test_optional_sandbox_client_options_positional_field_order_is_stable(
                 "workspace_root_ready",
                 "image",
                 "container_id",
+            ),
+        ),
+        (
+            "agents.extensions.sandbox.aca",
+            "ACASandboxesSessionState",
+            (
+                "type",
+                "session_id",
+                "snapshot",
+                "manifest",
+                "exposed_ports",
+                "snapshot_fingerprint",
+                "snapshot_fingerprint_version",
+                "workspace_root_ready",
+                "sandbox_id",
+                "subscription_id",
+                "resource_group",
+                "sandbox_group",
+                "region",
+                "disk",
+                "disk_size",
+                "auto_suspend_seconds",
+                "auto_suspend_mode",
+                "exposed_port_anonymous",
+                "ensure_running_timeout_seconds",
+                "labels",
+                "environment",
             ),
         ),
         (
@@ -767,6 +822,12 @@ def test_sandbox_session_state_field_order_is_stable(
     ("module_name", "class_name", "args", "expected_type"),
     [
         (
+            "agents.extensions.sandbox.aca",
+            "ACASandboxesClientOptions",
+            ("ubuntu",),
+            "aca_sandboxes",
+        ),
+        (
             "agents.sandbox.sandboxes.unix_local",
             "UnixLocalSandboxClientOptions",
             (),
@@ -813,6 +874,17 @@ def test_optional_sandbox_client_options_json_round_trip_preserves_type(
 @pytest.mark.parametrize(
     ("module_name", "class_name", "overrides"),
     [
+        (
+            "agents.extensions.sandbox.aca",
+            "ACASandboxesSessionState",
+            {
+                "sandbox_id": "sandbox-123",
+                "subscription_id": "subscription-123",
+                "resource_group": "resource-group",
+                "sandbox_group": "sandbox-group",
+                "region": "eastus2",
+            },
+        ),
         (
             "agents.sandbox.sandboxes.unix_local",
             "UnixLocalSandboxSessionState",

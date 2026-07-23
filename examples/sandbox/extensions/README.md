@@ -6,9 +6,50 @@ They intentionally keep the flow simple:
 
 1. Build a tiny manifest in memory.
 2. Create a `SandboxAgent` that inspects that workspace through one shell tool.
-3. Run the agent against E2B, Modal, Daytona, Cloudflare, Runloop, Blaxel, or Vercel.
+3. Run the agent against ACA Sandboxes, E2B, Modal, Daytona, Cloudflare, Runloop, Blaxel,
+   or Vercel.
 
 All of these examples require `OPENAI_API_KEY`, because they call the model through the normal `Runner` path. Each cloud backend also needs its own provider credentials.
+
+## ACA Sandboxes
+
+### Setup
+
+Install the repo extra:
+
+```bash
+uv sync --extra aca_sandboxes
+```
+
+Authenticate with Azure CLI or another `DefaultAzureCredential` source. The identity
+must have the **Container Apps SandboxGroup Data Owner** role at sandbox-group scope.
+
+Export the required environment variables:
+
+```bash
+export OPENAI_API_KEY=...
+export AZURE_SUBSCRIPTION_ID=...
+export ACA_RESOURCE_GROUP=...
+export ACA_SANDBOX_GROUP=...
+export ACA_SANDBOXGROUP_REGION=...
+```
+
+### Run
+
+```bash
+uv run python examples/sandbox/extensions/aca_sandboxes_runner.py --stream
+```
+
+ACA provider v1 supports non-interactive exec, manifest workspace files, file read/write,
+session-state resume, base disk sizing, Memory or Disk auto-suspend mode, and basic
+exposed ports. Ports are authenticated by default; anonymous access requires
+`ACASandboxesClientOptions(exposed_port_anonymous=True)`.
+
+ACA platform supports snapshots and volume mounts, but OpenAI ACA provider v1
+intentionally excludes them. The Python SDK interactive shell is not exposed as a PTY
+API; use `session.exec(...)` from the SDK and `aca sandbox shell` through the CLI or
+portal for manual troubleshooting. Source-IP port ACLs are available in ACA SDK
+`0.1.0b4` but are deferred from the OpenAI provider v1 public model.
 
 ## E2B
 

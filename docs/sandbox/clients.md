@@ -90,6 +90,7 @@ For provider-specific setup notes and links for the checked-in extension example
 
 | Client | Install | Example |
 | --- | --- | --- |
+| `ACASandboxesClient` | `openai-agents[aca_sandboxes]` | [ACA Sandboxes runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/aca_sandboxes_runner.py) |
 | `BlaxelSandboxClient` | `openai-agents[blaxel]` | [Blaxel runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/blaxel_runner.py) |
 | `CloudflareSandboxClient` | `openai-agents[cloudflare]` | [Cloudflare runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/cloudflare_runner.py) |
 | `DaytonaSandboxClient` | `openai-agents[daytona]` | [Daytona runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/daytona/daytona_runner.py) |
@@ -107,6 +108,7 @@ Hosted sandbox clients expose provider-specific mount strategies. Choose the bac
 | Backend | Mount notes |
 | --- | --- |
 | Docker | Supports `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, `BoxMount`, and `S3FilesMount` with local strategies such as `InContainerMountStrategy` and `DockerVolumeMountStrategy`. |
+| `ACASandboxesClient` | ACA platform supports volume mounts, but OpenAI ACA provider v1 intentionally excludes manifest mount strategies. |
 | `ModalSandboxClient` | Supports Modal cloud bucket mounts with `ModalCloudBucketMountStrategy` on `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`. You can use inline credentials or a named Modal Secret. |
 | `CloudflareSandboxClient` | Supports Cloudflare bucket mounts with `CloudflareBucketMountStrategy` on `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`. |
 | `BlaxelSandboxClient` | Supports cloud bucket mounts with `BlaxelCloudBucketMountStrategy` on `S3Mount`, `R2Mount`, and `GCSMount`. Also supports persistent Blaxel Drives with `BlaxelDriveMount` and `BlaxelDriveMountStrategy` from `agents.extensions.sandbox.blaxel`. |
@@ -124,6 +126,7 @@ The table below summarizes which remote storage entries each backend can mount d
 | Backend | AWS S3 | Cloudflare R2 | GCS | Azure Blob Storage | Box | S3 Files |
 | --- | --- | --- | --- | --- | --- | --- |
 | Docker | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `ACASandboxesClient` | - | - | - | - | - | - |
 | `ModalSandboxClient` | ✓ | ✓ | ✓ | - | - | - |
 | `CloudflareSandboxClient` | ✓ | ✓ | ✓ | - | - | - |
 | `BlaxelSandboxClient` | ✓ | ✓ | ✓ | - | - | - |
@@ -133,5 +136,55 @@ The table below summarizes which remote storage entries each backend can mount d
 | `VercelSandboxClient` | - | - | - | - | - | - |
 
 </div>
+
+### ACA Sandboxes provider
+
+Install the optional dependencies and construct the client with the ACA sandbox-group
+scope:
+
+```python
+import os
+
+from agents.extensions.sandbox import ACASandboxesClient, ACASandboxesClientOptions
+from agents.run import RunConfig
+from agents.sandbox import SandboxRunConfig
+
+run_config = RunConfig(
+    sandbox=SandboxRunConfig(
+        client=ACASandboxesClient(
+            region=os.environ["ACA_SANDBOXGROUP_REGION"],
+            subscription_id=os.environ["AZURE_SUBSCRIPTION_ID"],
+            resource_group=os.environ["ACA_RESOURCE_GROUP"],
+            sandbox_group=os.environ["ACA_SANDBOX_GROUP"],
+        ),
+        options=ACASandboxesClientOptions(
+            disk="ubuntu",
+            disk_size="20Gi",
+            auto_suspend_seconds=300,
+            auto_suspend_mode="Memory",
+            exposed_ports=(8080,),
+        ),
+    )
+)
+```
+
+The identity resolved by `DefaultAzureCredential` needs the **Container Apps
+SandboxGroup Data Owner** role at sandbox-group scope. ACA provider v1 supports
+non-interactive commands, manifest-root working directories, file read/write, serialized
+resume to an existing sandbox ID, base disk sizing, and Memory or Disk auto-suspend
+mode.
+
+ACA provider v1 supports basic exposed ports. Ports are authenticated by default;
+anonymous access requires explicit opt-in with `exposed_port_anonymous=True`. Source-IP
+port ACLs are available in ACA SDK `0.1.0b4` but are deferred from the OpenAI provider
+v1 public model.
+
+ACA platform supports snapshots and volume mounts, but OpenAI ACA provider v1
+intentionally excludes them. OpenAI workspace snapshot persistence and hydration raise
+an explicit unsupported error, and manifests containing mount entries fail before an ACA
+sandbox is allocated.
+
+The Python SDK interactive shell is not exposed as a PTY API; use `exec` from the SDK
+and shell through the ACA CLI or portal for manual troubleshooting.
 
 For more runnable examples, browse [examples/sandbox/](https://github.com/openai/openai-agents-python/tree/main/examples/sandbox) for local, coding, memory, handoff, and agent-composition patterns, and [examples/sandbox/extensions/](https://github.com/openai/openai-agents-python/tree/main/examples/sandbox/extensions) for hosted sandbox clients.

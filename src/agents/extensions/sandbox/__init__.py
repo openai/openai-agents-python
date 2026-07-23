@@ -1,4 +1,16 @@
 try:
+    from .aca import (
+        ACASandboxesClient as ACASandboxesClient,
+        ACASandboxesClientOptions as ACASandboxesClientOptions,
+        ACASandboxesSession as ACASandboxesSession,
+        ACASandboxesSessionState as ACASandboxesSessionState,
+    )
+
+    _HAS_ACA_SANDBOXES = True
+except Exception:  # pragma: no cover
+    _HAS_ACA_SANDBOXES = False
+
+try:
     from .e2b import (
         E2BCloudBucketMountStrategy as E2BCloudBucketMountStrategy,
         E2BSandboxClient as E2BSandboxClient,
@@ -111,6 +123,16 @@ except Exception:  # pragma: no cover
     _HAS_VERCEL = False
 
 __all__: list[str] = []
+
+if _HAS_ACA_SANDBOXES:
+    __all__.extend(
+        [
+            "ACASandboxesClient",
+            "ACASandboxesClientOptions",
+            "ACASandboxesSession",
+            "ACASandboxesSessionState",
+        ]
+    )
 
 if _HAS_E2B:
     __all__.extend(

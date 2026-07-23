@@ -45,6 +45,10 @@ redis = ["redis>=7"]
 dapr = ["dapr>=1.16.0", "grpcio>=1.60.0"]
 mongodb = ["pymongo>=4.14"]
 docker = ["docker>=6.1"]
+aca_sandboxes = [
+    "azure-containerapps-sandbox>=0.1.0b4,<0.2",
+    "azure-identity>=1.15,<2",
+]
 blaxel = ["blaxel>=0.2.50", "aiohttp>=3.12,<4"]
 daytona = ["daytona>=0.155.0"]
 cloudflare = ["aiohttp>=3.12,<4"]
@@ -219,10 +223,10 @@ format-command = "ruff format --stdin-filename {filename}"
 
 [tool.uv]
 exclude-newer = "7 days"
-exclude-newer-package = { openai = false }
+exclude-newer-package = { openai = false, azure-containerapps-sandbox = false }
 index-strategy = "first-index"
 
 [tool.uv.pip]
 exclude-newer = "7 days"
-exclude-newer-package = { openai = false }
+exclude-newer-package = { openai = false, azure-containerapps-sandbox = false }
 index-strategy = "first-index"
