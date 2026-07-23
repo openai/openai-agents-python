@@ -5,6 +5,7 @@ import importlib
 import inspect
 import json
 import os
+import sys
 from dataclasses import fields
 from pathlib import Path
 from typing import Any, cast
@@ -54,6 +55,13 @@ class FakeStdout:
         if not self._lines:
             return b""
         return self._lines.pop(0)
+
+    async def read(self, size: int) -> bytes:
+        if not self._lines:
+            return b""
+        data = b"".join(self._lines)
+        self._lines = [data[size:]] if len(data) > size else []
+        return data[:size]
 
 
 class FakeStderr:
@@ -443,8 +451,116 @@ async def test_codex_exec_run_raises_on_non_zero_exit(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("idle_timeout_seconds", [None, 30.0])
+async def test_codex_exec_run_cancellation_reaps_process_and_stderr_task(
+    monkeypatch: pytest.MonkeyPatch, idle_timeout_seconds: float | None
+) -> None:
+    stdout_started = asyncio.Event()
+    stderr_started = asyncio.Event()
+    stderr_cancelled = asyncio.Event()
+
+    class BlockingStdout:
+        async def readline(self) -> bytes:
+            stdout_started.set()
+            await asyncio.Future[None]()
+            return b""
+
+        async def read(self, _size: int) -> bytes:
+            return b""
+
+    class BlockingStderr:
+        async def read(self, _size: int) -> bytes:
+            stderr_started.set()
+            try:
+                await asyncio.Future[None]()
+            except asyncio.CancelledError:
+                stderr_cancelled.set()
+                raise
+            return b""
+
+    process = FakeProcess(stdout_lines=[], returncode=None)
+    process.stdout = cast(Any, BlockingStdout())
+    process.stderr = cast(Any, BlockingStderr())
+
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        return process
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    exec_client = exec_module.CodexExec(executable_path="/bin/codex")
+    stream = exec_client.run(
+        exec_module.CodexExecArgs(input="hello", idle_timeout_seconds=idle_timeout_seconds)
+    )
+    next_line = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(stdout_started.wait(), timeout=1)
+    await asyncio.wait_for(stderr_started.wait(), timeout=1)
+
+    next_line.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(next_line, timeout=1)
+
+    assert process.killed is True
+    assert process.returncode == 0
+    assert stderr_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_codex_exec_run_close_drains_stdout_before_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_create_subprocess_exec = asyncio.create_subprocess_exec
+    process: asyncio.subprocess.Process | None = None
+    child_code = (
+        "import os\n"
+        "os.write(1, b'ready\\n')\n"
+        "chunk = b'x' * 65536\n"
+        "while True:\n"
+        "    os.write(1, chunk)\n"
+    )
+
+    async def create_output_heavy_subprocess(
+        *_args: Any, **kwargs: Any
+    ) -> asyncio.subprocess.Process:
+        nonlocal process
+        process = await original_create_subprocess_exec(sys.executable, "-c", child_code, **kwargs)
+        return process
+
+    monkeypatch.setattr(
+        exec_module.asyncio, "create_subprocess_exec", create_output_heavy_subprocess
+    )
+
+    exec_client = exec_module.CodexExec(
+        executable_path="unused",
+        subprocess_stream_limit_bytes=exec_module._MIN_SUBPROCESS_STREAM_LIMIT_BYTES,
+    )
+    stream = exec_client.run(exec_module.CodexExecArgs(input="hello"))
+
+    try:
+        assert await asyncio.wait_for(anext(stream), timeout=5) == "ready"
+        assert process is not None
+        assert process.stdout is not None
+        stdout = cast(Any, process.stdout)
+        for _ in range(500):
+            if stdout._paused:
+                break
+            await asyncio.sleep(0.01)
+        assert stdout._paused
+
+        await asyncio.wait_for(stream.aclose(), timeout=5)
+        assert process.returncode is not None
+    finally:
+        if process is not None:
+            if process.returncode is None:
+                process.kill()
+            if process.stdout is not None:
+                while await process.stdout.read(exec_module._SUBPROCESS_DRAIN_CHUNK_BYTES):
+                    pass
+            await process.wait()
+
+
+@pytest.mark.asyncio
 async def test_codex_exec_run_raises_without_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
-    process = FakeProcess(stdout_lines=[], stdin_present=False)
+    process = FakeProcess(stdout_lines=[], returncode=None, stdin_present=False)
 
     async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
         return process
@@ -462,7 +578,7 @@ async def test_codex_exec_run_raises_without_stdin(monkeypatch: pytest.MonkeyPat
 
 @pytest.mark.asyncio
 async def test_codex_exec_run_raises_without_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
-    process = FakeProcess(stdout_lines=[], stdout_present=False)
+    process = FakeProcess(stdout_lines=[], returncode=None, stdout_present=False)
 
     async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
         return process

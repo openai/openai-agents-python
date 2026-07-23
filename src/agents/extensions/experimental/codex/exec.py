@@ -20,6 +20,7 @@ _SUBPROCESS_STREAM_LIMIT_ENV_VAR = "OPENAI_AGENTS_CODEX_SUBPROCESS_STREAM_LIMIT_
 _DEFAULT_SUBPROCESS_STREAM_LIMIT_BYTES = 8 * 1024 * 1024
 _MIN_SUBPROCESS_STREAM_LIMIT_BYTES = 64 * 1024
 _MAX_SUBPROCESS_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
+_SUBPROCESS_DRAIN_CHUNK_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -140,49 +141,58 @@ class CodexExec:
                     break
                 stderr_chunks.append(chunk)
 
+        async def _drain_remaining_stdout() -> None:
+            if process.stdout is None:
+                return
+            while await process.stdout.read(_SUBPROCESS_DRAIN_CHUNK_BYTES):
+                pass
+
         stderr_task = asyncio.create_task(_drain_stderr())
-
-        if process.stdin is None:
-            process.kill()
-            raise RuntimeError("Codex subprocess has no stdin")
-
-        process.stdin.write(args.input.encode("utf-8"))
-        await process.stdin.drain()
-        process.stdin.close()
-
-        if process.stdout is None:
-            process.kill()
-            raise RuntimeError("Codex subprocess has no stdout")
-        stdout = process.stdout
-
         cancel_task: asyncio.Task[None] | None = None
-        if args.signal is not None:
-            # Mirror AbortSignal semantics by terminating the subprocess.
-            cancel_task = asyncio.create_task(_watch_signal(args.signal, process))
+        try:
+            if process.stdin is None:
+                raise RuntimeError("Codex subprocess has no stdin")
 
-        async def _read_stdout_line() -> bytes:
-            if args.idle_timeout_seconds is None:
-                return await stdout.readline()
+            process.stdin.write(args.input.encode("utf-8"))
+            await process.stdin.drain()
+            process.stdin.close()
 
-            read_task: asyncio.Task[bytes] = asyncio.create_task(stdout.readline())
-            done, _ = await asyncio.wait(
-                {read_task}, timeout=args.idle_timeout_seconds, return_when=asyncio.FIRST_COMPLETED
-            )
-            if read_task in done:
-                return read_task.result()
+            if process.stdout is None:
+                raise RuntimeError("Codex subprocess has no stdout")
+            stdout = process.stdout
 
             if args.signal is not None:
-                args.signal.set()
-            if process.returncode is None:
-                process.terminate()
+                # Mirror AbortSignal semantics by terminating the subprocess.
+                cancel_task = asyncio.create_task(_watch_signal(args.signal, process))
 
-            read_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                await asyncio.wait_for(read_task, timeout=1)
+            async def _read_stdout_line() -> bytes:
+                if args.idle_timeout_seconds is None:
+                    return await stdout.readline()
 
-            raise RuntimeError(f"Codex stream idle for {args.idle_timeout_seconds} seconds.")
+                read_task: asyncio.Task[bytes] = asyncio.create_task(stdout.readline())
+                try:
+                    done, _ = await asyncio.wait(
+                        {read_task},
+                        timeout=args.idle_timeout_seconds,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if read_task in done:
+                        return read_task.result()
 
-        try:
+                    if args.signal is not None:
+                        args.signal.set()
+                    if process.returncode is None:
+                        process.terminate()
+
+                    raise RuntimeError(
+                        f"Codex stream idle for {args.idle_timeout_seconds} seconds."
+                    )
+                finally:
+                    if not read_task.done():
+                        read_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                            await asyncio.wait_for(read_task, timeout=1)
+
             while True:
                 line = await _read_stdout_line()
                 if not line:
@@ -190,11 +200,6 @@ class CodexExec:
                 yield line.decode("utf-8").rstrip("\n")
 
             await process.wait()
-            if cancel_task is not None:
-                cancel_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await cancel_task
-
             if process.returncode not in (0, None):
                 await stderr_task
                 stderr_text = b"".join(stderr_chunks).decode("utf-8")
@@ -202,11 +207,20 @@ class CodexExec:
                     f"Codex exec exited with code {process.returncode}: {stderr_text}"
                 )
         finally:
-            if cancel_task is not None and not cancel_task.done():
-                cancel_task.cancel()
-            await stderr_task
+            if cancel_task is not None:
+                if not cancel_task.done():
+                    cancel_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await cancel_task
             if process.returncode is None:
-                process.kill()
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+            await _drain_remaining_stdout()
+            await process.wait()
+            if not stderr_task.done():
+                stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stderr_task
 
     def _build_env(self, args: CodexExecArgs) -> dict[str, str]:
         # Respect env overrides when provided; otherwise copy from os.environ.
