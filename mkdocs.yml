@@ -121,6 +121,7 @@ plugins:
                     - Run error handlers: ref/run_error_handlers.md
                     - Memory: ref/memory.md
                     - REPL: ref/repl.md
+                    - Decorators: ref/decorators.md
                     - Tools: ref/tool.md
                     - Tool context: ref/tool_context.md
                     - Results: ref/result.md
