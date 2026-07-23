@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 import signal
+import subprocess
 import sys
 from dataclasses import fields
 from pathlib import Path
@@ -361,6 +362,7 @@ async def test_codex_exec_run_builds_command_args_and_env(monkeypatch: pytest.Mo
     assert env[exec_module._INTERNAL_ORIGINATOR_ENV] == exec_module._TYPESCRIPT_SDK_ORIGINATOR
     assert env["OPENAI_BASE_URL"] == "https://example.com"
     assert env["CODEX_API_KEY"] == "api-key"
+    assert captured["kwargs"]["start_new_session"] is (os.name != "nt")
 
 
 @pytest.mark.asyncio
@@ -507,6 +509,154 @@ async def test_codex_exec_run_cancellation_reaps_process_and_stderr_task(
 
 
 @pytest.mark.asyncio
+async def test_codex_exec_run_cancellation_preserves_error_when_wait_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout_started = asyncio.Event()
+    stderr_cancelled = asyncio.Event()
+
+    class BlockingStdout:
+        async def readline(self) -> bytes:
+            stdout_started.set()
+            await asyncio.Future[None]()
+            return b""
+
+        async def read(self, _size: int) -> bytes:
+            return b""
+
+    class BlockingStderr:
+        async def read(self, _size: int) -> bytes:
+            try:
+                await asyncio.Future[None]()
+            except asyncio.CancelledError:
+                stderr_cancelled.set()
+                raise
+            return b""
+
+    class FailingWaitProcess(FakeProcess):
+        async def wait(self) -> None:
+            raise RuntimeError("wait failed")
+
+    process = FailingWaitProcess(stdout_lines=[], returncode=None)
+    process.stdout = cast(Any, BlockingStdout())
+    process.stderr = cast(Any, BlockingStderr())
+
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        return process
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    stream = exec_module.CodexExec(executable_path="/bin/codex").run(
+        exec_module.CodexExecArgs(input="hello")
+    )
+    next_line = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(stdout_started.wait(), timeout=1)
+
+    next_line.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(next_line, timeout=1)
+
+    assert stderr_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_codex_exec_run_preserves_execution_error_when_stdout_drain_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stderr_cancelled = asyncio.Event()
+
+    class FailingDrainStdout(FakeStdout):
+        async def read(self, _size: int) -> bytes:
+            raise RuntimeError("stdout drain failed")
+
+    class BlockingStderr:
+        async def read(self, _size: int) -> bytes:
+            try:
+                await asyncio.Future[None]()
+            except asyncio.CancelledError:
+                stderr_cancelled.set()
+                raise
+            return b""
+
+    process = FakeProcess(stdout_lines=[], returncode=None, stdin_present=False)
+    process.stdout = FailingDrainStdout([])
+    process.stderr = cast(Any, BlockingStderr())
+
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        return process
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    with pytest.raises(RuntimeError, match="no stdin"):
+        async for _ in exec_module.CodexExec(executable_path="/bin/codex").run(
+            exec_module.CodexExecArgs(input="hello")
+        ):
+            pass
+
+    assert stderr_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_codex_exec_run_repeated_cancellation_finishes_stderr_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    stderr_cancelled = asyncio.Event()
+
+    class BlockingStdout:
+        async def readline(self) -> bytes:
+            stdout_started.set()
+            await asyncio.Future[None]()
+            return b""
+
+        async def read(self, _size: int) -> bytes:
+            return b""
+
+    class BlockingStderr:
+        async def read(self, _size: int) -> bytes:
+            try:
+                await asyncio.Future[None]()
+            except asyncio.CancelledError:
+                stderr_cancelled.set()
+                raise
+            return b""
+
+    process = FakeProcess(stdout_lines=[], returncode=None)
+    process.stdout = cast(Any, BlockingStdout())
+    process.stderr = cast(Any, BlockingStderr())
+
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        return process
+
+    async def blocking_terminate_process_tree(_process: FakeProcess) -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+        process.kill()
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(exec_module, "_terminate_process_tree", blocking_terminate_process_tree)
+
+    stream = exec_module.CodexExec(executable_path="/bin/codex").run(
+        exec_module.CodexExecArgs(input="hello")
+    )
+    next_line = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(stdout_started.wait(), timeout=1)
+
+    next_line.cancel()
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+    next_line.cancel()
+    release_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(next_line, timeout=1)
+
+    assert stderr_cancelled.is_set()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SelectorEventLoop lacks subprocess support")
+@pytest.mark.asyncio
 async def test_codex_exec_run_close_drains_stdout_before_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -560,6 +710,7 @@ async def test_codex_exec_run_close_drains_stdout_before_wait(
             await process.wait()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="SelectorEventLoop lacks subprocess support")
 @pytest.mark.asyncio
 async def test_codex_exec_run_close_is_bounded_when_descendant_holds_stdout(
     monkeypatch: pytest.MonkeyPatch,
@@ -612,6 +763,14 @@ async def test_codex_exec_run_close_is_bounded_when_descendant_holds_stdout(
 
         await asyncio.wait_for(stream.aclose(), timeout=1)
         assert process.returncode is not None
+        for _ in range(500):
+            try:
+                os.kill(helper_pid, 0)
+            except ProcessLookupError:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("Codex subprocess descendant remained alive after stream closure")
     finally:
         if helper_pid is not None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
@@ -623,6 +782,58 @@ async def test_codex_exec_run_close_is_bounded_when_descendant_holds_stdout(
                 while await process.stdout.read(exec_module._SUBPROCESS_DRAIN_CHUNK_BYTES):
                     pass
             await process.wait()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows process-tree behavior")
+def test_terminate_windows_process_tree_stops_descendant() -> None:
+    import ctypes
+
+    helper_code = "import time; time.sleep(60)"
+    child_code = (
+        "import subprocess\n"
+        "import sys\n"
+        "import time\n"
+        f"helper = subprocess.Popen([sys.executable, '-c', {helper_code!r}])\n"
+        "print(helper.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", child_code],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    helper_pid: int | None = None
+
+    try:
+        assert process.stdout is not None
+        helper_pid = int(process.stdout.readline())
+        kernel32 = cast(Any, ctypes).windll.kernel32
+        helper_handle = kernel32.OpenProcess(0x00100000, False, helper_pid)
+        assert helper_handle
+        try:
+            exec_module._terminate_windows_process_tree(process.pid)
+            process.wait(timeout=5)
+            assert kernel32.WaitForSingleObject(helper_handle, 5000) == 0
+        finally:
+            kernel32.CloseHandle(helper_handle)
+    finally:
+        if process.poll() is None:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            process.wait(timeout=5)
+        if helper_pid is not None:
+            subprocess.run(
+                ["taskkill", "/PID", str(helper_pid), "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
 
 @pytest.mark.asyncio
@@ -670,7 +881,7 @@ async def test_watch_signal_terminates_process() -> None:
     signal.set()
     await task
 
-    assert process.terminated is True
+    assert process.killed is True
 
 
 @pytest.mark.parametrize(

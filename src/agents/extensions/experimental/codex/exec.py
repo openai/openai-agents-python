@@ -5,6 +5,8 @@ import contextlib
 import os
 import platform
 import shutil
+import signal
+import subprocess
 import sys
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -128,6 +130,8 @@ class CodexExec:
             # default 64 KiB readline limit.
             limit=self._subprocess_stream_limit_bytes,
             env=env,
+            # Give POSIX descendants a process-group boundary that this execution owns.
+            start_new_session=os.name != "nt",
         )
 
         stderr_chunks: list[bytes] = []
@@ -204,8 +208,6 @@ class CodexExec:
 
                     if args.signal is not None:
                         args.signal.set()
-                    if process.returncode is None:
-                        process.terminate()
 
                     raise RuntimeError(
                         f"Codex stream idle for {args.idle_timeout_seconds} seconds."
@@ -230,19 +232,44 @@ class CodexExec:
                     f"Codex exec exited with code {process.returncode}: {stderr_text}"
                 )
         finally:
-            if cancel_task is not None:
-                if not cancel_task.done():
-                    cancel_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await cancel_task
-            if process.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    process.kill()
-            await _cleanup_process()
-            if not stderr_task.done():
-                stderr_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await stderr_task
+            original_error = sys.exc_info()[1]
+
+            async def _cleanup_resources() -> None:
+                cleanup_error: BaseException | None = None
+
+                if cancel_task is not None:
+                    try:
+                        await _cancel_and_wait(cancel_task)
+                    except BaseException as exc:
+                        cleanup_error = exc
+
+                if original_error is not None or process.returncode is None:
+                    try:
+                        await _terminate_process_tree(process)
+                    except BaseException as exc:
+                        if cleanup_error is None:
+                            cleanup_error = exc
+
+                try:
+                    await _cleanup_process()
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+
+                try:
+                    await _cancel_and_wait(stderr_task)
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+
+                if cleanup_error is not None:
+                    raise cleanup_error
+
+            cleanup_task = asyncio.create_task(_cleanup_resources())
+            await _await_cleanup_task(
+                cleanup_task,
+                preserve_exception=original_error is not None,
+            )
 
     def _build_env(self, args: CodexExecArgs) -> dict[str, str]:
         # Respect env overrides when provided; otherwise copy from os.environ.
@@ -264,10 +291,74 @@ class CodexExec:
         return env
 
 
-async def _watch_signal(signal: asyncio.Event, process: asyncio.subprocess.Process) -> None:
-    await signal.wait()
-    if process.returncode is None:
-        process.terminate()
+async def _cancel_and_wait(task: asyncio.Task[object]) -> None:
+    if not task.done():
+        task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def _await_cleanup_task(
+    cleanup_task: asyncio.Task[None],
+    *,
+    preserve_exception: bool,
+) -> None:
+    cancellation_error: asyncio.CancelledError | None = None
+
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError as exc:
+            if cleanup_task.cancelled():
+                break
+            cancellation_error = exc
+        except BaseException:
+            break
+
+    cleanup_error: BaseException | None = None
+    try:
+        cleanup_task.result()
+    except BaseException as exc:
+        cleanup_error = exc
+
+    if preserve_exception:
+        return
+    if cancellation_error is not None:
+        raise cancellation_error
+    if cleanup_error is not None:
+        raise cleanup_error
+
+
+def _terminate_windows_process_tree(pid: int) -> None:
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_SUBPROCESS_CLEANUP_TIMEOUT_SECONDS,
+        )
+
+
+async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
+    pid = getattr(process, "pid", None)
+    try:
+        if pid is not None:
+            if os.name == "nt":
+                await asyncio.to_thread(_terminate_windows_process_tree, pid)
+            else:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(pid, signal.SIGKILL)
+    finally:
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+
+
+async def _watch_signal(signal_event: asyncio.Event, process: asyncio.subprocess.Process) -> None:
+    await signal_event.wait()
+    await _terminate_process_tree(process)
 
 
 def _platform_target_triple() -> str:
