@@ -784,6 +784,7 @@ class TestBlaxelSandboxClient:
         assert isinstance(config.options, mod.BlaxelSandboxClientOptions)
         session = await client.create(options=config.options)
 
+        assert isinstance(session.state, mod.BlaxelSandboxSessionState)
         assert session.state.timeouts.exec_timeout_s == 120
 
     @pytest.mark.asyncio
