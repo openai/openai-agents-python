@@ -4,6 +4,7 @@ import litellm
 import pytest
 from litellm.types.utils import Choices, Message, ModelResponse, Usage
 
+from agents import function_tool
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.model_settings import ModelSettings
 from agents.models.interface import ModelTracing
@@ -46,6 +47,43 @@ async def test_extra_body_is_forwarded(monkeypatch):
     assert captured["extra_body"] == {"cached_content": "some_cache", "foo": 123}
     assert "cached_content" not in captured
     assert "foo" not in captured
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", [None, False])
+async def test_function_tools_skip_litellm_proxy_mcp_discovery(monkeypatch, override):
+    captured: dict[str, object] = {}
+
+    async def fake_acompletion(model, messages=None, **kwargs):
+        captured.update(kwargs)
+        msg = Message(role="assistant", content="ok")
+        choice = Choices(index=0, message=msg)
+        return ModelResponse(choices=[choice], usage=Usage(0, 0, 0))
+
+    @function_tool
+    def lookup() -> str:
+        """Return a deterministic result."""
+        return "ok"
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    settings = ModelSettings(
+        extra_args={"_skip_mcp_handler": override} if override is not None else None
+    )
+    model = LitellmModel(model="test-model")
+
+    await model.get_response(
+        system_instructions=None,
+        input=[],
+        model_settings=settings,
+        tools=[lookup],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+    )
+
+    assert captured["_skip_mcp_handler"] is (True if override is None else override)
 
 
 @pytest.mark.allow_call_model_methods

@@ -214,6 +214,18 @@ class GenericChatCompletionPayload(BaseModel):
     usage: Any
 
 
+class GenericResponsesPayload(BaseModel):
+    id: str
+    created_at: float
+    model: str
+    object: str
+    output: list[Any]
+    parallel_tool_calls: bool
+    tool_choice: Any
+    tools: list[Any]
+    usage: Any
+
+
 async def _empty_chat_stream() -> AsyncIterator[ChatCompletionChunk]:
     if False:
         yield ChatCompletionChunk(
@@ -408,6 +420,40 @@ async def test_any_llm_responses_path_is_used_when_supported(monkeypatch) -> Non
     assert kwargs["extra_headers"]["User-Agent"] == f"Agents/Python {__version__}"
     assert response.response_id == "resp_123"
     assert response.output[0].content[0].text == "Hello"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload_type", ["dict", "basemodel"])
+async def test_any_llm_responses_path_defaults_missing_cache_write_tokens(
+    monkeypatch: pytest.MonkeyPatch, payload_type: str
+) -> None:
+    response_payload = _response("Hello").model_dump()
+    response_payload["usage"]["input_tokens_details"].pop("cache_write_tokens")
+    response: Any = response_payload
+    if payload_type == "basemodel":
+        response = GenericResponsesPayload.model_validate(response_payload)
+
+    provider = FakeAnyLLMProvider(supports_responses=True, responses_response=response)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(model="openai/gpt-5.4-mini")
+
+    normalized = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    assert normalized.output[0].content[0].text == "Hello"
+    assert normalized.usage.input_tokens_details.cache_write_tokens == 0
+    assert "cache_write_tokens" not in response_payload["usage"]["input_tokens_details"]
 
 
 @pytest.mark.allow_call_model_methods

@@ -981,9 +981,28 @@ class AnyLLMModel(Model):
     def _normalize_response(self, response: Any) -> Response:
         if isinstance(response, Response):
             return response
-        if isinstance(response, BaseModel):
-            return Response.model_validate(response.model_dump())
-        return Response.model_validate(response)
+
+        payload = response.model_dump() if isinstance(response, BaseModel) else response
+        if isinstance(payload, dict):
+            usage = payload.get("usage")
+            if isinstance(usage, dict):
+                input_tokens_details = usage.get("input_tokens_details")
+                if (
+                    isinstance(input_tokens_details, dict)
+                    and "cache_write_tokens" not in input_tokens_details
+                ):
+                    payload = {
+                        **payload,
+                        "usage": {
+                            **usage,
+                            "input_tokens_details": {
+                                **input_tokens_details,
+                                "cache_write_tokens": 0,
+                            },
+                        },
+                    }
+
+        return Response.model_validate(payload)
 
     def _normalize_chat_completion_response(self, response: Any) -> ChatCompletion:
         if isinstance(response, ChatCompletion):

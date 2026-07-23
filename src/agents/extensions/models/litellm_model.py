@@ -574,6 +574,11 @@ class LitellmModel(Model):
         if model_settings.extra_args:
             extra_kwargs.update(model_settings.extra_args)
 
+        if converted_tools:
+            # SDK tools are already converted to ordinary function tools, so LiteLLM's proxy-only
+            # MCP discovery would add unsupported server dependencies without handling them.
+            extra_kwargs.setdefault("_skip_mcp_handler", True)
+
         if should_disable_provider_managed_retries():
             # Preserve provider-managed retries on the first attempt, but make runner retries the
             # sole retry layer by forcing LiteLLM's retry knobs off on replay attempts.
