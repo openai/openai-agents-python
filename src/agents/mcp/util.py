@@ -724,21 +724,36 @@ class MCPUtil:
                 # pipeline (failure_error_function) can handle it.  The default handler
                 # will surface the message as a structured error result; callers who set
                 # failure_error_function=None will have the error raised as documented.
-                error_text = e.error.message if hasattr(e, "error") and e.error else str(e)
-                logger.warning(
-                    "MCP tool %s on server '%s' returned an error: %s",
-                    tool_name_for_display,
-                    server.name,
-                    error_text,
-                )
+                if _debug.DONT_LOG_TOOL_DATA:
+                    logger.warning(
+                        "MCP tool %s on server '%s' returned an error.",
+                        tool_name_for_display,
+                        server.name,
+                    )
+                else:
+                    error_text = e.error.message if hasattr(e, "error") and e.error else str(e)
+                    logger.warning(
+                        "MCP tool %s on server '%s' returned an error: %s",
+                        tool_name_for_display,
+                        server.name,
+                        error_text,
+                    )
                 raise
 
-            logger.error(
-                "Error invoking MCP tool %s on server '%s': %s",
-                tool_name_for_display,
-                server.name,
-                e,
-            )
+            if _debug.DONT_LOG_TOOL_DATA:
+                logger.error(
+                    "Error invoking MCP tool %s on server '%s': %s",
+                    tool_name_for_display,
+                    server.name,
+                    e.__class__.__name__,
+                )
+            else:
+                logger.error(
+                    "Error invoking MCP tool %s on server '%s': %s",
+                    tool_name_for_display,
+                    server.name,
+                    e,
+                )
             raise AgentsException(
                 f"Error invoking MCP tool {tool_name_for_display} on server '{server.name}': {e}"
             ) from e

@@ -8,14 +8,25 @@ statements honor ``_debug.DONT_LOG_MODEL_DATA`` / ``_debug.DONT_LOG_TOOL_DATA``.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import patch
 
 import pytest
 from openai import AsyncOpenAI
 
 import agents._debug as _debug
-from agents import ModelSettings, ModelTracing, OpenAIResponsesModel, trace
-from agents.run_internal.tool_execution import log_tool_action_error
+from agents import (
+    ModelSettings,
+    ModelTracing,
+    OpenAIResponsesModel,
+    RunConfig,
+    RunContextWrapper,
+    trace,
+)
+from agents.run_internal.tool_execution import (
+    log_tool_action_error,
+    resolve_approval_rejection_message,
+)
 
 _SECRET = "super secret prompt content"
 
@@ -140,3 +151,45 @@ def test_log_tool_action_error_logs_full_when_tool_data_enabled(monkeypatch) -> 
     logged = str(mock_logger.error.call_args)
     assert "/secret/path" in logged
     assert mock_logger.error.call_args.kwargs.get("exc_info") is True
+
+
+@pytest.mark.asyncio
+async def test_approval_rejection_formatter_error_redacts_exception(monkeypatch, caplog) -> None:
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+
+    def boom(_args):
+        raise ValueError("formatter blew up SECRET_FMT_123")
+
+    result = await resolve_approval_rejection_message(
+        context_wrapper=RunContextWrapper(context=None),
+        run_config=RunConfig(tool_error_formatter=boom),
+        tool_type="function",
+        tool_name="my_tool",
+        call_id="call_1",
+    )
+
+    assert isinstance(result, str) and result
+    assert "Tool error formatter failed for my_tool" in caplog.text
+    assert "SECRET_FMT_123" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_approval_rejection_formatter_error_logs_full_when_enabled(
+    monkeypatch, caplog
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
+    def boom(_args):
+        raise ValueError("formatter blew up SECRET_FMT_123")
+
+    await resolve_approval_rejection_message(
+        context_wrapper=RunContextWrapper(context=None),
+        run_config=RunConfig(tool_error_formatter=boom),
+        tool_type="function",
+        tool_name="my_tool",
+        call_id="call_1",
+    )
+
+    assert "SECRET_FMT_123" in caplog.text

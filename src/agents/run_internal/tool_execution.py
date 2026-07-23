@@ -1200,7 +1200,7 @@ async def resolve_approval_rejection_message(
         )
         message = await maybe_message if inspect.isawaitable(maybe_message) else maybe_message
     except Exception as exc:
-        logger.error("Tool error formatter failed for %s: %s", tool_name, exc)
+        log_tool_action_error(f"Tool error formatter failed for {tool_name}", exc)
         return REJECTION_MESSAGE
 
     if message is None:
