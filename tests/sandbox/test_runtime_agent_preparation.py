@@ -46,6 +46,22 @@ def test_sandbox_agent_rejects_untrusted_manifest_path_grants() -> None:
         SandboxAgent(name="sandbox", default_manifest={"extra_path_grants": [{"path": "/tmp"}]})
 
 
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        Manifest(root="/workspace").model_dump(),
+        Manifest(root="/workspace").model_dump(mode="json"),
+    ],
+)
+def test_sandbox_agent_accepts_serialized_manifest_without_path_grants(
+    manifest: dict[str, Any],
+) -> None:
+    agent = SandboxAgent(name="sandbox", default_manifest=manifest)
+
+    assert isinstance(agent.default_manifest, Manifest)
+    assert agent.default_manifest.extra_path_grants == ()
+
+
 class _Capability:
     def __init__(self, fragment: str | None, *, type: str = "test") -> None:
         self.type = type

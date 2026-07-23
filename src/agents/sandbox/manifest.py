@@ -262,8 +262,10 @@ class Manifest(BaseModel):
 def _coerce_manifest(value: Manifest | dict[str, Any], *, parameter_name: str) -> Manifest:
     """Normalize manifest dictionaries without granting untrusted host filesystem access."""
     if isinstance(value, dict) and "extra_path_grants" in value:
-        raise TypeError(
-            f"{parameter_name}.extra_path_grants must be configured on a trusted "
-            "Manifest instance, not in a dictionary"
-        )
+        extra_path_grants = value["extra_path_grants"]
+        if not isinstance(extra_path_grants, list | tuple) or extra_path_grants:
+            raise TypeError(
+                f"{parameter_name}.extra_path_grants must be configured on a trusted "
+                "Manifest instance, not in a dictionary"
+            )
     return coerce_pydantic_config(value, Manifest, parameter_name=parameter_name)

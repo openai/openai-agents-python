@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
+from agents.run_config import SandboxRunConfig
 from agents.sandbox import Manifest, SandboxPathGrant
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 from agents.sandbox.errors import (
@@ -765,6 +766,25 @@ class TestBlaxelSandboxClient:
         options = mod.BlaxelSandboxClientOptions(name="my-sandbox")
         session = await client.create(options=options)
         assert session is not None
+
+    @pytest.mark.asyncio
+    async def test_create_with_dictionary_run_config_options(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agents.extensions.sandbox.blaxel import sandbox as mod
+
+        monkeypatch.setattr(mod, "_import_blaxel_sdk", lambda: _FakeSandboxInstance)
+
+        client = mod.BlaxelSandboxClient(token="test-token")
+        config = SandboxRunConfig(
+            client=client,
+            options={"name": "dict-options", "timeouts": {"exec_timeout_s": 120}},
+        )
+
+        assert isinstance(config.options, mod.BlaxelSandboxClientOptions)
+        session = await client.create(options=config.options)
+
+        assert session.state.timeouts.exec_timeout_s == 120
 
     @pytest.mark.asyncio
     async def test_create_with_image(self, monkeypatch: pytest.MonkeyPatch) -> None:

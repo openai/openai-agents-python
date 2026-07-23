@@ -79,6 +79,23 @@ def test_run_config_rejects_untrusted_manifest_path_grants() -> None:
 
 
 @pytest.mark.parametrize(
+    "manifest",
+    [
+        Manifest(root="/workspace").model_dump(),
+        Manifest(root="/workspace").model_dump(mode="json"),
+    ],
+)
+def test_run_config_accepts_serialized_manifest_without_path_grants(
+    manifest: dict[str, object],
+) -> None:
+    config = RunConfig(sandbox={"manifest": manifest})
+
+    assert config.sandbox is not None
+    assert isinstance(config.sandbox.manifest, Manifest)
+    assert config.sandbox.manifest.extra_path_grants == ()
+
+
+@pytest.mark.parametrize(
     ("settings", "message"),
     [
         ({"model_settings": {"temperatur": 0.2}}, "Unknown model settings: temperatur"),

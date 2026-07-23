@@ -265,6 +265,18 @@ class SandboxRunConfig:
                     options_type,
                     parameter_name="sandbox.options",
                 )
+            elif self.client.backend_id == "blaxel":
+                from .extensions.sandbox.blaxel.sandbox import (
+                    BlaxelSandboxClient,
+                    BlaxelSandboxClientOptions,
+                )
+
+                if isinstance(self.client, BlaxelSandboxClient):
+                    self.options = coerce_dataclass_config(
+                        self.options,
+                        BlaxelSandboxClientOptions,
+                        parameter_name="sandbox.options",
+                    )
         self.concurrency_limits = coerce_dataclass_config(
             self.concurrency_limits,
             _declared_dataclass_type(
