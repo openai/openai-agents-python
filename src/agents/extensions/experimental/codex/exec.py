@@ -243,12 +243,11 @@ class CodexExec:
                     except BaseException as exc:
                         cleanup_error = exc
 
-                if original_error is not None or process.returncode is None:
-                    try:
-                        await _terminate_process_tree(process)
-                    except BaseException as exc:
-                        if cleanup_error is None:
-                            cleanup_error = exc
+                try:
+                    await _terminate_process_tree(process)
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
 
                 try:
                     await _cleanup_process()

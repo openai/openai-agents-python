@@ -9,6 +9,7 @@ import os
 import signal
 import subprocess
 import sys
+from collections.abc import AsyncGenerator
 from dataclasses import fields
 from pathlib import Path
 from typing import Any, cast
@@ -798,6 +799,64 @@ async def test_codex_exec_run_close_is_bounded_when_descendant_holds_stdout(
             if process.stdout is not None:
                 while await process.stdout.read(exec_module._SUBPROCESS_DRAIN_CHUNK_BYTES):
                     pass
+            await process.wait()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SelectorEventLoop lacks subprocess support")
+@pytest.mark.asyncio
+async def test_codex_exec_run_terminates_descendant_after_clean_parent_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_create_subprocess_exec = asyncio.create_subprocess_exec
+    process: asyncio.subprocess.Process | None = None
+    helper_pid: int | None = None
+    helper_code = "import time; time.sleep(10)"
+    child_code = (
+        "import os\n"
+        "import subprocess\n"
+        "import sys\n"
+        "sys.stdin.buffer.read()\n"
+        f"helper = subprocess.Popen([sys.executable, '-c', {helper_code!r}], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=sys.stderr)\n"
+        "os.write(1, f'ready {helper.pid}\\n'.encode())\n"
+    )
+
+    async def create_process_with_descendant(
+        *_args: Any, **kwargs: Any
+    ) -> asyncio.subprocess.Process:
+        nonlocal process
+        process = await original_create_subprocess_exec(sys.executable, "-c", child_code, **kwargs)
+        return process
+
+    async def collect_output(stream: AsyncGenerator[str, None]) -> list[str]:
+        return [line async for line in stream]
+
+    monkeypatch.setattr(
+        exec_module.asyncio, "create_subprocess_exec", create_process_with_descendant
+    )
+
+    stream = exec_module.CodexExec(executable_path="unused").run(
+        exec_module.CodexExecArgs(input="hello")
+    )
+
+    try:
+        output = await asyncio.wait_for(collect_output(stream), timeout=5)
+        helper_pid = int(output[0].removeprefix("ready "))
+        assert process is not None
+        assert process.returncode == 0
+        for _ in range(500):
+            if not _process_is_running(helper_pid):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("Codex subprocess descendant remained alive after clean parent exit")
+    finally:
+        if helper_pid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(helper_pid, signal.SIGTERM)
+        if process is not None:
+            if process.returncode is None:
+                process.kill()
             await process.wait()
 
 
