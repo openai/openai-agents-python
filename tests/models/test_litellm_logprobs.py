@@ -1,6 +1,15 @@
 import litellm
 import pytest
-from litellm.types.utils import Choices, Message, ModelResponse, Usage
+from litellm.types.utils import (
+    ChatCompletionTokenLogprob,
+    ChoiceLogprobs,
+    Choices,
+    Message,
+    ModelResponse,
+    TopLogprob,
+    Usage,
+)
+from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.model_settings import ModelSettings
@@ -56,3 +65,54 @@ async def test_top_logprobs_with_extra_args_logprobs_does_not_collide(monkeypatc
     )
     assert captured["top_logprobs"] == 2
     assert captured["logprobs"] is True
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_preserves_returned_logprobs_in_output(monkeypatch):
+    """Returned token logprobs must be attached to ResponseOutputText.logprobs."""
+
+    async def fake_acompletion(model, messages=None, **kwargs):
+        message = Message(role="assistant", content="Hello")
+        logprobs = ChoiceLogprobs(
+            content=[
+                ChatCompletionTokenLogprob(
+                    token="Hello",
+                    logprob=-0.25,
+                    bytes=[72, 101, 108, 108, 111],
+                    top_logprobs=[
+                        TopLogprob(token="Hello", logprob=-0.25, bytes=[72, 101, 108, 108, 111]),
+                        TopLogprob(token="Hi", logprob=-1.5, bytes=[72, 105]),
+                    ],
+                )
+            ]
+        )
+        choice = Choices(index=0, message=message, logprobs=logprobs)
+        return ModelResponse(choices=[choice], usage=Usage(0, 0, 0))
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    response = await LitellmModel(model="test-model").get_response(
+        system_instructions=None,
+        input=[],
+        model_settings=ModelSettings(top_logprobs=2),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+    )
+
+    texts = [
+        content
+        for item in response.output
+        if isinstance(item, ResponseOutputMessage)
+        for content in item.content
+        if isinstance(content, ResponseOutputText)
+    ]
+    assert texts, "expected a ResponseOutputText in the output"
+    output_logprobs = texts[0].logprobs
+    assert output_logprobs is not None
+    assert len(output_logprobs) == 1
+    assert output_logprobs[0].token == "Hello"
+    assert output_logprobs[0].logprob == -0.25
+    assert [tlp.token for tlp in output_logprobs[0].top_logprobs] == ["Hello", "Hi"]

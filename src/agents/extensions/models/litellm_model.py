@@ -333,11 +333,34 @@ class LitellmModel(Model):
                 else []
             )
 
+            # LiteLLM's Choices omits the logprobs attribute entirely when it was not requested,
+            # so access it defensively (mirrors the finish_reason handling above).
+            logprob_models = None
+            choice_logprobs = getattr(first_choice, "logprobs", None) if first_choice else None
+            if choice_logprobs is not None and getattr(choice_logprobs, "content", None):
+                logprob_models = ChatCmplHelpers.convert_logprobs_for_output_text(
+                    choice_logprobs.content
+                )
+
+            if logprob_models:
+                self._attach_logprobs_to_output(items, logprob_models)
+
             return ModelResponse(
                 output=items,
                 usage=usage,
                 response_id=None,
             )
+
+    def _attach_logprobs_to_output(self, output_items: list[Any], logprobs: list[Any]) -> None:
+        from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+        for output_item in output_items:
+            if not isinstance(output_item, ResponseOutputMessage):
+                continue
+            for content in output_item.content:
+                if isinstance(content, ResponseOutputText):
+                    content.logprobs = logprobs
+                    return
 
     async def stream_response(
         self,
