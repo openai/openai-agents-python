@@ -902,3 +902,53 @@ def test_any_llm_split_does_not_duplicate_content_or_thinking(monkeypatch) -> No
     # Tool calls are still split one-per-message.
     assert assistants[0]["tool_calls"][0]["id"] == "call_1"
     assert assistants[1]["tool_calls"][0]["id"] == "call_2"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_sets_logprobs_when_top_logprobs_set(monkeypatch) -> None:
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=_chat_completion("Hello"))
+    module, _ = _import_any_llm_module(monkeypatch, provider)
+    AnyLLMModel = module.AnyLLMModel
+
+    model = AnyLLMModel(model="openrouter/openai/gpt-5.4-mini", api_key="k")
+    await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(top_logprobs=2),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    # The Chat Completions API rejects top_logprobs unless logprobs is True.
+    assert provider.chat_calls[0]["top_logprobs"] == 2
+    assert provider.chat_calls[0]["logprobs"] is True
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_omits_logprobs_when_top_logprobs_unset(monkeypatch) -> None:
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=_chat_completion("Hello"))
+    module, _ = _import_any_llm_module(monkeypatch, provider)
+    AnyLLMModel = module.AnyLLMModel
+
+    model = AnyLLMModel(model="openrouter/openai/gpt-5.4-mini", api_key="k")
+    await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    assert "logprobs" not in provider.chat_calls[0]

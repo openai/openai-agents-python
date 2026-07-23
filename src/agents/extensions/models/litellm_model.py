@@ -560,6 +560,12 @@ class LitellmModel(Model):
         # Prevent duplicate reasoning_effort kwargs when it was promoted to a top-level argument.
         extra_kwargs.pop("reasoning_effort", None)
 
+        # The Chat Completions API requires logprobs=True whenever top_logprobs is set. Defer to a
+        # caller-supplied logprobs (via extra_args, already merged into extra_kwargs) to avoid a
+        # duplicate-key collision.
+        if model_settings.top_logprobs is not None and "logprobs" not in extra_kwargs:
+            extra_kwargs["logprobs"] = True
+
         ret = await litellm.acompletion(
             model=self.model,
             messages=converted_messages,
