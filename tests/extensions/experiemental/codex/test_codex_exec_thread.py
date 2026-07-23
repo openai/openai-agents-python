@@ -35,6 +35,25 @@ output_schema_module = importlib.import_module(
 )
 
 
+def _process_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+
+    if sys.platform.startswith("linux"):
+        try:
+            status = Path(f"/proc/{pid}/status").read_text()
+        except FileNotFoundError:
+            return False
+        for line in status.splitlines():
+            if line.startswith("State:"):
+                # A zombie cannot execute but still responds to signal 0 until it is reaped.
+                return line.split()[1] != "Z"
+
+    return True
+
+
 class FakeStdin:
     def __init__(self) -> None:
         self.buffer = b""
@@ -764,9 +783,7 @@ async def test_codex_exec_run_close_is_bounded_when_descendant_holds_stdout(
         await asyncio.wait_for(stream.aclose(), timeout=1)
         assert process.returncode is not None
         for _ in range(500):
-            try:
-                os.kill(helper_pid, 0)
-            except ProcessLookupError:
+            if not _process_is_running(helper_pid):
                 break
             await asyncio.sleep(0.01)
         else:
