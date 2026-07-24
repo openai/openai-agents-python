@@ -8,6 +8,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from datetime import datetime, timezone
+from functools import partial
 from inspect import Parameter, signature
 from typing import Any, cast
 
@@ -43,6 +44,14 @@ def _safe_debug(message: str | Callable[[], str]) -> None:
     except Exception:
         # Avoid noisy shutdown errors when the underlying stream is already closed.
         return
+
+
+def _processor_diagnostic_extra(processor: TracingProcessor) -> dict[str, object]:
+    return {"trace_processor": processor}
+
+
+def _processor_shutdown_message(processor: TracingProcessor) -> str:
+    return f"Shutting down trace processor {processor}"
 
 
 def _remaining_timeout(deadline: float | None) -> float | None:
@@ -113,7 +122,7 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
                     logger,
                     "Error in trace processor during on_trace_start",
                     e,
-                    diagnostic_extra=lambda processor=processor: {"trace_processor": processor},
+                    diagnostic_extra=partial(_processor_diagnostic_extra, processor),
                 )
 
     def on_trace_end(self, trace: Trace) -> None:
@@ -128,7 +137,7 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
                     logger,
                     "Error in trace processor during on_trace_end",
                     e,
-                    diagnostic_extra=lambda processor=processor: {"trace_processor": processor},
+                    diagnostic_extra=partial(_processor_diagnostic_extra, processor),
                 )
 
     def on_span_start(self, span: Span[Any]) -> None:
@@ -143,7 +152,7 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
                     logger,
                     "Error in trace processor during on_span_start",
                     e,
-                    diagnostic_extra=lambda processor=processor: {"trace_processor": processor},
+                    diagnostic_extra=partial(_processor_diagnostic_extra, processor),
                 )
 
     def on_span_end(self, span: Span[Any]) -> None:
@@ -158,7 +167,7 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
                     logger,
                     "Error in trace processor during on_span_end",
                     e,
-                    diagnostic_extra=lambda processor=processor: {"trace_processor": processor},
+                    diagnostic_extra=partial(_processor_diagnostic_extra, processor),
                 )
 
     def shutdown(self, timeout: float | None = None) -> None:
@@ -170,9 +179,7 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
             if _debug.DONT_LOG_MODEL_DATA or _debug.DONT_LOG_TOOL_DATA:
                 _safe_debug("Shutting down trace processor")
             else:
-                _safe_debug(
-                    lambda processor=processor: f"Shutting down trace processor {processor}"
-                )
+                _safe_debug(partial(_processor_shutdown_message, processor))
             try:
                 processor_timeout = _remaining_timeout(deadline)
                 if processor_timeout is not None and processor_timeout <= 0:
@@ -189,7 +196,7 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
                     logger,
                     "Error shutting down trace processor",
                     e,
-                    diagnostic_extra=lambda processor=processor: {"trace_processor": processor},
+                    diagnostic_extra=partial(_processor_diagnostic_extra, processor),
                 )
 
     def force_flush(self):
@@ -204,7 +211,7 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
                     logger,
                     "Error flushing trace processor",
                     e,
-                    diagnostic_extra=lambda processor=processor: {"trace_processor": processor},
+                    diagnostic_extra=partial(_processor_diagnostic_extra, processor),
                 )
 
 

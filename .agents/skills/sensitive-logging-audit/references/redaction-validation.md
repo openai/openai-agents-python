@@ -1,6 +1,6 @@
 # Python sensitive logging validation
 
-The inventory is deliberately broader than a vulnerability detector. It finds confirmed SDK logger calls, raw output, exact policy-aware helpers, and unknown receivers with logging-like method names. Review every dynamic finding; do not treat a recognized receiver, helper, or guard as proof that its values are safe.
+The collector reports syntactic logging and raw-output candidates. It does not resolve aliases, prove receiver types, evaluate guards, classify payloads, or support a completeness claim. Review candidates together with direct source searches and runtime tests.
 
 ## Required validation matrix
 
@@ -39,41 +39,25 @@ The sensitive object itself must not remain attached even when its string repres
 
 ## Review procedure
 
-1. Run the inventory against all of `src/agents`.
-2. Review raw output and unknown receivers first.
-3. Review caught values, `logger.exception`, `exc_info`, `extra`, and formatting arguments.
-4. Trace model, tool, Realtime, MCP, session, sandbox, voice, tracing, and cleanup values to their producers.
-5. Classify intentional output separately from diagnostics; do not silently exempt `print` or warnings.
-6. Add focused tests at every changed caller boundary.
-7. Re-run the inventory and compare fingerprint groups to the baseline.
-8. Re-review any duplicate group whose count changed.
+1. Run the collector against all of `src/agents`.
+2. Run the supplemental `rg` searches from `SKILL.md` and inspect aliases and dynamic dispatch.
+3. Review raw output and ambiguous receivers first.
+4. Review caught values, `logger.exception`, `exc_info`, `extra`, and formatting arguments.
+5. Trace model, tool, Realtime, MCP, session, sandbox, voice, tracing, and cleanup values to their producers.
+6. Classify intentional output separately from diagnostics; do not silently exempt `print` or warnings.
+7. Add focused tests at every changed caller boundary.
+8. Re-run the collector and source searches after the fix.
 
-The detector supports a completeness claim for the repository's direct Python output shapes. It does not prove arbitrary runtime data flow, dynamically installed handlers, monkey-patched logger methods, or reflective calls.
+An empty or unchanged collector report is not proof of safety. Assignment aliases, monkey-patched methods, dynamically installed handlers, non-constant reflection, and arbitrary runtime data flow require manual inspection.
 
-## Review ledger shape
+## Audit report expectations
 
-Use a temporary JSON ledger when the audit is large:
+For each confirmed or uncertain path, record:
 
-```json
-{
-  "reviews": [
-    {
-      "group_fingerprint": "0123456789ab",
-      "group_count": 1,
-      "disposition": "tool",
-      "evidence": "The value originates from the function tool input JSON.",
-      "action": "Guard formatting and arguments with DONT_LOG_TOOL_DATA."
-    }
-  ]
-}
-```
+- The source location and value producer.
+- The manual disposition: `model`, `tool`, `model+tool`, `operational`, `intentional-output`, or `uncertain`.
+- Concrete evidence for the disposition.
+- The fix or reason for retaining the path.
+- The caller-level regression test, when behavior changed.
 
-Validate it with:
-
-```bash
-uv run python .agents/skills/sensitive-logging-audit/scripts/inventory_logging.py \
-  --validate-review /tmp/sensitive-logging-review.json --summary-only
-```
-
-Allowed dispositions are `model`, `tool`, `model+tool`, `operational`, `intentional-output`, and `uncertain`.
-Both `evidence` and `action` must be non-empty JSON strings; structured values do not count as review rationale.
+Do not reuse a disposition solely because a fingerprint or call text is unchanged.
