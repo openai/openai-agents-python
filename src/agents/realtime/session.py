@@ -318,7 +318,8 @@ class RealtimeSession(RealtimeModelListener):
         if cleanup_task is not None and (
             current_task in self._guardrail_tasks or current_task in self._tool_call_tasks
         ):
-            # Cleanup is already waiting for this tracked task, so waiting here would form a cycle.
+            self._closing = True
+            self._closed = True
             raise asyncio.CancelledError
 
         if cleanup_task is None:
