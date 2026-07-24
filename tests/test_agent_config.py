@@ -33,6 +33,13 @@ async def test_system_instructions():
     agent = agent.clone(instructions=async_instructions)
     assert await agent.get_system_prompt(context) == "async_123"
 
+    class AsyncCallableInstructions:
+        async def __call__(self, context: RunContextWrapper[None], agent: Agent[None]) -> str:
+            return "async_callable_123"
+
+    agent = agent.clone(instructions=AsyncCallableInstructions())
+    assert await agent.get_system_prompt(context) == "async_callable_123"
+
 
 @pytest.mark.asyncio
 async def test_handoff_with_agents():

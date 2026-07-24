@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Generic, cast
+from typing import Any, Generic
 
 from agents.prompts import Prompt
 
@@ -121,10 +121,13 @@ class RealtimeAgent(AgentBase, Generic[TContext]):
         if isinstance(self.instructions, str):
             return self.instructions
         elif callable(self.instructions):
-            if inspect.iscoroutinefunction(self.instructions):
-                return await cast(Awaitable[str], self.instructions(run_context, self))
-            else:
-                return cast(str, self.instructions(run_context, self))
+            # Call once, then await if needed. Callable instances with async
+            # ``__call__`` are not coroutine functions, so checking
+            # ``iscoroutinefunction(self.instructions)`` would skip the await.
+            result = self.instructions(run_context, self)
+            if inspect.isawaitable(result):
+                return await result
+            return result
         elif self.instructions is not None:
             if _debug.DONT_LOG_MODEL_DATA:
                 logger.error("Instructions must be a string or a function")

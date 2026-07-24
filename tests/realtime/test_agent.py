@@ -31,6 +31,30 @@ async def test_dynamic_instructions():
 
 
 @pytest.mark.asyncio
+async def test_async_callable_object_instructions_are_awaited():
+    """Callable instances whose ``__call__`` is async must be awaited.
+
+    ``inspect.iscoroutinefunction`` returns ``False`` for the instance itself, so the
+    previous implementation returned the unawaited coroutine as the system prompt.
+    """
+
+    class AsyncInstructions:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, ctx, agt) -> str:
+            self.calls += 1
+            assert ctx.context is None
+            return "Dynamic async callable"
+
+    instructions = AsyncInstructions()
+    agent = RealtimeAgent(name="test", instructions=instructions)
+    prompt = await agent.get_system_prompt(RunContextWrapper(context=None))
+    assert prompt == "Dynamic async callable"
+    assert instructions.calls == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("redacted", [True, False])
 async def test_mutated_invalid_instructions_respect_model_data_policy(
     monkeypatch, redacted: bool
