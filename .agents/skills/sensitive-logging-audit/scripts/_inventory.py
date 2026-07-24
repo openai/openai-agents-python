@@ -177,6 +177,30 @@ def target_value_pairs(target: ast.AST, value: ast.AST) -> list[tuple[str, ast.A
     return []
 
 
+def pattern_bound_names(pattern: ast.pattern) -> set[str]:
+    if isinstance(pattern, ast.MatchAs):
+        names = pattern_bound_names(pattern.pattern) if pattern.pattern is not None else set()
+        if pattern.name:
+            names.add(pattern.name)
+        return names
+    if isinstance(pattern, ast.MatchStar):
+        return {pattern.name} if pattern.name else set()
+    if isinstance(pattern, ast.MatchMapping):
+        names = {name for child in pattern.patterns for name in pattern_bound_names(child)}
+        if pattern.rest:
+            names.add(pattern.rest)
+        return names
+    if isinstance(pattern, ast.MatchClass):
+        return {
+            name
+            for child in [*pattern.patterns, *pattern.kwd_patterns]
+            for name in pattern_bound_names(child)
+        }
+    if isinstance(pattern, ast.MatchSequence | ast.MatchOr):
+        return {name for child in pattern.patterns for name in pattern_bound_names(child)}
+    return set()
+
+
 def iter_definitions(
     tree: ast.AST,
 ) -> Iterable[tuple[ast.AST, list[tuple[str, ast.AST | None]]]]:
@@ -205,6 +229,10 @@ def iter_definitions(
             yield node, [(node.name, None)]
         elif isinstance(node, ast.Delete):
             yield node, [(key, None) for target in node.targets for key in target_keys(target)]
+        elif isinstance(node, ast.match_case):
+            names = pattern_bound_names(node.pattern)
+            if names:
+                yield node.pattern, [(name, None) for name in sorted(names)]
 
 
 def bound_names(node: ast.AST) -> set[str]:
@@ -282,6 +310,8 @@ class Facts:
                         self.bindings[scope].update(bound_names(item.optional_vars))
             elif isinstance(node, ast.ExceptHandler) and node.name:
                 self.bindings[scope].add(node.name)
+            elif isinstance(node, ast.match_case):
+                self.bindings[scope].update(pattern_bound_names(node.pattern))
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     self.bindings[scope].add(alias.asname or alias.name.split(".", 1)[0])
@@ -371,6 +401,14 @@ class Facts:
                 child = self.parents[child]
             if child in definition.body:
                 return True
+        elif isinstance(definition, ast.pattern):
+            case = self.parents.get(definition)
+            if isinstance(case, ast.match_case):
+                child = use
+                while child in self.parents and self.parents[child] is not case:
+                    child = self.parents[child]
+                if child is case.guard or child in case.body:
+                    return True
 
         parent = self.parents.get(definition)
         if parent is None:

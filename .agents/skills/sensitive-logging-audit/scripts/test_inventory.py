@@ -453,6 +453,36 @@ def report(values, manager, secret):
 
         self.assertEqual([item.policy for item in findings], ["none", "none"])
 
+    def test_match_pattern_captures_kill_policy_alias_provenance(self) -> None:
+        findings = inventory_source(
+            """
+from agents import _debug
+from agents.logger import logger
+
+def direct_capture(value, secret):
+    flag = _debug.DONT_LOG_TOOL_DATA
+    match value:
+        case flag:
+            if not flag:
+                logger.error("direct capture: %s", secret)
+
+def nested_capture(value, secret):
+    flag = _debug.DONT_LOG_TOOL_DATA
+    match value:
+        case {"enabled": flag}:
+            if not flag:
+                logger.error("nested capture: %s", secret)
+
+def guarded_capture(value, secret):
+    flag = _debug.DONT_LOG_TOOL_DATA
+    match value:
+        case flag if not flag:
+            logger.error("guard capture: %s", secret)
+"""
+        )
+
+        self.assertEqual([item.policy for item in findings], ["none", "none", "none"])
+
     def test_combines_exact_model_and_tool_guards(self) -> None:
         findings = inventory_source(
             """

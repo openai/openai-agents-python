@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from .. import _debug
 from .._config_coercion import coerce_dataclass_config
 from ..exceptions import UserError
-from ..logger import log_model_and_tool_action_error, logger
+from ..logger import (
+    log_model_and_tool_action_error,
+    log_model_and_tool_action_warning,
+    logger,
+)
 from ..tracing import TraceCtxManager
 from .input import AudioInput, StreamedAudioInput
 from .model import STTModel, TTSModel
@@ -136,10 +139,9 @@ class VoicePipeline:
                         async for intro_text in self.workflow.on_start():
                             await output._add_text(intro_text)
                     except Exception as e:
-                        if _debug.DONT_LOG_MODEL_DATA:
-                            logger.warning("Voice workflow on_start failed")
-                        else:
-                            logger.warning("Voice workflow on_start failed: %s", e, exc_info=e)
+                        log_model_and_tool_action_warning(
+                            logger, "Voice workflow on_start failed", e
+                        )
 
                     transcription_session = await self._get_stt_model().create_session(
                         audio_input,
