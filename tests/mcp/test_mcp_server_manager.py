@@ -124,6 +124,36 @@ class FlakyServer(MCPServer):
         return ReadResourceResult(contents=[])
 
 
+class PartialFailureServer(FlakyServer):
+    def __init__(self, *, fail_cleanup: bool = False) -> None:
+        super().__init__(failures=0)
+        self.fail_cleanup = fail_cleanup
+        self.cleanup_calls = 0
+        self.resource_open = False
+        self._connect_task: asyncio.Task[object] | None = None
+
+    @property
+    def name(self) -> str:
+        return "partial-failure"
+
+    async def connect(self) -> None:
+        self.connect_calls += 1
+        self._connect_task = asyncio.current_task()
+        if self.resource_open:
+            raise RuntimeError("connect called without cleanup")
+        self.resource_open = True
+        if self.connect_calls == 1:
+            raise RuntimeError("connect failed after opening resource")
+
+    async def cleanup(self) -> None:
+        self.cleanup_calls += 1
+        if asyncio.current_task() is not self._connect_task:
+            raise RuntimeError("Attempted to exit cancel scope in a different task")
+        if self.fail_cleanup:
+            raise RuntimeError("cleanup failed")
+        self.resource_open = False
+
+
 class SensitiveNamedServer(FlakyServer):
     def __init__(self, name: str) -> None:
         super().__init__(failures=1)
@@ -398,6 +428,56 @@ async def test_manager_reconnect_failed_only() -> None:
         await manager.reconnect()
         assert manager.active_servers == [server]
         assert manager.failed_servers == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connect_in_parallel", [False, True])
+async def test_manager_reconnect_cleans_partial_failure_before_retry(
+    connect_in_parallel: bool,
+) -> None:
+    healthy_server = CleanupAwareServer()
+    failed_server = PartialFailureServer()
+    manager = MCPServerManager(
+        [healthy_server, failed_server], connect_in_parallel=connect_in_parallel
+    )
+    try:
+        await manager.connect_all()
+
+        assert manager.active_servers == [healthy_server]
+        assert manager.failed_servers == [failed_server]
+
+        await manager.reconnect()
+
+        assert manager.active_servers == [healthy_server, failed_server]
+        assert manager.failed_servers == []
+        assert failed_server not in manager.errors
+        assert failed_server.connect_calls == 2
+        assert failed_server.cleanup_calls == 1
+        assert failed_server.resource_open is True
+        assert healthy_server.connect_calls == 1
+        assert healthy_server.cleanup_calls == 0
+    finally:
+        await manager.cleanup_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connect_in_parallel", [False, True])
+async def test_manager_reconnect_does_not_retry_after_cleanup_failure(
+    connect_in_parallel: bool,
+) -> None:
+    server = PartialFailureServer(fail_cleanup=True)
+    manager = MCPServerManager([server], connect_in_parallel=connect_in_parallel)
+
+    await manager.connect_all()
+    await manager.reconnect()
+
+    assert manager.active_servers == []
+    assert manager.failed_servers == [server]
+    assert server.connect_calls == 1
+    assert server.cleanup_calls == 1
+    assert server.resource_open is True
+    assert str(manager.errors[server]) == "cleanup failed"
+    assert manager._workers == {}
 
 
 @pytest.mark.asyncio

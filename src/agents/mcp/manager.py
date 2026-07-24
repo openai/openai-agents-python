@@ -234,7 +234,8 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
                 If False, cleanup and retry all servers.
         """
         if failed_only:
-            servers_to_retry = self._unique_servers(self.failed_servers)
+            failed_servers = self._unique_servers(self.failed_servers)
+            servers_to_retry = await self._cleanup_servers(failed_servers)
         else:
             await self.cleanup_all()
             servers_to_retry = list(self._all_servers)
@@ -349,8 +350,10 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
         finally:
             self._connected_servers.discard(server)
 
-    async def _cleanup_servers(self, servers: Iterable[MCPServer]) -> None:
-        for server in reversed(list(servers)):
+    async def _cleanup_servers(self, servers: Iterable[MCPServer]) -> list[MCPServer]:
+        servers_list = list(servers)
+        cleaned_servers: set[MCPServer] = set()
+        for server in reversed(servers_list):
             try:
                 await self._cleanup_server(server)
             except asyncio.CancelledError as exc:
@@ -369,6 +372,9 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
                     exc,
                 )
                 self.errors[server] = exc
+            else:
+                cleaned_servers.add(server)
+        return [server for server in servers_list if server in cleaned_servers]
 
     async def _connect_all_parallel(self, servers: list[MCPServer]) -> None:
         tasks = [
