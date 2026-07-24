@@ -3567,6 +3567,74 @@ async def test_tool_use_behavior_custom_function():
 
 
 @pytest.mark.asyncio
+async def test_tool_use_behavior_preserves_none_final_output() -> None:
+    """Custom tool_use_behavior may return final_output=None; do not coerce it to 'None'."""
+
+    def behavior(
+        context: RunContextWrapper[Any], results: list[FunctionToolResult]
+    ) -> ToolsToFinalOutputResult:
+        assert results
+        return ToolsToFinalOutputResult(is_final_output=True, final_output=None)
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("foo", "tool_result")],
+        tool_use_behavior=behavior,
+    )
+    model.set_next_output([get_function_tool_call("foo", None)])
+
+    result = await Runner.run(agent, input="user_message")
+    assert result.final_output is None
+
+
+@pytest.mark.asyncio
+async def test_stop_on_first_tool_preserves_none_tool_output() -> None:
+    """stop_on_first_tool should preserve a tool's None output instead of the string 'None'."""
+
+    @function_tool
+    def returns_none() -> str | None:
+        return None
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[returns_none],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    model.set_next_output([get_function_tool_call("returns_none", "{}")])
+
+    result = await Runner.run(agent, input="user_message")
+    assert result.final_output is None
+
+
+@pytest.mark.asyncio
+async def test_tool_use_behavior_preserves_none_final_output_streamed() -> None:
+    """Streamed runs must preserve None final_output from tool_use_behavior as well."""
+
+    def behavior(
+        context: RunContextWrapper[Any], results: list[FunctionToolResult]
+    ) -> ToolsToFinalOutputResult:
+        return ToolsToFinalOutputResult(is_final_output=True, final_output=None)
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("foo", "tool_result")],
+        tool_use_behavior=behavior,
+    )
+    model.set_next_output([get_function_tool_call("foo", None)])
+
+    result = Runner.run_streamed(agent, input="user_message")
+    async for _ in result.stream_events():
+        pass
+    assert result.final_output is None
+
+
+@pytest.mark.asyncio
 async def test_model_settings_override():
     model = FakeModel()
     agent = Agent(

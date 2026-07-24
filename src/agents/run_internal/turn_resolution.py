@@ -201,14 +201,14 @@ async def _maybe_finalize_from_tool_results(
     if not check_tool_use.is_final_output:
         return None
 
-    if not public_agent.output_type or public_agent.output_type is str:
-        check_tool_use.final_output = str(check_tool_use.final_output)
-
     if check_tool_use.final_output is None:
         logger.error(
             "Model returned a final output of None. Not raising an error because we assume"
             "you know what you're doing."
         )
+    elif not public_agent.output_type or public_agent.output_type is str:
+        # Preserve None above; only stringify concrete values for plain-text agents.
+        check_tool_use.final_output = str(check_tool_use.final_output)
 
     return await execute_final_output(
         public_agent=public_agent,
