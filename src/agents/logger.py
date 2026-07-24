@@ -1,11 +1,20 @@
 import logging
 from collections.abc import Callable, Mapping
+from types import TracebackType
 
 from . import _debug
 
 logger = logging.getLogger("openai.agents")
 
 _DiagnosticExtra = Callable[[], Mapping[str, object]]
+
+
+def _exception_info(
+    exc: BaseException,
+) -> tuple[type[BaseException], BaseException, TracebackType | None]:
+    """Build logging exception info without evaluating exception truthiness."""
+    traceback = BaseException.__getattribute__(exc, "__traceback__")
+    return type(exc), exc, traceback
 
 
 def _log_action_error(
@@ -25,7 +34,7 @@ def _log_action_error(
             "%s: %s",
             message,
             exc,
-            exc_info=exc,
+            exc_info=_exception_info(exc),
             extra=diagnostic_extra() if diagnostic_extra is not None else None,
             stacklevel=stacklevel,
         )
@@ -48,7 +57,7 @@ def _log_action_at_level(
             "%s: %s",
             message,
             exc,
-            exc_info=exc,
+            exc_info=_exception_info(exc),
             extra=diagnostic_extra() if diagnostic_extra is not None else None,
             stacklevel=stacklevel,
         )

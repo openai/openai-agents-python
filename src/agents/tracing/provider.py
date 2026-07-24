@@ -47,7 +47,11 @@ def _safe_debug(message: str | Callable[[], str]) -> None:
 
 
 def _processor_diagnostic_extra(processor: TracingProcessor) -> dict[str, object]:
-    return {"trace_processor": processor}
+    processor_type = type(processor)
+    processor_identity = (
+        f"{processor_type.__module__}.{processor_type.__qualname__}@{id(processor):x}"
+    )
+    return {"trace_processor": processor_identity}
 
 
 def _processor_shutdown_message(processor: TracingProcessor) -> str:

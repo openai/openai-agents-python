@@ -9,7 +9,11 @@ statements honor ``_debug.DONT_LOG_MODEL_DATA`` / ``_debug.DONT_LOG_TOOL_DATA``.
 from __future__ import annotations
 
 import logging
+import pickle
+import threading
+from logging.handlers import QueueHandler
 from pathlib import Path
+from queue import SimpleQueue
 from typing import Any
 from unittest.mock import patch
 
@@ -71,9 +75,23 @@ class _HostileException(Exception):
         return super().__getattribute__(name)
 
 
+class _TruthinessException(Exception):
+    def __init__(self, *, truthy: bool) -> None:
+        super().__init__("diagnostic failure")
+        self.truthy = truthy
+        self.bool_calls = 0
+
+    def __bool__(self) -> bool:
+        self.bool_calls += 1
+        if self.truthy:
+            raise AssertionError("logging inspected exception truthiness")
+        return False
+
+
 class _FailingTracingProcessor(TracingProcessor):
     def __init__(self) -> None:
         self.str_calls = 0
+        self.lock = threading.Lock()
 
     def __str__(self) -> str:
         self.str_calls += 1
@@ -282,6 +300,35 @@ def test_shared_error_helper_preserves_diagnostics_when_enabled(monkeypatch) -> 
     assert _SECRET in logging.Formatter().format(record)
 
 
+@pytest.mark.parametrize(
+    "helper",
+    [log_shared_tool_action_error, log_tool_action_warning],
+)
+@pytest.mark.parametrize("truthy", [False, True], ids=["falsey", "hostile_bool"])
+def test_shared_error_helpers_do_not_evaluate_exception_truthiness(
+    monkeypatch,
+    helper,
+    truthy: bool,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    test_logger = logging.Logger("sensitive-logging-exception-truthiness")
+    handler = _RecordingHandler()
+    test_logger.addHandler(handler)
+    error = _TruthinessException(truthy=truthy)
+
+    try:
+        raise error
+    except _TruthinessException:
+        helper(test_logger, "Tool failed", error)
+
+    record = handler.records[0]
+    assert error.bool_calls == 0
+    assert record.exc_info is not None
+    assert record.exc_info[0] is type(error)
+    assert record.exc_info[1] is error
+    assert record.exc_info[2] is error.__traceback__
+
+
 @pytest.mark.parametrize("redacted", [True, False])
 def test_shared_error_helper_conditionally_attaches_diagnostic_extra(
     monkeypatch, redacted: bool
@@ -357,7 +404,13 @@ def test_trace_processor_failure_identity_follows_both_data_policies(
         assert _SECRET not in logging.Formatter().format(record)
         assert failing.str_calls == 0
     else:
-        assert record.__dict__["trace_processor"] is failing
+        processor_identity = record.__dict__["trace_processor"]
+        assert isinstance(processor_identity, str)
+        assert type(failing).__module__ in processor_identity
+        assert type(failing).__qualname__ in processor_identity
+        assert f"{id(failing):x}" in processor_identity
+        prepared = QueueHandler(SimpleQueue()).prepare(record)
+        pickle.dumps(prepared)
         assert record.exc_info is not None
         assert record.exc_info[1] is not None
         assert _SECRET in logging.Formatter().format(record)
@@ -425,7 +478,11 @@ def test_log_tool_action_error_logs_full_when_tool_data_enabled(monkeypatch) -> 
     mock_logger.error.assert_called_once()
     logged = str(mock_logger.error.call_args)
     assert "/secret/path" in logged
-    assert isinstance(mock_logger.error.call_args.kwargs.get("exc_info"), ValueError)
+    exc_info = mock_logger.error.call_args.kwargs.get("exc_info")
+    assert isinstance(exc_info, tuple)
+    assert exc_info[0] is ValueError
+    assert isinstance(exc_info[1], ValueError)
+    assert exc_info[2] is None
 
 
 @pytest.mark.asyncio

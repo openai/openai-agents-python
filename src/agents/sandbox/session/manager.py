@@ -161,7 +161,12 @@ class Instrumentation:
     ) -> None:
         if force_no_raise or sink.on_error in ("log", "ignore"):
             if sink.on_error == "log":
-                log_tool_action_error(logger, "Sandbox event sink failed (ignored)", exc)
+                log_tool_action_error(
+                    logger,
+                    "Sandbox event sink failed (ignored)",
+                    exc,
+                    diagnostic_extra=lambda: {"sink_type": type(sink).__name__},
+                )
             return
         raise RuntimeError(
             "sandbox event sink failed: "

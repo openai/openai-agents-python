@@ -34,7 +34,7 @@ from agents.items import (
     ToolApprovalItem,
     TResponseOutputItem,
 )
-from agents.result import RunResultStreaming
+from agents.result import RunResult, RunResultStreaming
 from agents.run import _sandbox_memory_input
 from agents.run_context import RunContextWrapper
 from agents.sandbox import (
@@ -1532,6 +1532,7 @@ async def test_sandbox_memory_enqueue_failure_follows_both_data_policies(
     )
 
     run_config = RunConfig(sandbox=SandboxRunConfig(client=client))
+    result: RunResult | RunResultStreaming
     if streamed:
         result = Runner.run_streamed(agent, "hello", run_config=run_config)
         async for _ in result.stream_events():

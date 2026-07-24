@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -18,6 +19,7 @@ import pytest
 from openai.types.responses.response_output_item import LocalShellCall, LocalShellCallAction
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 
+import agents._debug as _debug
 import agents.sandbox.runtime_agent_preparation as runtime_agent_preparation_module
 from agents import Agent, AgentHooks, LocalShellTool, RunHooks, Runner, function_tool
 from agents.exceptions import InputGuardrailTripwireTriggered, UserError
@@ -2115,14 +2117,17 @@ async def test_unix_local_client_delete_unmounts_nested_mounts_deepest_first(
     assert order == [root / "outer" / "child", root / "outer"]
 
 
+@pytest.mark.parametrize("redacted", [True, False], ids=["redacted", "diagnostic"])
 @pytest.mark.asyncio
 async def test_unix_local_client_delete_skips_rmtree_when_unmount_fails(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    redacted: bool,
 ) -> None:
     client = UnixLocalSandboxClient()
     manifest = _unix_local_manifest(
         entries={
-            "remote": S3Mount(
+            "SECRET_REMOTE_MOUNT": S3Mount(
                 bucket="bucket",
                 mount_strategy=InContainerMountStrategy(pattern=MountpointMountPattern()),
             ),
@@ -2139,7 +2144,7 @@ async def test_unix_local_client_delete_skips_rmtree_when_unmount_fails(
         base_dir: Path,
     ) -> None:
         _ = (self, session, dest, base_dir)
-        raise RuntimeError("busy")
+        raise RuntimeError("SECRET_UNMOUNT_ERROR")
 
     def _fake_rmtree(path: Path, ignore_errors: bool = False) -> None:
         _ = (path, ignore_errors)
@@ -2148,11 +2153,33 @@ async def test_unix_local_client_delete_skips_rmtree_when_unmount_fails(
 
     monkeypatch.setattr(S3Mount, "unmount", _failing_unmount)
     monkeypatch.setattr(shutil, "rmtree", _fake_rmtree)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+    caplog.set_level(logging.WARNING)
 
     await client.delete(session)
 
     assert rmtree_called is False
     assert workspace_root.exists()
+
+    record = next(
+        record
+        for record in caplog.records
+        if "Failed to unmount UnixLocal workspace mount" in logging.Formatter().format(record)
+    )
+    mount_path = str(workspace_root / "SECRET_REMOTE_MOUNT")
+    if redacted:
+        assert record.msg == "%s"
+        assert record.args == ("Failed to unmount UnixLocal workspace mount before deleting root",)
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert "mount_path" not in record.__dict__
+        assert mount_path not in logging.Formatter().format(record)
+        assert "SECRET_UNMOUNT_ERROR" not in logging.Formatter().format(record)
+    else:
+        assert record.__dict__["mount_path"] == mount_path
+        assert record.exc_info is not None
+        assert record.exc_info[1] is not None
+        assert "SECRET_UNMOUNT_ERROR" in logging.Formatter().format(record)
 
     shutil.rmtree(workspace_root, ignore_errors=True)
 
