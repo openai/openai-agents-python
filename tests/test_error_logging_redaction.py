@@ -358,6 +358,30 @@ def test_shared_error_helper_conditionally_attaches_diagnostic_extra(
         assert record.__dict__["openai_agents_diagnostic_context"] == {"sandbox_id": _SECRET}
 
 
+def test_shared_error_helper_ignores_diagnostic_extra_failure(monkeypatch) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    test_logger = logging.Logger("sensitive-logging-diagnostic-extra-failure")
+    handler = _RecordingHandler()
+    test_logger.addHandler(handler)
+    error = RuntimeError("original failure")
+
+    def diagnostic_extra() -> dict[str, object]:
+        raise AttributeError("metadata failure")
+
+    log_tool_action_warning(
+        test_logger,
+        "Tool failed",
+        error,
+        diagnostic_extra=diagnostic_extra,
+    )
+
+    record = handler.records[0]
+    assert "openai_agents_diagnostic_context" not in record.__dict__
+    assert record.exc_info is not None
+    assert record.exc_info[1] is error
+    assert "original failure" in logging.Formatter().format(record)
+
+
 @pytest.mark.parametrize(
     "operation",
     [
@@ -493,16 +517,24 @@ async def test_approval_rejection_formatter_error_redacts_exception(monkeypatch,
     def boom(_args):
         raise ValueError("formatter blew up SECRET_FMT_123")
 
+    tool_name = "SECRET_FORMATTER_TOOL_NAME"
     result = await resolve_approval_rejection_message(
         context_wrapper=RunContextWrapper(context=None),
         run_config=RunConfig(tool_error_formatter=boom),
         tool_type="function",
-        tool_name="my_tool",
+        tool_name=tool_name,
         call_id="call_1",
     )
 
     assert isinstance(result, str) and result
-    assert "Tool error formatter failed for my_tool" in caplog.text
+    record = next(
+        record for record in caplog.records if "Tool error formatter failed" in record.getMessage()
+    )
+    assert record.msg == "%s"
+    assert record.args == ("Tool error formatter failed",)
+    assert record.exc_info is None
+    assert "openai_agents_diagnostic_context" not in record.__dict__
+    assert tool_name not in caplog.text
     assert "SECRET_FMT_123" not in caplog.text
 
 
@@ -516,12 +548,18 @@ async def test_approval_rejection_formatter_error_logs_full_when_enabled(
     def boom(_args):
         raise ValueError("formatter blew up SECRET_FMT_123")
 
+    tool_name = "diagnostic_tool"
     await resolve_approval_rejection_message(
         context_wrapper=RunContextWrapper(context=None),
         run_config=RunConfig(tool_error_formatter=boom),
         tool_type="function",
-        tool_name="my_tool",
+        tool_name=tool_name,
         call_id="call_1",
     )
 
+    record = next(
+        record for record in caplog.records if "Tool error formatter failed" in record.getMessage()
+    )
+    assert record.__dict__["openai_agents_diagnostic_context"] == {"tool_name": tool_name}
+    assert record.exc_info is not None
     assert "SECRET_FMT_123" in caplog.text

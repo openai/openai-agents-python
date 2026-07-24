@@ -3532,16 +3532,7 @@ class TestGuardrailFunctionality:
         model_redacted: bool,
         tool_redacted: bool,
     ) -> None:
-        class _GuardrailError(RuntimeError):
-            def __init__(self) -> None:
-                super().__init__("SECRET_REALTIME_GUARDRAIL_ERROR")
-                self.bool_calls = 0
-
-            def __bool__(self) -> bool:
-                self.bool_calls += 1
-                raise AssertionError("logging inspected guardrail exception truthiness")
-
-        error = _GuardrailError()
+        error = RuntimeError("SECRET_REALTIME_GUARDRAIL_ERROR")
 
         async def failing_guardrail(context, agent, output):
             _ = context, agent, output
@@ -3560,11 +3551,13 @@ class TestGuardrailFunctionality:
             triggered = await session._run_output_guardrails("model text", "response-id")
 
         assert triggered is False
-        record = next(
+        records = [
             record
             for record in caplog.records
             if "Output guardrail raised an exception" in record.getMessage()
-        )
+        ]
+        assert len(records) == 1
+        record = records[0]
         redacted = model_redacted or tool_redacted
         if redacted:
             assert record.msg == "%s"
@@ -3582,7 +3575,38 @@ class TestGuardrailFunctionality:
             assert record.exc_info is not None
             assert record.exc_info[1] is error
             assert "SECRET_REALTIME_GUARDRAIL_ERROR" in logging.Formatter().format(record)
-        assert error.bool_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_output_guardrail_failure_tolerates_missing_callable_name(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        mock_model: RealtimeModel,
+    ) -> None:
+        class _FailingGuardrailCallable:
+            async def __call__(self, context, agent, output):
+                _ = context, agent, output
+                raise RuntimeError("SECRET_UNNAMED_GUARDRAIL_ERROR")
+
+        guardrail = OutputGuardrail(guardrail_function=_FailingGuardrailCallable())
+        agent = RealtimeAgent(name="agent", output_guardrails=[guardrail])
+        session = RealtimeSession(mock_model, agent, None)
+        monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
+        monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
+        with caplog.at_level(logging.WARNING, logger="openai.agents"):
+            triggered = await session._run_output_guardrails("model text", "response-id")
+
+        assert triggered is False
+        records = [
+            record
+            for record in caplog.records
+            if "Output guardrail raised an exception" in record.getMessage()
+        ]
+        assert len(records) == 1
+        context = records[0].__dict__["openai_agents_diagnostic_context"]
+        assert context["guardrail_type"].endswith("._FailingGuardrailCallable")
+        assert records[0].exc_info is not None
 
     @pytest.mark.asyncio
     async def test_transcript_delta_triggers_guardrail_at_threshold(

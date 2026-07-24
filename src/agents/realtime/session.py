@@ -94,7 +94,15 @@ _BACKGROUND_TASK_CANCEL_GRACE_SECONDS = 1.0
 
 
 def _guardrail_diagnostic_extra(guardrail: Any) -> dict[str, object]:
-    return {"guardrail_name": guardrail.get_name()}
+    try:
+        return {"guardrail_name": guardrail.get_name()}
+    except Exception:
+        try:
+            guardrail_type = type(guardrail.guardrail_function)
+            type_name = f"{guardrail_type.__module__}.{guardrail_type.__qualname__}"
+        except Exception:
+            type_name = "unknown"
+        return {"guardrail_type": type_name}
 
 
 def _serialize_tool_output(output: Any) -> str:

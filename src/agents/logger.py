@@ -21,7 +21,10 @@ def _exception_info(
 def _log_record_extra(diagnostic_extra: _DiagnosticExtra | None) -> dict[str, object] | None:
     if diagnostic_extra is None:
         return None
-    return {_DIAGNOSTIC_CONTEXT_FIELD: dict(diagnostic_extra())}
+    try:
+        return {_DIAGNOSTIC_CONTEXT_FIELD: dict(diagnostic_extra())}
+    except Exception:
+        return None
 
 
 def _log_action_error(

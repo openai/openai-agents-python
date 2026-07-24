@@ -1041,14 +1041,29 @@ def format_shell_error(error: Exception | BaseException | Any) -> str:
         return repr(error)
 
 
-def log_tool_action_error(message: str, exc: Exception | BaseException) -> None:
+def _tool_name_diagnostic_extra(tool_name: str) -> dict[str, object]:
+    return {"tool_name": tool_name}
+
+
+def log_tool_action_error(
+    message: str,
+    exc: Exception | BaseException,
+    *,
+    diagnostic_extra: Callable[[], Mapping[str, object]] | None = None,
+) -> None:
     """Log a tool-action failure without leaking tool data.
 
     Tool exceptions can embed tool call arguments or output, so the exception is
     redacted by default (matching ``_debug.DONT_LOG_TOOL_DATA``). The full exception
     and traceback are logged only when tool-data logging is explicitly enabled.
     """
-    _log_tool_action_error(logger, message, exc, stacklevel=4)
+    _log_tool_action_error(
+        logger,
+        message,
+        exc,
+        stacklevel=4,
+        diagnostic_extra=diagnostic_extra,
+    )
 
 
 async def with_tool_function_span(
@@ -1198,7 +1213,11 @@ async def resolve_approval_rejection_message(
         )
         message = await maybe_message if inspect.isawaitable(maybe_message) else maybe_message
     except Exception as exc:
-        log_tool_action_error(f"Tool error formatter failed for {tool_name}", exc)
+        log_tool_action_error(
+            "Tool error formatter failed",
+            exc,
+            diagnostic_extra=functools.partial(_tool_name_diagnostic_extra, tool_name),
+        )
         return REJECTION_MESSAGE
 
     if message is None:
