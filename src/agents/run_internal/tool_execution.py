@@ -104,6 +104,7 @@ from .items import (
     extract_mcp_request_id,
     extract_mcp_request_id_from_run,
     function_rejection_item,
+    function_tool_error_output,
 )
 from .run_steps import ToolRunFunction
 from .tool_use_tracker import AgentToolUseTracker
@@ -1729,6 +1730,7 @@ class _FunctionToolBatchExecutor:
                             self.public_agent,
                             tool_call,
                             rejection_message=rejected_message,
+                            output_json_schema=func_tool.output_json_schema,
                             scope_id=self.tool_state_scope_id,
                             tool_origin=get_function_tool_origin(func_tool),
                         ),
@@ -1778,6 +1780,7 @@ class _FunctionToolBatchExecutor:
                 self.public_agent,
                 tool_call,
                 rejection_message=rejection_message,
+                output_json_schema=func_tool.output_json_schema,
                 scope_id=self.tool_state_scope_id,
                 tool_origin=get_function_tool_origin(func_tool),
             ),
@@ -1891,9 +1894,18 @@ class _FunctionToolBatchExecutor:
         bypass_output_schema = bypass_output_schema or (output_guardrail_result.is_rejection)
         if bypass_output_schema:
             self.schema_bypassed_tool_runs.add(id(task_state.tool_run))
+        provider_result = (
+            function_tool_error_output(
+                tool_call,
+                final_result,
+                output_json_schema=func_tool.output_json_schema,
+            )
+            if bypass_output_schema
+            else final_result
+        )
         raw_output_item = ItemHelpers.tool_call_output_item(
             tool_call,
-            final_result,
+            provider_result,
             output_json_schema=None if bypass_output_schema else func_tool.output_json_schema,
             output_type_adapter=None if bypass_output_schema else func_tool._output_type_adapter,
         )
@@ -2012,11 +2024,20 @@ class _FunctionToolBatchExecutor:
 
             run_item: RunItem | None
             if not nested_interruptions:
+                provider_result = (
+                    function_tool_error_output(
+                        tool_run.tool_call,
+                        result,
+                        output_json_schema=tool_run.function_tool.output_json_schema,
+                    )
+                    if bypass_output_schema
+                    else result
+                )
                 run_item = ToolCallOutputItem(
                     output=result,
                     raw_item=ItemHelpers.tool_call_output_item(
                         tool_run.tool_call,
-                        result,
+                        provider_result,
                         output_json_schema=(
                             None
                             if bypass_output_schema

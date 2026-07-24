@@ -1934,7 +1934,7 @@ async def test_typed_programmatic_tool_preserves_input_guardrail_rejection() -> 
     assert result.final_output == "request rejected"
     function_outputs = _function_output_raw_items(result)
     assert len(function_outputs) == 1
-    assert function_outputs[0]["output"] == "inventory lookup blocked"
+    assert json.loads(function_outputs[0]["output"]) == {"error": "inventory lookup blocked"}
     assert _caller_dict(function_outputs[0]["caller"]) == PROGRAM_CALLER
 
 
@@ -1964,8 +1964,9 @@ async def test_typed_programmatic_tool_preserves_default_timeout_result() -> Non
     assert result.final_output == "request timed out"
     function_outputs = _function_output_raw_items(result)
     assert len(function_outputs) == 1
-    assert isinstance(function_outputs[0]["output"], str)
-    assert "timed out" in function_outputs[0]["output"].lower()
+    timeout_output = json.loads(function_outputs[0]["output"])
+    assert isinstance(timeout_output, dict)
+    assert "timed out" in timeout_output["error"].lower()
     assert _caller_dict(function_outputs[0]["caller"]) == PROGRAM_CALLER
 
 
@@ -2001,12 +2002,23 @@ async def test_typed_programmatic_tool_preserves_output_guardrail_rejection() ->
     assert result.final_output == "request rejected"
     function_outputs = _function_output_raw_items(result)
     assert len(function_outputs) == 1
-    assert function_outputs[0]["output"] == "inventory result blocked"
+    assert json.loads(function_outputs[0]["output"]) == {"error": "inventory result blocked"}
     assert _caller_dict(function_outputs[0]["caller"]) == PROGRAM_CALLER
 
 
 @pytest.mark.asyncio
-async def test_typed_programmatic_tool_preserves_approval_rejection() -> None:
+@pytest.mark.parametrize("streaming", [False, True], ids=["nonstreaming", "streaming"])
+@pytest.mark.parametrize("serialize_state", [False, True], ids=["in-memory", "serialized"])
+@pytest.mark.parametrize(
+    "rejection_message",
+    [None, 'Denied: "東京"'],
+    ids=["default-rejection", "custom-rejection"],
+)
+async def test_typed_programmatic_tool_preserves_approval_rejection(
+    streaming: bool,
+    serialize_state: bool,
+    rejection_message: str | None,
+) -> None:
     model = FakeModel()
     model.add_multiple_turn_outputs(
         [
@@ -2024,18 +2036,40 @@ async def test_typed_programmatic_tool_preserves_approval_rejection() -> None:
         model=model,
         tools=[ProgrammaticToolCallingTool(), lookup_inventory],
     )
-    first_result = await Runner.run(agent, "Check inventory")
+    first_result: Any
+    if streaming:
+        first_result = Runner.run_streamed(agent, "Check inventory")
+        async for _event in first_result.stream_events():
+            pass
+    else:
+        first_result = await Runner.run(agent, "Check inventory")
     assert len(first_result.interruptions) == 1
 
     state = first_result.to_state()
-    state.reject(first_result.interruptions[0])
-    result = await Runner.run(agent, state)
+    if serialize_state:
+        state = await RunState.from_json(agent, state.to_json())
+    state.reject(state.get_interruptions()[0], rejection_message=rejection_message)
+    result: Any
+    if streaming:
+        result = Runner.run_streamed(agent, state)
+        async for _event in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, state)
 
     assert result.final_output == "request rejected"
     function_outputs = _function_output_raw_items(result)
     assert len(function_outputs) == 1
-    assert function_outputs[0]["output"] == "Tool execution was not approved."
+    expected_message = rejection_message or "Tool execution was not approved."
+    assert json.loads(function_outputs[0]["output"]) == {"error": expected_message}
     assert _caller_dict(function_outputs[0]["caller"]) == PROGRAM_CALLER
+    assert model.last_turn_args is not None
+    replayed_output = next(
+        item
+        for item in model.last_turn_args["input"]
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    )
+    assert json.loads(replayed_output["output"]) == {"error": expected_message}
 
 
 @pytest.mark.asyncio
@@ -2199,7 +2233,7 @@ async def test_typed_programmatic_tool_preserves_pre_approval_guardrail_rejectio
     assert result.final_output == "request rejected"
     function_outputs = _function_output_raw_items(result)
     assert len(function_outputs) == 1
-    assert function_outputs[0]["output"] == "inventory lookup blocked"
+    assert json.loads(function_outputs[0]["output"]) == {"error": "inventory lookup blocked"}
     assert _caller_dict(function_outputs[0]["caller"]) == PROGRAM_CALLER
 
 

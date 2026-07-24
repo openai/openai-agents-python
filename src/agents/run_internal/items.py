@@ -75,6 +75,7 @@ __all__ = [
     "deduplicate_input_items",
     "deduplicate_input_items_preferring_latest",
     "strip_internal_input_item_metadata",
+    "function_tool_error_output",
     "function_rejection_item",
     "shell_rejection_item",
     "apply_patch_rejection_item",
@@ -733,22 +734,49 @@ def deduplicate_input_items_preferring_latest(
     return list(reversed(deduplicate_input_items(list(reversed(items)))))
 
 
+def function_tool_error_output(
+    tool_call: Any,
+    output: Any,
+    *,
+    output_json_schema: dict[str, Any] | None,
+) -> Any:
+    """Encode SDK-generated programmatic tool errors as provider-compatible JSON objects."""
+    if output_json_schema is None or not isinstance(output, str):
+        return output
+
+    if isinstance(tool_call, dict):
+        caller = tool_call.get("caller")
+    else:
+        caller = getattr(tool_call, "caller", None)
+    caller_type = caller.get("type") if isinstance(caller, dict) else getattr(caller, "type", None)
+    if caller_type != "program":
+        return output
+
+    return json.dumps({"error": output}, ensure_ascii=False, separators=(",", ":"))
+
+
 def function_rejection_item(
     agent: Any,
     tool_call: Any,
     *,
     rejection_message: str = REJECTION_MESSAGE,
+    output_json_schema: dict[str, Any] | None = None,
     scope_id: str | None = None,
     tool_origin: Any = None,
 ) -> ToolCallOutputItem:
     """Build a ToolCallOutputItem representing a rejected function tool call."""
     if isinstance(tool_call, ResponseFunctionToolCall):
         drop_agent_tool_run_result(tool_call, scope_id=scope_id)
+    provider_output = function_tool_error_output(
+        tool_call,
+        rejection_message,
+        output_json_schema=output_json_schema,
+    )
     return ToolCallOutputItem(
         output=rejection_message,
         raw_item=ItemHelpers.tool_call_output_item(
             tool_call,
-            rejection_message,
+            provider_output,
         ),
         agent=agent,
         tool_origin=tool_origin,

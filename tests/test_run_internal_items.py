@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from typing import Any, cast
 
 import pytest
@@ -9,6 +10,7 @@ from openai.types.responses import (
     ResponseToolSearchCall,
     ResponseToolSearchOutputItem,
 )
+from openai.types.responses.response_function_tool_call import CallerProgram
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 from agents import Agent
@@ -25,6 +27,51 @@ from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.result import RunResult
 from agents.run_context import RunContextWrapper
 from agents.run_internal import items as run_items
+
+
+@pytest.mark.parametrize("mapping_call", [False, True], ids=["typed-call", "mapping-call"])
+def test_programmatic_structured_tool_errors_are_encoded_as_json_objects(
+    mapping_call: bool,
+) -> None:
+    caller = {"type": "program", "caller_id": "program-42"}
+    tool_call: Any
+    if mapping_call:
+        tool_call = {"type": "function_call", "call_id": "call-42", "caller": caller}
+    else:
+        tool_call = ResponseFunctionToolCall(
+            type="function_call",
+            call_id="call-42",
+            name="lookup",
+            arguments="{}",
+            caller=CallerProgram(type="program", caller_id="program-42"),
+        )
+
+    output = run_items.function_tool_error_output(
+        tool_call,
+        'Rejected: "東京"',
+        output_json_schema={"type": "object"},
+    )
+
+    assert json.loads(output) == {"error": 'Rejected: "東京"'}
+
+
+@pytest.mark.parametrize("caller", [None, {"type": "direct"}], ids=["no-caller", "direct"])
+@pytest.mark.parametrize("has_schema", [False, True], ids=["untyped", "typed"])
+def test_direct_function_tool_errors_preserve_plain_text(
+    caller: dict[str, str] | None,
+    has_schema: bool,
+) -> None:
+    tool_call: dict[str, Any] = {"type": "function_call", "call_id": "call-42"}
+    if caller is not None:
+        tool_call["caller"] = caller
+
+    output = run_items.function_tool_error_output(
+        tool_call,
+        "Request rejected.",
+        output_json_schema={"type": "object"} if has_schema else None,
+    )
+
+    assert output == "Request rejected."
 
 
 def test_drop_orphan_function_calls_preserves_non_mapping_entries() -> None:

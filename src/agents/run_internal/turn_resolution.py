@@ -1051,6 +1051,7 @@ async def resolve_interrupted_turn(
                 public_agent,
                 tool_call,
                 rejection_message=rejection_message,
+                output_json_schema=function_tool.output_json_schema,
                 scope_id=tool_state_scope_id,
                 tool_origin=get_function_tool_origin(function_tool),
             )
