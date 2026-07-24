@@ -817,11 +817,11 @@ async def test_memory_capability_injects_truncated_memory_summary(
 
     try:
         async with session:
-            monkeypatch.setattr(memory_module, "_MEMORY_SUMMARY_MAX_TOKENS", 1)
+            monkeypatch.setattr(memory_module, "_MEMORY_SUMMARY_MAX_TOKENS", 8)
             await session.mkdir("memories", parents=True)
             await session.write(
                 Path("memories/memory_summary.md"),
-                io.BytesIO(b"abcdefg"),
+                io.BytesIO(b"abcdefghijklmnopqrstuvwxyz" * 2),
             )
             capability.bind(session)
 

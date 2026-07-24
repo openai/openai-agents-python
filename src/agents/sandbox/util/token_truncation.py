@@ -40,6 +40,9 @@ def formatted_truncate_text(content: str, policy: TruncationPolicy) -> str:
     if _byte_len(content) <= policy.byte_budget():
         return content
     total_lines = len(content.splitlines())
+    if policy.mode == "tokens":
+        prefix = f"Total output lines: {total_lines}\n\n"
+        return _truncate_token_output(content, policy, prefix=prefix)
     result = truncate_text(content, policy)
     return f"Total output lines: {total_lines}\n\n{result}"
 
@@ -61,9 +64,10 @@ def formatted_truncate_text_with_token_count(
     if _byte_len(content) <= policy.byte_budget():
         return content, None
 
-    truncated, original_token_count = truncate_with_token_budget(content, policy)
     total_lines = len(content.splitlines())
-    return f"Total output lines: {total_lines}\n\n{truncated}", original_token_count
+    prefix = f"Total output lines: {total_lines}\n\n"
+    truncated = _truncate_token_output(content, policy, prefix=prefix)
+    return truncated, approx_token_count(content)
 
 
 def truncate_with_token_budget(s: str, policy: TruncationPolicy) -> tuple[str, int | None]:
@@ -75,11 +79,42 @@ def truncate_with_token_budget(s: str, policy: TruncationPolicy) -> tuple[str, i
     if max_tokens > 0 and byte_len <= approx_bytes_for_tokens(max_tokens):
         return s, None
 
-    truncated = truncate_with_byte_estimate(s, policy)
     approx_total = approx_token_count(s)
+    truncated = _truncate_token_output(s, policy)
     if truncated == s:
         return truncated, None
     return truncated, approx_total
+
+
+def _truncate_token_output(content: str, policy: TruncationPolicy, *, prefix: str = "") -> str:
+    max_bytes = policy.byte_budget()
+    if max_bytes == 0:
+        return ""
+
+    source_bytes = content.encode("utf-8")
+    marker = format_truncation_marker(policy, approx_token_count(content))
+
+    if _byte_len(prefix) + _byte_len(marker) > max_bytes:
+        prefix = ""
+
+    content_budget = max_bytes - _byte_len(prefix) - _byte_len(marker)
+    if content_budget < 0:
+        return _truncate_utf8(marker, max_bytes)
+
+    left_budget, right_budget = split_budget(content_budget)
+    _, left, right = split_string(content, left_budget, right_budget)
+    retained_bytes = _byte_len(left) + _byte_len(right)
+    removed_bytes = len(source_bytes) - retained_bytes
+    removed_chars = len(content) - len(left) - len(right)
+    marker = format_truncation_marker(
+        policy,
+        removed_units_for_source(policy, removed_bytes, removed_chars),
+    )
+    return assemble_truncated_output(f"{prefix}{left}", right, marker)
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
 
 
 def truncate_with_byte_estimate(s: str, policy: TruncationPolicy) -> str:

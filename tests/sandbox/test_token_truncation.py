@@ -40,6 +40,16 @@ def test_formatted_truncate_text_adds_line_count_when_truncated() -> None:
     assert "chars truncated" in result
 
 
+def test_formatted_truncate_text_keeps_token_metadata_within_budget() -> None:
+    content = "\n".join(f"line {index}: {('value ' * 8).strip()}" for index in range(20))
+
+    result = formatted_truncate_text(content, TruncationPolicy.tokens(32))
+
+    assert result.startswith("Total output lines: 20\n\n")
+    assert "tokens truncated" in result
+    assert approx_token_count(result) <= 32
+
+
 def test_formatted_truncate_text_with_token_count_handles_none_and_short_content() -> None:
     assert formatted_truncate_text_with_token_count("short", None) == ("short", None)
     assert formatted_truncate_text_with_token_count("short", 10) == ("short", None)
@@ -48,19 +58,47 @@ def test_formatted_truncate_text_with_token_count_handles_none_and_short_content
 def test_formatted_truncate_text_with_token_count_reports_original_count() -> None:
     result, original_token_count = formatted_truncate_text_with_token_count("abcdefghi", 1)
 
-    assert result.startswith("Total output lines: 1\n\n")
-    assert "tokens truncated" in result
+    assert approx_token_count(result) <= 1
     assert original_token_count == approx_token_count("abcdefghi")
+
+
+def test_formatted_truncate_text_with_token_count_keeps_metadata_within_budget() -> None:
+    content = "\n".join(f"line {index}: {('value ' * 8).strip()}" for index in range(20))
+
+    result, original_token_count = formatted_truncate_text_with_token_count(content, 32)
+
+    assert result.startswith("Total output lines: 20\n\n")
+    assert "tokens truncated" in result
+    assert approx_token_count(result) <= 32
+    assert original_token_count == approx_token_count(content)
 
 
 def test_truncate_text_dispatches_byte_and_token_modes() -> None:
     assert truncate_text("abcdef", TruncationPolicy.bytes(4)).startswith("a")
-    assert "tokens truncated" in truncate_text("abcdefghi", TruncationPolicy.tokens(1))
+    token_result = truncate_text("abcdefghijklmnopqrstuvwxyz" * 2, TruncationPolicy.tokens(8))
+    assert "tokens truncated" in token_result
+    assert approx_token_count(token_result) <= 8
 
 
 def test_truncate_with_token_budget_handles_empty_and_short_content() -> None:
     assert truncate_with_token_budget("", TruncationPolicy.tokens(1)) == ("", None)
     assert truncate_with_token_budget("abc", TruncationPolicy.tokens(1)) == ("abc", None)
+
+
+def test_truncate_with_token_budget_includes_marker_within_budget() -> None:
+    content = "abcdefghijklmnopqrstuvwxyz" * 2
+    result, original_token_count = truncate_with_token_budget(content, TruncationPolicy.tokens(8))
+
+    assert "tokens truncated" in result
+    assert approx_token_count(result) <= 8
+    assert original_token_count == approx_token_count(content)
+
+
+def test_formatted_truncate_text_with_zero_token_budget_returns_empty_payload() -> None:
+    result, original_token_count = formatted_truncate_text_with_token_count("content", 0)
+
+    assert result == ""
+    assert original_token_count == approx_token_count("content")
 
 
 def test_truncate_with_byte_estimate_handles_empty_zero_and_short_content() -> None:

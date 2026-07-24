@@ -469,8 +469,7 @@ class TestShellCapability:
             "Process exited with code 7\n"
             "Original token count: 6\n"
             "Output:\n"
-            "Total output lines: 2\n\n"
-            "stdo…4 tokens truncated… pwd"
+            "…6 tok"
         )
 
     @pytest.mark.asyncio
