@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import sys
+from collections.abc import MutableMapping
 
 import pytest
 
@@ -12,6 +14,32 @@ from agents.tracing.provider import DefaultTraceProvider
 from agents.tracing.setup import set_trace_provider
 
 from .testing_processor import SPAN_PROCESSOR_TESTING
+
+_PROXY_ENVIRONMENT_VARIABLES = (
+    "ALL_PROXY",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+)
+_PROXY_OPT_IN_ENVIRONMENT_VARIABLE = "OPENAI_AGENTS_TEST_USE_PROXY"
+
+
+def _remove_ambient_proxy_environment(environment: MutableMapping[str, str]) -> None:
+    """Keep unit tests independent from host proxy configuration."""
+    if environment.get(_PROXY_OPT_IN_ENVIRONMENT_VARIABLE, "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return
+
+    for variable in _PROXY_ENVIRONMENT_VARIABLES:
+        environment.pop(variable, None)
+
+
+_remove_ambient_proxy_environment(os.environ)
 
 collect_ignore: list[str] = []
 
@@ -50,8 +78,6 @@ def setup_span_processor():
 # monkeypatch.delenv("OPENAI_API_KEY", ...) to remove it locally.
 @pytest.fixture(scope="session", autouse=True)
 def ensure_openai_api_key():
-    import os
-
     if not os.environ.get("OPENAI_API_KEY"):
         os.environ["OPENAI_API_KEY"] = "test_key"
 
