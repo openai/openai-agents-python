@@ -55,6 +55,62 @@ tests-parallel:
 tests-serial:
 	uv run pytest -m serial
 
+.PHONY: integration-tests
+integration-tests:
+	uv run python .github/scripts/run_integration_tests.py --profile full $(filter --all,$(MAKECMDGOALS))
+
+.PHONY: integration-tests-release
+integration-tests-release:
+	uv run python .github/scripts/run_integration_tests.py --profile release $(filter --all,$(MAKECMDGOALS))
+
+.PHONY: integration-tests-nightly
+integration-tests-nightly:
+	uv run python .github/scripts/run_integration_tests.py --profile nightly $(filter --all,$(MAKECMDGOALS))
+
+.PHONY: integration-tests-manual
+integration-tests-manual:
+	uv run python .github/scripts/run_integration_tests.py --profile manual $(filter --all,$(MAKECMDGOALS))
+
+.PHONY: integration-tests-packaging
+integration-tests-packaging:
+	uv run python .github/scripts/run_integration_tests.py --profile packaging
+
+.PHONY: integration-tests-core
+integration-tests-core:
+	uv run python .github/scripts/run_integration_tests.py --profile core
+
+.PHONY: integration-tests-providers
+integration-tests-providers:
+	uv run python .github/scripts/run_integration_tests.py --profile providers $(filter --all,$(MAKECMDGOALS))
+
+.PHONY: integration-tests-providers-external
+integration-tests-providers-external:
+	OPENAI_AGENTS_INTEGRATION_EXTERNAL_PROVIDERS=1 uv run python .github/scripts/run_integration_tests.py --profile providers $(filter --all,$(MAKECMDGOALS))
+
+.PHONY: integration-tests-providers-all
+integration-tests-providers-all:
+	uv run python .github/scripts/run_integration_tests.py --profile providers --all
+
+.PHONY: --all
+--all:
+	@:
+
+.PHONY: integration-tests-realtime
+integration-tests-realtime:
+	uv run python .github/scripts/run_integration_tests.py --profile realtime
+
+.PHONY: integration-tests-voice
+integration-tests-voice:
+	uv run python .github/scripts/run_integration_tests.py --profile voice
+
+.PHONY: integration-tests-hosted
+integration-tests-hosted:
+	uv run python .github/scripts/run_integration_tests.py --profile hosted
+
+.PHONY: integration-tests-extras
+integration-tests-extras:
+	uv run python .github/scripts/run_integration_tests.py --profile extras
+
 .PHONY: coverage
 coverage:
 	

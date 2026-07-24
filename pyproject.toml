@@ -103,6 +103,15 @@ agents = { workspace = true }
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+exclude = [
+    "/.agents",
+    "/.github",
+    "/.tmp*",
+    "/.uv*",
+    "/integration_tests",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/agents"]
 
