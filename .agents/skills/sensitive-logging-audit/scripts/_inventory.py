@@ -41,6 +41,7 @@ KNOWN_HELPERS = {
 }
 SENSITIVE_HELPER_METHODS = {name.rsplit(".", 1)[-1] for name in KNOWN_HELPERS}
 RAW_MODULE_METHODS = {
+    "builtins": {"print"},
     "pprint": {"pprint"},
     "traceback": {"print_exc", "print_exception"},
     "warnings": {"warn", "warn_explicit"},
@@ -61,6 +62,8 @@ COMPARISON_CLASSIFICATION_FIELDS = (
     "policy",
     "catch_value",
 )
+
+DefinitionValue = ast.AST | frozenset[str] | None
 
 
 def _is_sdk_logger_module_or_parent(module: str) -> bool:
@@ -250,11 +253,12 @@ class Facts:
         self.node_scopes: dict[ast.AST, ast.AST] = {}
         self.scope_parents: dict[ast.AST, ast.AST | None] = {tree: None}
         self.parents = make_parent_map(tree)
-        self.definitions = list(iter_definitions(tree))
-        self.definition_values: dict[ast.AST, dict[str, list[tuple[ast.AST, ast.AST | None]]]] = (
+        self.definitions: list[tuple[ast.AST, list[tuple[str, DefinitionValue]]]] = [
+            (definition, list(targets)) for definition, targets in iter_definitions(tree)
+        ]
+        self.definition_values: dict[ast.AST, dict[str, list[tuple[ast.AST, DefinitionValue]]]] = (
             defaultdict(lambda: defaultdict(list))
         )
-        self.import_policy_values: dict[ast.AST, dict[str, set[str]]] = defaultdict(dict)
         self._policy_lookup_stack: set[tuple[int, str]] = set()
         self.module_name, self.package_name = module_identity(file_path)
         self._index_scopes(tree)
@@ -351,6 +355,11 @@ class Facts:
             definitions = self.definition_values[scope].get(key, [])
             if definitions:
                 if scope is not use_scope:
+                    if all(isinstance(value, frozenset) for _, value in definitions):
+                        _, imported_facts = max(
+                            definitions, key=lambda item: self._node_position(item[0])
+                        )
+                        return set(imported_facts)
                     return set()
                 preceding = [
                     definition
@@ -364,6 +373,8 @@ class Facts:
                     return set()
                 if value is None:
                     return set()
+                if isinstance(value, frozenset):
+                    return set(value)
                 self._policy_lookup_stack.add(token)
                 try:
                     return {
@@ -374,9 +385,6 @@ class Facts:
                 finally:
                     self._policy_lookup_stack.remove(token)
 
-            imported = self.import_policy_values[scope].get(key)
-            if imported is not None:
-                return set(imported)
             if root in self.bindings[scope]:
                 return set()
             scope = self.scope_parents[scope]
@@ -433,7 +441,14 @@ class Facts:
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     bound = alias.asname or alias.name.split(".", 1)[0]
-                    if alias.name in {"logging", "pprint", "sys", "traceback", "warnings"}:
+                    if alias.name in {
+                        "builtins",
+                        "logging",
+                        "pprint",
+                        "sys",
+                        "traceback",
+                        "warnings",
+                    }:
                         self.add(scope, bound, {f"module:{alias.name}"})
                     elif alias.name == POLICY_MODULE:
                         self.add(
@@ -459,7 +474,7 @@ class Facts:
                             facts.add("factory:logger")
                         elif alias.name in LOG_METHODS:
                             facts.add(f"method:logger:{alias.name}")
-                        elif alias.name == "Logger":
+                        elif alias.name in {"Logger", "LoggerAdapter"}:
                             facts.add("type:logger")
                     if module == "functools" and alias.name == "partial":
                         facts.add("factory:partial")
@@ -473,7 +488,9 @@ class Facts:
                         policy = POLICY_NAMES[alias.name]
                         policy_facts = {f"policy:{policy}", f"policy-exact:{policy}"}
                         facts.update(policy_facts)
-                        self.import_policy_values[scope][bound] = policy_facts
+                        policy_value = frozenset(policy_facts)
+                        self.definitions.append((node, [(bound, policy_value)]))
+                        self.definition_values[scope][bound].append((node, policy_value))
                     if full_name in KNOWN_HELPERS:
                         facts.add(f"helper:{KNOWN_HELPERS[full_name]}")
                     if module in RAW_MODULE_METHODS and alias.name in RAW_MODULE_METHODS[module]:
@@ -496,7 +513,7 @@ class Facts:
                 if fact == "module:logging":
                     if node.attr == "getLogger":
                         result.add("factory:logger")
-                    elif node.attr == "Logger":
+                    elif node.attr in {"Logger", "LoggerAdapter"}:
                         result.add("type:logger")
                     elif node.attr in LOG_METHODS:
                         result.add(f"method:logger:{node.attr}")
@@ -584,7 +601,10 @@ class Facts:
             for definition, targets in self.definitions:
                 scope = self._scope_for(definition)
                 for key, value in targets:
-                    inferred = self.infer(value) if value is not None else set()
+                    if isinstance(value, frozenset):
+                        inferred = value
+                    else:
+                        inferred = self.infer(value) if value is not None else set()
                     changed |= self.add(scope, key, inferred)
 
     def _seed_special_attributes(self, tree: ast.Module) -> None:
@@ -789,6 +809,11 @@ def call_site_context(node: ast.AST, parents: Mapping[ast.AST, ast.AST], source:
                     index for index, argument in enumerate(current.args) if argument is child
                 )
                 parts.append(f"callback:{normalize_node(current.func, source)}:{argument_index}")
+            elif isinstance(child, ast.keyword) and child in current.keywords:
+                keyword_name = child.arg if child.arg is not None else "**"
+                parts.append(
+                    f"callback:{normalize_node(current.func, source)}:keyword:{keyword_name}"
+                )
         child = current
         current = parents.get(current)
     return ">".join(reversed(parts)) or "<module>"

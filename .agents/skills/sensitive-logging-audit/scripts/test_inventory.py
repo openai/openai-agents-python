@@ -147,6 +147,46 @@ qualified_emit(secret)
             [("logger", "error"), ("logger", "warning")],
         )
 
+    def test_recognizes_logger_adapter_sources(self) -> None:
+        findings = inventory_source(
+            """
+import logging
+from logging import LoggerAdapter
+
+base = logging.getLogger("base")
+direct = LoggerAdapter(base, {})
+direct_emit = direct.error
+direct_emit(secret)
+qualified = logging.LoggerAdapter(base, {})
+qualified_emit = qualified.warning
+qualified_emit(secret)
+"""
+        )
+
+        self.assertEqual(
+            [(item.kind, item.method) for item in findings],
+            [("logger", "error"), ("logger", "warning")],
+        )
+
+    def test_inventories_print_through_builtins_imports(self) -> None:
+        findings = inventory_source(
+            """
+import builtins
+from builtins import print as emit
+
+builtins.print(secret)
+emit(secret)
+"""
+        )
+
+        self.assertEqual(
+            [(item.kind, item.method, item.shape) for item in findings],
+            [
+                ("raw-output", "builtins.print", "dynamic-message"),
+                ("raw-output", "builtins.print", "dynamic-message"),
+            ],
+        )
+
     def test_resolves_helpers_through_qualified_sdk_logger_imports(self) -> None:
         findings = inventory_source(
             """
@@ -453,6 +493,36 @@ def report(values, manager, secret):
 
         self.assertEqual([item.policy for item in findings], ["none", "none"])
 
+    def test_policy_imports_are_ordered_definitions(self) -> None:
+        findings = inventory_source(
+            """
+from agents.logger import logger
+
+def report(flag, secret):
+    if not flag:
+        logger.error("before import: %s", secret)
+    from agents._debug import DONT_LOG_TOOL_DATA as flag
+    if not flag:
+        logger.error("after import: %s", secret)
+"""
+        )
+
+        self.assertEqual([item.policy for item in findings], ["none", "tool-guard"])
+
+    def test_module_policy_import_still_reaches_nested_function(self) -> None:
+        findings = inventory_source(
+            """
+from agents._debug import DONT_LOG_TOOL_DATA as flag
+from agents.logger import logger
+
+def report(secret):
+    if not flag:
+        logger.error("guarded: %s", secret)
+"""
+        )
+
+        self.assertEqual([item.policy for item in findings], ["tool-guard"])
+
     def test_match_pattern_captures_kill_policy_alias_provenance(self) -> None:
         findings = inventory_source(
             """
@@ -700,6 +770,23 @@ register(on_error=logger.error, writer=sys.stderr.write)
             [(item.kind, item.method) for item in findings],
             [("logger-callback", "error"), ("raw-output-callback", "stderr.write")],
         )
+
+    def test_keyword_callback_fingerprints_include_registration_context(self) -> None:
+        findings = inventory_source(
+            """
+from agents.logger import logger
+
+register_model(on_error=logger.error)
+register_operational(on_error=logger.error)
+register_model(on_warning=logger.error)
+"""
+        )
+
+        self.assertEqual(len(findings), 3)
+        self.assertEqual(len({item.group_fingerprint for item in findings}), 3)
+        self.assertIn("callback:register_model:keyword:on_error", findings[0].context)
+        self.assertIn("callback:register_operational:keyword:on_error", findings[1].context)
+        self.assertIn("callback:register_model:keyword:on_warning", findings[2].context)
 
     def test_source_collection_ignores_hidden_paths_only_below_the_scan_root(self) -> None:
         with TemporaryDirectory() as temp_dir:
