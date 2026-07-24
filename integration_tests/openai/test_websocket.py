@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
 import pytest
 
 from agents import (
@@ -9,14 +12,30 @@ from agents import (
     responses_websocket_session,
 )
 from agents.decorators import tool
+from agents.models.openai_responses import OpenAIResponsesWSModel
 
 pytestmark = [pytest.mark.core, pytest.mark.nightly]
 
 
 async def test_responses_websocket_session_reuses_a_connection_across_tool_turns(
-    integration_model: str,
+    integration_model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[str] = []
+    opened_connections: list[Any] = []
+    original_open = OpenAIResponsesWSModel._open_websocket_connection
+
+    async def capture_connection(
+        model: OpenAIResponsesWSModel,
+        url: str,
+        headers: Mapping[str, str],
+        *,
+        connect_timeout: float | None,
+    ) -> Any:
+        connection = await original_open(model, url, headers, connect_timeout=connect_timeout)
+        opened_connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(OpenAIResponsesWSModel, "_open_websocket_connection", capture_connection)
 
     @tool
     def lookup_checkpoint(name: str) -> str:
@@ -50,3 +69,4 @@ async def test_responses_websocket_session_reuses_a_connection_across_tool_turns
     assert "raw_response_event" in event_types
     assert first.context_wrapper.usage.total_tokens > 0
     assert second.context_wrapper.usage.total_tokens > 0
+    assert len(opened_connections) == 1

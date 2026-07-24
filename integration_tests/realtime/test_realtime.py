@@ -344,7 +344,9 @@ async def test_realtime_function_tool_approval_controls_side_effects(
                             event.call_id,
                             rejection_message="Publishing the checkpoint was rejected.",
                         )
-                if event.type == "agent_end" and approvals:
+                if approved and event.type == "tool_end" and approvals:
+                    return
+                if not approved and event.type == "agent_end" and approvals:
                     return
 
         await asyncio.wait_for(receive(), timeout=60)

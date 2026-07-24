@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from openai.resources.responses import AsyncResponses
 from pydantic import BaseModel
 
 from agents import (
@@ -137,8 +138,16 @@ async def test_streaming_structured_output_preserves_nested_optional_fields(
 
 
 async def test_explicit_prompt_cache_settings_reach_the_live_responses_api(
-    integration_model: str,
+    integration_model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    captured_requests: list[dict[str, Any]] = []
+    original_create = AsyncResponses.create
+
+    async def capture_request(responses: AsyncResponses, *args: Any, **kwargs: Any) -> Any:
+        captured_requests.append(kwargs)
+        return await original_create(responses, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncResponses, "create", capture_request)
     prefix = " ".join(f"release-checkpoint-{index}" for index in range(1100))
     agent = Agent(
         name="Packaged prompt caching agent",
@@ -172,3 +181,9 @@ async def test_explicit_prompt_cache_settings_reach_the_live_responses_api(
 
     assert result.final_output == "PROMPT_CACHE_READY"
     assert result.context_wrapper.usage.input_tokens > 0
+    assert len(captured_requests) == 1
+    assert captured_requests[0]["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
+    assert captured_requests[0]["prompt_cache_key"] == "packaged-integration-explicit-cache"
+    assert captured_requests[0]["input"][0]["content"][0]["prompt_cache_breakpoint"] == {
+        "mode": "explicit"
+    }

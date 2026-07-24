@@ -60,6 +60,91 @@ def test_openai_backed_provider_tests_require_an_openai_api_key(
         pytest_runtest_setup(cast(pytest.Item, item))
 
 
+@pytest.mark.parametrize(
+    ("fixture_name", "model_environment", "model_name", "credential_name"),
+    [
+        (
+            "any_llm_models",
+            "OPENAI_AGENTS_INTEGRATION_ANY_LLM_MODELS",
+            "openrouter/openai/gpt-5.6-luna",
+            "OPENROUTER_API_KEY",
+        ),
+        (
+            "any_llm_models",
+            "OPENAI_AGENTS_INTEGRATION_ANY_LLM_MODELS",
+            "anthropic/claude-sonnet-5",
+            "ANTHROPIC_API_KEY",
+        ),
+        (
+            "any_llm_models",
+            "OPENAI_AGENTS_INTEGRATION_ANY_LLM_MODELS",
+            "gemini/gemini-3.6-flash",
+            "GEMINI_API_KEY",
+        ),
+        (
+            "litellm_models",
+            "OPENAI_AGENTS_INTEGRATION_LITELLM_MODELS",
+            "openrouter/google/gemini-3.6-flash",
+            "OPENROUTER_API_KEY",
+        ),
+        (
+            "litellm_models",
+            "OPENAI_AGENTS_INTEGRATION_LITELLM_MODELS",
+            "gemini/gemini-3.6-flash",
+            "GOOGLE_API_KEY",
+        ),
+    ],
+)
+def test_configured_provider_models_use_provider_specific_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    fixture_name: str,
+    model_environment: str,
+    model_name: str,
+    credential_name: str,
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(model_environment, model_name)
+    monkeypatch.setenv(credential_name, "provider-test-key")
+    monkeypatch.setenv("OPENAI_AGENTS_INTEGRATION_STRICT", "1")
+    item = SimpleNamespace(
+        fixturenames=[fixture_name],
+        get_closest_marker=lambda name: name == "providers",
+    )
+
+    pytest_runtest_setup(cast(pytest.Item, item))
+
+
+def test_configured_provider_models_require_their_own_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_AGENTS_INTEGRATION_ANY_LLM_MODELS", "openrouter/openai/gpt-5.6-luna")
+    monkeypatch.setenv("OPENAI_AGENTS_INTEGRATION_STRICT", "1")
+    item = SimpleNamespace(
+        fixturenames=["any_llm_models"],
+        get_closest_marker=lambda name: name == "providers",
+    )
+
+    with pytest.raises(pytest.fail.Exception, match="Set OPENROUTER_API_KEY"):
+        pytest_runtest_setup(cast(pytest.Item, item))
+
+
+def test_configured_openai_provider_rejects_placeholder_api_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test_key")
+    monkeypatch.setenv("OPENAI_AGENTS_INTEGRATION_LITELLM_MODELS", "openai/gpt-4.1-mini")
+    monkeypatch.setenv("OPENAI_AGENTS_INTEGRATION_STRICT", "1")
+    item = SimpleNamespace(
+        fixturenames=["litellm_models"],
+        get_closest_marker=lambda name: name == "providers",
+    )
+
+    with pytest.raises(pytest.fail.Exception, match="Set OPENAI_API_KEY"):
+        pytest_runtest_setup(cast(pytest.Item, item))
+
+
 def test_strict_mode_requires_requested_external_provider_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

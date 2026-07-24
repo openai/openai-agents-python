@@ -131,13 +131,50 @@ def skip_or_fail(reason: str) -> None:
     pytest.skip(reason)
 
 
+def _provider_model_credentials(model: str) -> tuple[str, ...]:
+    provider = model.partition("/")[0]
+    if provider == "openrouter":
+        return ("OPENROUTER_API_KEY",)
+    if provider == "anthropic":
+        return ("ANTHROPIC_API_KEY",)
+    if provider in {"gemini", "google"}:
+        return ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+    return ("OPENAI_API_KEY",)
+
+
+def _has_provider_credential(credential: str) -> bool:
+    value = os.environ.get(credential)
+    if credential == "OPENAI_API_KEY":
+        return value not in {None, "", "test_key", "fake-for-tests"}
+    return bool(value)
+
+
 def pytest_runtest_setup(item: pytest.Item) -> None:
     if not any(item.get_closest_marker(marker) for marker in LIVE_MARKERS):
         return
-    if item.get_closest_marker("providers") and "external_provider" in getattr(
-        item, "fixturenames", ()
-    ):
-        return
+    if item.get_closest_marker("providers"):
+        fixture_names = getattr(item, "fixturenames", ())
+        if "external_provider" in fixture_names:
+            return
+        for fixture_name, environment_name in (
+            ("any_llm_models", "OPENAI_AGENTS_INTEGRATION_ANY_LLM_MODELS"),
+            ("litellm_models", "OPENAI_AGENTS_INTEGRATION_LITELLM_MODELS"),
+        ):
+            if fixture_name not in fixture_names:
+                continue
+            configured_models = os.environ.get(environment_name, "")
+            if not configured_models.strip():
+                break
+            for model in configured_models.split(","):
+                if not model.strip():
+                    continue
+                credentials = _provider_model_credentials(model.strip())
+                if not any(_has_provider_credential(credential) for credential in credentials):
+                    skip_or_fail(
+                        f"Set {' or '.join(credentials)} to execute configured provider "
+                        f"model {model.strip()!r}."
+                    )
+            return
     if os.environ.get("OPENAI_API_KEY") in {None, "", "test_key", "fake-for-tests"}:
         skip_or_fail("Set a real OPENAI_API_KEY to execute live integration tests.")
 

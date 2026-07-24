@@ -87,10 +87,19 @@ async def test_explicit_input_replay_preserves_a_real_response_history(
         run_config=config,
     )
     replay = first.to_input_list()
+    assert any(
+        item.get("role") == "user" and "verification number is 907" in str(item.get("content"))
+        for item in replay
+    )
     second = await Runner.run(
         agent,
         replay
-        + [{"role": "user", "content": "What verification number did I provide? Reply only 907."}],
+        + [
+            {
+                "role": "user",
+                "content": "What verification number did I provide? Reply with only the number.",
+            }
+        ],
         run_config=config,
     )
 
