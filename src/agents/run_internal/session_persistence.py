@@ -377,7 +377,7 @@ async def save_result_to_session(
     if run_state and new_items and new_run_items:
         missing_outputs = [
             item
-            for item in new_items
+            for item in new_items[:already_persisted]
             if item.type == "tool_call_output_item" and item not in new_run_items
         ]
         if missing_outputs:
