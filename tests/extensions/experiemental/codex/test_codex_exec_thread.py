@@ -743,16 +743,19 @@ async def test_create_process_exit_event_observes_already_exited_process() -> No
 
 
 @pytest.mark.asyncio
-async def test_codex_exec_run_uses_direct_exit_when_descendant_holds_inherited_pipes(
+async def test_codex_exec_run_terminates_tree_when_descendant_holds_stdout_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tree_terminated = asyncio.Event()
 
-    class ExitOnEofStdout(FakeStdout):
+    class PipeHoldingStdout(FakeStdout):
         async def readline(self) -> bytes:
-            process.returncode = 0
-            assert process._protocol is not None
-            process._protocol.process_exited()
+            if process.returncode is None:
+                process.returncode = 0
+                assert process._protocol is not None
+                process._protocol.process_exited()
+                return b"ready\n"
+            await tree_terminated.wait()
             return b""
 
     class PipeHoldingProcess(FakeProcess):
@@ -760,7 +763,7 @@ async def test_codex_exec_run_uses_direct_exit_when_descendant_holds_inherited_p
             await tree_terminated.wait()
 
     process = PipeHoldingProcess(stdout_lines=[], returncode=None)
-    process.stdout = ExitOnEofStdout([])
+    process.stdout = PipeHoldingStdout([])
     process._protocol = FakeProcessProtocol()
 
     async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
@@ -776,9 +779,12 @@ async def test_codex_exec_run_uses_direct_exit_when_descendant_holds_inherited_p
         exec_module.CodexExecArgs(input="hello")
     )
 
-    with pytest.raises(StopAsyncIteration):
-        await asyncio.wait_for(anext(stream), timeout=1)
+    async def collect_output() -> list[str]:
+        return [line async for line in stream]
 
+    output = await asyncio.wait_for(collect_output(), timeout=1)
+
+    assert output == ["ready"]
     assert tree_terminated.is_set()
 
 
@@ -911,20 +917,24 @@ async def test_codex_exec_run_close_is_bounded_when_descendant_holds_stdout(
 
 @pytest.mark.skipif(sys.platform == "win32", reason="SelectorEventLoop lacks subprocess support")
 @pytest.mark.asyncio
+@pytest.mark.parametrize("inherited_stream", ["stdout", "stderr"])
 async def test_codex_exec_run_terminates_descendant_after_clean_parent_exit(
     monkeypatch: pytest.MonkeyPatch,
+    inherited_stream: str,
 ) -> None:
     original_create_subprocess_exec = asyncio.create_subprocess_exec
     process: asyncio.subprocess.Process | None = None
     helper_pid: int | None = None
     helper_code = "import time; time.sleep(10)"
+    helper_stdout = "sys.stdout" if inherited_stream == "stdout" else "subprocess.DEVNULL"
+    helper_stderr = "sys.stderr" if inherited_stream == "stderr" else "subprocess.DEVNULL"
     child_code = (
         "import os\n"
         "import subprocess\n"
         "import sys\n"
         "sys.stdin.buffer.read()\n"
         f"helper = subprocess.Popen([sys.executable, '-c', {helper_code!r}], "
-        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=sys.stderr)\n"
+        f"stdin=subprocess.DEVNULL, stdout={helper_stdout}, stderr={helper_stderr})\n"
         "os.write(1, f'ready {helper.pid}\\n'.encode())\n"
     )
 
@@ -967,10 +977,74 @@ async def test_codex_exec_run_terminates_descendant_after_clean_parent_exit(
             await process.wait()
 
 
+def test_terminate_windows_process_tree_uses_trusted_taskkill_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ctypes
+
+    class FakeKernel32:
+        def GetSystemDirectoryW(self, buffer: Any, _size: int) -> int:
+            buffer.value = r"C:\Windows\System32"
+            return len(buffer.value)
+
+    class FakeWindll:
+        kernel32 = FakeKernel32()
+
+    trusted_path = r"C:\Windows\System32\taskkill.exe"
+    captured_command: list[str] | None = None
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        nonlocal captured_command
+        captured_command = command
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(ctypes, "windll", FakeWindll(), raising=False)
+    monkeypatch.setattr(exec_module.subprocess, "run", fake_run)
+
+    exec_module._terminate_windows_process_tree(123)
+
+    assert captured_command == [trusted_path, "/PID", "123", "/T", "/F"]
+
+
+def test_terminate_windows_process_tree_does_not_fallback_to_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ctypes
+
+    def unexpected_run(*_args: Any, **_kwargs: Any) -> None:
+        pytest.fail("taskkill must not be resolved through PATH")
+
+    monkeypatch.delattr(ctypes, "windll", raising=False)
+    monkeypatch.setattr(exec_module.subprocess, "run", unexpected_run)
+
+    exec_module._terminate_windows_process_tree(123)
+
+
+@pytest.mark.parametrize("length", [0, 32768])
+def test_windows_system_taskkill_path_rejects_invalid_length(
+    monkeypatch: pytest.MonkeyPatch,
+    length: int,
+) -> None:
+    import ctypes
+
+    class FakeKernel32:
+        def GetSystemDirectoryW(self, _buffer: Any, _size: int) -> int:
+            return length
+
+    class FakeWindll:
+        kernel32 = FakeKernel32()
+
+    monkeypatch.setattr(ctypes, "windll", FakeWindll(), raising=False)
+
+    assert exec_module._windows_system_taskkill_path() is None
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows process-tree behavior")
 def test_terminate_windows_process_tree_stops_descendant() -> None:
     import ctypes
 
+    taskkill_path = exec_module._windows_system_taskkill_path()
+    assert taskkill_path is not None
     helper_code = "import time; time.sleep(60)"
     child_code = (
         "import subprocess\n"
@@ -1004,7 +1078,7 @@ def test_terminate_windows_process_tree_stops_descendant() -> None:
     finally:
         if process.poll() is None:
             subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                [taskkill_path, "/PID", str(process.pid), "/T", "/F"],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -1012,7 +1086,7 @@ def test_terminate_windows_process_tree_stops_descendant() -> None:
             process.wait(timeout=5)
         if helper_pid is not None:
             subprocess.run(
-                ["taskkill", "/PID", str(helper_pid), "/F"],
+                [taskkill_path, "/PID", str(helper_pid), "/F"],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -1056,15 +1130,55 @@ async def test_codex_exec_run_raises_without_stdout(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
-async def test_watch_signal_terminates_process() -> None:
-    signal = asyncio.Event()
+async def test_codex_exec_run_terminates_tree_once_when_signal_and_exit_overlap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout_started = asyncio.Event()
+    tree_terminated = asyncio.Event()
+    termination_calls = 0
+
+    class BlockingStdout(FakeStdout):
+        async def readline(self) -> bytes:
+            stdout_started.set()
+            await tree_terminated.wait()
+            return b""
+
     process = FakeProcess(stdout_lines=[], returncode=None)
+    process.stdout = BlockingStdout([])
+    process._protocol = FakeProcessProtocol()
 
-    task = asyncio.create_task(exec_module._watch_signal(signal, process))
-    signal.set()
-    await task
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        return process
 
-    assert process.killed is True
+    async def terminate_process_tree(_process: FakeProcess) -> None:
+        nonlocal termination_calls
+        termination_calls += 1
+        if termination_calls == 1:
+            process.returncode = -9
+            assert process._protocol is not None
+            process._protocol.process_exited()
+            await asyncio.sleep(0)
+            tree_terminated.set()
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(exec_module, "_terminate_process_tree", terminate_process_tree)
+
+    signal_event = asyncio.Event()
+    stream = exec_module.CodexExec(executable_path="/bin/codex").run(
+        exec_module.CodexExecArgs(input="hello", signal=signal_event)
+    )
+
+    async def collect_output() -> list[str]:
+        return [line async for line in stream]
+
+    output_task = asyncio.create_task(collect_output())
+    await asyncio.wait_for(stdout_started.wait(), timeout=1)
+    signal_event.set()
+
+    with pytest.raises(RuntimeError, match="exited with code -9"):
+        await asyncio.wait_for(output_task, timeout=1)
+    assert termination_calls == 1
+    assert process._protocol.process_exited_calls == 1
 
 
 @pytest.mark.parametrize(

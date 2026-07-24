@@ -10,7 +10,7 @@ import subprocess
 import sys
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from agents.exceptions import UserError
 
@@ -134,6 +134,25 @@ class CodexExec:
             start_new_session=os.name != "nt",
         )
         direct_process_exit = _create_process_exit_event(process)
+        process_tree_termination_task: asyncio.Task[None] | None = None
+
+        async def _terminate_process_tree_once() -> None:
+            nonlocal process_tree_termination_task
+            if process_tree_termination_task is None:
+                process_tree_termination_task = asyncio.create_task(
+                    _terminate_process_tree(process)
+                )
+            await asyncio.shield(process_tree_termination_task)
+
+        async def _watch_termination_event(event: asyncio.Event) -> None:
+            await event.wait()
+            await _terminate_process_tree_once()
+
+        process_exit_cleanup_task = (
+            asyncio.create_task(_watch_termination_event(direct_process_exit))
+            if direct_process_exit is not None
+            else None
+        )
 
         stderr_chunks: list[bytes] = []
 
@@ -207,7 +226,7 @@ class CodexExec:
 
             if args.signal is not None:
                 # Mirror AbortSignal semantics by terminating the subprocess.
-                cancel_task = asyncio.create_task(_watch_signal(args.signal, process))
+                cancel_task = asyncio.create_task(_watch_termination_event(args.signal))
 
             async def _read_stdout_line() -> bytes:
                 if args.idle_timeout_seconds is None:
@@ -256,8 +275,15 @@ class CodexExec:
                     except BaseException as exc:
                         cleanup_error = exc
 
+                if process_exit_cleanup_task is not None:
+                    try:
+                        await _cancel_and_wait(process_exit_cleanup_task)
+                    except BaseException as exc:
+                        if cleanup_error is None:
+                            cleanup_error = exc
+
                 try:
-                    await _terminate_process_tree(process)
+                    await _terminate_process_tree_once()
                 except BaseException as exc:
                     if cleanup_error is None:
                         cleanup_error = exc
@@ -370,10 +396,28 @@ async def _await_cleanup_task(
         raise cleanup_error
 
 
+def _windows_system_taskkill_path() -> str | None:
+    import ctypes
+
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        return None
+
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = windll.kernel32.GetSystemDirectoryW(buffer, len(buffer))
+    if length == 0 or length >= len(buffer):
+        return None
+    return str(PureWindowsPath(buffer.value) / "taskkill.exe")
+
+
 def _terminate_windows_process_tree(pid: int) -> None:
+    taskkill_path = _windows_system_taskkill_path()
+    if taskkill_path is None:
+        return
+
     with contextlib.suppress(OSError, subprocess.TimeoutExpired):
         subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            [taskkill_path, "/PID", str(pid), "/T", "/F"],
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -395,11 +439,6 @@ async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
         if process.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 process.kill()
-
-
-async def _watch_signal(signal_event: asyncio.Event, process: asyncio.subprocess.Process) -> None:
-    await signal_event.wait()
-    await _terminate_process_tree(process)
 
 
 def _platform_target_triple() -> str:
