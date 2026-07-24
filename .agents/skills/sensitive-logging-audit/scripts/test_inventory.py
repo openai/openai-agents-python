@@ -300,6 +300,26 @@ emit(secret)
             ],
         )
 
+    def test_inventories_standard_file_descriptor_writes(self) -> None:
+        findings = inventory_source(
+            """
+import os
+from os import write as emit
+
+os.write(2, secret_bytes)
+emit(1, secret_bytes)
+os.write(3, secret_bytes)
+"""
+        )
+
+        self.assertEqual(
+            [(item.kind, item.method, item.shape) for item in findings],
+            [
+                ("raw-output", "os.write", "payload"),
+                ("raw-output", "os.write", "payload"),
+            ],
+        )
+
     def test_inventories_directly_imported_output_streams(self) -> None:
         findings = inventory_source(
             """
@@ -541,6 +561,49 @@ def class_definition(secret):
 
         self.assertEqual([item.policy for item in findings], ["none", "none"])
 
+    def test_non_policy_imports_kill_policy_alias_provenance(self) -> None:
+        findings = inventory_source(
+            """
+from agents.logger import logger
+
+def direct_import(secret):
+    from agents._debug import DONT_LOG_TOOL_DATA as flag
+    from settings import enabled as flag
+    if not flag:
+        logger.error("direct import: %s", secret)
+
+def module_import(secret):
+    from agents._debug import DONT_LOG_TOOL_DATA as flag
+    import settings as flag
+    if not flag:
+        logger.error("module import: %s", secret)
+"""
+        )
+
+        self.assertEqual([item.policy for item in findings], ["none", "none"])
+
+    def test_starred_targets_kill_policy_alias_provenance(self) -> None:
+        findings = inventory_source(
+            """
+from agents import _debug
+from agents.logger import logger
+
+def assignment(secret):
+    flag = _debug.DONT_LOG_TOOL_DATA
+    *flag, tail = [False]
+    if not flag:
+        logger.error("starred assignment: %s", secret)
+
+def loop(values, secret):
+    flag = _debug.DONT_LOG_TOOL_DATA
+    for *flag, tail in values:
+        if not flag:
+            logger.error("starred loop: %s", secret)
+"""
+        )
+
+        self.assertEqual([item.policy for item in findings], ["none", "none"])
+
     def test_runtime_binders_kill_imported_policy_alias_provenance(self) -> None:
         findings = inventory_source(
             """
@@ -774,6 +837,42 @@ from agents.logger import logger, log_tool_action_warning
                     "log_tool_action_warning",
                     "tool-helper",
                 )
+            ],
+        )
+
+    def test_resolves_constant_getattr_on_known_loggers(self) -> None:
+        findings = inventory_source(
+            """
+import builtins
+from agents.logger import logger
+
+emit = getattr(logger, "error")
+emit(secret)
+builtins.getattr(logger, "warning")(secret)
+"""
+        )
+
+        self.assertEqual(
+            [(item.kind, item.method, item.shape) for item in findings],
+            [
+                ("logger", "error", "dynamic-message"),
+                ("logger", "warning", "dynamic-message"),
+            ],
+        )
+
+    def test_inventories_callbacks_on_unknown_logger_receivers(self) -> None:
+        findings = inventory_source(
+            """
+register(log.warning)
+register(on_error=log.error)
+"""
+        )
+
+        self.assertEqual(
+            [(item.kind, item.method, item.confidence) for item in findings],
+            [
+                ("logging-candidate-callback", "warning", "unknown"),
+                ("logging-candidate-callback", "error", "unknown"),
             ],
         )
 

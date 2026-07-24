@@ -42,6 +42,7 @@ KNOWN_HELPERS = {
 SENSITIVE_HELPER_METHODS = {name.rsplit(".", 1)[-1] for name in KNOWN_HELPERS}
 RAW_MODULE_METHODS = {
     "builtins": {"print"},
+    "os": {"write"},
     "pprint": {"pp", "pprint"},
     "traceback": {"print_exc", "print_exception"},
     "warnings": {"warn", "warn_explicit"},
@@ -164,6 +165,8 @@ def target_keys(node: ast.AST) -> list[str]:
     key = expression_key(node)
     if key:
         return [key]
+    if isinstance(node, ast.Starred):
+        return target_keys(node.value)
     if isinstance(node, ast.List | ast.Tuple):
         return [key for element in node.elts for key in target_keys(element)]
     return []
@@ -173,6 +176,8 @@ def target_value_pairs(target: ast.AST, value: ast.AST) -> list[tuple[str, ast.A
     key = expression_key(target)
     if key:
         return [(key, value)]
+    if isinstance(target, ast.Starred):
+        return [(key, None) for key in target_keys(target.value)]
     if isinstance(target, ast.List | ast.Tuple):
         if isinstance(value, ast.List | ast.Tuple) and len(target.elts) == len(value.elts):
             return [
@@ -247,6 +252,8 @@ def iter_definitions(
 def bound_names(node: ast.AST) -> set[str]:
     if isinstance(node, ast.Name):
         return {node.id}
+    if isinstance(node, ast.Starred):
+        return bound_names(node.value)
     if isinstance(node, ast.List | ast.Tuple):
         return {name for element in node.elts for name in bound_names(element)}
     return set()
@@ -447,9 +454,11 @@ class Facts:
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     bound = alias.asname or alias.name.split(".", 1)[0]
+                    self._record_import_definition(node, scope, bound, None)
                     if alias.name in {
                         "builtins",
                         "logging",
+                        "os",
                         "pprint",
                         "sys",
                         "traceback",
@@ -475,6 +484,7 @@ class Facts:
                     bound = alias.asname or alias.name
                     full_name = f"{module}.{alias.name}" if module else alias.name
                     facts: set[str] = set()
+                    policy_value: DefinitionValue = None
                     if module == "logging":
                         if alias.name == "getLogger":
                             facts.add("factory:logger")
@@ -495,8 +505,7 @@ class Facts:
                         policy_facts = {f"policy:{policy}", f"policy-exact:{policy}"}
                         facts.update(policy_facts)
                         policy_value = frozenset(policy_facts)
-                        self.definitions.append((node, [(bound, policy_value)]))
-                        self.definition_values[scope][bound].append((node, policy_value))
+                    self._record_import_definition(node, scope, bound, policy_value)
                     if full_name in KNOWN_HELPERS:
                         facts.add(_helper_fact(full_name))
                     if module in RAW_MODULE_METHODS and alias.name in RAW_MODULE_METHODS[module]:
@@ -505,6 +514,16 @@ class Facts:
                         facts.add(f"stream:{alias.name}")
                     if facts:
                         self.add(scope, bound, facts)
+
+    def _record_import_definition(
+        self,
+        node: ast.Import | ast.ImportFrom,
+        scope: ast.AST,
+        bound: str,
+        value: DefinitionValue,
+    ) -> None:
+        self.definitions.append((node, [(bound, value)]))
+        self.definition_values[scope][bound].append((node, value))
 
     def infer(self, node: ast.AST) -> set[str]:
         key = expression_key(node)
@@ -554,6 +573,16 @@ class Facts:
             callee_facts = self.infer(node.func)
             if "factory:logger" in callee_facts or "type:logger" in callee_facts:
                 result.add("logger")
+            if self._is_getattr_call(node) and len(node.args) >= 2:
+                receiver_facts = self.infer(node.args[0])
+                attribute = node.args[1]
+                if (
+                    "logger" in receiver_facts
+                    and isinstance(attribute, ast.Constant)
+                    and isinstance(attribute.value, str)
+                    and attribute.value in LOG_METHODS
+                ):
+                    result.add(f"method:logger:{attribute.value}")
             if self._is_partial(callee_facts) and node.args:
                 callable_facts = self.infer(node.args[0])
                 method_facts = {fact for fact in callable_facts if fact.startswith("method:")}
@@ -599,6 +628,15 @@ class Facts:
     @staticmethod
     def _is_partial(facts: set[str]) -> bool:
         return "factory:partial" in facts
+
+    def _is_getattr_call(self, node: ast.Call) -> bool:
+        if isinstance(node.func, ast.Name):
+            return node.func.id == "getattr"
+        return (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "getattr"
+            and "module:builtins" in self.infer(node.func.value)
+        )
 
     def _resolve_definitions(self, tree: ast.Module) -> None:
         self._seed_special_attributes(tree)
@@ -882,6 +920,35 @@ def call_shape_with_partial(call: ast.Call, method: str, callee_facts: set[str])
     return shape
 
 
+def is_standard_file_descriptor_write(call: ast.Call, method: str) -> bool:
+    if method != "os.write":
+        return True
+    if not call.args:
+        return False
+    descriptor = call.args[0]
+    return (
+        isinstance(descriptor, ast.Constant)
+        and type(descriptor.value) is int
+        and descriptor.value in {1, 2}
+    )
+
+
+def is_unknown_logging_callback(argument: ast.AST, keyword: str | None) -> bool:
+    if not isinstance(argument, ast.Attribute) or argument.attr not in LOG_METHODS:
+        return False
+    receiver = expression_key(argument.value)
+    receiver_name = receiver.rsplit(".", 1)[-1].lower() if receiver else ""
+    logger_like_receiver = receiver_name in {"log", "logger"} or receiver_name.endswith(
+        ("_log", "_logger")
+    )
+    callback_keyword = keyword is not None and (
+        keyword.startswith("on_")
+        or keyword.endswith(("_callback", "_handler"))
+        or keyword in {"callback", "handler"}
+    )
+    return logger_like_receiver or callback_keyword
+
+
 def signals_for(text: str) -> list[str]:
     normalized = text.lower()
     groups = [
@@ -992,6 +1059,8 @@ def inventory_source(source: str, file_path: str = "fixture.py") -> list[Finding
                             catch_value,
                         )
                     else:
+                        if not is_standard_file_descriptor_write(node, sink_method):
+                            continue
                         record(
                             node,
                             call_text,
@@ -1033,13 +1102,18 @@ def inventory_source(source: str, file_path: str = "fixture.py") -> list[Finding
 
         if not _is_partial_call(callee_facts):
             callback_arguments = [
-                *node.args,
-                *(keyword.value for keyword in node.keywords if keyword.arg is not None),
+                *((argument, None) for argument in node.args),
+                *(
+                    (keyword.value, keyword.arg)
+                    for keyword in node.keywords
+                    if keyword.arg is not None
+                ),
             ]
-            for argument in callback_arguments:
-                for fact in facts.infer(argument):
-                    if not fact.startswith("method:"):
-                        continue
+            for argument, keyword in callback_arguments:
+                method_facts = {
+                    fact for fact in facts.infer(argument) if fact.startswith("method:")
+                }
+                for fact in method_facts:
                     _, sink_kind, sink_method = fact.split(":", 2)
                     record(
                         argument,
@@ -1051,6 +1125,21 @@ def inventory_source(source: str, file_path: str = "fixture.py") -> list[Finding
                         guarded_policy(argument, parents, facts)
                         if sink_kind == "logger"
                         else "none",
+                        "callback value",
+                    )
+                if (
+                    not method_facts
+                    and is_unknown_logging_callback(argument, keyword)
+                    and isinstance(argument, ast.Attribute)
+                ):
+                    record(
+                        argument,
+                        normalize_node(argument, source),
+                        "logging-candidate-callback",
+                        "unknown",
+                        argument.attr,
+                        "dynamic-message",
+                        guarded_policy(argument, parents, facts),
                         "callback value",
                     )
 

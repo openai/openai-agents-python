@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import httpx
@@ -40,6 +41,10 @@ from agents.run_internal.tool_execution import (
     log_tool_action_error,
     resolve_approval_rejection_message,
 )
+from agents.tracing.processor_interface import TracingProcessor
+from agents.tracing.provider import SynchronousMultiTracingProcessor
+from agents.tracing.spans import Span
+from agents.tracing.traces import Trace
 
 _SECRET = "super secret prompt content"
 
@@ -64,6 +69,36 @@ class _HostileException(Exception):
         if name in {"__class__", "__traceback__"}:
             raise AssertionError(f"redacted logging inspected {name}")
         return super().__getattribute__(name)
+
+
+class _FailingTracingProcessor(TracingProcessor):
+    def __init__(self) -> None:
+        self.str_calls = 0
+
+    def __str__(self) -> str:
+        self.str_calls += 1
+        return "SECRET_TRACE_PROCESSOR_ID"
+
+    def _fail(self) -> None:
+        raise ValueError(_SECRET)
+
+    def on_trace_start(self, trace: Trace) -> None:
+        self._fail()
+
+    def on_trace_end(self, trace: Trace) -> None:
+        self._fail()
+
+    def on_span_start(self, span: Span[Any]) -> None:
+        self._fail()
+
+    def on_span_end(self, span: Span[Any]) -> None:
+        self._fail()
+
+    def shutdown(self) -> None:
+        self._fail()
+
+    def force_flush(self) -> None:
+        self._fail()
 
 
 def _emit_shared_error_for_location(test_logger, helper) -> None:
@@ -274,6 +309,58 @@ def test_shared_error_helper_conditionally_attaches_diagnostic_extra(
     assert ("sandbox_id" in record.__dict__) is not redacted
     if not redacted:
         assert record.__dict__["sandbox_id"] == _SECRET
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "on_trace_start",
+        "on_trace_end",
+        "on_span_start",
+        "on_span_end",
+        "force_flush",
+        "shutdown",
+    ],
+)
+@pytest.mark.parametrize(
+    ("model_redacted", "tool_redacted"),
+    [(True, False), (False, True), (False, False)],
+)
+def test_trace_processor_failure_identity_follows_both_data_policies(
+    monkeypatch,
+    operation: str,
+    model_redacted: bool,
+    tool_redacted: bool,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", model_redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
+    test_logger = logging.Logger("sensitive-logging-trace-processor", level=logging.DEBUG)
+    test_logger.propagate = False
+    handler = _RecordingHandler()
+    test_logger.addHandler(handler)
+    failing = _FailingTracingProcessor()
+    multi = SynchronousMultiTracingProcessor()
+    multi.add_tracing_processor(failing)
+
+    with patch("agents.tracing.provider.logger", test_logger):
+        if operation.startswith(("on_trace", "on_span")):
+            getattr(multi, operation)(object())
+        else:
+            getattr(multi, operation)()
+
+    record = next(record for record in handler.records if record.levelno == logging.ERROR)
+    redacted = model_redacted or tool_redacted
+    if redacted:
+        assert "trace_processor" not in record.__dict__
+        assert failing not in record.__dict__.values()
+        assert record.exc_info is None
+        assert _SECRET not in logging.Formatter().format(record)
+        assert failing.str_calls == 0
+    else:
+        assert record.__dict__["trace_processor"] is failing
+        assert record.exc_info is not None
+        assert record.exc_info[1] is not None
+        assert _SECRET in logging.Formatter().format(record)
 
 
 @pytest.mark.parametrize(
