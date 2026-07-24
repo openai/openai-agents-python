@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -11,6 +12,7 @@ from openai.types.responses.response_computer_tool_call import (
     ResponseComputerToolCall,
 )
 
+import agents._debug as _debug
 from agents import (
     Agent,
     ComputerProvider,
@@ -66,6 +68,32 @@ class FakeComputer(Computer):
 
     def drag(self, path: list[tuple[int, int]]) -> None:
         return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redacted", [True, False])
+async def test_dispose_computer_failure_respects_tool_data_policy(
+    monkeypatch, caplog, redacted: bool
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+
+    async def dispose(**_kwargs: Any) -> None:
+        raise RuntimeError("SECRET_COMPUTER_DISPOSE_FAILURE")
+
+    tool = ComputerTool(
+        computer=ComputerProvider[FakeComputer](
+            create=AsyncMock(return_value=FakeComputer()),
+            dispose=dispose,
+        )
+    )
+    ctx = RunContextWrapper(context=None)
+    await resolve_computer(tool=tool, run_context=ctx)
+
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        await dispose_resolved_computers(run_context=ctx)
+
+    assert "Failed to dispose computer for run context" in caplog.text
+    assert ("SECRET_COMPUTER_DISPOSE_FAILURE" not in caplog.text) is redacted
 
 
 def _make_message(text: str) -> ResponseOutputMessage:

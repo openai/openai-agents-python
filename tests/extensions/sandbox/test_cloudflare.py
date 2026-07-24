@@ -1535,11 +1535,16 @@ async def test_cloudflare_shutdown_logs_on_failure(caplog: pytest.LogCaptureFixt
 
 
 @pytest.mark.asyncio
-async def test_cloudflare_shutdown_logs_delete_response_details(
+@pytest.mark.parametrize("redacted", [True, False])
+async def test_cloudflare_shutdown_logs_respect_tool_data_policy(
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    redacted: bool,
 ) -> None:
-    """Verify that DELETE response bodies are kept when shutdown cleanup fails."""
+    """Verify that DELETE response bodies follow the tool-data logging policy."""
     import logging
+
+    monkeypatch.setattr("agents._debug.DONT_LOG_TOOL_DATA", redacted)
 
     sess = _make_session(
         fake_http=_FakeHttp(
@@ -1558,8 +1563,9 @@ async def test_cloudflare_shutdown_logs_delete_response_details(
     with caplog.at_level(logging.DEBUG, logger="agents.extensions.sandbox.cloudflare.sandbox"):
         await sess._shutdown_backend()
 
-    assert any(
+    has_detail = any(
         "DELETE /sandbox failed: HTTP 502: pool_error: pool error: Failed to start container"
         in r.message
         for r in caplog.records
     )
+    assert has_detail is not redacted

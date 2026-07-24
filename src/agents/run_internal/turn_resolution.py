@@ -29,6 +29,7 @@ from openai.types.responses.response_output_item import (
 )
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
+from .. import _debug
 from .._mcp_tool_metadata import collect_mcp_list_tools_metadata
 from .._tool_identity import (
     build_function_tool_lookup_map,
@@ -72,7 +73,7 @@ from ..items import (
     coerce_tool_search_output_raw_item,
 )
 from ..lifecycle import RunHooks
-from ..logger import logger
+from ..logger import log_tool_action_error, logger
 from ..run_config import RunConfig, ToolErrorFormatterArgs
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
 from ..run_error_handlers import RunErrorHandlers
@@ -252,18 +253,21 @@ async def _resolve_tool_not_found_message(
         )
         message = await maybe_message if inspect.isawaitable(maybe_message) else maybe_message
     except Exception as exc:
-        logger.error("Tool error formatter failed for missing tool %s: %s", tool_name, exc)
+        log_tool_action_error(logger, "Tool error formatter failed for missing tool", exc)
         return default_message
 
     if message is None:
         return default_message
 
     if not isinstance(message, str):
-        logger.error(
-            "Tool error formatter returned non-string for missing tool %s: %s",
-            tool_name,
-            type(message).__name__,
-        )
+        if _debug.DONT_LOG_TOOL_DATA:
+            logger.error("Tool error formatter returned a non-string value for a missing tool")
+        else:
+            logger.error(
+                "Tool error formatter returned non-string for missing tool %s: %s",
+                tool_name,
+                type(message).__name__,
+            )
         return default_message
 
     return message

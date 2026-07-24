@@ -56,7 +56,13 @@ from ..items import (
     coerce_tool_search_output_raw_item,
 )
 from ..lifecycle import RunHooks
-from ..logger import logger
+from ..logger import (
+    log_model_action_debug,
+    log_model_action_error,
+    log_model_action_warning,
+    log_tool_action_warning,
+    logger,
+)
 from ..memory import Session
 from ..models._response_terminal import (
     response_error_event_failure_error,
@@ -270,7 +276,7 @@ async def cleanup_models_after_run(tool_use_tracker: AgentToolUseTracker) -> Non
         try:
             await model._cleanup_on_run_end(tool_use_tracker)
         except Exception as error:
-            logger.warning("Failed to clean up model resources after run: %s", error)
+            log_model_action_warning(logger, "Failed to clean up model resources after run", error)
 
 
 def _should_attach_generic_agent_error(exc: Exception) -> bool:
@@ -398,8 +404,8 @@ async def _run_output_guardrails_for_stream(
         raise
     except asyncio.CancelledError:
         raise
-    except Exception:
-        logger.error("Unexpected error in output guardrails", exc_info=True)
+    except Exception as exc:
+        log_model_action_error(logger, "Unexpected error in output guardrails", exc)
         raise
 
 
@@ -1302,13 +1308,15 @@ async def start_streaming(
                     if first_trigger is not None:
                         raise InputGuardrailTripwireTriggered(first_trigger)
             except Exception as e:
-                logger.debug(
-                    "Error in streamed_result finalize for agent %s - %s", current_agent.name, e
+                log_model_action_debug(
+                    logger,
+                    f"Error finalizing streamed result for agent {current_agent.name}",
+                    e,
                 )
         try:
             await dispose_resolved_computers(run_context=context_wrapper)
         except Exception as error:
-            logger.warning("Failed to dispose computers after streamed run: %s", error)
+            log_tool_action_warning(logger, "Failed to dispose computers after streamed run", error)
         if current_span:
             current_span.finish(reset_current=True)
         if current_task_span:

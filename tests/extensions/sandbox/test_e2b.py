@@ -2189,11 +2189,15 @@ async def test_e2b_stop_terminates_live_pty_sessions() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("redacted", [True, False])
 async def test_e2b_shutdown_logs_pause_failure_and_falls_back_to_kill(
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    redacted: bool,
 ) -> None:
+    monkeypatch.setattr("agents._debug.DONT_LOG_TOOL_DATA", redacted)
     sandbox = _FakeE2BSandbox()
-    sandbox.pause_error = RuntimeError("pause failed")
+    sandbox.pause_error = RuntimeError("SECRET_E2B_PAUSE_FAILURE")
     state = E2BSandboxSessionState(
         session_id=uuid.uuid4(),
         manifest=Manifest(root="/workspace"),
@@ -2211,12 +2215,23 @@ async def test_e2b_shutdown_logs_pause_failure_and_falls_back_to_kill(
     assert sandbox.pause_calls == 1
     assert sandbox.kill_calls == 1
     assert "Failed to pause E2B sandbox on shutdown; falling back to kill." in caplog.text
+    assert ("SECRET_E2B_PAUSE_FAILURE" not in caplog.text) is redacted
+    record = caplog.records[-1]
+    assert ("sandbox_id" in record.__dict__) is not redacted
+    assert ("pause_on_exit" in record.__dict__) is not redacted
+    if not redacted:
+        assert record.__dict__["sandbox_id"] == sandbox.sandbox_id
+        assert record.__dict__["pause_on_exit"] is True
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("redacted", [True, False])
 async def test_e2b_shutdown_logs_kill_failure_after_pause_fallback(
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    redacted: bool,
 ) -> None:
+    monkeypatch.setattr("agents._debug.DONT_LOG_TOOL_DATA", redacted)
     sandbox = _FakeE2BSandbox()
     sandbox.pause_error = RuntimeError("pause failed")
     sandbox.kill_error = RuntimeError("kill failed")
@@ -2237,10 +2252,22 @@ async def test_e2b_shutdown_logs_kill_failure_after_pause_fallback(
     assert sandbox.pause_calls == 1
     assert sandbox.kill_calls == 1
     assert "Failed to kill E2B sandbox after pause fallback failure." in caplog.text
+    record = caplog.records[-1]
+    assert ("sandbox_id" in record.__dict__) is not redacted
+    assert ("pause_on_exit" in record.__dict__) is not redacted
+    if not redacted:
+        assert record.__dict__["sandbox_id"] == sandbox.sandbox_id
+        assert record.__dict__["pause_on_exit"] is True
 
 
 @pytest.mark.asyncio
-async def test_e2b_shutdown_logs_direct_kill_failure(caplog: pytest.LogCaptureFixture) -> None:
+@pytest.mark.parametrize("redacted", [True, False])
+async def test_e2b_shutdown_logs_direct_kill_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    redacted: bool,
+) -> None:
+    monkeypatch.setattr("agents._debug.DONT_LOG_TOOL_DATA", redacted)
     sandbox = _FakeE2BSandbox()
     sandbox.kill_error = RuntimeError("kill failed")
     state = E2BSandboxSessionState(
@@ -2260,6 +2287,12 @@ async def test_e2b_shutdown_logs_direct_kill_failure(caplog: pytest.LogCaptureFi
     assert sandbox.pause_calls == 0
     assert sandbox.kill_calls == 1
     assert "Failed to kill E2B sandbox on shutdown." in caplog.text
+    record = caplog.records[-1]
+    assert ("sandbox_id" in record.__dict__) is not redacted
+    assert ("pause_on_exit" in record.__dict__) is not redacted
+    if not redacted:
+        assert record.__dict__["sandbox_id"] == sandbox.sandbox_id
+        assert record.__dict__["pause_on_exit"] is False
 
 
 @pytest.mark.asyncio

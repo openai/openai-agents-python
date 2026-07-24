@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
+from ....logger import log_tool_action_debug
 from ....sandbox.entries import Mount
 from ....sandbox.errors import (
     ExecTimeoutError,
@@ -1335,7 +1336,7 @@ class DaytonaSandboxClient(BaseSandboxClient[DaytonaSandboxClientOptions]):
                 await daytona_sandbox.start(timeout=state.start_timeout)
             reconnected = True
         except Exception as e:
-            logger.debug("daytona sandbox get() failed, will recreate: %s", e)
+            log_tool_action_debug(logger, "Daytona sandbox lookup failed; recreating", e)
 
         if not reconnected or daytona_sandbox is None:
             params = await self._build_create_params(

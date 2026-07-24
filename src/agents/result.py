@@ -28,7 +28,7 @@ from .items import (
     ToolApprovalItem,
     TResponseInputItem,
 )
-from .logger import logger
+from .logger import log_tool_action_warning, logger
 from .run_context import RunContextWrapper
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
@@ -661,8 +661,10 @@ class RunResultStreaming(RunResultBase):
                 try:
                     await sandbox_cleanup()
                 except Exception as error:
-                    logger.warning(
-                        "Failed to clean up sandbox resources after streamed run: %s", error
+                    log_tool_action_warning(
+                        logger,
+                        "Failed to clean up sandbox resources after streamed run",
+                        error,
                     )
 
             task = asyncio.create_task(_cleanup_once())

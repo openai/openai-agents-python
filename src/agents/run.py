@@ -27,7 +27,7 @@ from .items import (
     TResponseInputItem,
 )
 from .lifecycle import RunHooks
-from .logger import logger
+from .logger import log_tool_action_warning, logger
 from .memory import Session
 from .result import RunResult, RunResultStreaming
 from .run_config import (
@@ -1606,10 +1606,14 @@ class AgentRunner:
                                 terminal_metadata=terminal_metadata_for_exception(run_exception),
                             )
                     except Exception as error:
-                        logger.warning("Failed to enqueue sandbox memory after run: %s", error)
+                        log_tool_action_warning(
+                            logger, "Failed to enqueue sandbox memory after run", error
+                        )
                     sandbox_resume_state = await sandbox_runtime.cleanup()
                 except Exception as error:
-                    logger.warning("Failed to clean up sandbox resources after run: %s", error)
+                    log_tool_action_warning(
+                        logger, "Failed to clean up sandbox resources after run", error
+                    )
                 else:
                     if completed_result is not None:
                         completed_result._sandbox_resume_state = sandbox_resume_state
@@ -1619,7 +1623,7 @@ class AgentRunner:
                 try:
                     await dispose_resolved_computers(run_context=context_wrapper)
                 except Exception as error:
-                    logger.warning("Failed to dispose computers after run: %s", error)
+                    log_tool_action_warning(logger, "Failed to dispose computers after run", error)
                 if current_span:
                     current_span.finish(reset_current=True)
                 if current_task_span:

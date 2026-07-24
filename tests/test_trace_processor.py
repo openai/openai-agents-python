@@ -12,9 +12,10 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
+import agents._debug as _debug
 from agents.tracing import flush_traces, get_trace_provider
 from agents.tracing.processor_interface import TracingExporter, TracingProcessor
-from agents.tracing.processors import BackendSpanExporter, BatchTraceProcessor
+from agents.tracing.processors import BackendSpanExporter, BatchTraceProcessor, ConsoleSpanExporter
 from agents.tracing.provider import DefaultTraceProvider, TraceProvider
 from agents.tracing.span_data import AgentSpanData
 from agents.tracing.spans import Span, SpanImpl
@@ -43,6 +44,20 @@ def get_trace(processor: TracingProcessor) -> TraceImpl:
         processor=processor,
         tracing_api_key=None,
     )
+
+
+@pytest.mark.parametrize("redacted", [True, False])
+def test_console_span_exporter_respects_data_policy(monkeypatch, capsys, redacted: bool) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+    span = get_span(mock_processor())
+    span.span_data.name = "SECRET_CONSOLE_SPAN"
+
+    ConsoleSpanExporter().export([span])
+
+    output = capsys.readouterr().out
+    assert ("SECRET_CONSOLE_SPAN" not in output) is redacted
+    assert "Export span" in output
 
 
 @pytest.fixture
@@ -438,17 +453,31 @@ def test_backend_span_exporter_2xx_success(mock_client):
 
 
 @patch("httpx.Client")
-def test_backend_span_exporter_4xx_client_error(mock_client):
-    mock_response = MagicMock()
-    mock_response.status_code = 400
-    mock_response.text = "Bad Request"
+@pytest.mark.parametrize("redacted", [True, False])
+def test_backend_span_exporter_4xx_client_error(mock_client, monkeypatch, caplog, redacted: bool):
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+
+    class Response:
+        status_code = 400
+        text_reads = 0
+
+        @property
+        def text(self) -> str:
+            self.text_reads += 1
+            return "SECRET_TRACE_RESPONSE_BODY"
+
+    mock_response = Response()
     mock_client.return_value.post.return_value = mock_response
 
     exporter = BackendSpanExporter(api_key="test_key")
-    exporter.export([get_span(mock_processor())])
+    with caplog.at_level(logging.ERROR, logger="openai.agents"):
+        exporter.export([get_span(mock_processor())])
 
     # 4xx should not be retried
     mock_client.return_value.post.assert_called_once()
+    assert ("SECRET_TRACE_RESPONSE_BODY" not in caplog.text) is redacted
+    assert mock_response.text_reads == (0 if redacted else 1)
     exporter.close()
 
 

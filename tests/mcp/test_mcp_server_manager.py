@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from typing import Any, cast
 
 import pytest
@@ -12,7 +13,9 @@ from mcp.types import (
     Tool as MCPTool,
 )
 
+from agents import _debug
 from agents.mcp import MCPServer, MCPServerManager
+from agents.mcp._logging import get_mcp_server_log_name
 from agents.run_context import RunContextWrapper
 
 
@@ -121,6 +124,21 @@ class FlakyServer(MCPServer):
         return ReadResourceResult(contents=[])
 
 
+class SensitiveNamedServer(FlakyServer):
+    def __init__(self, name: str) -> None:
+        super().__init__(failures=1)
+        self._name = name
+        self.name_reads = 0
+
+    @property
+    def name(self) -> str:
+        self.name_reads += 1
+        return self._name
+
+    async def connect(self) -> None:
+        raise RuntimeError("SECRET_MCP_CONNECT_ERROR")
+
+
 class CleanupAwareServer(MCPServer):
     def __init__(self) -> None:
         super().__init__()
@@ -170,6 +188,84 @@ class CleanupAwareServer(MCPServer):
 
     async def read_resource(self, uri: str) -> ReadResourceResult:
         return ReadResourceResult(contents=[])
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("ordinary-server", "ordinary-server"),
+        (
+            "sse: https://user:password@example.test/events?token=secret#fragment",
+            "sse: https://example.test/events",
+        ),
+        (
+            "streamable_http: https://example.test/mcp?token=secret",
+            "streamable_http: https://example.test/mcp",
+        ),
+        (
+            "streamable_http: https://user:password@example.test:8443/mcp?token=secret",
+            "streamable_http: https://example.test:8443/mcp",
+        ),
+        ("streamable_http: https://[::1]:8000/mcp", "streamable_http: https://[::1]:8000/mcp"),
+        (
+            "streamable-http: https://example.test/mcp#secret",
+            "streamable-http: https://example.test/mcp",
+        ),
+        (
+            "streamable_http: https://user:password@[invalid/mcp?token=secret",
+            "streamable_http: <invalid-url>",
+        ),
+        (
+            "streamable_http: https://user:password/mcp?token=secret",
+            "streamable_http: <invalid-url>",
+        ),
+        ("https://user:password@example.test/mcp?token=secret", "https://example.test/mcp"),
+        ("https://user:password@[invalid/mcp?token=secret", "<invalid-url>"),
+        ("stdio: python server.py?token=secret", "stdio: python server.py?token=secret"),
+    ],
+)
+def test_get_mcp_server_log_name(name: str, expected: str) -> None:
+    assert get_mcp_server_log_name(name) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redacted", [True, False])
+@pytest.mark.parametrize(
+    ("server_name", "diagnostic_sentinel", "always_hidden"),
+    [
+        (
+            "streamable_http: https://SECRET_CREDENTIAL@example.test/"
+            "SECRET_MCP_PATH?token=SECRET_MCP_QUERY#SECRET_MCP_FRAGMENT",
+            "SECRET_MCP_PATH",
+            ("SECRET_CREDENTIAL", "SECRET_MCP_QUERY", "SECRET_MCP_FRAGMENT"),
+        ),
+        (
+            "SECRET_CUSTOM_MCP_SERVER_NAME",
+            "SECRET_CUSTOM_MCP_SERVER_NAME",
+            (),
+        ),
+    ],
+)
+async def test_manager_sanitizes_url_derived_server_names_in_failure_logs(
+    monkeypatch,
+    caplog,
+    redacted: bool,
+    server_name: str,
+    diagnostic_sentinel: str,
+    always_hidden: tuple[str, ...],
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+    server = SensitiveNamedServer(server_name)
+    manager = MCPServerManager([server])
+
+    with caplog.at_level(logging.ERROR, logger="openai.agents"):
+        await manager.connect_all()
+
+    assert (diagnostic_sentinel not in caplog.text) is redacted
+    assert server.name_reads == (0 if redacted else 1)
+    for sentinel in always_hidden:
+        assert sentinel not in caplog.text
+    assert ("SECRET_MCP_CONNECT_ERROR" not in caplog.text) is redacted
 
 
 class CancelledServer(MCPServer):

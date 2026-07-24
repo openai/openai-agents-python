@@ -199,7 +199,9 @@ def _server_event_validation_summary(error: BaseException) -> str:
     if isinstance(error, pydantic.ValidationError):
         return f"{error.error_count()} validation error(s)"
 
-    return error.__class__.__name__
+    if not _debug.DONT_LOG_MODEL_DATA:
+        return type(error).__name__
+    return "validation failed"
 
 
 def _server_event_identity(event: Any) -> tuple[Any, Any]:

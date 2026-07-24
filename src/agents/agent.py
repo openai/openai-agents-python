@@ -29,7 +29,7 @@ from .agent_tool_state import (
 from .exceptions import ModelBehaviorError, UserError
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
-from .logger import logger
+from .logger import log_model_and_tool_action_error, logger
 from .mcp import MCPUtil
 from .model_settings import ModelSettings, _coerce_model_settings, _declared_model_settings_type
 from .models.default_models import (
@@ -854,10 +854,11 @@ class Agent(AgentBase, Generic[TContext]):
                             maybe_result = stream_handler(payload)
                             if inspect.isawaitable(maybe_result):
                                 await maybe_result
-                        except Exception:
-                            logger.exception(
-                                "Error while handling on_stream event for agent tool %s.",
-                                self.name,
+                        except Exception as exc:
+                            log_model_and_tool_action_error(
+                                logger,
+                                "Error while handling an agent tool on_stream event",
+                                exc,
                             )
 
                     async def dispatch_stream_events() -> None:

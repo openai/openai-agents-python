@@ -58,7 +58,7 @@ from ..items import (
     ToolApprovalItem,
     ToolCallOutputItem,
 )
-from ..logger import logger
+from ..logger import log_tool_action_error as _log_tool_action_error, logger
 from ..model_settings import ModelSettings
 from ..run_config import RunConfig, ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper
@@ -1048,10 +1048,7 @@ def log_tool_action_error(message: str, exc: Exception | BaseException) -> None:
     redacted by default (matching ``_debug.DONT_LOG_TOOL_DATA``). The full exception
     and traceback are logged only when tool-data logging is explicitly enabled.
     """
-    if _debug.DONT_LOG_TOOL_DATA:
-        logger.error("%s: %s", message, exc.__class__.__name__)
-    else:
-        logger.error("%s: %s", message, exc, exc_info=True)
+    _log_tool_action_error(logger, message, exc, stacklevel=4)
 
 
 async def with_tool_function_span(
@@ -1208,11 +1205,14 @@ async def resolve_approval_rejection_message(
         return REJECTION_MESSAGE
 
     if not isinstance(message, str):
-        logger.error(
-            "Tool error formatter returned non-string for %s: %s",
-            tool_name,
-            type(message).__name__,
-        )
+        if _debug.DONT_LOG_TOOL_DATA:
+            logger.error("Tool error formatter returned a non-string value")
+        else:
+            logger.error(
+                "Tool error formatter returned non-string for %s: %s",
+                tool_name,
+                type(message).__name__,
+            )
         return REJECTION_MESSAGE
 
     return message

@@ -7,13 +7,14 @@ import tempfile
 import threading
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 pytest.importorskip("sqlalchemy")  # Skip tests if SQLAlchemy is not installed
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
+import agents._debug as _debug
 from agents import Agent, Runner, TResponseInputItem, function_tool
 from agents.extensions.memory import AdvancedSQLiteSession
 from agents.result import RunResult
@@ -152,6 +153,32 @@ async def test_advanced_session_basic_functionality(agent: Agent):
     assert retrieved[1].get("content") == "Hi there!"
 
     session.close()
+
+
+@pytest.mark.parametrize("redacted", [True, False])
+async def test_create_branch_logging_respects_model_data_policy(monkeypatch, redacted: bool):
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
+    mock_logger = Mock()
+    session = AdvancedSQLiteSession(
+        session_id="advanced_branch_logging",
+        create_tables=True,
+        logger=mock_logger,
+    )
+    secret = "SECRET_BRANCH_TURN_CONTENT"
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": secret},
+                {"role": "assistant", "content": "response"},
+            ]
+        )
+        await session.create_branch_from_turn(1, "branch")
+
+        logged = str(mock_logger.debug.call_args)
+        assert (secret not in logged) is redacted
+    finally:
+        session.close()
 
 
 async def test_advanced_session_respects_custom_table_names():

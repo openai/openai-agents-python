@@ -10,6 +10,7 @@ from typing import Any, cast
 from pydantic import BaseModel
 from typing_extensions import assert_never
 
+from .. import _debug
 from .._tool_identity import (
     FunctionToolLookupKey,
     get_function_tool_lookup_key_for_tool,
@@ -19,7 +20,7 @@ from ..agent import Agent
 from ..exceptions import ToolInputGuardrailTripwireTriggered, UserError
 from ..handoffs import Handoff
 from ..items import ToolApprovalItem
-from ..logger import logger
+from ..logger import log_model_action_error, log_tool_action_error, logger
 from ..run_config import ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper, TContext
 from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, Tool, invoke_function_tool
@@ -476,8 +477,8 @@ class RealtimeSession(RealtimeModelListener):
 
                     if new_content:
                         incoming_item = incoming_item.model_copy(update={"content": new_content})
-                except Exception:
-                    logger.error("Error merging transcripts", exc_info=True)
+                except Exception as exc:
+                    log_model_action_error(logger, "Error merging transcripts", exc)
                     pass
 
             self._history = self._get_new_history(self._history, incoming_item)
@@ -810,18 +811,21 @@ class RealtimeSession(RealtimeModelListener):
             )
             message = await maybe_message if inspect.isawaitable(maybe_message) else maybe_message
         except Exception as exc:
-            logger.error("Tool error formatter failed for %s: %s", tool.name, exc)
+            log_tool_action_error(logger, "Tool error formatter failed", exc)
             return REJECTION_MESSAGE
 
         if message is None:
             return REJECTION_MESSAGE
 
         if not isinstance(message, str):
-            logger.error(
-                "Tool error formatter returned non-string for %s: %s",
-                tool.name,
-                type(message).__name__,
-            )
+            if _debug.DONT_LOG_TOOL_DATA:
+                logger.error("Tool error formatter returned a non-string value")
+            else:
+                logger.error(
+                    "Tool error formatter returned non-string for %s: %s",
+                    tool.name,
+                    type(message).__name__,
+                )
             return REJECTION_MESSAGE
 
         return message
@@ -1312,13 +1316,15 @@ class RealtimeSession(RealtimeModelListener):
                 if result.output.tripwire_triggered:
                     triggered_results.append(result)
             except Exception as exc:
-                logger.warning(
-                    "Output guardrail %r raised %s: %s; skipping it.",
-                    guardrail.get_name(),
-                    type(exc).__name__,
-                    exc,
-                )
-                logger.debug("Output guardrail failure details.", exc_info=True)
+                if _debug.DONT_LOG_MODEL_DATA:
+                    logger.warning("Output guardrail raised an exception; skipping it")
+                else:
+                    logger.warning(
+                        "Output guardrail %r raised %s; skipping it.",
+                        guardrail.get_name(),
+                        exc,
+                    )
+                    logger.debug("Output guardrail failure details.", exc_info=exc)
                 continue
 
         if triggered_results:
@@ -1432,11 +1438,14 @@ class RealtimeSession(RealtimeModelListener):
             return
 
         if isinstance(exception, _PendingToolOutputSendError):
-            logger.warning(
-                "Realtime tool output send failed for call %s; cached output will be retried",
-                exception.call_id,
-                exc_info=exception,
-            )
+            if _debug.DONT_LOG_TOOL_DATA:
+                logger.warning("Realtime tool output send failed; cached output will be retried")
+            else:
+                logger.warning(
+                    "Realtime tool output send failed for call %s; cached output will be retried",
+                    exception.call_id,
+                    exc_info=exception,
+                )
             self._put_event_nowait(
                 RealtimeError(
                     info=self._event_info,
@@ -1449,7 +1458,7 @@ class RealtimeSession(RealtimeModelListener):
             )
             return
 
-        logger.exception("Realtime tool call task failed", exc_info=exception)
+        log_tool_action_error(logger, "Realtime tool call task failed", exception)
 
         if self._stored_exception is None:
             self._stored_exception = exception

@@ -43,7 +43,7 @@ except ImportError as e:
     )
 
 from ...items import TResponseInputItem
-from ...logger import logger
+from ...logger import log_model_and_tool_action_error, logger
 from ...memory.session import SessionABC
 from ...memory.session_settings import (
     SessionSettings,
@@ -461,5 +461,5 @@ class DaprSession(SessionABC):
                 )
                 return True
             except Exception:
-                logger.error("Dapr connection failed: %s", initial_error)
+                log_model_and_tool_action_error(logger, "Dapr connection failed", initial_error)
                 return False

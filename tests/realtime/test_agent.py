@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -27,6 +28,29 @@ async def test_dynamic_instructions():
     agent = RealtimeAgent(name="test", instructions=_instructions)
     instructions = await agent.get_system_prompt(RunContextWrapper(context=None))
     assert instructions == "Dynamic"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redacted", [True, False])
+async def test_mutated_invalid_instructions_respect_model_data_policy(
+    monkeypatch, redacted: bool
+) -> None:
+    class SensitiveInstructions:
+        def __str__(self) -> str:
+            return "SECRET_REALTIME_INSTRUCTIONS"
+
+        __repr__ = __str__
+
+    agent = RealtimeAgent(name="test")
+    agent.instructions = SensitiveInstructions()  # type: ignore[assignment]
+    monkeypatch.setattr("agents.realtime.agent._debug.DONT_LOG_MODEL_DATA", redacted)
+
+    with patch("agents.realtime.agent.logger") as mock_logger:
+        prompt = await agent.get_system_prompt(RunContextWrapper(context=None))
+
+    assert prompt is None
+    logged = str(mock_logger.error.call_args)
+    assert ("SECRET_REALTIME_INSTRUCTIONS" not in logged) is redacted
 
 
 def test_post_init_rejects_invalid_field_types() -> None:

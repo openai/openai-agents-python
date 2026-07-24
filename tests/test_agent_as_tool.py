@@ -13,6 +13,7 @@ from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from pydantic import BaseModel, Field
 
+import agents._debug as _debug
 from agents import (
     Agent,
     AgentBase,
@@ -2406,8 +2407,12 @@ async def test_agent_as_tool_streaming_dispatches_without_blocking(
 @pytest.mark.asyncio
 async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
     agent = Agent(name="handler_error_agent")
+    secret = "SECRET_AGENT_STREAM_PAYLOAD"
 
     class DummyStreamingResult:
         def __init__(self) -> None:
@@ -2427,7 +2432,7 @@ async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
     )
 
     def bad_handler(event: AgentToolStreamEvent) -> None:
-        raise RuntimeError("boom")
+        raise RuntimeError(secret)
 
     tool_call = ResponseFunctionToolCall(
         id="call_bad",
@@ -2450,9 +2455,11 @@ async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
         tool_call=tool_call,
     )
 
-    output = await tool.on_invoke_tool(tool_context, '{"input": "go"}')
+    with caplog.at_level("ERROR", logger="openai.agents"):
+        output = await tool.on_invoke_tool(tool_context, '{"input": "go"}')
 
     assert output == "ok"
+    assert secret not in caplog.text
 
 
 @pytest.mark.asyncio

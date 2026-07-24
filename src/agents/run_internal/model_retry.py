@@ -10,7 +10,7 @@ import httpx
 from openai import APIConnectionError, APITimeoutError, BadRequestError
 
 from ..items import ModelResponse, TResponseStreamEvent
-from ..logger import logger
+from ..logger import log_model_action_debug, logger
 from ..models._retry_runtime import (
     get_error_code as _get_error_code,
     get_request_id as _get_request_id,
@@ -246,7 +246,7 @@ async def _close_async_iterator_quietly(iterator: Any | None) -> None:
     try:
         await _close_async_iterator(iterator)
     except Exception as exc:
-        logger.debug("Ignoring retry stream cleanup error: %s", exc)
+        log_model_action_debug(logger, "Ignoring retry stream cleanup error", exc)
 
 
 def _get_stream_event_type(event: TResponseStreamEvent) -> str | None:

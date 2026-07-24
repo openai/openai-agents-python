@@ -8,6 +8,7 @@ from typing import Any, Generic, cast
 
 from agents.prompts import Prompt
 
+from .. import _debug
 from ..agent import AgentBase
 from ..guardrail import OutputGuardrail
 from ..handoffs import Handoff
@@ -125,6 +126,11 @@ class RealtimeAgent(AgentBase, Generic[TContext]):
             else:
                 return cast(str, self.instructions(run_context, self))
         elif self.instructions is not None:
-            logger.error("Instructions must be a string or a function, got %s", self.instructions)
+            if _debug.DONT_LOG_MODEL_DATA:
+                logger.error("Instructions must be a string or a function")
+            else:
+                logger.error(
+                    "Instructions must be a string or a function, got %s", self.instructions
+                )
 
         return None

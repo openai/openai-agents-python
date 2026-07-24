@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
+from ....logger import log_tool_action_debug, log_tool_action_warning
 from ....sandbox.entries import Mount
 from ....sandbox.errors import (
     ExecTimeoutError,
@@ -453,7 +454,9 @@ class BlaxelSandboxSession(BaseSandboxSession):
                 }
             )
         except Exception as e:
-            logger.debug("workspace root mkdir failed (will retry during materialization): %s", e)
+            log_tool_action_debug(
+                logger, "Workspace root mkdir failed; retrying during materialization", e
+            )
         await super().start()
 
     async def stop(self) -> None:
@@ -467,7 +470,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             # When pause_on_exit is True the sandbox is kept alive.  Blaxel
             # automatically resumes it on the next connection.
         except Exception as e:
-            logger.warning("sandbox delete failed during shutdown: %s", e)
+            log_tool_action_warning(logger, "Sandbox delete failed during shutdown", e)
 
     async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
         return await self._validate_remote_path_access(path, for_write=for_write)
@@ -626,7 +629,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             await asyncio.wait_for(self._sandbox.fs.ls("/"), timeout=10.0)
             return True
         except Exception as e:
-            logger.debug("sandbox health check failed: %s", e)
+            log_tool_action_debug(logger, "Sandbox health check failed", e)
             return False
 
     # -- workspace persistence -----------------------------------------------
@@ -690,7 +693,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
                         "rm", "-f", "--", tar_path, timeout=self.state.timeouts.cleanup_s
                     )
                 except Exception as e:
-                    logger.debug("persist cleanup rm failed (non-fatal): %s", e)
+                    log_tool_action_debug(logger, "Persist cleanup failed (non-fatal)", e)
 
         remount_error: WorkspaceArchiveReadError | None = None
         for mount_entry, mount_path in reversed(unmounted_mounts):
@@ -764,7 +767,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
                     "rm", "-f", "--", tar_path, timeout=self.state.timeouts.cleanup_s
                 )
             except Exception as e:
-                logger.debug("hydrate cleanup rm failed (non-fatal): %s", e)
+                log_tool_action_debug(logger, "Hydrate cleanup failed (non-fatal)", e)
 
     # -- PTY -----------------------------------------------------------------
 
@@ -947,7 +950,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
                 ):
                     break
         except Exception as e:
-            logger.debug("PTY ws reader terminated with error: %s", e)
+            log_tool_action_debug(logger, "PTY WebSocket reader terminated with an error", e)
         finally:
             entry.done = True
             entry.output_notify.set()
@@ -1018,14 +1021,14 @@ class BlaxelSandboxSession(BaseSandboxSession):
                 try:
                     await entry.ws.close()
                 except Exception as e:
-                    logger.debug("PTY ws close error (non-fatal): %s", e)
+                    log_tool_action_debug(logger, "PTY WebSocket close failed (non-fatal)", e)
             if entry.http_session is not None:
                 try:
                     await entry.http_session.close()
                 except Exception as e:
-                    logger.debug("PTY http session close error (non-fatal): %s", e)
+                    log_tool_action_debug(logger, "PTY HTTP session close failed (non-fatal)", e)
         except Exception as e:
-            logger.debug("PTY entry termination error (non-fatal): %s", e)
+            log_tool_action_debug(logger, "PTY entry termination failed (non-fatal)", e)
 
 
 # ---------------------------------------------------------------------------
@@ -1126,7 +1129,7 @@ class BlaxelSandboxClient(BaseSandboxClient["BlaxelSandboxClientOptions"]):
         try:
             await inner.shutdown()
         except Exception as e:
-            logger.warning("shutdown error during delete (non-fatal): %s", e)
+            log_tool_action_warning(logger, "Shutdown failed during delete (non-fatal)", e)
         return session
 
     async def resume(
@@ -1152,7 +1155,7 @@ class BlaxelSandboxClient(BaseSandboxClient["BlaxelSandboxClientOptions"]):
                 blaxel_sandbox = await SandboxInstance.get(state.sandbox_name)
                 reconnected = True
             except Exception as e:
-                logger.debug("sandbox get() failed, will recreate: %s", e)
+                log_tool_action_debug(logger, "Sandbox lookup failed; recreating", e)
 
         if not reconnected or blaxel_sandbox is None:
             create_config = _build_create_config(

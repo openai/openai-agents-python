@@ -54,7 +54,7 @@ from .computer import AsyncComputer, Computer
 from .editor import ApplyPatchEditor, ApplyPatchOperation
 from .exceptions import ModelBehaviorError, ToolTimeoutError, UserError
 from .function_schema import DocstringStyle, function_schema
-from .logger import logger
+from .logger import log_tool_action_warning, logger
 from .run_context import RunContextWrapper
 from .strict_schema import ensure_strict_json_schema
 from .tool_context import ToolContext
@@ -885,7 +885,7 @@ async def dispose_resolved_computers(*, run_context: RunContextWrapper[Any]) -> 
             if inspect.isawaitable(result):
                 await result
         except Exception as exc:
-            logger.warning("Failed to dispose computer for run context: %s", exc)
+            log_tool_action_warning(logger, "Failed to dispose computer for run context", exc)
 
 
 @dataclass

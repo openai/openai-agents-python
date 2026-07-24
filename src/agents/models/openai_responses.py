@@ -50,7 +50,7 @@ from ..computer import AsyncComputer, Computer
 from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
-from ..logger import logger
+from ..logger import log_model_action_debug, log_model_action_error, logger
 from ..model_settings import MCPToolChoice
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..tool import (
@@ -300,7 +300,9 @@ class _ResponseStreamWithRequestId:
             await self._cleanup_once()
         except Exception as exc:
             if self._yielded_terminal_event:
-                logger.debug("Ignoring stream cleanup error after terminal event: %s", exc)
+                log_model_action_debug(
+                    logger, "Ignoring stream cleanup error after terminal event", exc
+                )
                 return
             raise
 
@@ -452,7 +454,9 @@ class OpenAIResponsesModel(Model):
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            logger.debug("Background stream cleanup failed after cancellation: %s", exc)
+            log_model_action_debug(
+                logger, "Background stream cleanup failed after cancellation", exc
+            )
 
     async def get_response(
         self,
@@ -506,19 +510,16 @@ class OpenAIResponsesModel(Model):
                     SpanError(
                         message="Error getting response",
                         data={
-                            "error": str(e) if tracing.include_data() else e.__class__.__name__,
+                            "error": str(e)
+                            if tracing.include_data()
+                            else "Error details are redacted.",
                         },
                     )
                 )
-                request_id = getattr(e, "request_id", None)
-                if _debug.DONT_LOG_MODEL_DATA:
-                    logger.error(
-                        "Error getting response: %s. (request_id: %s)",
-                        e.__class__.__name__,
-                        request_id,
-                    )
-                else:
-                    logger.error("Error getting response: %s. (request_id: %s)", e, request_id)
+                message = "Error getting response"
+                if not _debug.DONT_LOG_MODEL_DATA:
+                    message = f"{message} (request_id: {getattr(e, 'request_id', None)})"
+                log_model_action_error(logger, message, e)
                 raise
 
         return ModelResponse(
@@ -603,8 +604,10 @@ class OpenAIResponsesModel(Model):
                             await self._maybe_aclose_async_iterator(stream)
                         except Exception as exc:
                             if yielded_terminal_event:
-                                logger.debug(
-                                    "Ignoring stream cleanup error after terminal event: %s", exc
+                                log_model_action_debug(
+                                    logger,
+                                    "Ignoring stream cleanup error after terminal event",
+                                    exc,
                                 )
                             else:
                                 raise
@@ -624,14 +627,13 @@ class OpenAIResponsesModel(Model):
                     SpanError(
                         message="Error streaming response",
                         data={
-                            "error": str(e) if tracing.include_data() else e.__class__.__name__,
+                            "error": str(e)
+                            if tracing.include_data()
+                            else "Error details are redacted.",
                         },
                     )
                 )
-                if _debug.DONT_LOG_MODEL_DATA:
-                    logger.error("Error streaming response: %s", e.__class__.__name__)
-                else:
-                    logger.error("Error streaming response: %s", e)
+                log_model_action_error(logger, "Error streaming response", e)
                 raise
 
     @overload

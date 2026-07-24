@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import agents._debug as _debug
 from agents import Agent, Runner
 from agents.items import TResponseInputItem
 from agents.memory import (
@@ -706,9 +707,12 @@ class TestOpenAIResponsesCompactionSession:
         assert failing_session.add_calls == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("redacted", [True, False])
     async def test_run_compaction_reraises_replacement_error_when_restore_fails(
-        self, caplog: pytest.LogCaptureFixture
+        self, monkeypatch, caplog: pytest.LogCaptureFixture, redacted: bool
     ) -> None:
+        monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
+        monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
         history: list[TResponseInputItem] = [
             cast(TResponseInputItem, {"type": "message", "role": "user", "content": "original"}),
         ]
@@ -730,7 +734,7 @@ class TestOpenAIResponsesCompactionSession:
                 if self.add_calls == 1:
                     await super().add_items(items[:1])
                     raise RuntimeError("replacement failed")
-                raise RuntimeError("restore failed")
+                raise RuntimeError("SECRET_COMPACTION_RESTORE_FAILURE")
 
             async def clear_session(self) -> None:
                 self.clear_calls += 1
@@ -758,6 +762,7 @@ class TestOpenAIResponsesCompactionSession:
         assert (
             "Failed to restore session history after compaction replacement failed." in caplog.text
         )
+        assert ("SECRET_COMPACTION_RESTORE_FAILURE" not in caplog.text) is redacted
         assert failing_session.clear_calls == 2
         assert failing_session.add_calls == 2
 

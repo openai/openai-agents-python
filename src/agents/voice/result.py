@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ..exceptions import UserError
-from ..logger import logger
+from ..logger import log_model_action_error, log_model_and_tool_action_error, logger
 from ..tracing import Span, SpeechGroupSpanData, speech_group_span, speech_span
 from ..tracing.util import time_iso
 from ..util._error_tracing import get_trace_error
@@ -192,7 +192,7 @@ class StreamedAudioResult:
                         },
                     }
                 )
-                logger.error("Error streaming audio: %s", e)
+                log_model_action_error(logger, "Error streaming voice audio", e)
 
                 # Signal completion for whole session because of error
                 await local_queue.put(VoiceStreamEventLifecycle(event="session_ended"))
@@ -308,7 +308,9 @@ class StreamedAudioResult:
                 break
             if isinstance(event, VoiceStreamEventError):
                 self._stored_exception = event.error
-                logger.error("Error processing output: %s", event.error)
+                log_model_and_tool_action_error(
+                    logger, "Error processing voice output", event.error
+                )
                 break
             if event is None:
                 break

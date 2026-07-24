@@ -17,6 +17,7 @@ from openai.types.responses.response_output_text import AnnotationFileCitation, 
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from typing_extensions import TypedDict
 
+import agents._debug as _debug
 from agents import (
     Agent,
     GuardrailFunctionOutput,
@@ -2777,6 +2778,45 @@ async def test_rewind_handles_id_stripped_sessions() -> None:
 
     assert session.pop_calls == 1
     assert session.saved_items == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redacted", [True, False])
+async def test_rewind_debug_logging_respects_model_and_tool_policies(
+    monkeypatch, redacted: bool
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+    secret = "SECRET_REWIND_SESSION_CONTENT"
+    session = IdStrippingSession()
+    item = cast(
+        TResponseInputItem,
+        {"id": "message-1", "type": "message", "role": "user", "content": secret},
+    )
+    await session.add_items([item])
+
+    with patch("agents.run_internal.session_persistence.logger") as mock_logger:
+        await rewind_session_items(session, [item])
+
+    logged = str(mock_logger.debug.call_args_list)
+    assert (secret not in logged) is redacted
+
+
+@pytest.mark.asyncio
+async def test_rewind_failure_uses_placeholder_free_shared_logger_message() -> None:
+    class FailingTailSession(SimpleListSession):
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            raise RuntimeError("tail failure")
+
+    item = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "hi"})
+    session = FailingTailSession(history=[item])
+
+    with patch(
+        "agents.run_internal.session_persistence.log_model_and_tool_action_warning"
+    ) as mock_warning:
+        await rewind_session_items(session, [item])
+
+    assert mock_warning.call_args.args[1] == "Failed to rewind session item"
 
 
 @pytest.mark.asyncio

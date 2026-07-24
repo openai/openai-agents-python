@@ -81,7 +81,7 @@ from .items import (
     coerce_tool_search_call_raw_item,
     coerce_tool_search_output_raw_item,
 )
-from .logger import logger
+from .logger import log_model_and_tool_action_warning, logger
 from .run_context import RunContextWrapper
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
@@ -3752,7 +3752,9 @@ def _deserialize_items(
         except UserError:
             raise
         except Exception as e:
-            logger.warning("Failed to deserialize item of type %s: %s", item_type, e)
+            log_model_and_tool_action_warning(
+                logger, f"Failed to deserialize item of type {item_type}", e
+            )
             continue
 
     return result

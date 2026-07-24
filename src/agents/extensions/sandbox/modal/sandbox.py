@@ -33,6 +33,7 @@ import modal
 from modal.config import config as modal_config
 from modal.container_process import ContainerProcess
 
+from ....logger import log_tool_action_warning
 from ....sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 from ....sandbox.entries import Mount
 from ....sandbox.errors import (
@@ -1327,8 +1328,9 @@ class ModalSandboxSession(BaseSandboxSession):
             if not rm_out.ok():
                 cleanup_restore_error = await restore_ephemeral_paths()
                 if cleanup_restore_error is not None:
-                    logger.warning(
-                        "Failed to restore Modal ephemeral paths after cleanup failure: %s",
+                    log_tool_action_warning(
+                        logger,
+                        "Failed to restore Modal ephemeral paths after cleanup failure",
                         cleanup_restore_error,
                     )
                 raise WorkspaceArchiveReadError(
@@ -1352,8 +1354,9 @@ class ModalSandboxSession(BaseSandboxSession):
         except Exception as e:
             restore_error = await restore_ephemeral_paths()
             if restore_error is not None:
-                logger.warning(
-                    "Failed to restore Modal ephemeral paths after snapshot failure: %s",
+                log_tool_action_warning(
+                    logger,
+                    "Failed to restore Modal ephemeral paths after snapshot failure",
                     restore_error,
                 )
             raise WorkspaceArchiveReadError(

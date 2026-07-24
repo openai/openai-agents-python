@@ -14,6 +14,7 @@ import pytest
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel, ConfigDict
 
+import agents._debug as _debug
 from agents import Agent, function_tool
 from agents.exceptions import ModelBehaviorError, UserError
 from agents.extensions.experimental.codex import (
@@ -1802,7 +1803,13 @@ async def test_replaced_codex_tool_preserves_codex_collision_markers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_codex_tool_consume_events_with_on_stream_error() -> None:
+async def test_codex_tool_consume_events_with_on_stream_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    secret = "SECRET_CODEX_STREAM_PAYLOAD"
     events = [
         {
             "type": "item.started",
@@ -1865,7 +1872,7 @@ async def test_codex_tool_consume_events_with_on_stream_error() -> None:
     def on_stream(payload: CodexToolStreamEvent) -> None:
         callbacks.append(payload.event.type)
         if payload.event.type == "item.started":
-            raise RuntimeError("boom")
+            raise RuntimeError(secret)
 
     context = ToolContext(
         context=None,
@@ -1874,20 +1881,22 @@ async def test_codex_tool_consume_events_with_on_stream_error() -> None:
         tool_arguments="{}",
     )
 
-    with trace("codex-test"):
-        response, usage, thread_id = await codex_tool_module._consume_events(
-            event_stream(),
-            {"inputs": [{"type": "text", "text": "hello"}]},
-            context,
-            SimpleNamespace(id="thread-1"),
-            on_stream,
-            64,
-        )
+    with caplog.at_level("ERROR", logger="openai.agents"):
+        with trace("codex-test"):
+            response, usage, thread_id = await codex_tool_module._consume_events(
+                event_stream(),
+                {"inputs": [{"type": "text", "text": "hello"}]},
+                context,
+                SimpleNamespace(id="thread-1"),
+                on_stream,
+                64,
+            )
 
     assert response == "done"
     assert usage == Usage(input_tokens=1, cached_input_tokens=0, output_tokens=1)
     assert thread_id == "thread-1"
     assert "item.started" in callbacks
+    assert secret not in caplog.text
 
 
 @pytest.mark.asyncio

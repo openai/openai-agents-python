@@ -13,9 +13,14 @@ from collections import deque
 from collections.abc import Sequence
 from typing import Any, cast
 
+from .. import _debug
 from ..exceptions import UserError
 from ..items import HandoffOutputItem, ItemHelpers, RunItem, ToolCallOutputItem, TResponseInputItem
-from ..logger import logger
+from ..logger import (
+    log_model_and_tool_action_debug,
+    log_model_and_tool_action_warning,
+    logger,
+)
 from ..memory import (
     OpenAIResponsesCompactionArgs,
     Session,
@@ -542,8 +547,9 @@ async def rewind_session_items(
         len(target_serializations),
     )
 
-    for i, target in enumerate(target_serializations):
-        logger.debug("Rewind target %d (first 300 chars): %s", i, target[:300])
+    if not (_debug.DONT_LOG_MODEL_DATA or _debug.DONT_LOG_TOOL_DATA):
+        for i, target in enumerate(target_serializations):
+            logger.debug("Rewind target %d (first 300 chars): %s", i, target[:300])
 
     snapshot_serializations = target_serializations.copy()
     rewound = await _rewind_session_tail_suffix(
@@ -554,7 +560,7 @@ async def rewind_session_items(
         mismatch_warning=(
             "Skipping session rewind because the current tail does not match the retry-owned suffix"
         ),
-        pop_failure_warning="Failed to rewind session item: %s",
+        pop_failure_warning="Failed to rewind session item",
     )
     if not rewound:
         return
@@ -571,7 +577,7 @@ async def rewind_session_items(
     try:
         latest_items = await session.get_items(limit=1)
     except Exception as exc:
-        logger.debug("Failed to peek session items while rewinding: %s", exc)
+        log_model_and_tool_action_debug(logger, "Failed to peek session items while rewinding", exc)
         return
 
     if not latest_items:
@@ -584,7 +590,9 @@ async def rewind_session_items(
     try:
         session_items = await session.get_items()
     except Exception as exc:
-        logger.debug("Failed to inspect session tail while stripping stray items: %s", exc)
+        log_model_and_tool_action_debug(
+            logger, "Failed to inspect session tail while stripping stray items", exc
+        )
         return
 
     stray_serializations = _collect_retry_owned_tail_serializations(
@@ -609,7 +617,7 @@ async def rewind_session_items(
             "Skipping stray session cleanup because the current tail no longer matches "
             "retry-owned conversation items"
         ),
-        pop_failure_warning="Failed to strip stray session item: %s",
+        pop_failure_warning="Failed to strip stray session item",
     )
 
 
@@ -633,7 +641,9 @@ async def wait_for_session_cleanup(
         try:
             tail_items = await session.get_items(limit=window)
         except Exception as exc:
-            logger.debug("Failed to verify session cleanup (attempt %d): %s", attempt + 1, exc)
+            log_model_and_tool_action_debug(
+                logger, f"Failed to verify session cleanup (attempt {attempt + 1})", exc
+            )
             await asyncio.sleep(0.1 * (attempt + 1))
             continue
 
@@ -764,7 +774,7 @@ async def _rewind_session_tail_suffix(
     try:
         tail_items = await session.get_items(limit=len(expected_serializations))
     except Exception as exc:
-        logger.warning(pop_failure_warning, exc)
+        log_model_and_tool_action_warning(logger, pop_failure_warning, exc)
         return False
 
     if len(tail_items) != len(expected_serializations):
@@ -791,7 +801,7 @@ async def _rewind_session_tail_suffix(
                 result = await result
         except Exception as exc:
             await _restore_popped_session_items(session, popped_items)
-            logger.warning(pop_failure_warning, exc)
+            log_model_and_tool_action_warning(logger, pop_failure_warning, exc)
             return False
 
         if result is None:
@@ -827,7 +837,9 @@ async def _restore_popped_session_items(
         if inspect.isawaitable(result):
             await result
     except Exception as exc:
-        logger.warning("Failed to restore session items after a rewind mismatch: %s", exc)
+        log_model_and_tool_action_warning(
+            logger, "Failed to restore session items after a rewind mismatch", exc
+        )
 
 
 def _collect_retry_owned_tail_serializations(

@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
 
+from ...logger import log_tool_action_warning
 from ..errors import (
     ExecNonZeroError,
     ExecTimeoutError,
@@ -1129,12 +1130,12 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         for mount_entry, mount_path in inner.state.manifest.ephemeral_mount_targets():
             try:
                 await mount_entry.unmount(inner, mount_path, Path("/"))
-            except Exception:
+            except Exception as exc:
                 unmount_failed = True
-                logger.warning(
-                    "Failed to unmount UnixLocal workspace mount before deleting root: %s",
-                    mount_path,
-                    exc_info=True,
+                log_tool_action_warning(
+                    logger,
+                    "Failed to unmount UnixLocal workspace mount before deleting root",
+                    exc,
                 )
         if unmount_failed:
             return session

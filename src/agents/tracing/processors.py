@@ -13,7 +13,12 @@ from typing import Any, cast
 
 import httpx
 
-from ..logger import logger
+from .. import _debug
+from ..logger import (
+    log_model_and_tool_action_error,
+    log_model_and_tool_action_warning,
+    logger,
+)
 from .processor_interface import TracingExporter, TracingProcessor
 from .spans import Span
 from .traces import Trace
@@ -24,6 +29,12 @@ class ConsoleSpanExporter(TracingExporter):
 
     def export(self, items: list[Trace | Span[Any]]) -> None:
         for item in items:
+            if _debug.DONT_LOG_MODEL_DATA or _debug.DONT_LOG_TOOL_DATA:
+                if isinstance(item, Trace):
+                    print("[Exporter] Export trace. Trace data is redacted.")
+                else:
+                    print("[Exporter] Export span. Span data is redacted.")
+                continue
             if isinstance(item, Trace):
                 print(f"[Exporter] Export trace_id={item.trace_id}, name={item.name}")
             else:
@@ -173,11 +184,17 @@ class BackendSpanExporter(TracingExporter):
 
                     # If the response is a client error (4xx), we won't retry
                     if 400 <= response.status_code < 500:
-                        logger.error(
-                            "[non-fatal] Tracing client error %s: %s",
-                            response.status_code,
-                            response.text,
-                        )
+                        if _debug.DONT_LOG_MODEL_DATA or _debug.DONT_LOG_TOOL_DATA:
+                            logger.error(
+                                "[non-fatal] Tracing client error %s. Response data is redacted.",
+                                response.status_code,
+                            )
+                        else:
+                            logger.error(
+                                "[non-fatal] Tracing client error %s: %s",
+                                response.status_code,
+                                response.text,
+                            )
                         break
 
                     # For 5xx or other unexpected codes, treat it as transient and retry
@@ -186,7 +203,9 @@ class BackendSpanExporter(TracingExporter):
                     )
                 except httpx.RequestError as exc:
                     # Network or other I/O error, we'll retry
-                    logger.warning("[non-fatal] Tracing: request failed: %s", exc)
+                    log_model_and_tool_action_warning(
+                        logger, "[non-fatal] Tracing request failed", exc
+                    )
 
                 # If we reach here, we need to retry or give up
                 if attempt >= self.max_retries:
@@ -690,10 +709,13 @@ class BatchTraceProcessor(TracingProcessor):
                     else:
                         self._exporter.export(items_to_export)
                 except Exception as exc:
-                    logger.error(
-                        "[non-fatal] Tracing: exporter raised %s; dropping batch of %d items",
+                    log_model_and_tool_action_error(
+                        logger,
+                        (
+                            "[non-fatal] Tracing exporter failed; "
+                            f"dropping batch of {len(items_to_export)} items"
+                        ),
                         exc,
-                        len(items_to_export),
                     )
 
 

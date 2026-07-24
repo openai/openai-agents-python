@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+import agents._debug as _debug
 from agents.exceptions import ToolTimeoutError, UserError
 from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
 from agents.handoffs import Handoff
@@ -576,6 +577,7 @@ class _FakeAudio:
 
 @pytest.mark.asyncio
 async def test_item_updated_merge_exception_path_logs_error(monkeypatch):
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
     model = _DummyModel()
     agent = RealtimeAgent(name="agent")
     session = RealtimeSession(model, agent, None)
@@ -594,8 +596,7 @@ async def test_item_updated_merge_exception_path_logs_error(monkeypatch):
 
     with patch("agents.realtime.session.logger") as mock_logger:
         await session.on_event(RealtimeModelItemUpdatedEvent(item=incoming))
-        # error branch should be hit
-        assert mock_logger.error.called
+        mock_logger.error.assert_called_once_with("%s", "Error merging transcripts", stacklevel=3)
 
 
 @pytest.mark.asyncio
@@ -3118,6 +3119,31 @@ class TestToolCallExecution:
             and ev.output == "run-level test_function denied (call_reject_custom)"
             for ev in events
         )
+
+    @pytest.mark.asyncio
+    async def test_rejection_formatter_error_is_redacted(
+        self, monkeypatch, mock_model, mock_agent, mock_function_tool
+    ):
+        monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+
+        def fail_formatter(_args):
+            raise ValueError("SECRET_REALTIME_TOOL_FORMATTER")
+
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={"tool_error_formatter": fail_formatter},
+        )
+
+        with patch("agents.realtime.session.logger") as mock_logger:
+            message = await session._resolve_approval_rejection_message(
+                tool=mock_function_tool,
+                call_id="call_reject_error",
+            )
+
+        assert message
+        mock_logger.error.assert_called_once_with("%s", "Tool error formatter failed", stacklevel=3)
 
     @pytest.mark.asyncio
     async def test_reject_pending_tool_call_prefers_explicit_message(

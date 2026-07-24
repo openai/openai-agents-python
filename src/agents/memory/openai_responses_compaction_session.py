@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from openai import AsyncOpenAI
 
 from ..items import TResponseInputItem
+from ..logger import log_model_and_tool_action_warning
 from ..models._openai_shared import get_default_openai_client
 from ..run_internal.items import normalize_input_items_for_api
 from .openai_conversations_session import OpenAIConversationsSession
@@ -273,10 +274,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     ) -> None:
         try:
             current_items = await self._get_all_underlying_session_items()
-        except Exception:
-            logger.warning(
+        except Exception as inspection_error:
+            log_model_and_tool_action_warning(
+                logger,
                 "Failed to inspect session history after compaction replacement clear failed.",
-                exc_info=True,
+                inspection_error,
             )
             return
 
@@ -299,15 +301,17 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 await self.underlying_session.clear_session()
             if previous_items:
                 await self.underlying_session.add_items(list(previous_items))
-        except Exception:
-            logger.warning(
+        except Exception as restore_error:
+            log_model_and_tool_action_warning(
+                logger,
                 "Failed to restore session history after compaction replacement failed.",
-                exc_info=True,
+                restore_error,
             )
             return
 
-        logger.warning(
-            "Restored previous session history after compaction replacement failed: %s",
+        log_model_and_tool_action_warning(
+            logger,
+            "Restored previous session history after compaction replacement failed",
             replacement_error,
         )
 

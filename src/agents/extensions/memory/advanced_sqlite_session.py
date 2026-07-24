@@ -11,8 +11,14 @@ from typing import Any, cast
 from agents.result import RunResult
 from agents.usage import Usage
 
+from ... import _debug
 from ..._tool_identity import is_reserved_synthetic_tool_namespace, tool_qualified_name
 from ...items import TResponseInputItem
+from ...logger import (
+    log_model_action_error,
+    log_model_action_warning,
+    log_model_and_tool_action_error,
+)
 from ...memory import SQLiteSession
 from ...memory.session_settings import SessionSettings, resolve_session_limit
 
@@ -172,9 +178,11 @@ class AdvancedSQLiteSession(SQLiteSession):
                     self._insert_items(conn, items)
                     self._insert_structure_metadata(conn, items)
                     conn.commit()
-                except Exception:
+                except Exception as exc:
                     conn.rollback()
-                    self._logger.exception("Failed to add items for session %s", self.session_id)
+                    log_model_and_tool_action_error(
+                        self._logger, "Failed to add session items", exc
+                    )
                     raise
 
         await asyncio.to_thread(_add_items_sync)
@@ -462,7 +470,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                     turn_anchor=turn_anchor,
                 )
         except Exception as e:
-            self._logger.error("Failed to store usage for session %s: %s", self.session_id, e)
+            log_model_action_error(self._logger, "Failed to store session usage", e)
 
     def _capture_current_turn(self) -> tuple[int, str, int | None]:
         """Return (current_turn, branch_id, turn_anchor) in one locked read.
@@ -581,15 +589,19 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         try:
             await asyncio.to_thread(_add_structure_sync)
-        except Exception:
-            self._logger.exception(
-                "Failed to add structure metadata for session %s", self.session_id
+        except Exception as exc:
+            log_model_and_tool_action_error(
+                self._logger,
+                "Failed to add session structure metadata",
+                exc,
             )
             # Try to clean up any orphaned messages to maintain consistency.
             try:
                 await self._cleanup_orphaned_messages()
-            except Exception:
-                self._logger.exception("Failed to cleanup orphaned messages")
+            except Exception as cleanup_exc:
+                log_model_and_tool_action_error(
+                    self._logger, "Failed to cleanup orphaned session messages", cleanup_exc
+                )
             raise
 
     def _insert_structure_metadata(
@@ -870,13 +882,21 @@ class AdvancedSQLiteSession(SQLiteSession):
         old_branch = self._current_branch_id
         await asyncio.to_thread(self._commit_branch_pointer, branch_name, generation)
 
-        self._logger.debug(
-            "Created branch '%s' from turn %s ('%s') in '%s'",
-            branch_name,
-            turn_number,
-            turn_content,
-            old_branch,
-        )
+        if _debug.DONT_LOG_MODEL_DATA:
+            self._logger.debug(
+                "Created branch '%s' from turn %s in '%s'",
+                branch_name,
+                turn_number,
+                old_branch,
+            )
+        else:
+            self._logger.debug(
+                "Created branch '%s' from turn %s ('%s') in '%s'",
+                branch_name,
+                turn_number,
+                turn_content,
+                old_branch,
+            )
         return branch_name
 
     async def create_branch_from_content(
@@ -1580,7 +1600,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                     try:
                         input_details_json = json.dumps(usage_data.input_tokens_details.__dict__)
                     except (TypeError, ValueError) as e:
-                        self._logger.warning("Failed to serialize input tokens details: %s", e)
+                        log_model_action_warning(
+                            self._logger, "Failed to serialize input token details", e
+                        )
                         input_details_json = None
 
                 if (
@@ -1590,7 +1612,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                     try:
                         output_details_json = json.dumps(usage_data.output_tokens_details.__dict__)
                     except (TypeError, ValueError) as e:
-                        self._logger.warning("Failed to serialize output tokens details: %s", e)
+                        log_model_action_warning(
+                            self._logger, "Failed to serialize output token details", e
+                        )
                         output_details_json = None
 
                 with closing(conn.cursor()) as cursor:

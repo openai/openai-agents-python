@@ -25,7 +25,7 @@ from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff
 from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
-from ..logger import logger
+from ..logger import log_model_action_debug, logger
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..tool import Tool
 from ..tracing import generation_span
@@ -149,7 +149,9 @@ class OpenAIChatCompletionsModel(Model):
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            logger.debug("Background stream cleanup failed after cancellation: %s", exc)
+            log_model_action_debug(
+                logger, "Background stream cleanup failed after cancellation", exc
+            )
 
     def _validate_official_openai_input_content_types(
         self, request_input: str | list[TResponseInputItem]
@@ -387,8 +389,10 @@ class OpenAIChatCompletionsModel(Model):
                         await self._maybe_aclose_async_iterator(stream)
                     except Exception as exc:
                         if yielded_terminal_event:
-                            logger.debug(
-                                "Ignoring stream cleanup error after terminal event: %s", exc
+                            log_model_action_debug(
+                                logger,
+                                "Ignoring stream cleanup error after terminal event",
+                                exc,
                             )
                         else:
                             raise

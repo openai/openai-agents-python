@@ -34,6 +34,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
+from ....logger import log_tool_action_warning
 from ....sandbox.entries import Mount
 from ....sandbox.errors import (
     ExecNonZeroError,
@@ -858,6 +859,12 @@ class E2BSandboxSession(BaseSandboxSession):
 
     async def _shutdown_backend(self) -> None:
         # Best-effort kill of the remote sandbox.
+        def diagnostic_extra() -> dict[str, object]:
+            return {
+                "sandbox_id": self.state.sandbox_id,
+                "pause_on_exit": self.state.pause_on_exit,
+            }
+
         try:
             if self.state.pause_on_exit:
                 await _sandbox_pause(self._sandbox)
@@ -865,33 +872,27 @@ class E2BSandboxSession(BaseSandboxSession):
                 await _sandbox_kill(self._sandbox)
         except Exception as e:
             if self.state.pause_on_exit:
-                logger.warning(
+                log_tool_action_warning(
+                    logger,
                     "Failed to pause E2B sandbox on shutdown; falling back to kill.",
-                    extra={
-                        "sandbox_id": self.state.sandbox_id,
-                        "pause_on_exit": self.state.pause_on_exit,
-                    },
-                    exc_info=e,
+                    e,
+                    diagnostic_extra=diagnostic_extra,
                 )
                 try:
                     await _sandbox_kill(self._sandbox)
                 except Exception as kill_exc:
-                    logger.warning(
+                    log_tool_action_warning(
+                        logger,
                         "Failed to kill E2B sandbox after pause fallback failure.",
-                        extra={
-                            "sandbox_id": self.state.sandbox_id,
-                            "pause_on_exit": self.state.pause_on_exit,
-                        },
-                        exc_info=kill_exc,
+                        kill_exc,
+                        diagnostic_extra=diagnostic_extra,
                     )
             else:
-                logger.warning(
+                log_tool_action_warning(
+                    logger,
                     "Failed to kill E2B sandbox on shutdown.",
-                    extra={
-                        "sandbox_id": self.state.sandbox_id,
-                        "pause_on_exit": self.state.pause_on_exit,
-                    },
-                    exc_info=e,
+                    e,
+                    diagnostic_extra=diagnostic_extra,
                 )
 
     async def _exec_internal(
