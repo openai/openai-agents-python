@@ -3570,13 +3570,13 @@ class TestDriveMounts:
             assert record.args == ("Drive detach failed (non-fatal)",)
             assert record.exc_info is None
             assert record.exc_text is None
-            assert "mount_path" not in record.__dict__
+            assert "openai_agents_diagnostic_context" not in record.__dict__
             assert error not in record.__dict__.values()
             rendered = logging.Formatter().format(record)
             assert mount_path not in rendered
             assert "SECRET_UNMOUNT_ERROR" not in rendered
         else:
-            assert record.__dict__["mount_path"] == mount_path
+            assert record.__dict__["openai_agents_diagnostic_context"] == {"mount_path": mount_path}
             assert record.exc_info is not None
             assert record.exc_info[1] is error
             assert "SECRET_UNMOUNT_ERROR" in logging.Formatter().format(record)

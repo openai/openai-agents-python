@@ -353,9 +353,9 @@ def test_shared_error_helper_conditionally_attaches_diagnostic_extra(
 
     record = handler.records[0]
     assert extra_calls == (0 if redacted else 1)
-    assert ("sandbox_id" in record.__dict__) is not redacted
+    assert ("openai_agents_diagnostic_context" in record.__dict__) is not redacted
     if not redacted:
-        assert record.__dict__["sandbox_id"] == _SECRET
+        assert record.__dict__["openai_agents_diagnostic_context"] == {"sandbox_id": _SECRET}
 
 
 @pytest.mark.parametrize(
@@ -398,13 +398,13 @@ def test_trace_processor_failure_identity_follows_both_data_policies(
     record = next(record for record in handler.records if record.levelno == logging.ERROR)
     redacted = model_redacted or tool_redacted
     if redacted:
-        assert "trace_processor" not in record.__dict__
+        assert "openai_agents_diagnostic_context" not in record.__dict__
         assert failing not in record.__dict__.values()
         assert record.exc_info is None
         assert _SECRET not in logging.Formatter().format(record)
         assert failing.str_calls == 0
     else:
-        processor_identity = record.__dict__["trace_processor"]
+        processor_identity = record.__dict__["openai_agents_diagnostic_context"]["trace_processor"]
         assert isinstance(processor_identity, str)
         assert type(failing).__module__ in processor_identity
         assert type(failing).__qualname__ in processor_identity

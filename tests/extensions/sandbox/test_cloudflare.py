@@ -50,6 +50,7 @@ class _FakeResponse:
         self.status = status
         self._json_body = json_body
         self._raw_body = raw_body
+        self.read_calls = 0
 
     async def json(self, *, content_type: str | None = None) -> Any:
         _ = content_type
@@ -58,6 +59,7 @@ class _FakeResponse:
         return json.loads(self._raw_body)
 
     async def read(self) -> bytes:
+        self.read_calls += 1
         if self._json_body is not None:
             return json.dumps(self._json_body).encode()
         return self._raw_body
@@ -1546,19 +1548,14 @@ async def test_cloudflare_shutdown_logs_respect_tool_data_policy(
 
     monkeypatch.setattr("agents._debug.DONT_LOG_TOOL_DATA", redacted)
 
-    sess = _make_session(
-        fake_http=_FakeHttp(
-            {
-                "DELETE /v1/sandbox/": _FakeResponse(
-                    status=502,
-                    json_body={
-                        "error": "pool error: Failed to start container",
-                        "code": "pool_error",
-                    },
-                )
-            }
-        )
+    response = _FakeResponse(
+        status=502,
+        json_body={
+            "error": "pool error: Failed to start container",
+            "code": "pool_error",
+        },
     )
+    sess = _make_session(fake_http=_FakeHttp({"DELETE /v1/sandbox/": response}))
 
     with caplog.at_level(logging.DEBUG, logger="agents.extensions.sandbox.cloudflare.sandbox"):
         await sess._shutdown_backend()
@@ -1569,3 +1566,4 @@ async def test_cloudflare_shutdown_logs_respect_tool_data_policy(
         for r in caplog.records
     )
     assert has_detail is not redacted
+    assert response.read_calls == (0 if redacted else 1)

@@ -2475,11 +2475,11 @@ async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
         assert record.msg == "%s"
         assert record.args == ("Error while handling an agent tool on_stream event",)
         assert record.exc_info is None
-        assert "agent_name" not in record.__dict__
+        assert "openai_agents_diagnostic_context" not in record.__dict__
         assert secret not in caplog.text
         assert agent_name not in caplog.text
     else:
-        assert record.__dict__["agent_name"] == agent_name
+        assert record.__dict__["openai_agents_diagnostic_context"] == {"agent_name": agent_name}
         assert record.exc_info is not None
         assert record.exc_info[1] is not None
         assert secret in caplog.text

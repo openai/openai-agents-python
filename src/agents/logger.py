@@ -7,6 +7,7 @@ from . import _debug
 logger = logging.getLogger("openai.agents")
 
 _DiagnosticExtra = Callable[[], Mapping[str, object]]
+_DIAGNOSTIC_CONTEXT_FIELD = "openai_agents_diagnostic_context"
 
 
 def _exception_info(
@@ -15,6 +16,12 @@ def _exception_info(
     """Build logging exception info without evaluating exception truthiness."""
     traceback = BaseException.__getattribute__(exc, "__traceback__")
     return type(exc), exc, traceback
+
+
+def _log_record_extra(diagnostic_extra: _DiagnosticExtra | None) -> dict[str, object] | None:
+    if diagnostic_extra is None:
+        return None
+    return {_DIAGNOSTIC_CONTEXT_FIELD: dict(diagnostic_extra())}
 
 
 def _log_action_error(
@@ -35,7 +42,7 @@ def _log_action_error(
             message,
             exc,
             exc_info=_exception_info(exc),
-            extra=diagnostic_extra() if diagnostic_extra is not None else None,
+            extra=_log_record_extra(diagnostic_extra),
             stacklevel=stacklevel,
         )
 
@@ -58,7 +65,7 @@ def _log_action_at_level(
             message,
             exc,
             exc_info=_exception_info(exc),
-            extra=diagnostic_extra() if diagnostic_extra is not None else None,
+            extra=_log_record_extra(diagnostic_extra),
             stacklevel=stacklevel,
         )
 

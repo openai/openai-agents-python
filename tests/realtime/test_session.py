@@ -1,6 +1,7 @@
 import asyncio
 import dataclasses
 import json
+import logging
 import threading
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
@@ -3516,6 +3517,72 @@ class TestGuardrailFunctionality:
             )
 
         return OutputGuardrail(guardrail_function=guardrail_func, name="safe_guardrail")
+
+    @pytest.mark.parametrize(
+        ("model_redacted", "tool_redacted"),
+        [(True, False), (False, True), (False, False)],
+        ids=["model_redacted", "tool_redacted", "diagnostic"],
+    )
+    @pytest.mark.asyncio
+    async def test_output_guardrail_failure_follows_both_data_policies(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        mock_model: RealtimeModel,
+        model_redacted: bool,
+        tool_redacted: bool,
+    ) -> None:
+        class _GuardrailError(RuntimeError):
+            def __init__(self) -> None:
+                super().__init__("SECRET_REALTIME_GUARDRAIL_ERROR")
+                self.bool_calls = 0
+
+            def __bool__(self) -> bool:
+                self.bool_calls += 1
+                raise AssertionError("logging inspected guardrail exception truthiness")
+
+        error = _GuardrailError()
+
+        async def failing_guardrail(context, agent, output):
+            _ = context, agent, output
+            raise error
+
+        guardrail = OutputGuardrail(
+            guardrail_function=failing_guardrail,
+            name="SECRET_REALTIME_GUARDRAIL_NAME",
+        )
+        agent = RealtimeAgent(name="agent", output_guardrails=[guardrail])
+        session = RealtimeSession(mock_model, agent, None)
+        monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", model_redacted)
+        monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
+
+        with caplog.at_level(logging.DEBUG, logger="openai.agents"):
+            triggered = await session._run_output_guardrails("model text", "response-id")
+
+        assert triggered is False
+        record = next(
+            record
+            for record in caplog.records
+            if "Output guardrail raised an exception" in record.getMessage()
+        )
+        redacted = model_redacted or tool_redacted
+        if redacted:
+            assert record.msg == "%s"
+            assert record.args == ("Output guardrail raised an exception; skipping it",)
+            assert record.exc_info is None
+            assert record.exc_text is None
+            assert "openai_agents_diagnostic_context" not in record.__dict__
+            assert error not in record.__dict__.values()
+            rendered = logging.Formatter().format(record)
+            assert "SECRET_REALTIME_GUARDRAIL_ERROR" not in rendered
+            assert "SECRET_REALTIME_GUARDRAIL_NAME" not in rendered
+        else:
+            context = record.__dict__["openai_agents_diagnostic_context"]
+            assert context == {"guardrail_name": "SECRET_REALTIME_GUARDRAIL_NAME"}
+            assert record.exc_info is not None
+            assert record.exc_info[1] is error
+            assert "SECRET_REALTIME_GUARDRAIL_ERROR" in logging.Formatter().format(record)
+        assert error.bool_calls == 0
 
     @pytest.mark.asyncio
     async def test_transcript_delta_triggers_guardrail_at_threshold(

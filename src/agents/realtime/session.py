@@ -5,6 +5,7 @@ import dataclasses
 import inspect
 import json
 from collections.abc import AsyncIterator, Sequence
+from functools import partial
 from typing import Any, cast
 
 from pydantic import BaseModel
@@ -20,7 +21,12 @@ from ..agent import Agent
 from ..exceptions import ToolInputGuardrailTripwireTriggered, UserError
 from ..handoffs import Handoff
 from ..items import ToolApprovalItem
-from ..logger import log_model_action_error, log_tool_action_error, logger
+from ..logger import (
+    log_model_action_error,
+    log_model_and_tool_action_warning,
+    log_tool_action_error,
+    logger,
+)
 from ..run_config import ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper, TContext
 from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, Tool, invoke_function_tool
@@ -85,6 +91,10 @@ class _RealtimeSessionClosedSentinel:
 
 _REALTIME_SESSION_CLOSED_SENTINEL = _RealtimeSessionClosedSentinel()
 _BACKGROUND_TASK_CANCEL_GRACE_SECONDS = 1.0
+
+
+def _guardrail_diagnostic_extra(guardrail: Any) -> dict[str, object]:
+    return {"guardrail_name": guardrail.get_name()}
 
 
 def _serialize_tool_output(output: Any) -> str:
@@ -1316,15 +1326,12 @@ class RealtimeSession(RealtimeModelListener):
                 if result.output.tripwire_triggered:
                     triggered_results.append(result)
             except Exception as exc:
-                if _debug.DONT_LOG_MODEL_DATA:
-                    logger.warning("Output guardrail raised an exception; skipping it")
-                else:
-                    logger.warning(
-                        "Output guardrail %r raised %s; skipping it.",
-                        guardrail.get_name(),
-                        exc,
-                    )
-                    logger.debug("Output guardrail failure details.", exc_info=exc)
+                log_model_and_tool_action_warning(
+                    logger,
+                    "Output guardrail raised an exception; skipping it",
+                    exc,
+                    diagnostic_extra=partial(_guardrail_diagnostic_extra, guardrail),
+                )
                 continue
 
         if triggered_results:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any, cast
 
 import httpx
@@ -17,6 +18,7 @@ from openai.types.responses import (
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from typing_extensions import TypedDict
 
+import agents._debug as _debug
 from agents import (
     Agent,
     GuardrailFunctionOutput,
@@ -1186,6 +1188,72 @@ async def test_input_guardrail_tripwire_triggered_causes_exception_streamed():
         result = Runner.run_streamed(agent, input="user_message")
         async for _ in result.stream_events():
             pass
+
+
+@pytest.mark.parametrize(
+    ("model_redacted", "tool_redacted"),
+    [(True, False), (False, True), (False, False)],
+    ids=["model_redacted", "tool_redacted", "diagnostic"],
+)
+@pytest.mark.asyncio
+async def test_streamed_finalizer_failure_follows_both_data_policies(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    model_redacted: bool,
+    tool_redacted: bool,
+) -> None:
+    async def safe_guardrail(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        _ = context, agent, input
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    error = RuntimeError("SECRET_STREAM_FINALIZER_ERROR")
+
+    async def fail_finalizer(_result: Any) -> bool:
+        raise error
+
+    monkeypatch.setattr(
+        run_loop,
+        "input_guardrail_tripwire_triggered_for_stream",
+        fail_finalizer,
+    )
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", model_redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
+    agent_name = "SECRET_STREAM_AGENT_NAME"
+    agent = Agent(
+        name=agent_name,
+        input_guardrails=[InputGuardrail(guardrail_function=safe_guardrail)],
+        model=FakeModel(initial_output=[get_text_message("done")]),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="openai.agents"):
+        result = Runner.run_streamed(agent, input="user_message")
+        async for _ in result.stream_events():
+            pass
+
+    assert result.final_output == "done"
+    record = next(
+        record
+        for record in caplog.records
+        if "Error finalizing streamed result" in record.getMessage()
+    )
+    redacted = model_redacted or tool_redacted
+    if redacted:
+        assert record.msg == "%s"
+        assert record.args == ("Error finalizing streamed result",)
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert "openai_agents_diagnostic_context" not in record.__dict__
+        rendered = logging.Formatter().format(record)
+        assert agent_name not in rendered
+        assert "SECRET_STREAM_FINALIZER_ERROR" not in rendered
+    else:
+        context = record.__dict__["openai_agents_diagnostic_context"]
+        assert context == {"agent_name": agent_name}
+        assert record.exc_info is not None
+        assert record.exc_info[1] is error
+        assert "SECRET_STREAM_FINALIZER_ERROR" in logging.Formatter().format(record)
 
 
 @pytest.mark.asyncio

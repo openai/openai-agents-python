@@ -231,11 +231,13 @@ async def test_logged_sink_failure_conditionally_includes_sink_type(
         assert record.args == ("Sandbox event sink failed (ignored)",)
         assert record.exc_info is None
         assert record.exc_text is None
-        assert "sink_type" not in record.__dict__
+        assert "openai_agents_diagnostic_context" not in record.__dict__
         assert "_FailingLogSink" not in logging.Formatter().format(record)
         assert "SECRET_SINK_ERROR" not in logging.Formatter().format(record)
     else:
-        assert record.__dict__["sink_type"] == "_FailingLogSink"
+        assert record.__dict__["openai_agents_diagnostic_context"] == {
+            "sink_type": "_FailingLogSink"
+        }
         assert record.exc_info is not None
         assert record.exc_info[1] is not None
         assert "SECRET_SINK_ERROR" in logging.Formatter().format(record)

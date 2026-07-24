@@ -695,10 +695,10 @@ class CloudflareSandboxSession(BaseSandboxSession):
             async with http.delete(url) as resp:
                 if resp.status < 400 or resp.status == 404:
                     return
-                detail = await _read_cloudflare_response_body(resp)
                 if _debug.DONT_LOG_TOOL_DATA:
                     logger.debug("Failed to delete Cloudflare sandbox on shutdown")
                 else:
+                    detail = await _read_cloudflare_response_body(resp)
                     logger.debug(
                         "Failed to delete Cloudflare sandbox on shutdown: %s",
                         _cloudflare_http_error_message("DELETE /sandbox", resp.status, detail),

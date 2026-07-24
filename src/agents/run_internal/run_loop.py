@@ -9,6 +9,7 @@ import asyncio
 import dataclasses as _dc
 import json
 from collections.abc import Awaitable, Callable, Mapping
+from functools import partial
 from typing import Any, TypeVar, cast
 
 from openai.types.responses import (
@@ -57,9 +58,9 @@ from ..items import (
 )
 from ..lifecycle import RunHooks
 from ..logger import (
-    log_model_action_debug,
     log_model_action_error,
     log_model_action_warning,
+    log_model_and_tool_action_debug,
     log_tool_action_warning,
     logger,
 )
@@ -277,6 +278,10 @@ async def cleanup_models_after_run(tool_use_tracker: AgentToolUseTracker) -> Non
             await model._cleanup_on_run_end(tool_use_tracker)
         except Exception as error:
             log_model_action_warning(logger, "Failed to clean up model resources after run", error)
+
+
+def _agent_diagnostic_extra(agent: Agent[Any]) -> dict[str, object]:
+    return {"agent_name": agent.name}
 
 
 def _should_attach_generic_agent_error(exc: Exception) -> bool:
@@ -1308,10 +1313,11 @@ async def start_streaming(
                     if first_trigger is not None:
                         raise InputGuardrailTripwireTriggered(first_trigger)
             except Exception as e:
-                log_model_action_debug(
+                log_model_and_tool_action_debug(
                     logger,
-                    f"Error finalizing streamed result for agent {current_agent.name}",
+                    "Error finalizing streamed result",
                     e,
+                    diagnostic_extra=partial(_agent_diagnostic_extra, current_agent),
                 )
         try:
             await dispose_resolved_computers(run_context=context_wrapper)

@@ -2217,11 +2217,12 @@ async def test_e2b_shutdown_logs_pause_failure_and_falls_back_to_kill(
     assert "Failed to pause E2B sandbox on shutdown; falling back to kill." in caplog.text
     assert ("SECRET_E2B_PAUSE_FAILURE" not in caplog.text) is redacted
     record = caplog.records[-1]
-    assert ("sandbox_id" in record.__dict__) is not redacted
-    assert ("pause_on_exit" in record.__dict__) is not redacted
+    assert ("openai_agents_diagnostic_context" in record.__dict__) is not redacted
     if not redacted:
-        assert record.__dict__["sandbox_id"] == sandbox.sandbox_id
-        assert record.__dict__["pause_on_exit"] is True
+        assert record.__dict__["openai_agents_diagnostic_context"] == {
+            "sandbox_id": sandbox.sandbox_id,
+            "pause_on_exit": True,
+        }
 
 
 @pytest.mark.asyncio
@@ -2253,11 +2254,12 @@ async def test_e2b_shutdown_logs_kill_failure_after_pause_fallback(
     assert sandbox.kill_calls == 1
     assert "Failed to kill E2B sandbox after pause fallback failure." in caplog.text
     record = caplog.records[-1]
-    assert ("sandbox_id" in record.__dict__) is not redacted
-    assert ("pause_on_exit" in record.__dict__) is not redacted
+    assert ("openai_agents_diagnostic_context" in record.__dict__) is not redacted
     if not redacted:
-        assert record.__dict__["sandbox_id"] == sandbox.sandbox_id
-        assert record.__dict__["pause_on_exit"] is True
+        assert record.__dict__["openai_agents_diagnostic_context"] == {
+            "sandbox_id": sandbox.sandbox_id,
+            "pause_on_exit": True,
+        }
 
 
 @pytest.mark.asyncio
@@ -2288,11 +2290,12 @@ async def test_e2b_shutdown_logs_direct_kill_failure(
     assert sandbox.kill_calls == 1
     assert "Failed to kill E2B sandbox on shutdown." in caplog.text
     record = caplog.records[-1]
-    assert ("sandbox_id" in record.__dict__) is not redacted
-    assert ("pause_on_exit" in record.__dict__) is not redacted
+    assert ("openai_agents_diagnostic_context" in record.__dict__) is not redacted
     if not redacted:
-        assert record.__dict__["sandbox_id"] == sandbox.sandbox_id
-        assert record.__dict__["pause_on_exit"] is False
+        assert record.__dict__["openai_agents_diagnostic_context"] == {
+            "sandbox_id": sandbox.sandbox_id,
+            "pause_on_exit": False,
+        }
 
 
 @pytest.mark.asyncio

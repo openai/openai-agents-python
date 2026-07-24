@@ -1489,30 +1489,42 @@ async def test_usage_tracking_failure_identity_follows_model_data_policy(
     secret = "SECRET_USAGE_FAILURE"
     run_result = create_mock_run_result(usage_data)
 
-    with (
-        patch.object(
-            session,
-            "_update_turn_usage_internal",
-            side_effect=RuntimeError(secret),
-        ),
-        caplog.at_level(logging.ERROR, logger=test_logger.name),
-    ):
-        await session.store_run_usage(run_result)
+    original_record_factory = logging.getLogRecordFactory()
+
+    def application_record_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = original_record_factory(*args, **kwargs)
+        record.session_id = "APPLICATION_SESSION_ID"
+        return record
+
+    logging.setLogRecordFactory(application_record_factory)
+    try:
+        with (
+            patch.object(
+                session,
+                "_update_turn_usage_internal",
+                side_effect=RuntimeError(secret),
+            ),
+            caplog.at_level(logging.ERROR, logger=test_logger.name),
+        ):
+            await session.store_run_usage(run_result)
+    finally:
+        logging.setLogRecordFactory(original_record_factory)
 
     record = next(
         record
         for record in caplog.records
         if "Failed to store session usage" in record.getMessage()
     )
+    assert record.__dict__["session_id"] == "APPLICATION_SESSION_ID"
     if model_redacted:
         assert record.msg == "%s"
         assert record.args == ("Failed to store session usage",)
         assert record.exc_info is None
-        assert "session_id" not in record.__dict__
+        assert "openai_agents_diagnostic_context" not in record.__dict__
         assert secret not in caplog.text
         assert session_id not in caplog.text
     else:
-        assert record.__dict__["session_id"] == session_id
+        assert record.__dict__["openai_agents_diagnostic_context"] == {"session_id": session_id}
         assert record.exc_info is not None
         assert record.exc_info[1] is not None
         assert secret in caplog.text
