@@ -1257,6 +1257,24 @@ class TestStripOrphanedAssistantIds:
         for item in result:
             assert "id" not in item
 
+    def test_strips_id_from_message_after_a_differently_paired_reasoning(self) -> None:
+        """A surviving reasoning item elsewhere in the output must not preserve an id
+        on an assistant message whose own reasoning item did not survive."""
+        items: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "reasoning", "id": "rs_1", "content": "..."}),
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "id": "msg_1", "content": "paired"},
+            ),
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "id": "msg_2", "content": "orphaned"},
+            ),
+        ]
+        result = _strip_orphaned_assistant_ids(items)
+        assert result[1].get("id") == "msg_1"
+        assert "id" not in result[2]
+
 
 class TestCompactionStripsOrphanedIds:
     """Regression test for #2727: gpt-5.4 compact retains assistant msg IDs after
@@ -1334,6 +1352,39 @@ class TestCompactionStripsOrphanedIds:
         stored_items = mock_session.add_items.call_args[0][0]
         assistant_items = [i for i in stored_items if i.get("role") == "assistant"]
         assert assistant_items[0]["id"] == "msg_aaa"
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_strips_only_the_unpaired_id_in_a_mixed_output(self) -> None:
+        """A compacted output can mix a message whose own reasoning item survived with one
+        whose reasoning item did not; only the unpaired message's id should be stripped."""
+        mock_session = self.create_mock_session()
+        mock_session.get_items.return_value = [
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": f"m{i}"})
+            for i in range(DEFAULT_COMPACTION_THRESHOLD)
+        ]
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "reasoning", "id": "rs_111", "content": "thinking..."},
+            {"type": "message", "role": "assistant", "id": "msg_paired", "content": "answer 1"},
+            {"type": "message", "role": "assistant", "id": "msg_orphaned", "content": "answer 2"},
+        ]
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+        )
+
+        await session.run_compaction({"response_id": "resp-123"})
+
+        stored_items = mock_session.add_items.call_args[0][0]
+        assistant_items = [i for i in stored_items if i.get("role") == "assistant"]
+        assert assistant_items[0]["id"] == "msg_paired"
+        assert "id" not in assistant_items[1]
 
 
 class TestTypeGuard:

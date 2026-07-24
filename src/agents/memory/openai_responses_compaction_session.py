@@ -391,20 +391,32 @@ def _strip_orphaned_assistant_ids(
     because the API expects the paired reasoning item for each assistant message
     ID.  This function detects and removes those orphaned IDs so the compacted
     history can be used safely.
+
+    A reasoning item pairs with the next non-reasoning item that follows it (the
+    same convention ``_drop_reasoning_items_preceding_dropped_calls`` uses), so
+    pairing is tracked per message rather than once for the whole list: a
+    compacted output can legitimately mix a message whose own reasoning item
+    survived with one whose reasoning item was dropped elsewhere in the same
+    output.
     """
     if not items:
         return items
 
-    has_reasoning = any(
-        isinstance(item, dict) and item.get("type") == "reasoning" for item in items
-    )
-    if has_reasoning:
-        return items
-
     cleaned: list[TResponseInputItem] = []
+    has_paired_reasoning = False
     for item in items:
-        if isinstance(item, dict) and item.get("role") == "assistant" and "id" in item:
+        if isinstance(item, dict) and item.get("type") == "reasoning":
+            has_paired_reasoning = True
+            cleaned.append(item)
+            continue
+        if (
+            isinstance(item, dict)
+            and item.get("role") == "assistant"
+            and "id" in item
+            and not has_paired_reasoning
+        ):
             item = {k: v for k, v in item.items() if k != "id"}  # type: ignore[assignment]
+        has_paired_reasoning = False
         cleaned.append(item)
     return cleaned
 
