@@ -2405,13 +2405,20 @@ async def test_agent_as_tool_streaming_dispatches_without_blocking(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_redacted", "tool_redacted"),
+    [(True, False), (False, True), (False, False)],
+)
 async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    model_redacted: bool,
+    tool_redacted: bool,
 ) -> None:
-    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
-    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
-    agent = Agent(name="handler_error_agent")
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", model_redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
+    agent_name = "SECRET_HANDLER_ERROR_AGENT"
+    agent = Agent(name=agent_name)
     secret = "SECRET_AGENT_STREAM_PAYLOAD"
 
     class DummyStreamingResult:
@@ -2459,7 +2466,23 @@ async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
         output = await tool.on_invoke_tool(tool_context, '{"input": "go"}')
 
     assert output == "ok"
-    assert secret not in caplog.text
+    record = next(
+        record
+        for record in caplog.records
+        if "Error while handling an agent tool on_stream event" in record.getMessage()
+    )
+    if model_redacted or tool_redacted:
+        assert record.msg == "%s"
+        assert record.args == ("Error while handling an agent tool on_stream event",)
+        assert record.exc_info is None
+        assert "agent_name" not in record.__dict__
+        assert secret not in caplog.text
+        assert agent_name not in caplog.text
+    else:
+        assert record.__dict__["agent_name"] == agent_name
+        assert record.exc_info is not None
+        assert record.exc_info[1] is not None
+        assert secret in caplog.text
 
 
 @pytest.mark.asyncio

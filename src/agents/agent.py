@@ -855,10 +855,15 @@ class Agent(AgentBase, Generic[TContext]):
                             if inspect.isawaitable(maybe_result):
                                 await maybe_result
                         except Exception as exc:
+
+                            def diagnostic_extra() -> dict[str, object]:
+                                return {"agent_name": self.name}
+
                             log_model_and_tool_action_error(
                                 logger,
                                 "Error while handling an agent tool on_stream event",
                                 exc,
+                                diagnostic_extra=diagnostic_extra,
                             )
 
                     async def dispatch_stream_events() -> None:

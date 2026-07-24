@@ -470,7 +470,16 @@ class AdvancedSQLiteSession(SQLiteSession):
                     turn_anchor=turn_anchor,
                 )
         except Exception as e:
-            log_model_action_error(self._logger, "Failed to store session usage", e)
+
+            def diagnostic_extra() -> dict[str, object]:
+                return {"session_id": self.session_id}
+
+            log_model_action_error(
+                self._logger,
+                "Failed to store session usage",
+                e,
+                diagnostic_extra=diagnostic_extra,
+            )
 
     def _capture_current_turn(self) -> tuple[int, str, int | None]:
         """Return (current_turn, branch_id, turn_anchor) in one locked read.

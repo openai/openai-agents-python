@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import json
+import logging
 import tempfile
 import threading
 from pathlib import Path
@@ -1457,6 +1458,60 @@ async def test_error_handling_in_usage_tracking(usage_data: Usage):
     # Test normal operation
     run_result = create_mock_run_result(usage_data)
     await session.store_run_usage(run_result)
+
+
+@pytest.mark.parametrize(
+    ("model_redacted", "tool_redacted"),
+    [(True, False), (False, True), (False, False)],
+)
+async def test_usage_tracking_failure_identity_follows_model_data_policy(
+    usage_data: Usage,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    model_redacted: bool,
+    tool_redacted: bool,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", model_redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
+    session_id = "SECRET_USAGE_SESSION_ID"
+    test_logger = logging.getLogger("advanced-sqlite-usage-failure")
+    session = AdvancedSQLiteSession(
+        session_id=session_id,
+        create_tables=True,
+        logger=test_logger,
+    )
+    secret = "SECRET_USAGE_FAILURE"
+    run_result = create_mock_run_result(usage_data)
+
+    with (
+        patch.object(
+            session,
+            "_update_turn_usage_internal",
+            side_effect=RuntimeError(secret),
+        ),
+        caplog.at_level(logging.ERROR, logger=test_logger.name),
+    ):
+        await session.store_run_usage(run_result)
+
+    record = next(
+        record
+        for record in caplog.records
+        if "Failed to store session usage" in record.getMessage()
+    )
+    if model_redacted:
+        assert record.msg == "%s"
+        assert record.args == ("Failed to store session usage",)
+        assert record.exc_info is None
+        assert "session_id" not in record.__dict__
+        assert secret not in caplog.text
+        assert session_id not in caplog.text
+    else:
+        assert record.__dict__["session_id"] == session_id
+        assert record.exc_info is not None
+        assert record.exc_info[1] is not None
+        assert secret in caplog.text
+
+    session.close()
 
     # Close the session to simulate database errors
     session.close()
