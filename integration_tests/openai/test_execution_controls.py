@@ -228,21 +228,23 @@ async def test_stateless_reasoning_replay_preserves_encrypted_content_when_retur
         name="Packaged stateless reasoning replay agent",
         model=integration_model,
         instructions=(
-            "Call remember_word when asked to store a release word. Once it succeeds reply "
-            "exactly STORED. Answer follow-up questions using the previous tool result."
+            "Calculate the requested arithmetic before calling remember_word. Use the word "
+            "AMBER when the result is odd and COBALT when it is even. Once the tool succeeds "
+            "reply exactly STORED. Answer follow-up questions using the previous tool result."
         ),
         tools=[remember_word],
         model_settings=ModelSettings(
             store=False,
-            reasoning={"effort": "low", "summary": "auto"},
+            reasoning={"effort": "medium", "summary": "auto"},
             response_include=["reasoning.encrypted_content"],
-            max_tokens=512,
+            max_tokens=1024,
         ),
     )
     config = RunConfig(tracing_disabled=True, reasoning_item_id_policy="omit")
     first = await Runner.run(
         agent,
-        "Use remember_word with word='AMBER', then reply only STORED.",
+        "What is the remainder when 4837 multiplied by 8291 is divided by 97? "
+        "Follow the parity rule, call remember_word, and then reply only STORED.",
         run_config=config,
     )
     reasoning_items = [
@@ -251,6 +253,7 @@ async def test_stateless_reasoning_replay_preserves_encrypted_content_when_retur
         for item in response.output
         if isinstance(item, ResponseReasoningItem)
     ]
+    assert reasoning_items, "The stateless response did not contain any reasoning items."
     replay = first.to_input_list(mode="normalized")
     replayed_reasoning = [item for item in replay if item.get("type") == "reasoning"]
     replay.append(

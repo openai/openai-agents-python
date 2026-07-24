@@ -134,6 +134,10 @@ def skip_or_fail(reason: str) -> None:
 def pytest_runtest_setup(item: pytest.Item) -> None:
     if not any(item.get_closest_marker(marker) for marker in LIVE_MARKERS):
         return
+    if item.get_closest_marker("providers") and "external_provider" in getattr(
+        item, "fixturenames", ()
+    ):
+        return
     if os.environ.get("OPENAI_API_KEY") in {None, "", "test_key", "fake-for-tests"}:
         skip_or_fail("Set a real OPENAI_API_KEY to execute live integration tests.")
 

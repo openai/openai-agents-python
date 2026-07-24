@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import cast
+
 import pytest
-from conftest import _external_providers
+from conftest import _external_providers, pytest_runtest_setup
 
 pytestmark = pytest.mark.packaging
 
@@ -22,6 +25,39 @@ def test_external_provider_coverage_is_explicitly_enabled(monkeypatch: pytest.Mo
     monkeypatch.delenv("OPENAI_AGENTS_INTEGRATION_DIRECT_PROVIDERS", raising=False)
 
     assert _external_providers() == []
+
+
+@pytest.mark.parametrize(
+    "credential_name", ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"]
+)
+def test_external_provider_tests_do_not_require_an_openai_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+    credential_name: str,
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(credential_name, "provider-test-key")
+    monkeypatch.setenv("OPENAI_AGENTS_INTEGRATION_STRICT", "1")
+    item = SimpleNamespace(
+        fixturenames=["external_provider"],
+        get_closest_marker=lambda name: name == "providers",
+    )
+
+    pytest_runtest_setup(cast(pytest.Item, item))
+
+
+def test_openai_backed_provider_tests_require_an_openai_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "provider-test-key")
+    monkeypatch.setenv("OPENAI_AGENTS_INTEGRATION_STRICT", "1")
+    item = SimpleNamespace(
+        fixturenames=["integration_model"],
+        get_closest_marker=lambda name: name == "providers",
+    )
+
+    with pytest.raises(pytest.fail.Exception, match="Set a real OPENAI_API_KEY"):
+        pytest_runtest_setup(cast(pytest.Item, item))
 
 
 def test_strict_mode_requires_requested_external_provider_credentials(

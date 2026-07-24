@@ -72,7 +72,9 @@ async def test_live_model_and_tool_spans_finish_without_exposing_sensitive_data(
     processor = CollectingTraceProcessor()
     provider = cast(Any, get_trace_provider())
     original_processors = list(provider._multi_processor._processors)
+    original_env_disabled = provider._env_disabled
     original_manual_disabled = provider._manual_disabled
+    original_disabled = provider._disabled
     monkeypatch.setenv("OPENAI_AGENTS_DISABLE_TRACING", "0")
     set_trace_processors([processor])
     set_tracing_disabled(False)
@@ -91,8 +93,9 @@ async def test_live_model_and_tool_spans_finish_without_exposing_sensitive_data(
             result = await Runner.run(agent, "Inspect the secret.", run_config=config)
     finally:
         set_trace_processors(original_processors)
+        provider._env_disabled = original_env_disabled
         provider._manual_disabled = original_manual_disabled
-        provider._refresh_disabled_flag()
+        provider._disabled = original_disabled
 
     assert calls == ["secret-token-42"]
     assert result.final_output == "TRACE_READY"
