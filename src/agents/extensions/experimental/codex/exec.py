@@ -133,6 +133,7 @@ class CodexExec:
             # Give POSIX descendants a process-group boundary that this execution owns.
             start_new_session=os.name != "nt",
         )
+        direct_process_exit = _create_process_exit_event(process)
 
         stderr_chunks: list[bytes] = []
 
@@ -174,7 +175,23 @@ class CodexExec:
                         timeout=_SUBPROCESS_CLEANUP_TIMEOUT_SECONDS,
                     )
 
+        async def _wait_for_direct_process() -> None:
+            if direct_process_exit is None:
+                await process.wait()
+            else:
+                await direct_process_exit.wait()
+
         stderr_task = asyncio.create_task(_drain_stderr())
+
+        async def _finish_stderr() -> None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(stderr_task),
+                    timeout=_SUBPROCESS_CLEANUP_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                await _cancel_and_wait(stderr_task)
+
         cancel_task: asyncio.Task[None] | None = None
         try:
             if process.stdin is None:
@@ -224,13 +241,9 @@ class CodexExec:
                     break
                 yield line.decode("utf-8").rstrip("\n")
 
-            await process.wait()
-            if process.returncode not in (0, None):
-                await stderr_task
-                stderr_text = b"".join(stderr_chunks).decode("utf-8")
-                raise RuntimeError(
-                    f"Codex exec exited with code {process.returncode}: {stderr_text}"
-                )
+            # Wait for the direct process independently of pipes inherited by descendants.
+            await _wait_for_direct_process()
+
         finally:
             original_error = sys.exc_info()[1]
 
@@ -256,12 +269,15 @@ class CodexExec:
                         cleanup_error = exc
 
                 try:
-                    await _cancel_and_wait(stderr_task)
+                    if original_error is None:
+                        await _finish_stderr()
+                    else:
+                        await _cancel_and_wait(stderr_task)
                 except BaseException as exc:
                     if cleanup_error is None:
                         cleanup_error = exc
 
-                if cleanup_error is not None:
+                if cleanup_error is not None and process.returncode in (0, None):
                     raise cleanup_error
 
             cleanup_task = asyncio.create_task(_cleanup_resources())
@@ -269,6 +285,10 @@ class CodexExec:
                 cleanup_task,
                 preserve_exception=original_error is not None,
             )
+
+        if process.returncode not in (0, None):
+            stderr_text = b"".join(stderr_chunks).decode("utf-8")
+            raise RuntimeError(f"Codex exec exited with code {process.returncode}: {stderr_text}")
 
     def _build_env(self, args: CodexExecArgs) -> dict[str, str]:
         # Respect env overrides when provided; otherwise copy from os.environ.
@@ -295,6 +315,28 @@ async def _cancel_and_wait(task: asyncio.Task[object]) -> None:
         task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
+
+
+def _create_process_exit_event(
+    process: asyncio.subprocess.Process,
+) -> asyncio.Event | None:
+    protocol = getattr(process, "_protocol", None)
+    process_exited = getattr(protocol, "process_exited", None)
+    if protocol is None or not callable(process_exited):
+        return None
+
+    process_exit_event = asyncio.Event()
+
+    def _process_exited() -> None:
+        try:
+            process_exited()
+        finally:
+            process_exit_event.set()
+
+    protocol.process_exited = _process_exited
+    if process.returncode is not None:
+        process_exit_event.set()
+    return process_exit_event
 
 
 async def _await_cleanup_task(

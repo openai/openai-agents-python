@@ -97,6 +97,14 @@ class FakeStderr:
         return self._chunks.pop(0)
 
 
+class FakeProcessProtocol:
+    def __init__(self) -> None:
+        self.process_exited_calls = 0
+
+    def process_exited(self) -> None:
+        self.process_exited_calls += 1
+
+
 class FakeProcess:
     def __init__(
         self,
@@ -114,6 +122,7 @@ class FakeProcess:
         self.returncode = returncode
         self.killed = False
         self.terminated = False
+        self._protocol: FakeProcessProtocol | None = None
 
     async def wait(self) -> None:
         if self.returncode is None:
@@ -673,6 +682,104 @@ async def test_codex_exec_run_repeated_cancellation_finishes_stderr_cleanup(
         await asyncio.wait_for(next_line, timeout=1)
 
     assert stderr_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_codex_exec_run_waits_for_direct_exit_after_stdout_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout_eof = asyncio.Event()
+    tree_terminated = asyncio.Event()
+
+    class EofStdout(FakeStdout):
+        async def readline(self) -> bytes:
+            stdout_eof.set()
+            return b""
+
+    process = FakeProcess(stdout_lines=[], returncode=None)
+    process.stdout = EofStdout([])
+    process._protocol = FakeProcessProtocol()
+
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        return process
+
+    async def terminate_process_tree(_process: FakeProcess) -> None:
+        tree_terminated.set()
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(exec_module, "_terminate_process_tree", terminate_process_tree)
+
+    stream = exec_module.CodexExec(executable_path="/bin/codex").run(
+        exec_module.CodexExecArgs(input="hello")
+    )
+    next_line = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(stdout_eof.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert tree_terminated.is_set() is False
+
+    process.returncode = 0
+    assert process._protocol is not None
+    process._protocol.process_exited()
+
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(next_line, timeout=1)
+
+    assert tree_terminated.is_set()
+    assert process.returncode == 0
+    assert process.killed is False
+    assert process._protocol.process_exited_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_create_process_exit_event_observes_already_exited_process() -> None:
+    process = FakeProcess(stdout_lines=[], returncode=0)
+    process._protocol = FakeProcessProtocol()
+
+    process_exit_event = exec_module._create_process_exit_event(cast(Any, process))
+
+    assert process_exit_event is not None
+    assert process_exit_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_codex_exec_run_uses_direct_exit_when_descendant_holds_inherited_pipes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tree_terminated = asyncio.Event()
+
+    class ExitOnEofStdout(FakeStdout):
+        async def readline(self) -> bytes:
+            process.returncode = 0
+            assert process._protocol is not None
+            process._protocol.process_exited()
+            return b""
+
+    class PipeHoldingProcess(FakeProcess):
+        async def wait(self) -> None:
+            await tree_terminated.wait()
+
+    process = PipeHoldingProcess(stdout_lines=[], returncode=None)
+    process.stdout = ExitOnEofStdout([])
+    process._protocol = FakeProcessProtocol()
+
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        return process
+
+    async def terminate_process_tree(_process: FakeProcess) -> None:
+        tree_terminated.set()
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(exec_module, "_terminate_process_tree", terminate_process_tree)
+
+    stream = exec_module.CodexExec(executable_path="/bin/codex").run(
+        exec_module.CodexExecArgs(input="hello")
+    )
+
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(stream), timeout=1)
+
+    assert tree_terminated.is_set()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="SelectorEventLoop lacks subprocess support")
