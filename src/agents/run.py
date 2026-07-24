@@ -27,7 +27,7 @@ from .items import (
     TResponseInputItem,
 )
 from .lifecycle import RunHooks
-from .logger import log_tool_action_warning, logger
+from .logger import log_model_and_tool_action_warning, log_tool_action_warning, logger
 from .memory import Session
 from .result import RunResult, RunResultStreaming
 from .run_config import (
@@ -1606,7 +1606,7 @@ class AgentRunner:
                                 terminal_metadata=terminal_metadata_for_exception(run_exception),
                             )
                     except Exception as error:
-                        log_tool_action_warning(
+                        log_model_and_tool_action_warning(
                             logger, "Failed to enqueue sandbox memory after run", error
                         )
                     sandbox_resume_state = await sandbox_runtime.cleanup()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ from openai.types.responses import ResponseCustomToolCall, ResponseFunctionToolC
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
+import agents._debug as _debug
 import agents.sandbox.capabilities.memory as memory_module
 import agents.sandbox.memory.manager as memory_manager_module
 import agents.sandbox.memory.phase_one as phase_one_module
@@ -1495,15 +1497,31 @@ async def test_sandbox_memory_unregisters_manager_on_session_close() -> None:
         await client.delete(session)
 
 
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.parametrize(
+    ("model_redacted", "tool_redacted"),
+    [(True, False), (False, True), (False, False)],
+    ids=["model_redacted", "tool_redacted", "diagnostic"],
+)
 @pytest.mark.asyncio
-async def test_sandbox_memory_enqueue_failure_still_cleans_up_owned_session(
+async def test_sandbox_memory_enqueue_failure_follows_both_data_policies(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    streamed: bool,
+    model_redacted: bool,
+    tool_redacted: bool,
 ) -> None:
+    secret = "SECRET_SANDBOX_MEMORY_PAYLOAD"
+    error = RuntimeError(secret)
+
     async def _raise_write_rollout(*args: Any, **kwargs: Any) -> Path:
         _ = args, kwargs
-        raise RuntimeError("write_rollout failed")
+        raise error
 
     monkeypatch.setattr(memory_manager_module, "write_rollout", _raise_write_rollout)
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", model_redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
+    caplog.set_level(logging.WARNING)
 
     client = _DeleteTrackingUnixLocalSandboxClient()
     agent = SandboxAgent(
@@ -1513,15 +1531,38 @@ async def test_sandbox_memory_enqueue_failure_still_cleans_up_owned_session(
         capabilities=[_memory_config()],
     )
 
-    result = await Runner.run(
-        agent,
-        "hello",
-        run_config=RunConfig(sandbox=SandboxRunConfig(client=client)),
-    )
+    run_config = RunConfig(sandbox=SandboxRunConfig(client=client))
+    if streamed:
+        result = Runner.run_streamed(agent, "hello", run_config=run_config)
+        async for _ in result.stream_events():
+            pass
+        expected_message = "Failed to enqueue sandbox memory after streamed run"
+    else:
+        result = await Runner.run(agent, "hello", run_config=run_config)
+        expected_message = "Failed to enqueue sandbox memory after run"
 
     assert result.final_output == "done"
     assert len(client.deleted_roots) == 1
     assert not client.deleted_roots[0].exists()
+
+    record = next(
+        record
+        for record in caplog.records
+        if expected_message in logging.Formatter().format(record)
+    )
+    redacted = model_redacted or tool_redacted
+    if redacted:
+        assert record.msg == "%s"
+        assert record.args == (expected_message,)
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert error not in record.__dict__.values()
+        assert secret not in logging.Formatter().format(record)
+    else:
+        assert record.args == (expected_message, error)
+        assert record.exc_info is not None
+        assert record.exc_info[1] is error
+        assert secret in logging.Formatter().format(record)
 
 
 @pytest.mark.asyncio

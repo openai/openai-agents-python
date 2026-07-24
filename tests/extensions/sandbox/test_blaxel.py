@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import tarfile
 import time
 import uuid
@@ -14,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
+import agents._debug as _debug
 from agents.run_config import SandboxRunConfig
 from agents.sandbox import Manifest, SandboxPathGrant
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
@@ -3539,13 +3541,45 @@ class TestDriveMounts:
         assert sandbox.drives.unmount_calls == ["/mnt/data"]
 
     @pytest.mark.asyncio
-    async def test_detach_drive_error_logged_not_raised(self) -> None:
+    @pytest.mark.parametrize("redacted", [True, False], ids=["redacted", "diagnostic"])
+    async def test_detach_drive_error_logged_not_raised(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        redacted: bool,
+    ) -> None:
         from agents.extensions.sandbox.blaxel.mounts import _detach_drive
 
+        mount_path = "/mnt/SECRET_DRIVE_PATH"
+        error = RuntimeError("SECRET_UNMOUNT_ERROR")
         sandbox = _FakeSandboxInstance()
-        sandbox.drives.unmount_error = RuntimeError("unmount failed")
+        sandbox.drives.unmount_error = error
+        monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+        caplog.set_level(logging.WARNING)
+
         # Should not raise; error is logged.
-        await _detach_drive(sandbox, "/mnt/data")
+        await _detach_drive(sandbox, mount_path)
+
+        record = next(
+            record
+            for record in caplog.records
+            if "Drive detach failed" in logging.Formatter().format(record)
+        )
+        if redacted:
+            assert record.msg == "%s"
+            assert record.args == ("Drive detach failed (non-fatal)",)
+            assert record.exc_info is None
+            assert record.exc_text is None
+            assert "mount_path" not in record.__dict__
+            assert error not in record.__dict__.values()
+            rendered = logging.Formatter().format(record)
+            assert mount_path not in rendered
+            assert "SECRET_UNMOUNT_ERROR" not in rendered
+        else:
+            assert record.__dict__["mount_path"] == mount_path
+            assert record.exc_info is not None
+            assert record.exc_info[1] is error
+            assert "SECRET_UNMOUNT_ERROR" in logging.Formatter().format(record)
 
     @pytest.mark.asyncio
     async def test_detach_drive_no_drives_api(self) -> None:

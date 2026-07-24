@@ -669,7 +669,12 @@ async def _detach_drive(sandbox: Any, mount_path: str) -> None:
         try:
             await drives.unmount(mount_path)
         except Exception as e:
-            log_tool_action_warning(logger, "Drive detach failed (non-fatal)", e)
+            log_tool_action_warning(
+                logger,
+                "Drive detach failed (non-fatal)",
+                e,
+                diagnostic_extra=lambda: {"mount_path": mount_path},
+            )
 
 
 __all__ = [
