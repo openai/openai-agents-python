@@ -263,6 +263,34 @@ async def test_realtime_handoff_async_on_handoff_without_input_runs() -> None:
     assert called == [True]
 
 
+@pytest.mark.asyncio
+async def test_realtime_handoff_async_callable_objects_are_awaited() -> None:
+    class WithInput:
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        async def __call__(self, ctx: RunContextWrapper[Any], value: int) -> None:
+            self.calls.append(value)
+
+    class NoInput:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, ctx: RunContextWrapper[Any]) -> None:
+            self.calls += 1
+
+    rt = RealtimeAgent(name="async_callable")
+    with_input = WithInput()
+    with_input_handoff = realtime_handoff(rt, on_handoff=with_input, input_type=int)
+    assert await with_input_handoff.on_invoke_handoff(RunContextWrapper(None), "7") is rt
+    assert with_input.calls == [7]
+
+    no_input = NoInput()
+    no_input_handoff = realtime_handoff(rt, on_handoff=no_input)
+    assert await no_input_handoff.on_invoke_handoff(RunContextWrapper(None), "") is rt
+    assert no_input.calls == 1
+
+
 class StrictInput(BaseModel):
     name: str
     age: int

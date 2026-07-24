@@ -139,6 +139,43 @@ async def test_custom_tool_use_behavior_async() -> None:
 
 
 @pytest.mark.asyncio
+async def test_custom_tool_use_behavior_async_callable_object() -> None:
+    """Async callable objects should be awaited and invoked exactly once."""
+
+    class Behavior:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(
+            self,
+            context: RunContextWrapper,
+            results: list[FunctionToolResult],
+        ) -> ToolsToFinalOutputResult:
+            self.calls += 1
+            assert len(results) == 2
+            return ToolsToFinalOutputResult(
+                is_final_output=True,
+                final_output="async_callable",
+            )
+
+    behavior = Behavior()
+    agent = Agent(name="test", tool_use_behavior=behavior)
+    tool_results = [
+        _make_function_tool_result(agent, "ignored1"),
+        _make_function_tool_result(agent, "ignored2"),
+    ]
+    result = await run_loop.check_for_final_output_from_tools(
+        agent=agent,
+        tool_results=tool_results,
+        context_wrapper=RunContextWrapper(context=None),
+    )
+
+    assert result.is_final_output is True
+    assert result.final_output == "async_callable"
+    assert behavior.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_invalid_tool_use_behavior_raises() -> None:
     """If tool_use_behavior is invalid, we should raise a UserError."""
     agent = Agent(name="test")

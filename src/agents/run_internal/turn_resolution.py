@@ -688,14 +688,10 @@ async def check_for_final_output_from_tools(
                 )
         return ToolsToFinalOutputResult(is_final_output=False, final_output=None)
     elif callable(agent.tool_use_behavior):
-        if inspect.iscoroutinefunction(agent.tool_use_behavior):
-            return await cast(
-                Awaitable[ToolsToFinalOutputResult],
-                agent.tool_use_behavior(context_wrapper, tool_results),
-            )
-        return cast(
-            ToolsToFinalOutputResult, agent.tool_use_behavior(context_wrapper, tool_results)
-        )
+        result = agent.tool_use_behavior(context_wrapper, tool_results)
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
     logger.error("Invalid tool_use_behavior: %s", agent.tool_use_behavior)
     raise UserError(f"Invalid tool_use_behavior: {agent.tool_use_behavior}")
