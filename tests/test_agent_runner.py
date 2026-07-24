@@ -2609,6 +2609,52 @@ async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("session_backend", ["memory", "sqlite"])
+async def test_non_streamed_model_retry_does_not_rewind_committed_session_input(
+    tmp_path: Path, session_backend: str
+) -> None:
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+    session: CountingSession | SQLiteSession
+    if session_backend == "sqlite":
+        session = SQLiteSession("retry-session", tmp_path / "retry.sqlite3")
+        await session.add_items([get_text_input_item("previous")])
+    else:
+        session = CountingSession(history=[get_text_input_item("previous")])
+
+    try:
+        result = await Runner.run(agent, input="test", session=session)
+        saved_items = await session.get_items()
+    finally:
+        if isinstance(session, SQLiteSession):
+            session.close()
+
+    assert result.final_output == "done"
+    assert [item.get("role") for item in saved_items] == ["user", "user", "assistant"]
+    assert [item.get("content") for item in saved_items[:2]] == ["previous", "test"]
+    if isinstance(session, CountingSession):
+        assert session.pop_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_get_new_response_uses_agent_retry_settings() -> None:
     model = FakeModel()
     model.set_hardcoded_usage(Usage(requests=1))

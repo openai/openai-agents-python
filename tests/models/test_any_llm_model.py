@@ -274,6 +274,135 @@ async def test_user_agent_header_any_llm_chat(override_ua: str | None, monkeypat
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider_name", ["gemini", "vertexai"])
+@pytest.mark.parametrize("options_type", ["unset", "dictionary", "model"])
+async def test_any_llm_google_chat_headers_use_http_options(
+    monkeypatch: pytest.MonkeyPatch, provider_name: str, options_type: str
+) -> None:
+    class HttpOptions(BaseModel):
+        headers: dict[str, str]
+        timeout: int
+
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=_chat_completion("Hello"))
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(model=f"{provider_name}/gemini-2.5-flash")
+
+    extra_args: dict[str, Any] = {}
+    configured_options: dict[str, Any] | HttpOptions | None = None
+    if options_type == "dictionary":
+        configured_options = {"headers": {"X-Existing": "existing"}, "timeout": 1000}
+        extra_args["http_options"] = configured_options
+    elif options_type == "model":
+        configured_options = HttpOptions(headers={"X-Existing": "existing"}, timeout=1000)
+        extra_args["http_options"] = configured_options
+
+    await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(
+            extra_args=extra_args,
+            extra_headers={"X-Test-Header": "test"},
+        ),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    call = provider.chat_calls[0]
+    assert "extra_headers" not in call
+    http_options = call["http_options"]
+    if isinstance(http_options, BaseModel):
+        http_options = http_options.model_dump()
+    assert http_options["headers"]["User-Agent"] == f"Agents/Python {__version__}"
+    assert http_options["headers"]["X-Test-Header"] == "test"
+    if configured_options is not None:
+        assert http_options["headers"]["X-Existing"] == "existing"
+        assert http_options["timeout"] == 1000
+        if isinstance(configured_options, BaseModel):
+            assert configured_options.headers == {"X-Existing": "existing"}
+        else:
+            assert configured_options["headers"] == {"X-Existing": "existing"}
+
+
+@pytest.mark.parametrize("provider_name", ["gemini", "vertexai"])
+@pytest.mark.parametrize("content_type", ["model", "dictionary"])
+def test_any_llm_google_provider_normalizes_function_result_roles(
+    monkeypatch: pytest.MonkeyPatch, provider_name: str, content_type: str
+) -> None:
+    class GoogleContent(BaseModel):
+        role: str
+        parts: list[dict[str, Any]]
+
+    tool_result: dict[str, Any] = {
+        "role": "function",
+        "parts": [{"function_response": {"name": "get_weather", "response": {"result": "sunny"}}}],
+    }
+    original_tool_result: GoogleContent | dict[str, Any]
+    if content_type == "model":
+        original_tool_result = GoogleContent.model_validate(tool_result)
+    else:
+        original_tool_result = tool_result
+
+    class GoogleProvider(FakeAnyLLMProvider):
+        @staticmethod
+        def _convert_completion_params(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "model": "gemini-3.6-flash",
+                "contents": [
+                    GoogleContent(role="user", parts=[{"text": "Check the weather."}]),
+                    original_tool_result,
+                    GoogleContent(role="model", parts=[{"text": "Done."}]),
+                ],
+            }
+
+    provider = GoogleProvider(supports_responses=False)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(model=f"{provider_name}/gemini-3.6-flash")
+
+    converted = model._get_provider()._convert_completion_params(object())
+    contents = converted["contents"]
+
+    assert [
+        item.role if isinstance(item, GoogleContent) else item["role"] for item in contents
+    ] == [
+        "user",
+        "user",
+        "model",
+    ]
+    normalized_tool_result = contents[1]
+    if isinstance(normalized_tool_result, BaseModel):
+        normalized_tool_result = normalized_tool_result.model_dump()
+    assert normalized_tool_result["parts"] == tool_result["parts"]
+    assert (
+        original_tool_result.role
+        if isinstance(original_tool_result, GoogleContent)
+        else original_tool_result["role"]
+    ) == "function"
+
+
+def test_any_llm_non_google_provider_does_not_normalize_function_result_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NonGoogleProvider(FakeAnyLLMProvider):
+        @staticmethod
+        def _convert_completion_params(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            return {"contents": [{"role": "function", "parts": [{"result": "ok"}]}]}
+
+    provider = NonGoogleProvider(supports_responses=False)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(model="openrouter/google/gemini-3.6-flash")
+
+    converted = model._get_provider()._convert_completion_params(object())
+
+    assert converted["contents"][0]["role"] == "function"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_any_llm_chat_path_is_used_when_responses_are_unsupported(monkeypatch) -> None:
     provider = FakeAnyLLMProvider(supports_responses=False, chat_response=_chat_completion("Hello"))
     module, create_calls = _import_any_llm_module(monkeypatch, provider)

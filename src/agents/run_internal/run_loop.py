@@ -1955,9 +1955,9 @@ async def get_new_response(
     model_settings = model_settings_with_prompt_cache_key(model_settings, prompt_cache_key)
 
     async def rewind_model_request() -> None:
-        items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
-        await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
         if server_conversation_tracker is not None:
+            items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
+            await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
             server_conversation_tracker.rewind_input(filtered.input)
 
     with model_run_context(tool_use_tracker):
