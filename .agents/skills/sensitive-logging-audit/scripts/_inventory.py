@@ -42,7 +42,7 @@ KNOWN_HELPERS = {
 SENSITIVE_HELPER_METHODS = {name.rsplit(".", 1)[-1] for name in KNOWN_HELPERS}
 RAW_MODULE_METHODS = {
     "builtins": {"print"},
-    "pprint": {"pprint"},
+    "pprint": {"pp", "pprint"},
     "traceback": {"print_exc", "print_exception"},
     "warnings": {"warn", "warn_explicit"},
 }
@@ -64,6 +64,10 @@ COMPARISON_CLASSIFICATION_FIELDS = (
 )
 
 DefinitionValue = ast.AST | frozenset[str] | None
+
+
+def _helper_fact(full_name: str) -> str:
+    return f"helper:{KNOWN_HELPERS[full_name]}:{full_name.rsplit('.', 1)[-1]}"
 
 
 def _is_sdk_logger_module_or_parent(module: str) -> bool:
@@ -208,7 +212,9 @@ def iter_definitions(
     tree: ast.AST,
 ) -> Iterable[tuple[ast.AST, list[tuple[str, ast.AST | None]]]]:
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            yield node, [(node.name, None)]
+        elif isinstance(node, ast.Assign):
             for target in node.targets:
                 yield node, target_value_pairs(target, node.value)
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
@@ -437,7 +443,7 @@ class Facts:
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 full_name = f"{self.module_name}.{node.name}"
                 if scope is tree and full_name in KNOWN_HELPERS:
-                    self.add(scope, node.name, {f"helper:{KNOWN_HELPERS[full_name]}"})
+                    self.add(scope, node.name, {_helper_fact(full_name)})
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     bound = alias.asname or alias.name.split(".", 1)[0]
@@ -492,7 +498,7 @@ class Facts:
                         self.definitions.append((node, [(bound, policy_value)]))
                         self.definition_values[scope][bound].append((node, policy_value))
                     if full_name in KNOWN_HELPERS:
-                        facts.add(f"helper:{KNOWN_HELPERS[full_name]}")
+                        facts.add(_helper_fact(full_name))
                     if module in RAW_MODULE_METHODS and alias.name in RAW_MODULE_METHODS[module]:
                         facts.add(f"method:raw:{module}.{alias.name}")
                     if module == "sys" and alias.name in {"stdout", "stderr"}:
@@ -530,7 +536,7 @@ class Facts:
                     if module in SDK_LOGGER_MODULES:
                         helper_policy = KNOWN_HELPERS.get(qualified_name)
                         if helper_policy is not None:
-                            result.add(f"helper:{helper_policy}")
+                            result.add(_helper_fact(qualified_name))
                         if node.attr == "logger":
                             result.add("logger")
                     if module in RAW_MODULE_METHODS and node.attr in RAW_MODULE_METHODS[module]:
@@ -549,11 +555,11 @@ class Facts:
             if "factory:logger" in callee_facts or "type:logger" in callee_facts:
                 result.add("logger")
             if self._is_partial(callee_facts) and node.args:
-                method_facts = {
-                    fact for fact in self.infer(node.args[0]) if fact.startswith("method:")
-                }
+                callable_facts = self.infer(node.args[0])
+                method_facts = {fact for fact in callable_facts if fact.startswith("method:")}
                 result.update(method_facts)
-                if len(node.args) == 1 and not node.keywords:
+                inherited_shape = any(fact.startswith("partial-shape:") for fact in callable_facts)
+                if len(node.args) == 1 and not node.keywords and not inherited_shape:
                     result.add("partial-shape:empty")
                 else:
                     bound_call = ast.Call(
@@ -563,7 +569,8 @@ class Facts:
                     )
                     for method_fact in method_facts:
                         _, _, method = method_fact.split(":", 2)
-                        result.add(f"partial-shape:{call_shape(bound_call, method)}")
+                        shape = call_shape_with_partial(bound_call, method, callable_facts)
+                        result.add(f"partial-shape:{shape}")
             return result
         if isinstance(node, ast.BoolOp):
             for value in node.values:
@@ -959,16 +966,13 @@ def inventory_source(source: str, file_path: str = "fixture.py") -> list[Finding
                 category, sink_kind, sink_method = _split_sink_fact(fact)
                 if category == "helper":
                     helper_policy = f"{sink_kind}-helper"
-                    helper_method = (
-                        node.func.id if isinstance(node.func, ast.Name) else node.func.attr
-                    )
                     record(
                         node,
                         call_text,
                         "sensitive-helper",
                         "confirmed",
-                        helper_method,
-                        call_shape(node, helper_method),
+                        sink_method,
+                        call_shape(node, sink_method),
                         helper_policy,
                         catch_value,
                     )
@@ -1068,12 +1072,7 @@ def inventory_source(source: str, file_path: str = "fixture.py") -> list[Finding
 
 def _split_sink_fact(fact: str) -> tuple[str, str, str]:
     if fact.startswith("helper:"):
-        policy = fact.split(":", 1)[1]
-        method = (
-            "log_model_and_tool_action_error"
-            if policy == "model+tool"
-            else f"log_{policy}_action_error"
-        )
+        _, policy, method = fact.split(":", 2)
         return "helper", policy, method
     _, sink_kind, sink_method = fact.split(":", 2)
     return "method", sink_kind, sink_method
@@ -1188,9 +1187,11 @@ def validate_review_ledger(
             continue
         if review.get("disposition") not in DISPOSITIONS:
             errors.append(f"Invalid disposition for {group}.")
-        if not str(review.get("evidence", "")).strip():
+        evidence = review.get("evidence")
+        if not isinstance(evidence, str) or not evidence.strip():
             errors.append(f"Missing evidence for {group}.")
-        if not str(review.get("action", "")).strip():
+        action = review.get("action")
+        if not isinstance(action, str) or not action.strip():
             errors.append(f"Missing action for {group}.")
         if review.get("group_count") != count:
             actual = review.get("group_count")

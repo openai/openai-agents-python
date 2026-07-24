@@ -76,3 +76,4 @@ uv run python .agents/skills/sensitive-logging-audit/scripts/inventory_logging.p
 ```
 
 Allowed dispositions are `model`, `tool`, `model+tool`, `operational`, `intentional-output`, and `uncertain`.
+Both `evidence` and `action` must be non-empty JSON strings; structured values do not count as review rationale.

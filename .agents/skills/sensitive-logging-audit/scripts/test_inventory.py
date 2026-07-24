@@ -238,6 +238,23 @@ formatted(secret)
             ],
         )
 
+    def test_nested_partial_preserves_bound_payload_shape(self) -> None:
+        findings = inventory_source(
+            """
+from functools import partial
+from agents.logger import logger
+
+first = partial(logger.error, secret)
+second = partial(first)
+second()
+"""
+        )
+
+        self.assertEqual(
+            [(item.kind, item.method, item.shape) for item in findings],
+            [("logger", "error", "dynamic-message")],
+        )
+
     def test_inventories_raw_output_and_unknown_receivers(self) -> None:
         findings = inventory_source(
             """
@@ -261,6 +278,25 @@ task.exception()
                 ("raw-output", "stderr.write", "confirmed"),
                 ("raw-output", "traceback.print_exception", "confirmed"),
                 ("logging-candidate", "exception", "unknown"),
+            ],
+        )
+
+    def test_inventories_pprint_pp_aliases(self) -> None:
+        findings = inventory_source(
+            """
+import pprint
+from pprint import pp as emit
+
+pprint.pp(secret)
+emit(secret)
+"""
+        )
+
+        self.assertEqual(
+            [(item.kind, item.method, item.shape) for item in findings],
+            [
+                ("raw-output", "pprint.pp", "dynamic-message"),
+                ("raw-output", "pprint.pp", "dynamic-message"),
             ],
         )
 
@@ -475,6 +511,36 @@ def report(enabled, secret):
 
         self.assertEqual([item.policy for item in findings], ["tool-guard", "none"])
 
+    def test_definitions_kill_policy_alias_provenance(self) -> None:
+        findings = inventory_source(
+            """
+from agents import _debug
+from agents.logger import logger
+
+def function_definition(secret):
+    flag = _debug.DONT_LOG_TOOL_DATA
+
+    @lambda function: False
+    def flag():
+        pass
+
+    if not flag:
+        logger.error("function definition: %s", secret)
+
+def class_definition(secret):
+    flag = _debug.DONT_LOG_TOOL_DATA
+
+    @lambda class_: False
+    class flag:
+        pass
+
+    if not flag:
+        logger.error("class definition: %s", secret)
+"""
+        )
+
+        self.assertEqual([item.policy for item in findings], ["none", "none"])
+
     def test_runtime_binders_kill_imported_policy_alias_provenance(self) -> None:
         findings = inventory_source(
             """
@@ -684,6 +750,30 @@ log_tool_action_warning(logger, "Cleanup failed", error)
             [
                 ("log_tool_action_debug", "tool-helper"),
                 ("log_tool_action_warning", "tool-helper"),
+            ],
+        )
+
+    def test_recognizes_conditional_helper_callees(self) -> None:
+        findings = inventory_source(
+            """
+from agents.logger import logger, log_tool_action_warning
+
+(log_tool_action_warning if enabled else log_tool_action_warning)(
+    logger,
+    "Cleanup failed",
+    error,
+)
+"""
+        )
+
+        self.assertEqual(
+            [(item.kind, item.method, item.policy) for item in findings],
+            [
+                (
+                    "sensitive-helper",
+                    "log_tool_action_warning",
+                    "tool-helper",
+                )
             ],
         )
 
@@ -904,6 +994,23 @@ logger.info('ready')
 
         self.assertFalse(validation["valid"])
         self.assertIn(f"Duplicate review entries for {group}", validation["errors"])
+
+    def test_review_ledger_rejects_non_text_evidence_and_actions(self) -> None:
+        findings = inventory_source("from agents.logger import logger\nlogger.error('x', secret)\n")
+        group = findings[0].group_fingerprint
+        review = {
+            "group_fingerprint": group,
+            "group_count": 1,
+            "disposition": "tool",
+            "evidence": {},
+            "action": [],
+        }
+
+        validation = validate_review_ledger({"reviews": [review]}, findings)
+
+        self.assertFalse(validation["valid"])
+        self.assertIn(f"Missing evidence for {group}.", validation["errors"])
+        self.assertIn(f"Missing action for {group}.", validation["errors"])
 
     def test_summary_separates_unknown_and_raw_candidates(self) -> None:
         findings = inventory_source(
