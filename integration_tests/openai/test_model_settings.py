@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from openai.resources.responses import AsyncResponses
 from openai.types.shared import Reasoning
 
 from agents import Agent, ModelSettings, RunConfig, Runner
@@ -11,9 +12,22 @@ from agents.retry import ModelRetryBackoffSettings, ModelRetrySettings
 pytestmark = pytest.mark.core
 
 
+@pytest.fixture
+def captured_response_requests(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    requests: list[dict[str, Any]] = []
+    original_create = AsyncResponses.create
+
+    async def capture_request(responses: AsyncResponses, *args: Any, **kwargs: Any) -> Any:
+        requests.append(kwargs)
+        return await original_create(responses, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncResponses, "create", capture_request)
+    return requests
+
+
 @pytest.mark.parametrize("dictionary", [False, True], ids=["typed", "dictionary"])
 async def test_agent_model_settings_reach_the_live_responses_api(
-    integration_model: str, dictionary: bool
+    integration_model: str, dictionary: bool, captured_response_requests: list[dict[str, Any]]
 ) -> None:
     settings: ModelSettings | dict[str, Any]
     if dictionary:
@@ -32,11 +46,14 @@ async def test_agent_model_settings_reach_the_live_responses_api(
     assert isinstance(agent.model_settings, ModelSettings)
     assert result.final_output == "PACKAGED_SETTINGS_OK"
     assert result.context_wrapper.usage.total_tokens > 0
+    assert len(captured_response_requests) == 1
+    assert captured_response_requests[0]["max_output_tokens"] == 256
+    assert captured_response_requests[0]["reasoning"].effort == "low"
 
 
 @pytest.mark.parametrize("dictionary", [False, True], ids=["typed", "dictionary"])
 async def test_run_config_model_settings_reach_the_live_responses_api(
-    integration_model: str, dictionary: bool
+    integration_model: str, dictionary: bool, captured_response_requests: list[dict[str, Any]]
 ) -> None:
     settings: ModelSettings | dict[str, Any]
     if dictionary:
@@ -54,6 +71,9 @@ async def test_run_config_model_settings_reach_the_live_responses_api(
 
     assert isinstance(config.model_settings, ModelSettings)
     assert result.final_output == "RUN_CONFIG_OK"
+    assert len(captured_response_requests) == 1
+    assert captured_response_requests[0]["max_output_tokens"] == 256
+    assert captured_response_requests[0]["reasoning"].effort == "low"
 
 
 async def test_nested_retry_settings_and_clone_dictionaries_reach_the_api(

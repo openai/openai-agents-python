@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import runpy
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -39,6 +41,7 @@ def test_external_provider_tests_do_not_require_an_openai_api_key(
     monkeypatch.setenv("OPENAI_AGENTS_INTEGRATION_STRICT", "1")
     item = SimpleNamespace(
         fixturenames=["external_provider"],
+        callspec=SimpleNamespace(params={"external_provider": object()}),
         get_closest_marker=lambda name: name == "providers",
     )
 
@@ -154,8 +157,36 @@ def test_strict_mode_requires_requested_external_provider_credentials(
     monkeypatch.setenv("OPENAI_AGENTS_INTEGRATION_EXTERNAL_PROVIDERS", "1")
     monkeypatch.setenv("OPENAI_AGENTS_INTEGRATION_STRICT", "1")
 
+    assert _external_providers() == []
+    item = SimpleNamespace(
+        fixturenames=["external_provider"],
+        callspec=SimpleNamespace(params={"external_provider": None}),
+        get_closest_marker=lambda name: name == "providers",
+    )
+
     with pytest.raises(pytest.fail.Exception, match="External provider coverage requires"):
-        _external_providers()
+        pytest_runtest_setup(cast(pytest.Item, item))
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_extra"),
+    [
+        ("anthropic/claude-sonnet-5", "anthropic"),
+        ("gemini/gemini-3.6-flash", "gemini"),
+        ("google/gemini-3.6-flash", "gemini"),
+        ("openrouter/openai/gpt-5.6-luna", "openrouter"),
+    ],
+)
+def test_configured_any_llm_models_install_provider_extras_without_external_matrix(
+    monkeypatch: pytest.MonkeyPatch, model: str, expected_extra: str
+) -> None:
+    monkeypatch.setenv("OPENAI_AGENTS_INTEGRATION_ANY_LLM_MODELS", model)
+    runner_path = Path(__file__).resolve().parents[2] / ".github/scripts/run_integration_tests.py"
+    runner = runpy.run_path(str(runner_path))
+
+    assert runner["_any_llm_provider_extras"](
+        external_providers_enabled=False, direct_providers_enabled=False
+    ) == [expected_extra]
 
 
 def test_strict_mode_does_not_require_unrequested_external_providers(

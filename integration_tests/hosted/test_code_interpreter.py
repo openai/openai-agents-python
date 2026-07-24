@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from openai.types.responses import ResponseReasoningItem
 
 from agents import Agent, CodeInterpreterTool, RunConfig, Runner
 from agents.items import ToolCallItem
@@ -20,7 +21,7 @@ async def test_code_interpreter_reasoning_items_survive_follow_up_replay(
                 tool_config={"type": "code_interpreter", "container": {"type": "auto"}}
             )
         ],
-        model_settings={"max_tokens": 1024},
+        model_settings={"max_tokens": 1024, "reasoning": {"effort": "medium"}},
     )
     first = await Runner.run(
         agent,
@@ -35,7 +36,17 @@ async def test_code_interpreter_reasoning_items_survive_follow_up_replay(
         for item in first.new_items
     )
 
+    reasoning_items = [
+        output
+        for response in first.raw_responses
+        for output in response.output
+        if isinstance(output, ResponseReasoningItem)
+    ]
+    assert reasoning_items
+
     follow_up = first.to_input_list()
+    replayed_reasoning = [item for item in follow_up if item.get("type") == "reasoning"]
+    assert [item.get("id") for item in replayed_reasoning] == [item.id for item in reasoning_items]
     follow_up.append({"role": "user", "content": "Repeat the calculated result exactly."})
     second = await Runner.run(
         agent,

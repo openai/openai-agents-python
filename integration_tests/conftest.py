@@ -83,12 +83,6 @@ def _external_providers() -> list[ExternalProvider]:
                 )
             )
 
-    if not providers and _strict():
-        pytest.fail(
-            "External provider coverage requires OPENROUTER_API_KEY or explicitly enabled "
-            "direct-provider credentials."
-        )
-
     return providers
 
 
@@ -101,20 +95,7 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
         metafunc.parametrize("external_provider", providers, ids=[item.name for item in providers])
         return
 
-    metafunc.parametrize(
-        "external_provider",
-        [
-            pytest.param(
-                None,
-                marks=pytest.mark.skip(
-                    reason=(
-                        "Enable external provider coverage and set OPENROUTER_API_KEY, "
-                        "or explicitly include configured direct providers."
-                    )
-                ),
-            )
-        ],
-    )
+    metafunc.parametrize("external_provider", [None], ids=["unconfigured"])
 
 
 def _strict() -> bool:
@@ -155,6 +136,18 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     if item.get_closest_marker("providers"):
         fixture_names = getattr(item, "fixturenames", ())
         if "external_provider" in fixture_names:
+            callspec = getattr(item, "callspec", None)
+            provider = getattr(callspec, "params", {}).get("external_provider")
+            if provider is None:
+                if _external_providers_enabled():
+                    skip_or_fail(
+                        "External provider coverage requires OPENROUTER_API_KEY or explicitly "
+                        "enabled direct-provider credentials."
+                    )
+                pytest.skip(
+                    "Enable external provider coverage and set OPENROUTER_API_KEY, "
+                    "or explicitly include configured direct providers."
+                )
             return
         for fixture_name, environment_name in (
             ("any_llm_models", "OPENAI_AGENTS_INTEGRATION_ANY_LLM_MODELS"),

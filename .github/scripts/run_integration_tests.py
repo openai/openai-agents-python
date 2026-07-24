@@ -52,6 +52,31 @@ def build_distributions() -> tuple[Path, Path]:
     return wheels[-1], sdists[-1]
 
 
+def _any_llm_provider_extras(
+    *, external_providers_enabled: bool, direct_providers_enabled: bool
+) -> list[str]:
+    provider_extras: set[str] = set()
+    configured_models = os.environ.get("OPENAI_AGENTS_INTEGRATION_ANY_LLM_MODELS", "")
+    for model in configured_models.split(","):
+        provider = model.strip().partition("/")[0]
+        if provider in {"anthropic", "openrouter"}:
+            provider_extras.add(provider)
+        elif provider in {"gemini", "google"}:
+            provider_extras.add("gemini")
+
+    if external_providers_enabled:
+        if direct_providers_enabled and os.environ.get("ANTHROPIC_API_KEY"):
+            provider_extras.add("anthropic")
+        if direct_providers_enabled and (
+            os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        ):
+            provider_extras.add("gemini")
+        if os.environ.get("OPENROUTER_API_KEY"):
+            provider_extras.add("openrouter")
+
+    return sorted(provider_extras)
+
+
 def create_environment(
     name: str, distribution: Path, *, extras: bool = False, optional_extra: str | None = None
 ) -> Path:
@@ -70,16 +95,11 @@ def create_environment(
     direct_providers_enabled = os.environ.get(
         "OPENAI_AGENTS_INTEGRATION_DIRECT_PROVIDERS", ""
     ).lower() in {"1", "true", "yes"}
-    if extras and external_providers_enabled:
-        any_llm_extras = []
-        if direct_providers_enabled and os.environ.get("ANTHROPIC_API_KEY"):
-            any_llm_extras.append("anthropic")
-        if direct_providers_enabled and (
-            os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        ):
-            any_llm_extras.append("gemini")
-        if os.environ.get("OPENROUTER_API_KEY"):
-            any_llm_extras.append("openrouter")
+    if extras:
+        any_llm_extras = _any_llm_provider_extras(
+            external_providers_enabled=external_providers_enabled,
+            direct_providers_enabled=direct_providers_enabled,
+        )
         if any_llm_extras:
             requirements.append(f"any-llm-sdk[{','.join(any_llm_extras)}]")
     proxy_values = [

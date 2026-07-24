@@ -22,6 +22,7 @@ async def test_static_voice_pipeline_transcribes_and_synthesizes_without_audio_d
     from agents.voice import (
         AudioInput,
         SingleAgentVoiceWorkflow,
+        SingleAgentWorkflowCallbacks,
         VoicePipeline,
         VoiceStreamEventAudio,
         VoiceStreamEventLifecycle,
@@ -34,6 +35,12 @@ async def test_static_voice_pipeline_transcribes_and_synthesizes_without_audio_d
         else pcm_audio
     )
     original_audio = audio.copy()
+    transcriptions: list[str] = []
+
+    class RecordingWorkflowCallbacks(SingleAgentWorkflowCallbacks):
+        def on_run(self, workflow: SingleAgentVoiceWorkflow, transcription: str) -> None:
+            transcriptions.append(transcription)
+
     agent: Agent[Any] = Agent(
         name="Packaged voice workflow agent",
         model=integration_model,
@@ -41,7 +48,7 @@ async def test_static_voice_pipeline_transcribes_and_synthesizes_without_audio_d
         model_settings={"max_tokens": 256},
     )
     pipeline = VoicePipeline(
-        workflow=SingleAgentVoiceWorkflow(agent),
+        workflow=SingleAgentVoiceWorkflow(agent, callbacks=RecordingWorkflowCallbacks()),
         config={
             "tracing_disabled": True,
             "stt_settings": {"language": "en"},
@@ -59,6 +66,8 @@ async def test_static_voice_pipeline_transcribes_and_synthesizes_without_audio_d
 
     assert audio.size > 0
     np.testing.assert_array_equal(audio, original_audio)
+    assert len(transcriptions) == 1
+    assert all(word in transcriptions[0].lower() for word in ("packaged", "voice", "ready"))
     assert audio_chunks > 0
     assert lifecycle == ["turn_started", "turn_ended", "session_ended"]
 

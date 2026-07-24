@@ -26,6 +26,7 @@ from agents import (
 )
 from agents.decorators import tool, tool_input_guardrail, tool_output_guardrail
 from agents.extensions.handoff_filters import remove_all_tools
+from agents.handoffs import HandoffInputData
 
 pytestmark = pytest.mark.hosted
 
@@ -103,6 +104,12 @@ async def test_programmatic_tool_history_survives_a_filtered_handoff(
     integration_model: str,
 ) -> None:
     calls: list[str] = []
+    handoff_filter_inputs: list[tuple[HandoffInputData, HandoffInputData]] = []
+
+    def capture_filtered_handoff(input_data: HandoffInputData) -> HandoffInputData:
+        filtered = remove_all_tools(input_data)
+        handoff_filter_inputs.append((input_data, filtered))
+        return filtered
 
     @tool(allowed_callers=["programmatic"])
     def inspect_inventory(sku: str) -> InventoryResult:
@@ -124,7 +131,7 @@ async def test_programmatic_tool_history_survives_a_filtered_handoff(
             "After the program returns, immediately transfer to the summary specialist."
         ),
         tools=[inspect_inventory, ProgrammaticToolCallingTool()],
-        handoffs=[handoff(specialist, input_filter=remove_all_tools)],
+        handoffs=[handoff(specialist, input_filter=capture_filtered_handoff)],
         model_settings={"max_tokens": 1024},
     )
     result = await Runner.run(
@@ -137,6 +144,16 @@ async def test_programmatic_tool_history_survives_a_filtered_handoff(
     assert calls == ["alpha"]
     assert result.final_output == "FILTERED_PROGRAM_HANDOFF_OK"
     assert result.last_agent is specialist
+    assert len(handoff_filter_inputs) == 1
+    original_input, filtered_input = handoff_filter_inputs[0]
+    assert any(
+        isinstance(item, ToolCallItem | ToolCallOutputItem)
+        for item in (*original_input.pre_handoff_items, *original_input.new_items)
+    )
+    assert not any(
+        isinstance(item, ToolCallItem | ToolCallOutputItem)
+        for item in (*filtered_input.pre_handoff_items, *filtered_input.new_items)
+    )
     assert any(
         isinstance(output, Program)
         for response in result.raw_responses
