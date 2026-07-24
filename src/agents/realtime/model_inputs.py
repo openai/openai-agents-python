@@ -68,6 +68,12 @@ class RealtimeModelSendUserInput:
     user_input: RealtimeModelUserInput
     """The user input to send."""
 
+    response_create_id: str | None = None
+    """Optional correlation ID for the response.create triggered by this input.
+
+    Custom models should echo this value on the matching turn_started event when possible.
+    """
+
 
 @dataclass
 class RealtimeModelSendAudio:
@@ -97,6 +103,18 @@ class RealtimeModelSendInterrupt:
 
     force_response_cancel: bool = False
     """Force sending a response.cancel event even if automatic cancellation is enabled."""
+
+    response_id: str | None = None
+    """Limit the interrupt to the response that triggered it, when supported."""
+
+    cancel_response_only: bool = False
+    """Cancel only the identified response and interrupt any playback associated with it.
+
+    Playback associated with unrelated responses is preserved.
+    """
+
+    playback_only: bool = False
+    """Interrupt audio playback without cancelling a response."""
 
 
 @dataclass

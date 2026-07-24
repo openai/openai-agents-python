@@ -30,6 +30,26 @@ cd examples/realtime/app && LOG_LEVEL=DEBUG uv run python server.py
 
 The debug logs include concise summaries for server, model, session, history, tool, handoff, error, and usage events. Audio frames and high-volume delta events are omitted, and transcript content is not logged. Uvicorn and WebSocket protocol logging remain at INFO so `LOG_LEVEL=DEBUG` does not dump wire payloads.
 
+### Testing delayed output guardrails
+
+Enable the manual delayed guardrail when validating response lifecycle behavior:
+
+```bash
+cd examples/realtime/app
+REALTIME_GUARDRAIL_TEST=1 \
+REALTIME_GUARDRAIL_TEST_DELAY_SECONDS=1 \
+REALTIME_GUARDRAIL_TEST_TRIGGER_PHRASE="red balloon" \
+REALTIME_GUARDRAIL_TEST_DEBOUNCE_TEXT_LENGTH=1 \
+LOG_LEVEL=DEBUG \
+uv run python server.py
+```
+
+Ask the agent to say "red balloon" in a short response. Test mode lowers the debounce threshold to 1 by default so even this short output is checked. The delay makes it likely that the response finishes before the guardrail result is ready. The app should still receive a `guardrail_tripped` event and generate the safe follow-up without cancelling a newer response.
+
+The guardrail rejects every response containing the trigger phrase. If the automatic safe follow-up also contains it, the follow-up should be rejected with another `guardrail_tripped` event, but the SDK should not generate a third response automatically. A new user turn should still be checked normally and can trigger the guardrail again.
+
+To exercise the overlapping-response case, speak again immediately after the triggering response finishes but before the delayed guardrail returns. The newer response should continue without being interrupted.
+
 ## Customization
 
 To use the same UI with your own agents, edit `agent.py` and ensure get_starting_agent() returns the right starting agent for your use case.

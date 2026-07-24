@@ -11,6 +11,7 @@ from .config import RealtimeAudioFormat
 class ModelAudioState:
     initial_received_time: float
     audio_length_ms: float
+    response_id: str | None = None
 
 
 class ModelAudioTracker:
@@ -18,6 +19,7 @@ class ModelAudioTracker:
         # (item_id, item_content_index) -> ModelAudioState
         self._states: dict[tuple[str, int], ModelAudioState] = {}
         self._last_audio_item: tuple[str, int] | None = None
+        self._audio_items_by_response_id: dict[str, list[tuple[str, int]]] = {}
         # Format is set once the session payload negotiates one. Audio deltas can
         # arrive before that for transcription-only sessions or when the payload
         # omits an audio format, so we default to None and let the length
@@ -28,20 +30,42 @@ class ModelAudioTracker:
         """Called when the model wants to set the audio format."""
         self._format = format
 
-    def on_audio_delta(self, item_id: str, item_content_index: int, audio_bytes: bytes) -> None:
+    def on_audio_delta(
+        self,
+        item_id: str,
+        item_content_index: int,
+        audio_bytes: bytes,
+        response_id: str | None = None,
+    ) -> None:
         """Called when an audio delta is received from the model."""
         ms = calculate_audio_length_ms(self._format, audio_bytes)
         new_key = (item_id, item_content_index)
 
         self._last_audio_item = new_key
+        if response_id is not None:
+            response_items = self._audio_items_by_response_id.setdefault(response_id, [])
+            if new_key not in response_items:
+                response_items.append(new_key)
         if new_key not in self._states:
-            self._states[new_key] = ModelAudioState(time.monotonic(), ms)
+            self._states[new_key] = ModelAudioState(time.monotonic(), ms, response_id)
         else:
             self._states[new_key].audio_length_ms += ms
+            if response_id is not None:
+                self._states[new_key].response_id = response_id
 
     def on_interrupted(self) -> None:
         """Called when the audio playback has been interrupted."""
+        if self._last_audio_item is not None:
+            state = self._states.get(self._last_audio_item)
+            if state is not None and state.response_id is not None:
+                self._audio_items_by_response_id.pop(state.response_id, None)
         self._last_audio_item = None
+
+    def on_response_interrupted(self, response_id: str) -> None:
+        """Called when buffered audio for a specific response has been interrupted."""
+        interrupted_items = self._audio_items_by_response_id.pop(response_id, [])
+        if self._last_audio_item in interrupted_items:
+            self._last_audio_item = None
 
     def get_state(self, item_id: str, item_content_index: int) -> ModelAudioState | None:
         """Called when the model wants to get the current playback state."""
@@ -50,3 +74,7 @@ class ModelAudioTracker:
     def get_last_audio_item(self) -> tuple[str, int] | None:
         """Called when the model wants to get the last audio item ID and content index."""
         return self._last_audio_item
+
+    def get_audio_items_for_response(self, response_id: str) -> tuple[tuple[str, int], ...]:
+        """Return every audio item received for a response in arrival order."""
+        return tuple(self._audio_items_by_response_id.get(response_id, ()))

@@ -51,6 +51,8 @@ from agents.realtime.model_events import (
     RealtimeModelItemDeletedEvent,
     RealtimeModelItemUpdatedEvent,
     RealtimeModelOtherEvent,
+    RealtimeModelOutputTextDeltaEvent,
+    RealtimeModelRawServerEvent,
     RealtimeModelToolCallEvent,
     RealtimeModelTranscriptDeltaEvent,
     RealtimeModelTurnEndedEvent,
@@ -67,6 +69,8 @@ from agents.realtime.model_inputs import (
 from agents.realtime.session import (
     REJECTION_MESSAGE,
     RealtimeSession,
+    _GuardrailRecoveryAttemptError,
+    _PendingToolOutput,
     _PendingToolOutputSendError,
     _serialize_tool_output,
 )
@@ -2230,6 +2234,7 @@ class TestToolCallExecution:
 
         mock_function_tool.on_invoke_tool.assert_called_once()
         assert len(mock_model.sent_tool_outputs) == 0
+        assert not session._pending_response_request_order
 
         await session._handle_tool_call(tool_call_event)
 
@@ -3622,7 +3627,13 @@ class TestGuardrailFunctionality:
         monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
 
         with caplog.at_level(logging.DEBUG, logger="openai.agents"):
-            triggered = await session._run_output_guardrails("model text", "response-id")
+            triggered = await session._run_output_guardrails(
+                "model text",
+                "response-id",
+                agent,
+                is_guardrail_recovery=False,
+                is_audio_output=False,
+            )
 
         assert triggered is False
         records = [
@@ -3669,7 +3680,13 @@ class TestGuardrailFunctionality:
         monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
 
         with caplog.at_level(logging.WARNING, logger="openai.agents"):
-            triggered = await session._run_output_guardrails("model text", "response-id")
+            triggered = await session._run_output_guardrails(
+                "model text",
+                "response-id",
+                agent,
+                is_guardrail_recovery=False,
+                is_audio_output=False,
+            )
 
         assert triggered is False
         records = [
@@ -3712,6 +3729,7 @@ class TestGuardrailFunctionality:
             if isinstance(event, RealtimeModelSendInterrupt)
         )
         assert interrupt_event.force_response_cancel is True
+        assert interrupt_event.cancel_response_only is False
         assert len(mock_model.sent_messages) == 1
         assert mock_model.sent_messages[0] == "guardrail triggered: triggered_guardrail"
 
@@ -3723,6 +3741,364 @@ class TestGuardrailFunctionality:
         guardrail_events = [e for e in events if isinstance(e, RealtimeGuardrailTripped)]
         assert len(guardrail_events) == 1
         assert guardrail_events[0].message == "this is more than ten characters"
+
+    @pytest.mark.asyncio
+    async def test_text_output_deltas_trigger_guardrails_at_threshold(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [triggered_guardrail],
+                "guardrails_settings": {"debounce_text_length": 10},
+            },
+        )
+
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_text",
+                response_id="resp_text",
+                delta="blocked ",
+            )
+        )
+        assert mock_model.interrupts_called == 0
+
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_text",
+                response_id="resp_text",
+                delta="content",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        assert mock_model.interrupts_called == 1
+        interrupt_event = next(
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendInterrupt)
+        )
+        assert interrupt_event.cancel_response_only is True
+        assert mock_model.sent_messages == ["guardrail triggered: triggered_guardrail"]
+        assert session._item_transcripts["item_text"] == "blocked content"
+        await session.on_event(
+            RealtimeModelAudioEvent(
+                data=b"rejected",
+                response_id="resp_text",
+                item_id="item_text_audio",
+                content_index=0,
+            )
+        )
+        await session.on_event(
+            RealtimeModelAudioEvent(
+                data=b"allowed",
+                response_id="resp_new",
+                item_id="item_new_audio",
+                content_index=0,
+            )
+        )
+        events = []
+        while not session._event_queue.empty():
+            events.append(await session._event_queue.get())
+        guardrail_events = [
+            event for event in events if isinstance(event, RealtimeGuardrailTripped)
+        ]
+        assert len(guardrail_events) == 1
+        assert guardrail_events[0].message == "blocked content"
+        audio_events = [event for event in events if isinstance(event, RealtimeAudio)]
+        assert len(audio_events) == 1
+        assert audio_events[0].audio.response_id == "resp_new"
+
+    @pytest.mark.asyncio
+    async def test_interrupt_failure_still_sends_guardrail_recovery(
+        self, mock_agent, triggered_guardrail
+    ):
+        class FailingInterruptModel(MockRealtimeModel):
+            async def send_event(self, event):
+                if isinstance(event, RealtimeModelSendInterrupt):
+                    raise RuntimeError("interrupt failed")
+                await super().send_event(event)
+
+        model = FailingInterruptModel()
+        session = RealtimeSession(
+            model,
+            mock_agent,
+            None,
+            run_config={"output_guardrails": [triggered_guardrail]},
+        )
+        session._active_output_response_id = "response_1"
+
+        with pytest.raises(RuntimeError, match="interrupt failed"):
+            await session._run_output_guardrails(
+                "blocked",
+                "response_1",
+                mock_agent,
+                is_guardrail_recovery=False,
+                is_audio_output=False,
+            )
+
+        recovery_events = [
+            event
+            for event in model.sent_events
+            if isinstance(event, RealtimeModelSendUserInput)
+            and event.response_create_id is not None
+        ]
+        assert len(recovery_events) == 1
+
+    @pytest.mark.asyncio
+    async def test_interrupt_and_recovery_failures_are_both_preserved(
+        self, mock_agent, triggered_guardrail
+    ):
+        class FailingInterruptAndRecoveryModel(MockRealtimeModel):
+            async def send_event(self, event):
+                if isinstance(event, RealtimeModelSendInterrupt):
+                    raise RuntimeError("interrupt failed")
+                if (
+                    isinstance(event, RealtimeModelSendUserInput)
+                    and event.response_create_id is not None
+                ):
+                    raise RuntimeError("recovery failed")
+                await super().send_event(event)
+
+        model = FailingInterruptAndRecoveryModel()
+        session = RealtimeSession(
+            model,
+            mock_agent,
+            None,
+            run_config={"output_guardrails": [triggered_guardrail]},
+        )
+        session._active_output_response_id = "response_1"
+
+        with pytest.raises(_GuardrailRecoveryAttemptError) as exc_info:
+            await session._run_output_guardrails(
+                "blocked",
+                "response_1",
+                mock_agent,
+                is_guardrail_recovery=False,
+                is_audio_output=False,
+            )
+
+        assert str(exc_info.value.interrupt_error) == "interrupt failed"
+        assert str(exc_info.value.recovery_error) == "recovery failed"
+        assert not session._pending_guardrail_recovery_ids
+        assert not session._pending_response_request_order
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalid_event",
+        [
+            {"type": "response.output_text.delta", "delta": "blocked"},
+            {
+                "type": "response.output_text.delta",
+                "item_id": "item_text",
+                "response_id": "resp_text",
+                "delta": "",
+            },
+            {
+                "type": "response.output_audio_transcript.delta",
+                "item_id": "item_text",
+                "response_id": "resp_text",
+                "delta": "blocked",
+            },
+        ],
+        ids=["missing-identifiers", "empty-delta", "audio-transcript-handled-separately"],
+    )
+    async def test_unrelated_raw_server_events_do_not_schedule_text_guardrails(
+        self, mock_model, mock_agent, triggered_guardrail, invalid_event
+    ):
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [triggered_guardrail],
+                "guardrails_settings": {"debounce_text_length": 1},
+            },
+        )
+
+        await session.on_event(RealtimeModelRawServerEvent(data=invalid_event))
+        await self._wait_for_guardrail_tasks(session)
+
+        assert mock_model.interrupts_called == 0
+        assert session._item_transcripts == {}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("start_next_response", [False, True])
+    @pytest.mark.parametrize("output_kind", ["text", "audio"])
+    async def test_late_guardrail_result_preserves_result_without_interrupting_new_response(
+        self, mock_model, mock_agent, start_next_response, output_kind
+    ):
+        guardrail_started = asyncio.Event()
+        release_guardrail = asyncio.Event()
+
+        async def delayed_guardrail(_context, _agent, _output):
+            guardrail_started.set()
+            await release_guardrail.wait()
+            return GuardrailFunctionOutput(output_info={}, tripwire_triggered=True)
+
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [
+                    OutputGuardrail(
+                        guardrail_function=delayed_guardrail,
+                        name="delayed_guardrail",
+                    )
+                ],
+                "guardrails_settings": {"debounce_text_length": 5},
+            },
+        )
+
+        delta_event: RealtimeModelOutputTextDeltaEvent | RealtimeModelTranscriptDeltaEvent
+        if output_kind == "text":
+            delta_event = RealtimeModelOutputTextDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="blocked",
+            )
+        else:
+            delta_event = RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="blocked",
+            )
+
+        await session.on_event(delta_event)
+        await asyncio.wait_for(guardrail_started.wait(), timeout=1)
+
+        await session.on_event(RealtimeModelTurnEndedEvent())
+        if start_next_response:
+            await session.on_event(
+                RealtimeModelOutputTextDeltaEvent(
+                    item_id="item_2",
+                    response_id="response_2",
+                    delta="safe",
+                )
+            )
+        release_guardrail.set()
+        await self._wait_for_guardrail_tasks(session)
+
+        assert mock_model.interrupts_called == (1 if output_kind == "audio" else 0)
+        if output_kind == "audio":
+            interrupt_event = next(
+                event
+                for event in mock_model.sent_events
+                if isinstance(event, RealtimeModelSendInterrupt)
+            )
+            assert interrupt_event.response_id == "response_1"
+            assert interrupt_event.playback_only is True
+        assert mock_model.sent_messages == ["guardrail triggered: delayed_guardrail"]
+        queued_events = []
+        while not session._event_queue.empty():
+            queued_events.append(await session._event_queue.get())
+        guardrail_events = [
+            event for event in queued_events if isinstance(event, RealtimeGuardrailTripped)
+        ]
+        assert len(guardrail_events) == 1
+        assert guardrail_events[0].message == "blocked"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("output_kind", ["text", "audio"])
+    async def test_guardrail_runs_when_turn_ends_before_task_starts(
+        self, mock_model, mock_agent, triggered_guardrail, output_kind
+    ):
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [triggered_guardrail],
+                "guardrails_settings": {"debounce_text_length": 5},
+            },
+        )
+
+        delta_event: RealtimeModelOutputTextDeltaEvent | RealtimeModelTranscriptDeltaEvent
+        if output_kind == "text":
+            delta_event = RealtimeModelOutputTextDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="blocked",
+            )
+        else:
+            delta_event = RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="blocked",
+            )
+
+        await session.on_event(delta_event)
+        await session.on_event(RealtimeModelTurnEndedEvent())
+        await self._wait_for_guardrail_tasks(session)
+
+        assert mock_model.interrupts_called == (1 if output_kind == "audio" else 0)
+        if output_kind == "audio":
+            interrupt_event = next(
+                event
+                for event in mock_model.sent_events
+                if isinstance(event, RealtimeModelSendInterrupt)
+            )
+            assert interrupt_event.response_id == "response_1"
+            assert interrupt_event.playback_only is True
+        assert mock_model.sent_messages == ["guardrail triggered: triggered_guardrail"]
+        queued_events = []
+        while not session._event_queue.empty():
+            queued_events.append(await session._event_queue.get())
+        guardrail_events = [
+            event for event in queued_events if isinstance(event, RealtimeGuardrailTripped)
+        ]
+        assert len(guardrail_events) == 1
+        assert guardrail_events[0].message == "blocked"
+
+    @pytest.mark.asyncio
+    async def test_guardrail_uses_agent_that_produced_the_response(self, mock_model):
+        guardrail_agents = []
+
+        def source_guardrail(_context, agent, _output):
+            guardrail_agents.append(agent)
+            return GuardrailFunctionOutput(output_info={}, tripwire_triggered=True)
+
+        source_agent = RealtimeAgent(
+            name="source",
+            output_guardrails=[
+                OutputGuardrail(
+                    guardrail_function=source_guardrail,
+                    name="source_guardrail",
+                )
+            ],
+        )
+        successor_agent = RealtimeAgent(name="successor")
+        session = RealtimeSession(
+            mock_model,
+            source_agent,
+            None,
+            run_config={"guardrails_settings": {"debounce_text_length": 5}},
+        )
+
+        await session.on_event(RealtimeModelTurnStartedEvent(response_id="response_1"))
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="bl",
+            )
+        )
+        await session.update_agent(successor_agent)
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="ocked",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        assert guardrail_agents == [source_agent]
+        assert mock_model.interrupts_called == 1
+        assert mock_model.sent_messages == ["guardrail triggered: source_guardrail"]
 
     @pytest.mark.asyncio
     async def test_agent_and_run_config_guardrails_not_run_twice(self, mock_model):
@@ -3928,6 +4304,582 @@ class TestGuardrailFunctionality:
         guardrail_events = [e for e in events if isinstance(e, RealtimeGuardrailTripped)]
         assert len(guardrail_events) == 1
         assert guardrail_events[0].message == "this is more than ten characters"
+
+    @pytest.mark.asyncio
+    async def test_guardrail_recovery_is_rejected_without_starting_another_recovery(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [triggered_guardrail],
+                "guardrails_settings": {"debounce_text_length": 5},
+            },
+        )
+
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="blocked",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        assert mock_model.interrupts_called == 1
+        assert mock_model.sent_messages == ["guardrail triggered: triggered_guardrail"]
+
+        await session.on_event(RealtimeModelTurnEndedEvent())
+        await session.on_event(RealtimeModelTurnStartedEvent())
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_2",
+                response_id="response_2",
+                delta="blocked again",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        assert mock_model.interrupts_called == 2
+        assert mock_model.sent_messages == ["guardrail triggered: triggered_guardrail"]
+
+        await session.on_event(RealtimeModelTurnEndedEvent())
+        await session.on_event(RealtimeModelTurnStartedEvent())
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_3",
+                response_id="response_3",
+                delta="blocked once more",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        assert mock_model.interrupts_called == 3
+        assert mock_model.sent_messages == [
+            "guardrail triggered: triggered_guardrail",
+            "guardrail triggered: triggered_guardrail",
+        ]
+        queued_events = []
+        while not session._event_queue.empty():
+            queued_events.append(await session._event_queue.get())
+        assert (
+            len([event for event in queued_events if isinstance(event, RealtimeGuardrailTripped)])
+            == 3
+        )
+
+    @pytest.mark.asyncio
+    async def test_guardrail_recovery_is_correlated_with_its_response(self, mock_model, mock_agent):
+        release_delayed_guardrail = asyncio.Event()
+
+        async def guardrail_function(context, agent, output):
+            if output == "blocked first response":
+                await release_delayed_guardrail.wait()
+            return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+        guardrail = OutputGuardrail(
+            guardrail_function=guardrail_function,
+            name="triggered_guardrail",
+        )
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [guardrail],
+                "guardrails_settings": {"debounce_text_length": 5},
+            },
+        )
+
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="blocked first response",
+            )
+        )
+        await session.on_event(RealtimeModelTurnEndedEvent(response_id="response_1"))
+
+        # The user's next response.create is sent before the delayed guardrail completes.
+        await session.send_message("next user turn")
+        release_delayed_guardrail.set()
+        await self._wait_for_guardrail_tasks(session)
+
+        recovery_events = [
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendUserInput)
+            and event.response_create_id is not None
+        ]
+        assert len(recovery_events) == 1
+        first_recovery_id = recovery_events[0].response_create_id
+        assert first_recovery_id is not None
+
+        # The user's already-requested turn starts first and must remain an ordinary turn.
+        await session.on_event(
+            RealtimeModelTurnStartedEvent(
+                response_id="response_2",
+                is_guardrail_recovery=False,
+            )
+        )
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_2",
+                response_id="response_2",
+                delta="blocked user response",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        recovery_events = [
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendUserInput)
+            and event.response_create_id is not None
+        ]
+        assert len(recovery_events) == 2
+
+        # The correlated replacement remains a recovery even though another turn started first.
+        await session.on_event(RealtimeModelTurnEndedEvent(response_id="response_2"))
+        await session.on_event(
+            RealtimeModelTurnStartedEvent(
+                response_id="response_3",
+                response_create_id=first_recovery_id,
+            )
+        )
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_3",
+                response_id="response_3",
+                delta="blocked recovery response",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        recovery_events = [
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendUserInput)
+            and event.response_create_id is not None
+        ]
+        assert len(recovery_events) == 2
+
+    @pytest.mark.asyncio
+    async def test_guardrail_recovery_uses_request_order_without_create_correlation(
+        self, mock_model, mock_agent
+    ):
+        release_delayed_guardrail = asyncio.Event()
+
+        async def guardrail_function(context, agent, output):
+            if output == "blocked first response":
+                await release_delayed_guardrail.wait()
+            return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+        guardrail = OutputGuardrail(
+            guardrail_function=guardrail_function,
+            name="triggered_guardrail",
+        )
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [guardrail],
+                "guardrails_settings": {"debounce_text_length": 5},
+            },
+        )
+
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="blocked first response",
+            )
+        )
+        await session.on_event(RealtimeModelTurnEndedEvent(response_id="response_1"))
+
+        # An ordinary user request is already queued when the delayed guardrail creates recovery.
+        await session.send_message("next user turn")
+        release_delayed_guardrail.set()
+        await self._wait_for_guardrail_tasks(session)
+
+        await session.on_event(RealtimeModelTurnStartedEvent(response_id="response_2"))
+        await session.on_event(RealtimeModelTurnEndedEvent(response_id="response_2"))
+
+        # A custom model can provide the response ID while omitting response_create_id.
+        await session.on_event(RealtimeModelTurnStartedEvent(response_id="response_3"))
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_3",
+                response_id="response_3",
+                delta="blocked recovery response",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        recovery_events = [
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendUserInput)
+            and event.response_create_id is not None
+        ]
+        assert len(recovery_events) == 1
+
+    @pytest.mark.asyncio
+    async def test_tool_output_request_precedes_uncorrelated_recovery(self, mock_model, mock_agent):
+        release_delayed_guardrail = asyncio.Event()
+
+        async def guardrail_function(context, agent, output):
+            if output == "blocked first response":
+                await release_delayed_guardrail.wait()
+            return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [
+                    OutputGuardrail(
+                        guardrail_function=guardrail_function,
+                        name="triggered_guardrail",
+                    )
+                ],
+                "guardrails_settings": {"debounce_text_length": 5},
+            },
+        )
+
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="blocked first response",
+            )
+        )
+        await session.on_event(RealtimeModelTurnEndedEvent(response_id="response_1"))
+        await session._send_pending_tool_output(
+            _PendingToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool",
+                    call_id="call_1",
+                    arguments="{}",
+                ),
+                output="ok",
+                start_response=True,
+            )
+        )
+        release_delayed_guardrail.set()
+        await self._wait_for_guardrail_tasks(session)
+
+        await session.on_event(RealtimeModelTurnStartedEvent(response_id="response_tool"))
+        await session.on_event(RealtimeModelTurnEndedEvent(response_id="response_tool"))
+        await session.on_event(RealtimeModelTurnStartedEvent(response_id="response_recovery"))
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_recovery",
+                response_id="response_recovery",
+                delta="blocked recovery response",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        recovery_events = [
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendUserInput)
+            and event.response_create_id is not None
+        ]
+        assert len(recovery_events) == 1
+        assert not session._pending_response_request_order
+
+    @pytest.mark.asyncio
+    async def test_guardrail_recovery_create_failure_releases_pending_request(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [triggered_guardrail],
+                "guardrails_settings": {"debounce_text_length": 5},
+            },
+        )
+
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="blocked",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        recovery_event = next(
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendUserInput)
+            and event.response_create_id is not None
+        )
+        assert recovery_event.response_create_id in session._pending_guardrail_recovery_ids
+
+        await session.on_event(
+            RealtimeModelErrorEvent(
+                error={"message": "response.create failed"},
+                response_create_id=recovery_event.response_create_id,
+            )
+        )
+
+        assert recovery_event.response_create_id not in session._pending_guardrail_recovery_ids
+        assert not session._pending_guardrail_recovery_order
+        assert not session._pending_response_request_order
+
+    @pytest.mark.asyncio
+    async def test_unrelated_error_preserves_pending_uncorrelated_recovery(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [triggered_guardrail],
+                "guardrails_settings": {"debounce_text_length": 5},
+            },
+        )
+
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="blocked",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        recovery_event = next(
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendUserInput)
+            and event.response_create_id is not None
+        )
+        assert recovery_event.response_create_id in session._pending_guardrail_recovery_ids
+
+        await session.on_event(
+            RealtimeModelErrorEvent(
+                error={"message": "bad item"},
+                is_guardrail_recovery=False,
+            )
+        )
+
+        assert recovery_event.response_create_id in session._pending_guardrail_recovery_ids
+        assert list(session._pending_guardrail_recovery_order) == [
+            recovery_event.response_create_id
+        ]
+
+        await session.on_event(RealtimeModelTurnEndedEvent(response_id="response_1"))
+        await session.on_event(
+            RealtimeModelTurnStartedEvent(
+                response_id="response_2",
+                is_guardrail_recovery=True,
+            )
+        )
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_2",
+                response_id="response_2",
+                delta="blocked again",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        recovery_events = [
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendUserInput)
+            and event.response_create_id is not None
+        ]
+        assert len(recovery_events) == 1
+
+    @pytest.mark.asyncio
+    async def test_uncorrelated_recovery_create_failure_releases_pending_recovery(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [triggered_guardrail],
+                "guardrails_settings": {"debounce_text_length": 5},
+            },
+        )
+
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="blocked",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        recovery_event = next(
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendUserInput)
+            and event.response_create_id is not None
+        )
+        assert recovery_event.response_create_id in session._pending_guardrail_recovery_ids
+
+        await session.on_event(
+            RealtimeModelErrorEvent(
+                error={"message": "response.create failed"},
+            )
+        )
+
+        assert recovery_event.response_create_id not in session._pending_guardrail_recovery_ids
+        assert not session._pending_guardrail_recovery_order
+        assert not session._pending_response_request_order
+
+        await session.on_event(RealtimeModelTurnEndedEvent(response_id="response_1"))
+        await session.on_event(
+            RealtimeModelTurnStartedEvent(
+                response_id="response_2",
+                is_guardrail_recovery=False,
+            )
+        )
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_2",
+                response_id="response_2",
+                delta="blocked again",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        recovery_events = [
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendUserInput)
+            and event.response_create_id is not None
+        ]
+        assert len(recovery_events) == 2
+
+    @pytest.mark.asyncio
+    async def test_server_vad_turn_does_not_consume_pending_recovery(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [triggered_guardrail],
+                "guardrails_settings": {"debounce_text_length": 5},
+            },
+        )
+
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="blocked",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        first_recovery = next(
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendUserInput)
+            and event.response_create_id is not None
+        )
+        await session.on_event(RealtimeModelTurnEndedEvent(response_id="response_1"))
+
+        await session.on_event(
+            RealtimeModelTurnStartedEvent(
+                response_id="response_vad",
+                is_guardrail_recovery=False,
+            )
+        )
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_vad",
+                response_id="response_vad",
+                delta="blocked again",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        recovery_events = [
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendUserInput)
+            and event.response_create_id is not None
+        ]
+        assert len(recovery_events) == 2
+        assert first_recovery.response_create_id in session._pending_guardrail_recovery_ids
+
+    @pytest.mark.asyncio
+    async def test_coalesced_tool_outputs_do_not_precede_pending_recovery(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [triggered_guardrail],
+                "guardrails_settings": {"debounce_text_length": 5},
+            },
+        )
+
+        for call_id in ("call_1", "call_2"):
+            await session._send_pending_tool_output(
+                _PendingToolOutput(
+                    tool_call=RealtimeModelToolCallEvent(
+                        name="tool",
+                        call_id=call_id,
+                        arguments="{}",
+                    ),
+                    output="ok",
+                    start_response=True,
+                )
+            )
+
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="blocked",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        await session.on_event(
+            RealtimeModelTurnStartedEvent(
+                response_id="response_recovery",
+                is_guardrail_recovery=True,
+            )
+        )
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_recovery",
+                response_id="response_recovery",
+                delta="blocked again",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        recovery_events = [
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendUserInput)
+            and event.response_create_id is not None
+        ]
+        assert len(recovery_events) == 1
 
     @pytest.mark.asyncio
     async def test_concurrent_guardrail_tasks_interrupt_once_per_response(self, mock_model):

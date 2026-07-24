@@ -27,6 +27,17 @@ def test_usage_event_types_are_publicly_exported() -> None:
         assert getattr(realtime, name) is not None
 
 
+def test_output_text_delta_event_is_publicly_exported() -> None:
+    event = realtime.RealtimeModelOutputTextDeltaEvent(
+        item_id="item_1",
+        delta="hello",
+        response_id="response_1",
+    )
+
+    assert "RealtimeModelOutputTextDeltaEvent" in realtime.__all__
+    assert event.type == "output_text_delta"
+
+
 def test_custom_model_can_construct_typed_usage_without_openai_types() -> None:
     event = realtime.RealtimeModelUsageEvent(
         usage=Usage(requests=1, input_tokens=8, output_tokens=5, total_tokens=13),

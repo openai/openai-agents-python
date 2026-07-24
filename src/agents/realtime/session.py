@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import inspect
 import json
+from collections import deque
 from collections.abc import AsyncIterator, Sequence
 from functools import partial
 from typing import Any, cast
@@ -72,6 +73,7 @@ from .model import RealtimeModel, RealtimeModelConfig, RealtimeModelListener
 from .model_events import (
     RealtimeModelEvent,
     RealtimeModelInputAudioTranscriptionCompletedEvent,
+    RealtimeModelOutputTextDeltaEvent,
     RealtimeModelToolCallEvent,
     RealtimeModelUsageEvent,
 )
@@ -160,6 +162,16 @@ class _PendingToolOutputSendError(RuntimeError):
         self.call_id = call_id
 
 
+class _GuardrailRecoveryAttemptError(RuntimeError):
+    def __init__(self, interrupt_error: Exception, recovery_error: Exception) -> None:
+        self.interrupt_error = interrupt_error
+        self.recovery_error = recovery_error
+        super().__init__(
+            "Guardrail interrupt and recovery request both failed: "
+            f"interrupt={interrupt_error!r}; recovery={recovery_error!r}"
+        )
+
+
 class RealtimeSession(RealtimeModelListener):
     """A connection to a realtime model. It streams events from the model to you, and allows you to
     send messages and audio to the model.
@@ -226,8 +238,19 @@ class RealtimeSession(RealtimeModelListener):
 
         # Guardrails state tracking
         self._interrupted_response_ids: set[str] = set()
+        self._active_output_response_id: str | None = None
+        self._response_agent_snapshots: dict[str, RealtimeAgent] = {}
+        self._unscoped_response_agent_snapshot: RealtimeAgent | None = None
         self._item_transcripts: dict[str, str] = {}  # item_id -> accumulated transcript
         self._item_guardrail_run_counts: dict[str, int] = {}  # item_id -> run count
+        self._pending_guardrail_recovery_ids: set[str] = set()
+        self._pending_guardrail_recovery_order: deque[str] = deque()
+        self._pending_response_request_order: deque[str] = deque()
+        self._ordinary_response_request_counter = 0
+        self._active_guardrail_recovery_response_ids: set[str] = set()
+        self._legacy_guardrail_recovery_turn_active = False
+        self._legacy_guardrail_recovery_response_id: str | None = None
+        self._guardrail_recovery_request_counter = 0
         self._debounce_text_length = self._run_config.get("guardrails_settings", {}).get(
             "debounce_text_length", 100
         )
@@ -335,7 +358,26 @@ class RealtimeSession(RealtimeModelListener):
 
     async def send_message(self, message: RealtimeUserInput) -> None:
         """Send a message to the model."""
-        await self._model.send_event(RealtimeModelSendUserInput(user_input=message))
+        await self._send_response_request(RealtimeModelSendUserInput(user_input=message))
+
+    async def _send_response_request(
+        self,
+        event: RealtimeModelSendUserInput | RealtimeModelSendToolOutput,
+    ) -> None:
+        response_create_id = (
+            event.response_create_id if isinstance(event, RealtimeModelSendUserInput) else None
+        )
+        if response_create_id is None:
+            self._ordinary_response_request_counter += 1
+            request_id = f"ordinary_{self._ordinary_response_request_counter}"
+        else:
+            request_id = response_create_id
+        self._pending_response_request_order.append(request_id)
+        try:
+            await self._model.send_event(event)
+        except BaseException:
+            self._discard_response_request(request_id)
+            raise
 
     async def send_audio(self, audio: bytes, *, commit: bool = False) -> None:
         """Send a raw audio chunk to the model."""
@@ -370,6 +412,10 @@ class RealtimeSession(RealtimeModelListener):
             return
 
         if event.type == "error":
+            self._discard_failed_guardrail_recovery(
+                event.response_create_id,
+                event.is_guardrail_recovery,
+            )
             await self._put_event(RealtimeError(info=self._event_info, error=event.error))
         elif event.type == "function_call":
             agent_snapshot = self._current_agent
@@ -384,14 +430,15 @@ class RealtimeSession(RealtimeModelListener):
                     handle_kwargs["dispatch_snapshot"] = dispatch_snapshot
                 await self._handle_tool_call(event, **handle_kwargs)
         elif event.type == "audio":
-            await self._put_event(
-                RealtimeAudio(
-                    info=self._event_info,
-                    audio=event,
-                    item_id=event.item_id,
-                    content_index=event.content_index,
+            if event.response_id not in self._interrupted_response_ids:
+                await self._put_event(
+                    RealtimeAudio(
+                        info=self._event_info,
+                        audio=event,
+                        item_id=event.item_id,
+                        content_index=event.content_index,
+                    )
                 )
-            )
         elif event.type == "audio_interrupted":
             await self._put_event(
                 RealtimeAudioInterrupted(
@@ -423,13 +470,13 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
         elif event.type == "transcript_delta":
-            # Accumulate transcript text for guardrail debouncing per item_id
             item_id = event.item_id
-            if item_id not in self._item_transcripts:
-                self._item_transcripts[item_id] = ""
-                self._item_guardrail_run_counts[item_id] = 0
-
-            self._item_transcripts[item_id] += event.delta
+            self._record_output_guardrail_delta(
+                item_id,
+                event.delta,
+                event.response_id,
+                is_audio_output=True,
+            )
             self._history = self._get_new_history(
                 self._history,
                 AssistantMessageItem(
@@ -437,16 +484,14 @@ class RealtimeSession(RealtimeModelListener):
                     content=[AssistantAudio(transcript=self._item_transcripts[item_id])],
                 ),
             )
-
-            # Check if we should run guardrails based on debounce threshold
-            current_length = len(self._item_transcripts[item_id])
-            threshold = self._debounce_text_length
-            next_run_threshold = (self._item_guardrail_run_counts[item_id] + 1) * threshold
-
-            if current_length >= next_run_threshold:
-                self._item_guardrail_run_counts[item_id] += 1
-                # Pass response_id so we can ensure only a single interrupt per response
-                self._enqueue_guardrail_task(self._item_transcripts[item_id], event.response_id)
+        elif event.type == "output_text_delta":
+            assert isinstance(event, RealtimeModelOutputTextDeltaEvent)
+            self._record_output_guardrail_delta(
+                event.item_id,
+                event.delta,
+                event.response_id,
+                is_audio_output=False,
+            )
         elif event.type == "item_updated":
             is_new = not any(item.item_id == event.item.item_id for item in self._history)
 
@@ -519,6 +564,25 @@ class RealtimeSession(RealtimeModelListener):
         elif event.type == "connection_status":
             pass
         elif event.type == "turn_started":
+            if event.response_id is None:
+                self._unscoped_response_agent_snapshot = self._current_agent
+            else:
+                self._response_agent_snapshots[event.response_id] = self._current_agent
+            is_guardrail_recovery = self._consume_guardrail_recovery(
+                event.response_create_id,
+                event.is_guardrail_recovery,
+            )
+            if is_guardrail_recovery:
+                if event.response_id is not None:
+                    self._active_guardrail_recovery_response_ids.add(event.response_id)
+                    self._legacy_guardrail_recovery_turn_active = False
+                    self._legacy_guardrail_recovery_response_id = None
+                else:
+                    self._legacy_guardrail_recovery_turn_active = True
+                    self._legacy_guardrail_recovery_response_id = None
+            else:
+                self._legacy_guardrail_recovery_turn_active = False
+                self._legacy_guardrail_recovery_response_id = None
             await self._put_event(
                 RealtimeAgentStartEvent(
                     agent=self._current_agent,
@@ -530,8 +594,20 @@ class RealtimeSession(RealtimeModelListener):
             self._context_wrapper.usage.add(event.usage)
         elif event.type == "turn_ended":
             # Clear guardrail state for next turn
+            self._active_output_response_id = None
+            if event.response_id is None:
+                self._response_agent_snapshots.clear()
+            else:
+                self._response_agent_snapshots.pop(event.response_id, None)
+            self._unscoped_response_agent_snapshot = None
             self._item_transcripts.clear()
             self._item_guardrail_run_counts.clear()
+            if event.response_id is None:
+                self._active_guardrail_recovery_response_ids.clear()
+            else:
+                self._active_guardrail_recovery_response_ids.discard(event.response_id)
+            self._legacy_guardrail_recovery_turn_active = False
+            self._legacy_guardrail_recovery_response_id = None
 
             await self._put_event(
                 RealtimeAgentEndEvent(
@@ -540,6 +616,10 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
         elif event.type == "exception":
+            self._discard_failed_guardrail_recovery(
+                event.response_create_id,
+                event.is_guardrail_recovery,
+            )
             # Store the exception to be raised in __aiter__
             self._stored_exception = event.exception
         elif event.type == "other":
@@ -791,13 +871,15 @@ class RealtimeSession(RealtimeModelListener):
             await self._model.send_event(pending_output.session_update)
         if self._closing or self._closed:
             return
-        await self._model.send_event(
-            RealtimeModelSendToolOutput(
-                tool_call=pending_output.tool_call,
-                output=pending_output.output,
-                start_response=pending_output.start_response,
-            )
+        tool_output_event = RealtimeModelSendToolOutput(
+            tool_call=pending_output.tool_call,
+            output=pending_output.output,
+            start_response=pending_output.start_response,
         )
+        if pending_output.start_response:
+            await self._send_response_request(tool_output_event)
+        else:
+            await self._model.send_event(tool_output_event)
         if self._closing or self._closed:
             return
         if pending_output.tool_end_event is not None:
@@ -1300,12 +1382,19 @@ class RealtimeSession(RealtimeModelListener):
         # Otherwise, add it to the end
         return old_history + [event]
 
-    async def _run_output_guardrails(self, text: str, response_id: str) -> bool:
+    async def _run_output_guardrails(
+        self,
+        text: str,
+        response_id: str,
+        agent_snapshot: RealtimeAgent,
+        is_guardrail_recovery: bool,
+        is_audio_output: bool,
+    ) -> bool:
         """Run output guardrails on the given text. Returns True if any guardrail was triggered."""
         if self._closing or self._closed:
             return False
 
-        combined_guardrails = self._current_agent.output_guardrails + self._run_config.get(
+        combined_guardrails = agent_snapshot.output_guardrails + self._run_config.get(
             "output_guardrails", []
         )
         seen_ids: set[int] = set()
@@ -1327,7 +1416,7 @@ class RealtimeSession(RealtimeModelListener):
                 result = await guardrail.run(
                     # TODO (rm) Remove this cast, it's wrong
                     self._context_wrapper,
-                    cast(Agent[Any], self._current_agent),
+                    cast(Agent[Any], agent_snapshot),
                     text,
                 )
                 if self._closing or self._closed:
@@ -1361,31 +1450,219 @@ class RealtimeSession(RealtimeModelListener):
             ):
                 return False
 
-            # Interrupt the model
-            if self._closing or self._closed:
-                return False
-            await self._model.send_event(RealtimeModelSendInterrupt(force_response_cancel=True))
+            interrupt_error: Exception | None = None
+            try:
+                # Cancel only while the response that produced this output remains active. Late
+                # audio guardrails still stop buffered playback without cancelling a newer response.
+                if self._is_guardrail_response_active(response_id):
+                    await self._model.send_event(
+                        RealtimeModelSendInterrupt(
+                            force_response_cancel=True,
+                            response_id=response_id,
+                            cancel_response_only=not is_audio_output,
+                        )
+                    )
+                elif is_audio_output:
+                    await self._model.send_event(
+                        RealtimeModelSendInterrupt(
+                            response_id=response_id,
+                            playback_only=True,
+                        )
+                    )
+            except Exception as exc:
+                interrupt_error = exc
 
-            # Send guardrail triggered message
-            if self._closing or self._closed:
-                return False
-            guardrail_names = [result.guardrail.get_name() for result in triggered_results]
-            await self._model.send_event(
-                RealtimeModelSendUserInput(
-                    user_input=f"guardrail triggered: {', '.join(guardrail_names)}"
-                )
-            )
+            # Start one automatic recovery response for each ordinary response. If that recovery
+            # response also trips a guardrail, reject it without extending the same recovery chain.
+            recovery_error: Exception | None = None
+            if not is_guardrail_recovery:
+                if self._closing or self._closed:
+                    if interrupt_error is not None:
+                        raise interrupt_error
+                    return False
+                else:
+                    guardrail_names = [result.guardrail.get_name() for result in triggered_results]
+                    self._guardrail_recovery_request_counter += 1
+                    response_create_id = (
+                        f"guardrail_recovery_{self._guardrail_recovery_request_counter}"
+                    )
+                    self._pending_guardrail_recovery_ids.add(response_create_id)
+                    self._pending_guardrail_recovery_order.append(response_create_id)
+                    try:
+                        await self._send_response_request(
+                            RealtimeModelSendUserInput(
+                                user_input=f"guardrail triggered: {', '.join(guardrail_names)}",
+                                response_create_id=response_create_id,
+                            )
+                        )
+                    except BaseException as exc:
+                        self._discard_guardrail_recovery(response_create_id)
+                        if not isinstance(exc, Exception):
+                            raise
+                        recovery_error = exc
+
+            if interrupt_error is not None and recovery_error is not None:
+                raise _GuardrailRecoveryAttemptError(
+                    interrupt_error,
+                    recovery_error,
+                ) from interrupt_error
+            if interrupt_error is not None:
+                raise interrupt_error
+            if recovery_error is not None:
+                raise recovery_error
 
             return True
 
         return False
 
-    def _enqueue_guardrail_task(self, text: str, response_id: str) -> None:
+    def _discard_guardrail_recovery(self, response_create_id: str) -> None:
+        self._pending_guardrail_recovery_ids.discard(response_create_id)
+        try:
+            self._pending_guardrail_recovery_order.remove(response_create_id)
+        except ValueError:
+            pass
+        self._discard_response_request(response_create_id)
+
+    def _discard_response_request(self, request_id: str) -> None:
+        try:
+            self._pending_response_request_order.remove(request_id)
+        except ValueError:
+            pass
+
+    def _consume_pending_ordinary_response_requests(self) -> None:
+        while (
+            self._pending_response_request_order
+            and self._pending_response_request_order[0] not in self._pending_guardrail_recovery_ids
+        ):
+            self._pending_response_request_order.popleft()
+
+    def _discard_failed_guardrail_recovery(
+        self,
+        response_create_id: str | None,
+        is_guardrail_recovery: bool | None,
+    ) -> None:
+        if response_create_id is not None:
+            self._discard_guardrail_recovery(response_create_id)
+            return
+
+        if is_guardrail_recovery is False:
+            return
+        if is_guardrail_recovery is None and self._pending_response_request_order:
+            request_id = self._pending_response_request_order[0]
+            if request_id not in self._pending_guardrail_recovery_ids:
+                self._pending_response_request_order.popleft()
+                return
+            self._discard_guardrail_recovery(request_id)
+            return
+        if not self._pending_guardrail_recovery_order:
+            return
+
+        self._discard_guardrail_recovery(self._pending_guardrail_recovery_order[0])
+
+    def _consume_guardrail_recovery(
+        self,
+        response_create_id: str | None,
+        is_guardrail_recovery: bool | None,
+    ) -> bool:
+        if response_create_id is not None:
+            was_pending = response_create_id in self._pending_guardrail_recovery_ids
+            if was_pending:
+                self._discard_guardrail_recovery(response_create_id)
+            return was_pending or is_guardrail_recovery is True
+
+        if is_guardrail_recovery is False:
+            self._consume_pending_ordinary_response_requests()
+            return False
+        if is_guardrail_recovery is True:
+            if self._pending_guardrail_recovery_order:
+                self._discard_guardrail_recovery(self._pending_guardrail_recovery_order[0])
+            return True
+
+        if self._pending_response_request_order:
+            request_id = self._pending_response_request_order[0]
+            if request_id not in self._pending_guardrail_recovery_ids:
+                self._pending_response_request_order.popleft()
+                return False
+            self._discard_guardrail_recovery(request_id)
+            return True
+
+        if not self._pending_guardrail_recovery_order:
+            return False
+
+        self._discard_guardrail_recovery(self._pending_guardrail_recovery_order[0])
+        return True
+
+    def _is_guardrail_response_active(self, response_id: str) -> bool:
+        return (
+            not self._closing
+            and not self._closed
+            and self._active_output_response_id == response_id
+        )
+
+    def _record_output_guardrail_delta(
+        self,
+        item_id: str,
+        delta: str,
+        response_id: str,
+        *,
+        is_audio_output: bool,
+    ) -> None:
+        """Accumulate text or audio transcript deltas using the same guardrail debounce."""
+        self._active_output_response_id = response_id
+        agent_snapshot = self._response_agent_snapshots.get(response_id)
+        if agent_snapshot is None:
+            agent_snapshot = self._unscoped_response_agent_snapshot or self._current_agent
+            self._response_agent_snapshots[response_id] = agent_snapshot
+        if (
+            self._legacy_guardrail_recovery_turn_active
+            and self._legacy_guardrail_recovery_response_id is None
+        ):
+            self._legacy_guardrail_recovery_response_id = response_id
+        is_guardrail_recovery = (
+            response_id in self._active_guardrail_recovery_response_ids
+            or self._legacy_guardrail_recovery_response_id == response_id
+        )
+        if item_id not in self._item_transcripts:
+            self._item_transcripts[item_id] = ""
+            self._item_guardrail_run_counts[item_id] = 0
+
+        self._item_transcripts[item_id] += delta
+        current_length = len(self._item_transcripts[item_id])
+        next_run_threshold = (
+            self._item_guardrail_run_counts[item_id] + 1
+        ) * self._debounce_text_length
+        if current_length >= next_run_threshold:
+            self._item_guardrail_run_counts[item_id] += 1
+            self._enqueue_guardrail_task(
+                self._item_transcripts[item_id],
+                response_id,
+                agent_snapshot=agent_snapshot,
+                is_guardrail_recovery=is_guardrail_recovery,
+                is_audio_output=is_audio_output,
+            )
+
+    def _enqueue_guardrail_task(
+        self,
+        text: str,
+        response_id: str,
+        *,
+        agent_snapshot: RealtimeAgent,
+        is_guardrail_recovery: bool,
+        is_audio_output: bool,
+    ) -> None:
         # Runs the guardrails in a separate task to avoid blocking the main loop
         if self._closing or self._closed:
             return
 
-        task = asyncio.create_task(self._run_output_guardrails(text, response_id))
+        task = asyncio.create_task(
+            self._run_output_guardrails(
+                text,
+                response_id,
+                agent_snapshot,
+                is_guardrail_recovery,
+                is_audio_output,
+            )
+        )
         self._guardrail_tasks.add(task)
 
         # Add callback to remove completed tasks and handle exceptions

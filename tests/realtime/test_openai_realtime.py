@@ -13,12 +13,15 @@ from pydantic import TypeAdapter
 from agents import Agent, function_tool
 from agents.exceptions import UserError
 from agents.handoffs import handoff
-from agents.realtime.model import RealtimeModelConfig
+from agents.realtime.model import RealtimeModelConfig, RealtimePlaybackTracker
 from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
     RealtimeModelErrorEvent,
+    RealtimeModelExceptionEvent,
+    RealtimeModelOutputTextDeltaEvent,
     RealtimeModelRawServerEvent,
     RealtimeModelToolCallEvent,
+    RealtimeModelTurnStartedEvent,
     RealtimeModelUsageEvent,
 )
 from agents.realtime.model_inputs import (
@@ -636,7 +639,13 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
                     self._string_adapter.validate_python(voice)
                 if event["type"] == "response.done":
                     return SimpleNamespace(type=event["type"], response=SimpleNamespace(usage=None))
-                return SimpleNamespace(type=event["type"])
+                return SimpleNamespace(
+                    type=event["type"],
+                    response=SimpleNamespace(
+                        id=None,
+                        metadata=event.get("response", {}).get("metadata"),
+                    ),
+                )
 
         monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
         model._server_event_type_adapter = CustomVoiceRejectingAdapter()
@@ -651,7 +660,9 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
 
         response_with_custom_voice = {
             "type": "response.created",
-            "response": {"audio": {"output": {"voice": {"id": "voice_test"}}}},
+            "response": {
+                "audio": {"output": {"voice": {"id": "voice_test"}}},
+            },
         }
         await model._handle_ws_event(response_with_custom_voice)
 
@@ -1081,6 +1092,9 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
         await model.send_event(RealtimeModelSendUserInput(user_input="hi"))
         await asyncio.sleep(0)
+        pending_event_id = model._pending_response_create_event_id
+        assert pending_event_id is not None
+        await model._mark_response_created(pending_event_id)
         await model._mark_response_done()
         await model.send_event(RealtimeModelSendAudio(audio=b"a", commit=False))
         await model.send_event(RealtimeModelSendAudio(audio=b"a", commit=True))
@@ -1106,7 +1120,12 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
     async def test_interrupt_force_cancel_overrides_auto_cancellation(self, model, monkeypatch):
         """Interrupt should send response.cancel even when auto cancel is enabled."""
         model._audio_state_tracker.set_audio_format("pcm16")
-        model._audio_state_tracker.on_audio_delta("item_1", 0, b"\x00" * 4800)
+        model._audio_state_tracker.on_audio_delta(
+            "item_1",
+            0,
+            b"\x00" * 4800,
+            response_id="response_1",
+        )
         await model._mark_response_created()
         model._created_session = SimpleNamespace(
             audio=SimpleNamespace(
@@ -1119,11 +1138,22 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         monkeypatch.setattr(model, "_send_raw_message", send_raw)
         monkeypatch.setattr(model, "_emit_event", emit_event)
 
-        await model._send_interrupt(RealtimeModelSendInterrupt(force_response_cancel=True))
+        await model._send_interrupt(
+            RealtimeModelSendInterrupt(
+                force_response_cancel=True,
+                response_id="response_1",
+            )
+        )
 
         assert send_raw.await_count == 2
         payload_types = {call.args[0].type for call in send_raw.call_args_list}
         assert payload_types == {"conversation.item.truncate", "response.cancel"}
+        cancel_event = next(
+            call.args[0]
+            for call in send_raw.call_args_list
+            if call.args[0].type == "response.cancel"
+        )
+        assert cancel_event.response_id == "response_1"
         assert model._ongoing_response is True
         assert model._response_control == "cancel_requested"
 
@@ -1131,6 +1161,448 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert model._ongoing_response is False
         assert model._response_control == "free"
         assert model._audio_state_tracker.get_last_audio_item() is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_response_only_does_not_truncate_stale_audio(self, model, monkeypatch):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta("stale_audio_item", 0, b"\x00" * 4800)
+        await model._mark_response_created()
+        model._created_session = SimpleNamespace(
+            audio=SimpleNamespace(
+                input=SimpleNamespace(turn_detection=SimpleNamespace(interrupt_response=True))
+            )
+        )
+
+        send_raw = AsyncMock()
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_interrupt(
+            RealtimeModelSendInterrupt(
+                force_response_cancel=True,
+                response_id="text_response",
+                cancel_response_only=True,
+            )
+        )
+
+        assert send_raw.await_count == 1
+        assert send_raw.await_args is not None
+        cancel_event = send_raw.await_args.args[0]
+        assert cancel_event.type == "response.cancel"
+        assert cancel_event.response_id == "text_response"
+        emit_event.assert_not_awaited()
+        assert model._audio_state_tracker.get_last_audio_item() == ("stale_audio_item", 0)
+
+    @pytest.mark.asyncio
+    async def test_cancel_response_only_interrupts_audio_from_same_response(
+        self, model, monkeypatch
+    ):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "mixed_audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="mixed_response",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("mixed_audio_item", 0, 50)
+        await model._mark_response_created()
+
+        send_raw = AsyncMock()
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_interrupt(
+            RealtimeModelSendInterrupt(
+                force_response_cancel=True,
+                response_id="mixed_response",
+                cancel_response_only=True,
+            )
+        )
+
+        assert [call.args[0].type for call in send_raw.await_args_list] == [
+            "conversation.item.truncate",
+            "response.cancel",
+        ]
+        assert emit_event.await_count == 1
+        assert emit_event.await_args is not None
+        interrupted_event = emit_event.await_args.args[0]
+        assert interrupted_event.item_id == "mixed_audio_item"
+        assert interrupted_event.content_index == 0
+        assert model._audio_state_tracker.get_last_audio_item() is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_response_only_preserves_newer_response_audio(self, model, monkeypatch):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "mixed_audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="mixed_response",
+        )
+        model._audio_state_tracker.on_audio_delta(
+            "new_audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="new_response",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("new_audio_item", 0, 50)
+        await model._mark_response_created()
+
+        send_raw = AsyncMock()
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_interrupt(
+            RealtimeModelSendInterrupt(
+                force_response_cancel=True,
+                response_id="mixed_response",
+                cancel_response_only=True,
+            )
+        )
+
+        assert send_raw.await_count == 1
+        assert send_raw.await_args is not None
+        assert send_raw.await_args.args[0].type == "response.cancel"
+        assert emit_event.await_count == 1
+        assert emit_event.await_args is not None
+        interrupted_event = emit_event.await_args.args[0]
+        assert interrupted_event.item_id == "mixed_audio_item"
+        assert model._audio_state_tracker.get_last_audio_item() == ("new_audio_item", 0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("cancel_response_only", [False, True])
+    async def test_cancel_response_only_interrupts_all_source_items_and_preserves_newer_audio(
+        self, model, monkeypatch, cancel_response_only
+    ):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "source_audio_item_1",
+            0,
+            b"\x00" * 4800,
+            response_id="mixed_response",
+        )
+        model._audio_state_tracker.on_audio_delta(
+            "source_audio_item_2",
+            1,
+            b"\x00" * 4800,
+            response_id="mixed_response",
+        )
+        model._audio_state_tracker.on_audio_delta(
+            "new_audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="new_response",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("new_audio_item", 0, 50)
+        await model._mark_response_created()
+
+        send_raw = AsyncMock()
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_interrupt(
+            RealtimeModelSendInterrupt(
+                force_response_cancel=True,
+                response_id="mixed_response",
+                cancel_response_only=cancel_response_only,
+            )
+        )
+
+        assert [call.args[0].type for call in send_raw.await_args_list] == ["response.cancel"]
+        assert [
+            (call.args[0].item_id, call.args[0].content_index)
+            for call in emit_event.await_args_list
+        ] == [
+            ("source_audio_item_1", 0),
+            ("source_audio_item_2", 1),
+        ]
+        assert model._audio_state_tracker.get_audio_items_for_response("mixed_response") == ()
+        assert model._audio_state_tracker.get_last_audio_item() == ("new_audio_item", 0)
+        assert model._playback_tracker.get_state()["current_item_id"] == "new_audio_item"
+
+    @pytest.mark.asyncio
+    async def test_response_scoped_interrupt_suppresses_late_source_audio_until_done(
+        self, model, monkeypatch
+    ):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        send_raw = AsyncMock()
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_interrupt(
+            RealtimeModelSendInterrupt(
+                force_response_cancel=True,
+                response_id="source_response",
+                cancel_response_only=True,
+            )
+        )
+
+        source_delta = SimpleNamespace(
+            response_id="source_response",
+            item_id="source_item",
+            content_index=0,
+            delta="dGVzdA==",
+        )
+        newer_delta = SimpleNamespace(
+            response_id="newer_response",
+            item_id="newer_item",
+            content_index=0,
+            delta="dGVzdA==",
+        )
+        await model._handle_audio_delta(source_delta)
+        await model._handle_audio_delta(newer_delta)
+
+        assert model._audio_state_tracker.get_state("source_item", 0) is None
+        assert model._audio_state_tracker.get_state("newer_item", 0) is not None
+        assert [
+            event.response_id for event in (call.args[0] for call in emit_event.await_args_list)
+        ] == ["newer_response"]
+
+        class ResponseDoneAdapter:
+            def validate_python(self, event):
+                return SimpleNamespace(
+                    type=event["type"],
+                    response=SimpleNamespace(id="source_response", usage=None),
+                )
+
+        model._server_event_type_adapter = ResponseDoneAdapter()
+        await model._handle_ws_event({"type": "response.done", "response": {}})
+        assert "source_response" not in model._interrupted_audio_response_ids
+
+    @pytest.mark.asyncio
+    async def test_mixed_output_cancel_failure_still_interrupts_source_audio(
+        self, model, monkeypatch
+    ):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "mixed_audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="mixed_response",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("mixed_audio_item", 0, 50)
+        await model._mark_response_created()
+
+        sent_types: list[str] = []
+
+        async def fake_send_raw(event):
+            sent_types.append(event.type)
+            if event.type == "response.cancel":
+                raise RuntimeError("response.cancel failed")
+
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        with pytest.raises(RuntimeError, match="response.cancel failed"):
+            await model._send_interrupt(
+                RealtimeModelSendInterrupt(
+                    force_response_cancel=True,
+                    response_id="mixed_response",
+                    cancel_response_only=True,
+                )
+            )
+
+        assert sent_types == ["conversation.item.truncate", "response.cancel"]
+        assert emit_event.await_count == 1
+        assert model._audio_state_tracker.get_last_audio_item() is None
+        assert model._playback_tracker.get_state()["current_item_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_audio_truncate_failure_still_attempts_response_cancel(self, model, monkeypatch):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="audio_response",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("audio_item", 0, 50)
+        await model._mark_response_created()
+
+        sent_types: list[str] = []
+
+        async def fake_send_raw(event):
+            sent_types.append(event.type)
+            if event.type == "conversation.item.truncate":
+                raise RuntimeError("conversation.item.truncate failed")
+
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        with pytest.raises(RuntimeError, match="conversation.item.truncate failed"):
+            await model._send_interrupt(
+                RealtimeModelSendInterrupt(
+                    force_response_cancel=True,
+                    response_id="audio_response",
+                )
+            )
+
+        assert sent_types == ["conversation.item.truncate", "response.cancel"]
+        assert emit_event.await_count == 1
+        assert model._audio_state_tracker.get_last_audio_item() is None
+        assert model._playback_tracker.get_state()["current_item_id"] is None
+        assert model._response_control == "cancel_requested"
+
+    @pytest.mark.asyncio
+    async def test_interrupt_preserves_truncate_and_cancel_failures(self, model, monkeypatch):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="audio_response",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("audio_item", 0, 50)
+        await model._mark_response_created()
+
+        async def fake_send_raw(event):
+            raise RuntimeError(f"{event.type} failed")
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        with pytest.raises(
+            RuntimeError, match="Multiple Realtime interrupt operations failed"
+        ) as exc_info:
+            await model._send_interrupt(
+                RealtimeModelSendInterrupt(
+                    force_response_cancel=True,
+                    response_id="audio_response",
+                )
+            )
+
+        errors = cast(Any, exc_info.value).errors
+        assert [operation for operation, _error in errors] == [
+            "truncate_audio",
+            "cancel_response",
+        ]
+        assert [str(error) for _operation, error in errors] == [
+            "conversation.item.truncate failed",
+            "response.cancel failed",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_playback_only_interrupt_targets_matching_response(self, model, monkeypatch):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "old_audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="old_response",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("old_audio_item", 0, 50)
+
+        send_raw = AsyncMock()
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_interrupt(
+            RealtimeModelSendInterrupt(
+                response_id="old_response",
+                playback_only=True,
+            )
+        )
+
+        assert send_raw.await_count == 1
+        assert send_raw.await_args is not None
+        assert send_raw.await_args.args[0].type == "conversation.item.truncate"
+        assert emit_event.await_count == 1
+        assert model._response_control == "free"
+        assert model._audio_state_tracker.get_last_audio_item() is None
+
+    @pytest.mark.asyncio
+    async def test_playback_only_interrupt_does_not_overtruncate_completed_old_audio(
+        self, model, monkeypatch
+    ):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "old_audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="old_response",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("old_audio_item", 0, 200)
+        await model._mark_response_created()
+
+        send_raw = AsyncMock()
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_interrupt(
+            RealtimeModelSendInterrupt(
+                response_id="old_response",
+                playback_only=True,
+            )
+        )
+
+        send_raw.assert_not_awaited()
+        assert emit_event.await_count == 1
+        assert emit_event.await_args is not None
+        assert emit_event.await_args.args[0].item_id == "old_audio_item"
+        assert model._ongoing_response is True
+        assert model._response_control == "free"
+        assert model._audio_state_tracker.get_last_audio_item() is None
+
+    @pytest.mark.asyncio
+    async def test_playback_only_interrupt_does_not_stop_newer_response_audio(
+        self, model, monkeypatch
+    ):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "old_audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="old_response",
+        )
+        model._audio_state_tracker.on_audio_delta(
+            "new_audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="new_response",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("new_audio_item", 0, 100)
+        await model._mark_response_created()
+
+        send_raw = AsyncMock()
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_interrupt(
+            RealtimeModelSendInterrupt(
+                response_id="old_response",
+                playback_only=True,
+            )
+        )
+
+        send_raw.assert_not_awaited()
+        assert emit_event.await_count == 1
+        assert emit_event.await_args is not None
+        interrupted_event = emit_event.await_args.args[0]
+        assert interrupted_event.item_id == "old_audio_item"
+        assert interrupted_event.content_index == 0
+        assert model._ongoing_response is True
+        assert model._response_control == "free"
+        assert model._audio_state_tracker.get_last_audio_item() == ("new_audio_item", 0)
+        assert model._audio_state_tracker.get_audio_items_for_response("old_response") == ()
 
     @pytest.mark.asyncio
     async def test_interrupt_respects_auto_cancellation_when_not_forced(self, model, monkeypatch):
@@ -1155,6 +1627,478 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert send_raw.call_args_list[0].args[0].type == "conversation.item.truncate"
         assert all(call.args[0].type != "response.cancel" for call in send_raw.call_args_list)
         assert model._ongoing_response is True
+
+    @pytest.mark.asyncio
+    async def test_output_text_delta_emits_provider_neutral_event(self, model):
+        listener = AsyncMock()
+        model.add_listener(listener)
+
+        await model._handle_ws_event(
+            {
+                "type": "response.output_text.delta",
+                "event_id": "event_1",
+                "item_id": "item_1",
+                "response_id": "response_1",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "hello",
+            }
+        )
+
+        emitted = [call.args[0] for call in listener.on_event.call_args_list]
+        assert [event.type for event in emitted] == ["raw_server_event", "output_text_delta"]
+        text_event = emitted[1]
+        assert isinstance(text_event, RealtimeModelOutputTextDeltaEvent)
+        assert text_event.item_id == "item_1"
+        assert text_event.response_id == "response_1"
+        assert text_event.delta == "hello"
+
+    @pytest.mark.asyncio
+    async def test_response_create_correlation_skips_an_already_requested_user_turn(
+        self, model, monkeypatch
+    ):
+        payload_types: list[str] = []
+        response_create_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            payload_types.append(event.type)
+            if event.type == "response.create":
+                response_create_events.append(event)
+
+        class ResponseLifecycleAdapter:
+            def validate_python(self, event):
+                return SimpleNamespace(
+                    type=event["type"],
+                    response=SimpleNamespace(
+                        id=event["response"]["id"],
+                        metadata=event["response"].get("metadata"),
+                        usage=None,
+                    ),
+                )
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        model._server_event_type_adapter = ResponseLifecycleAdapter()
+        listener = AsyncMock()
+        model.add_listener(listener)
+
+        await model._send_user_input(RealtimeModelSendUserInput(user_input="user input"))
+        await asyncio.sleep(0)
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert payload_types == [
+            "conversation.item.create",
+            "response.create",
+        ]
+        assert len(response_create_events) == 1
+
+        await model._handle_ws_event(
+            {
+                "type": "response.created",
+                "response": {"id": "response_user"},
+            }
+        )
+        await model._handle_ws_event({"type": "response.done", "response": {"id": "response_user"}})
+        await asyncio.sleep(0)
+
+        assert payload_types[-2:] == ["conversation.item.create", "response.create"]
+        assert len(response_create_events) == 2
+        assert response_create_events[1].response is not None
+        await model._handle_ws_event(
+            {
+                "type": "response.created",
+                "response": {
+                    "id": "response_recovery",
+                    "metadata": response_create_events[1].response.metadata,
+                },
+            }
+        )
+
+        turn_started_events = [
+            call.args[0]
+            for call in listener.on_event.call_args_list
+            if isinstance(call.args[0], RealtimeModelTurnStartedEvent)
+        ]
+        assert [
+            (
+                event.response_id,
+                event.response_create_id,
+                event.is_guardrail_recovery,
+            )
+            for event in turn_started_events
+        ] == [
+            ("response_user", None, False),
+            ("response_recovery", "recovery_1", True),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_server_vad_turn_does_not_consume_pending_guardrail_recovery(
+        self, model, monkeypatch
+    ):
+        response_create_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            if event.type == "response.create":
+                response_create_events.append(event)
+
+        class ResponseLifecycleAdapter:
+            def validate_python(self, event):
+                return SimpleNamespace(
+                    type=event["type"],
+                    response=SimpleNamespace(
+                        id=event["response"]["id"],
+                        metadata=event["response"].get("metadata"),
+                        usage=None,
+                    ),
+                )
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        model._server_event_type_adapter = ResponseLifecycleAdapter()
+        listener = AsyncMock()
+        model.add_listener(listener)
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        await asyncio.sleep(0)
+        assert len(response_create_events) == 1
+        pending_event_id = model._pending_response_create_event_id
+        assert pending_event_id is not None
+
+        await model._handle_ws_event(
+            {"type": "response.created", "response": {"id": "response_vad"}}
+        )
+        assert model._pending_response_create_event_id == pending_event_id
+        assert model._response_control == "create_requested"
+
+        await model._handle_ws_event({"type": "response.done", "response": {"id": "response_vad"}})
+        assert model._pending_response_create_event_id == pending_event_id
+        assert model._response_control == "create_requested"
+
+        await model._handle_ws_event(
+            {
+                "type": "response.created",
+                "response": {
+                    "id": "response_recovery",
+                    "metadata": response_create_events[0].response.metadata,
+                },
+            }
+        )
+
+        turn_started_events = [
+            call.args[0]
+            for call in listener.on_event.call_args_list
+            if isinstance(call.args[0], RealtimeModelTurnStartedEvent)
+        ]
+        assert [
+            (
+                event.response_id,
+                event.response_create_id,
+                event.is_guardrail_recovery,
+            )
+            for event in turn_started_events
+        ] == [
+            ("response_vad", None, False),
+            ("response_recovery", "recovery_1", True),
+        ]
+        assert model._pending_response_create_event_id is None
+        assert model._response_control == "free"
+
+    @pytest.mark.asyncio
+    async def test_guardrail_recovery_inputs_are_serialized_with_response_creates(
+        self, model, monkeypatch
+    ):
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        await model._mark_response_created()
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="first recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="second recovery",
+                response_create_id="recovery_2",
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert sent_events == []
+
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        assert [event.type for event in sent_events] == [
+            "conversation.item.create",
+            "response.create",
+        ]
+        assert "first recovery" in sent_events[0].model_dump_json()
+        assert sent_events[0].item.id is not None
+        first_create_event_id = sent_events[1].event_id
+        assert first_create_event_id is not None
+
+        await model._mark_response_created(first_create_event_id)
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        assert [event.type for event in sent_events] == [
+            "conversation.item.create",
+            "response.create",
+            "conversation.item.create",
+            "response.create",
+        ]
+        assert "second recovery" in sent_events[2].model_dump_json()
+
+    @pytest.mark.asyncio
+    async def test_recovery_item_ids_change_after_reconnect(self, model, monkeypatch):
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="first recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        await asyncio.sleep(0)
+        first_item_id = sent_events[0].item.id
+        first_create_event_id = sent_events[1].event_id
+        assert first_item_id is not None
+        assert first_create_event_id is not None
+
+        await model._release_response_waiters()
+        sent_events.clear()
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="second recovery",
+                response_create_id="recovery_2",
+            )
+        )
+        await asyncio.sleep(0)
+        second_item_id = sent_events[0].item.id
+        second_create_event_id = sent_events[1].event_id
+
+        assert second_item_id is not None
+        assert second_create_event_id is not None
+        assert second_item_id != first_item_id
+        assert second_create_event_id != first_create_event_id
+
+    @pytest.mark.asyncio
+    async def test_user_input_waits_for_queued_guardrail_recovery(self, model, monkeypatch):
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        await model._mark_response_created()
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        await model._send_user_input(RealtimeModelSendUserInput(user_input="next user turn one"))
+        await model._send_user_input(RealtimeModelSendUserInput(user_input="next user turn two"))
+        await asyncio.sleep(0)
+
+        assert sent_events == []
+
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        assert [event.type for event in sent_events] == [
+            "conversation.item.create",
+            "response.create",
+        ]
+        assert "guardrail recovery" in sent_events[0].model_dump_json()
+        recovery_create_event_id = sent_events[1].event_id
+        assert recovery_create_event_id is not None
+
+        await model._mark_response_created(recovery_create_event_id)
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        assert [event.type for event in sent_events] == [
+            "conversation.item.create",
+            "response.create",
+            "conversation.item.create",
+            "response.create",
+        ]
+        assert "next user turn one" in sent_events[2].model_dump_json()
+
+        next_create_event_id = sent_events[3].event_id
+        assert next_create_event_id is not None
+        await model._mark_response_created(next_create_event_id)
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        assert [event.type for event in sent_events] == [
+            "conversation.item.create",
+            "response.create",
+            "conversation.item.create",
+            "response.create",
+            "conversation.item.create",
+            "response.create",
+        ]
+        assert "next user turn two" in sent_events[4].model_dump_json()
+
+    @pytest.mark.asyncio
+    async def test_correlated_response_create_send_failure_emits_correlation(
+        self, model, monkeypatch
+    ):
+        sent_events: list[Any] = []
+        response_create_attempts = 0
+
+        async def fake_send_raw(event):
+            nonlocal response_create_attempts
+            sent_events.append(event)
+            if event.type == "response.create":
+                response_create_attempts += 1
+                if response_create_attempts == 1:
+                    raise RuntimeError("response.create failed")
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        listener = AsyncMock()
+        model.add_listener(listener)
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        pending = model._response_create_sequencer.pending_response_create
+        assert pending is not None
+        assert pending.input_item_id is not None
+        assert [event.type for event in sent_events] == [
+            "conversation.item.create",
+            "response.create",
+            "conversation.item.delete",
+        ]
+
+        await model._send_user_input(RealtimeModelSendUserInput(user_input="next user turn"))
+        await asyncio.sleep(0)
+        assert [event.type for event in sent_events].count("response.create") == 1
+
+        exception_events = [
+            call.args[0]
+            for call in listener.on_event.call_args_list
+            if isinstance(call.args[0], RealtimeModelExceptionEvent)
+        ]
+        assert len(exception_events) == 1
+        assert exception_events[0].response_create_id == "recovery_1"
+        assert model._response_control == "create_requested"
+
+        await model._handle_ws_event(
+            {
+                "type": "conversation.item.deleted",
+                "event_id": "event_deleted_1",
+                "item_id": pending.input_item_id,
+            }
+        )
+        await asyncio.sleep(0)
+
+        assert [event.type for event in sent_events][-2:] == [
+            "conversation.item.create",
+            "response.create",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_recovery_cleanup_send_failure_keeps_response_gate_closed(
+        self, model, monkeypatch
+    ):
+        async def fake_send_raw(event):
+            if event.type == "response.create":
+                raise RuntimeError("response.create failed")
+            if event.type == "conversation.item.delete":
+                raise RuntimeError("conversation.item.delete failed")
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        listener = AsyncMock()
+        model.add_listener(listener)
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        exception_events = [
+            call.args[0]
+            for call in listener.on_event.call_args_list
+            if isinstance(call.args[0], RealtimeModelExceptionEvent)
+        ]
+        assert len(exception_events) == 1
+        assert exception_events[0].response_create_id == "recovery_1"
+        assert exception_events[0].is_guardrail_recovery is True
+        assert "response.create failed" in str(exception_events[0].exception)
+        assert "conversation.item.delete failed" in str(exception_events[0].exception)
+        assert isinstance(exception_events[0].exception.__cause__, RuntimeError)
+        assert str(exception_events[0].exception.__cause__) == "response.create failed"
+        cleanup_error = cast(Any, exception_events[0].exception).cleanup_error
+        assert isinstance(cleanup_error, RuntimeError)
+        assert str(cleanup_error) == "conversation.item.delete failed"
+        assert model._pending_response_create_event_id is not None
+        assert model._response_control == "create_requested"
+
+    @pytest.mark.asyncio
+    async def test_user_input_send_failure_abandons_response_create_request(
+        self, model, monkeypatch
+    ):
+        sent_events: list[Any] = []
+        input_attempts = 0
+
+        async def fake_send_raw(event):
+            nonlocal input_attempts
+            if event.type == "conversation.item.create":
+                input_attempts += 1
+                if input_attempts == 1:
+                    raise RuntimeError("conversation.item.create failed")
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+
+        with pytest.raises(RuntimeError, match="conversation.item.create failed"):
+            await model._send_user_input(RealtimeModelSendUserInput(user_input="first"))
+
+        assert model._response_create_sequencer._pending_request_versions == set()
+
+        await model._send_user_input(RealtimeModelSendUserInput(user_input="second"))
+        await asyncio.sleep(0)
+
+        assert [event.type for event in sent_events] == [
+            "conversation.item.create",
+            "response.create",
+        ]
+        assert "second" in sent_events[0].model_dump_json()
 
     @pytest.mark.asyncio
     async def test_send_user_input_defers_response_create_without_blocking_caller(
@@ -1258,7 +2202,9 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         await asyncio.sleep(0)
         assert payload_types == ["conversation.item.create", "response.create"]
 
-        await model._mark_response_created()
+        pending_event_id = model._pending_response_create_event_id
+        assert pending_event_id is not None
+        await model._mark_response_created(pending_event_id)
 
         second_task = asyncio.create_task(
             model._send_user_input(RealtimeModelSendUserInput(user_input="second"))
@@ -1312,7 +2258,9 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
         assert payload_types.count("response.create") == 1
 
-        await model._mark_response_created()
+        pending_event_id = model._pending_response_create_event_id
+        assert pending_event_id is not None
+        await model._mark_response_created(pending_event_id)
         await asyncio.sleep(0)
 
         await model._mark_response_done()
@@ -1389,6 +2337,10 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
         assert model._response_control == "create_requested"
         assert model._pending_response_create_event_id == pending_event_id
+        assert model._emit_event.await_args is not None
+        unrelated_error_event = model._emit_event.await_args.args[0]
+        assert isinstance(unrelated_error_event, RealtimeModelErrorEvent)
+        assert unrelated_error_event.is_guardrail_recovery is False
 
         waiting_task = asyncio.create_task(
             model._send_user_input(RealtimeModelSendUserInput(user_input="second"))
@@ -1419,6 +2371,284 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert payload_types == [
             "conversation.item.create",
             "response.create",
+            "conversation.item.create",
+            "response.create",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_response_create_server_error_emits_correlation(self, model, monkeypatch):
+        async def fake_send_raw(_event):
+            pass
+
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        await asyncio.sleep(0)
+
+        pending_event_id = model._pending_response_create_event_id
+        assert pending_event_id is not None
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "event_err_1",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "bad_response_create",
+                    "message": "bad response.create",
+                    "event_id": pending_event_id,
+                },
+            }
+        )
+
+        error_event = emit_event.call_args_list[-1].args[0]
+        assert isinstance(error_event, RealtimeModelErrorEvent)
+        assert error_event.response_create_id == "recovery_1"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("cancel_vad", [False, True])
+    async def test_response_create_server_error_during_vad_releases_pending_recovery(
+        self, model, monkeypatch, cancel_vad
+    ):
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        await asyncio.sleep(0)
+
+        pending_event_id = model._pending_response_create_event_id
+        assert pending_event_id is not None
+        assert model._response_control == "create_requested"
+        pending = model._response_create_sequencer.pending_response_create
+        assert pending is not None
+        assert pending.input_item_id is not None
+        assert pending.input_delete_event_id is not None
+
+        response_create_id, is_guardrail_recovery = await model._mark_response_created()
+        assert response_create_id is None
+        assert is_guardrail_recovery is False
+        assert model._ongoing_response is True
+        if cancel_vad:
+            await model._cancel_response()
+            assert model._response_control == "cancel_requested"
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "event_err_1",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "bad_response_create",
+                    "message": "a response is already active",
+                    "event_id": pending_event_id,
+                },
+            }
+        )
+
+        assert model._pending_response_create_event_id == pending_event_id
+        assert model._response_control == ("cancel_requested" if cancel_vad else "create_requested")
+        assert sent_events[-1].type == "conversation.item.delete"
+        assert sent_events[-1].item_id == pending.input_item_id
+        error_event = emit_event.call_args_list[-1].args[0]
+        assert isinstance(error_event, RealtimeModelErrorEvent)
+        assert error_event.response_create_id == "recovery_1"
+        assert error_event.is_guardrail_recovery is True
+
+        await model._send_user_input(RealtimeModelSendUserInput(user_input="next user turn"))
+        await asyncio.sleep(0)
+        assert [event.type for event in sent_events].count("response.create") == 1
+
+        await model._handle_ws_event(
+            {
+                "type": "conversation.item.deleted",
+                "event_id": "event_deleted_1",
+                "item_id": pending.input_item_id,
+            }
+        )
+
+        assert model._pending_response_create_event_id is None
+        assert model._response_control == ("cancel_requested" if cancel_vad else "free")
+        await model._mark_response_done()
+        assert model._response_control == "free"
+        await asyncio.sleep(0)
+
+        event_types = [event.type for event in sent_events]
+        delete_index = event_types.index("conversation.item.delete")
+        assert event_types[delete_index + 1 :] == [
+            "conversation.item.create",
+            "response.create",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_failed_recovery_input_cleanup_keeps_response_gate_closed(
+        self, model, monkeypatch
+    ):
+        async def fake_send_raw(_event):
+            pass
+
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        await asyncio.sleep(0)
+
+        pending = model._response_create_sequencer.pending_response_create
+        assert pending is not None
+        assert pending.input_delete_event_id is not None
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "event_err_create",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "bad_response_create",
+                    "message": "bad response.create",
+                    "event_id": pending.event_id,
+                },
+            }
+        )
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "event_err_delete",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "bad_item",
+                    "message": "failed to delete recovery input",
+                    "event_id": pending.input_delete_event_id,
+                },
+            }
+        )
+
+        emitted = [call.args[0] for call in emit_event.call_args_list]
+        cleanup_exception = next(
+            event for event in emitted if isinstance(event, RealtimeModelExceptionEvent)
+        )
+        assert cleanup_exception.response_create_id == "recovery_1"
+        assert cleanup_exception.is_guardrail_recovery is True
+        cleanup_error = cast(Any, cleanup_exception.exception)
+        assert cleanup_error.response_create_error.message == "bad response.create"
+        assert cleanup_error.cleanup_error.message == "failed to delete recovery input"
+        assert model._pending_response_create_event_id == pending.event_id
+        assert model._response_control == "create_requested"
+
+    @pytest.mark.asyncio
+    async def test_cleanup_send_failure_after_server_rejection_keeps_correlation(
+        self, model, monkeypatch
+    ):
+        async def fake_send_raw(event):
+            if event.type == "conversation.item.delete":
+                raise RuntimeError("conversation.item.delete send failed")
+
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        await asyncio.sleep(0)
+
+        pending = model._response_create_sequencer.pending_response_create
+        assert pending is not None
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "event_err_create",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "bad_response_create",
+                    "message": "bad response.create",
+                    "event_id": pending.event_id,
+                },
+            }
+        )
+
+        emitted = [call.args[0] for call in emit_event.call_args_list]
+        cleanup_exception = next(
+            event for event in emitted if isinstance(event, RealtimeModelExceptionEvent)
+        )
+        assert cleanup_exception.response_create_id == "recovery_1"
+        assert cleanup_exception.is_guardrail_recovery is True
+        cleanup_error = cast(Any, cleanup_exception.exception)
+        assert cleanup_error.response_create_error.message == "bad response.create"
+        assert isinstance(cleanup_error.cleanup_error, RuntimeError)
+        assert str(cleanup_error.cleanup_error) == "conversation.item.delete send failed"
+        error_event = emitted[-1]
+        assert isinstance(error_event, RealtimeModelErrorEvent)
+        assert error_event.response_create_id == "recovery_1"
+        assert error_event.is_guardrail_recovery is True
+        assert model._pending_response_create_event_id == pending.event_id
+        assert model._response_control == "create_requested"
+
+    @pytest.mark.asyncio
+    async def test_identified_unrelated_error_does_not_delete_pending_recovery(
+        self, model, monkeypatch
+    ):
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        await asyncio.sleep(0)
+
+        pending_event_id = model._pending_response_create_event_id
+        assert pending_event_id is not None
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "event_err_unrelated",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "bad_item",
+                    "message": "bad item",
+                    "event_id": "some_other_event",
+                },
+            }
+        )
+
+        assert model._pending_response_create_event_id == pending_event_id
+        assert model._response_control == "create_requested"
+        assert [event.type for event in sent_events] == [
             "conversation.item.create",
             "response.create",
         ]
@@ -1760,7 +2990,9 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
         assert payload_types.count("response.create") == 1
 
-        await model._mark_response_created()
+        pending_event_id = model._pending_response_create_event_id
+        assert pending_event_id is not None
+        await model._mark_response_created(pending_event_id)
         await model._mark_response_done()
         await asyncio.sleep(0)
 
@@ -1810,7 +3042,9 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
         assert payload_types.count("response.create") == 1
 
-        await model._mark_response_created()
+        pending_event_id = model._pending_response_create_event_id
+        assert pending_event_id is not None
+        await model._mark_response_created(pending_event_id)
         await model._mark_response_done()
         await asyncio.sleep(0)
 

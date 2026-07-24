@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from typing_extensions import assert_never
 
 from agents.realtime import RealtimeRunner, RealtimeSession, RealtimeSessionEvent
-from agents.realtime.config import RealtimeUserInputMessage
+from agents.realtime.config import RealtimeRunConfig, RealtimeUserInputMessage
 from agents.realtime.items import RealtimeItem
 from agents.realtime.model import RealtimeModelConfig
 from agents.realtime.model_events import (
@@ -28,15 +28,15 @@ from agents.realtime.model_inputs import RealtimeModelSendRawMessage
 # Import TwilioHandler class - handle both module and package use cases
 if TYPE_CHECKING:
     # For type checking, use the relative import
-    from .agent import get_starting_agent
+    from .agent import get_manual_guardrail_test_debounce_text_length, get_starting_agent
 else:
     # At runtime, try both import styles
     try:
         # Try relative import first (when used as a package)
-        from .agent import get_starting_agent
+        from .agent import get_manual_guardrail_test_debounce_text_length, get_starting_agent
     except ImportError:
         # Fall back to direct import (when run as a script)
-        from agent import get_starting_agent
+        from agent import get_manual_guardrail_test_debounce_text_length, get_starting_agent
 
 
 _requested_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -46,6 +46,13 @@ logger = logging.getLogger(__name__)
 logger.setLevel(_log_level)
 
 STATIC_DIR = Path(__file__).with_name("static")
+
+
+def _get_runner_config() -> RealtimeRunConfig | None:
+    debounce_text_length = get_manual_guardrail_test_debounce_text_length()
+    if debounce_text_length is None:
+        return None
+    return {"guardrails_settings": {"debounce_text_length": debounce_text_length}}
 
 
 class RealtimeWebSocketManager:
@@ -60,7 +67,7 @@ class RealtimeWebSocketManager:
         self.websockets[session_id] = websocket
 
         agent = get_starting_agent()
-        runner = RealtimeRunner(agent)
+        runner = RealtimeRunner(agent, config=_get_runner_config())
         # If you want to customize the runner behavior, you can pass options:
         # runner_config = RealtimeRunConfig(async_tool_calls=False)
         # runner = RealtimeRunner(agent, config=runner_config)
@@ -219,7 +226,7 @@ class RealtimeWebSocketManager:
 
     def _log_debug_model_event(self, session_id: str, event: Any) -> None:
         model_event = event.data
-        if model_event.type in {"audio", "transcript_delta"}:
+        if model_event.type in {"audio", "output_text_delta", "transcript_delta"}:
             return
 
         if isinstance(model_event, RealtimeModelRawServerEvent):

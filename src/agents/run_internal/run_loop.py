@@ -325,6 +325,28 @@ def _complete_stream_interruption(
     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
 
 
+async def _wait_for_streamed_turn_events_and_stop_if_cancelled(
+    streamed_result: RunResultStreaming,
+) -> bool:
+    """Let consumers process the completed turn before starting another one."""
+    await streamed_result._wait_for_turn_event_consumption()
+    if streamed_result._cancel_mode != "after_turn":
+        return False
+
+    streamed_result.is_complete = True
+    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+    return True
+
+
+def _publish_streamed_result_agent(
+    streamed_result: RunResultStreaming,
+    agent: Agent[Any],
+) -> None:
+    """Publish an agent transition before cancellation can complete the streamed run."""
+    streamed_result.current_agent = agent
+    streamed_result._current_agent_output_schema = get_output_schema(agent)
+
+
 async def _save_resumed_stream_items(
     *,
     session: Session | None,
@@ -902,6 +924,7 @@ async def start_streaming(
                         current_agent = turn_result.next_step.new_agent
                         if run_state is not None:
                             run_state._current_agent = current_agent
+                        _publish_streamed_result_agent(streamed_result, current_agent)
                         if current_span:
                             current_span.finish(reset_current=True)
                         current_span = None
@@ -910,6 +933,10 @@ async def start_streaming(
                             AgentUpdatedStreamEvent(new_agent=current_agent)
                         )
                         run_state._current_step = NextStepRunAgain()  # type: ignore[assignment]
+                        if await _wait_for_streamed_turn_events_and_stop_if_cancelled(
+                            streamed_result
+                        ):
+                            break
                         continue
 
                     if isinstance(turn_result.next_step, NextStepFinalOutput):
@@ -933,6 +960,10 @@ async def start_streaming(
                             store_setting,
                         )
                         run_state._current_step = NextStepRunAgain()  # type: ignore[assignment]
+                        if await _wait_for_streamed_turn_events_and_stop_if_cancelled(
+                            streamed_result
+                        ):
+                            break
                         continue
 
                     run_state._current_step = None
@@ -1212,6 +1243,7 @@ async def start_streaming(
                     current_agent = turn_result.next_step.new_agent
                     if run_state is not None:
                         run_state._current_agent = current_agent
+                    _publish_streamed_result_agent(streamed_result, current_agent)
                     current_span.finish(reset_current=True)
                     current_span = None
                     should_run_agent_start_hooks = True
@@ -1221,9 +1253,7 @@ async def start_streaming(
                     if streamed_result._state is not None:
                         streamed_result._state._current_step = NextStepRunAgain()
 
-                    if streamed_result._cancel_mode == "after_turn":  # type: ignore[comparison-overlap]
-                        streamed_result.is_complete = True
-                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    if await _wait_for_streamed_turn_events_and_stop_if_cancelled(streamed_result):
                         break
                 elif isinstance(turn_result.next_step, NextStepFinalOutput):
                     await _finalize_streamed_final_output(
@@ -1273,9 +1303,7 @@ async def start_streaming(
                         store_setting,
                     )
 
-                    if streamed_result._cancel_mode == "after_turn":  # type: ignore[comparison-overlap]
-                        streamed_result.is_complete = True
-                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    if await _wait_for_streamed_turn_events_and_stop_if_cancelled(streamed_result):
                         break
             except Exception as e:
                 if current_span and _should_attach_generic_agent_error(e):

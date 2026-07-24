@@ -16,6 +16,10 @@ class RealtimeModelErrorEvent:
     error: Any
 
     type: Literal["error"] = "error"
+    response_create_id: str | None = None
+    """Correlation ID of the failed response.create request, when available."""
+    is_guardrail_recovery: bool | None = None
+    """Whether the failed response.create was requested for guardrail recovery, when known."""
 
 
 @dataclass
@@ -107,6 +111,17 @@ class RealtimeModelTranscriptDeltaEvent:
 
 
 @dataclass
+class RealtimeModelOutputTextDeltaEvent:
+    """Partial text output update."""
+
+    item_id: str
+    delta: str
+    response_id: str
+
+    type: Literal["output_text_delta"] = "output_text_delta"
+
+
+@dataclass
 class RealtimeModelItemUpdatedEvent:
     """Item added to the history or updated."""
 
@@ -138,6 +153,12 @@ class RealtimeModelTurnStartedEvent:
     """Triggered when the model starts generating a response for a turn."""
 
     type: Literal["turn_started"] = "turn_started"
+    response_id: str | None = None
+    """Provider response ID for this turn, when available."""
+    response_create_id: str | None = None
+    """Correlation ID copied from the response.create request, when available."""
+    is_guardrail_recovery: bool | None = None
+    """Whether this turn was requested for guardrail recovery, when known."""
 
 
 @dataclass
@@ -189,6 +210,8 @@ class RealtimeModelTurnEndedEvent:
     """Triggered when the model finishes generating a response for a turn."""
 
     type: Literal["turn_ended"] = "turn_ended"
+    response_id: str | None = None
+    """Provider response ID for this turn, when available."""
 
 
 @dataclass
@@ -208,6 +231,10 @@ class RealtimeModelExceptionEvent:
     context: str | None = None
 
     type: Literal["exception"] = "exception"
+    response_create_id: str | None = None
+    """Correlation ID of the failed response.create request, when available."""
+    is_guardrail_recovery: bool | None = None
+    """Whether the failed response.create was requested for guardrail recovery, when known."""
 
 
 @dataclass
@@ -228,6 +255,7 @@ RealtimeModelEvent: TypeAlias = (
     | RealtimeModelInputAudioTimeoutTriggeredEvent
     | RealtimeModelInputAudioTranscriptionCompletedEvent
     | RealtimeModelTranscriptDeltaEvent
+    | RealtimeModelOutputTextDeltaEvent
     | RealtimeModelItemUpdatedEvent
     | RealtimeModelItemDeletedEvent
     | RealtimeModelConnectionStatusEvent

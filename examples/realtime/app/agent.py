@@ -1,5 +1,8 @@
 import asyncio
+import os
+from typing import Any
 
+from agents import GuardrailFunctionOutput, OutputGuardrail
 from agents.decorators import tool
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 from agents.realtime import RealtimeAgent, realtime_handoff
@@ -7,6 +10,41 @@ from agents.realtime import RealtimeAgent, realtime_handoff
 """
 When running the UI example locally, you can edit this file to change the setup. THe server
 will use the agent returned from get_starting_agent() as the starting agent."""
+
+
+async def delayed_manual_test_guardrail(
+    _context: Any,
+    _agent: Any,
+    output: str,
+) -> GuardrailFunctionOutput:
+    """Delay output validation so response lifecycle races are easy to test manually."""
+    delay_seconds = float(os.getenv("REALTIME_GUARDRAIL_TEST_DELAY_SECONDS", "1.0"))
+    trigger_phrase = os.getenv("REALTIME_GUARDRAIL_TEST_TRIGGER_PHRASE", "red balloon")
+    await asyncio.sleep(max(delay_seconds, 0.0))
+    return GuardrailFunctionOutput(
+        output_info={"trigger_phrase": trigger_phrase, "delay_seconds": delay_seconds},
+        tripwire_triggered=bool(trigger_phrase) and trigger_phrase.casefold() in output.casefold(),
+    )
+
+
+def get_manual_guardrail_test_debounce_text_length() -> int | None:
+    """Return the short manual-test debounce threshold when the guardrail is enabled."""
+    if os.getenv("REALTIME_GUARDRAIL_TEST", "").casefold() not in {"1", "true", "yes", "on"}:
+        return None
+    configured = int(os.getenv("REALTIME_GUARDRAIL_TEST_DEBOUNCE_TEXT_LENGTH", "1"))
+    return max(configured, 1)
+
+
+manual_test_output_guardrails = (
+    [
+        OutputGuardrail(
+            guardrail_function=delayed_manual_test_guardrail,
+            name="delayed_manual_test_guardrail",
+        )
+    ]
+    if get_manual_guardrail_test_debounce_text_length() is not None
+    else []
+)
 
 ### TOOLS
 
@@ -63,6 +101,7 @@ faq_agent = RealtimeAgent(
     2. Use the faq lookup tool to answer the question. Do not rely on your own knowledge.
     3. If you cannot answer the question, transfer back to the triage agent.""",
     tools=[faq_lookup_tool],
+    output_guardrails=manual_test_output_guardrails,
 )
 
 seat_booking_agent = RealtimeAgent(
@@ -77,6 +116,7 @@ seat_booking_agent = RealtimeAgent(
     3. Use the update seat tool to update the seat on the flight.
     If the customer asks a question that is not related to the routine, transfer back to the triage agent. """,
     tools=[update_seat],
+    output_guardrails=manual_test_output_guardrails,
 )
 
 triage_agent = RealtimeAgent(
@@ -87,6 +127,7 @@ triage_agent = RealtimeAgent(
         "You are a helpful triaging agent. You can use your tools to delegate questions to other appropriate agents."
     ),
     tools=[get_weather],
+    output_guardrails=manual_test_output_guardrails,
     handoffs=[
         realtime_handoff(faq_agent, tool_name_override="transfer_to_faq_agent"),
         realtime_handoff(seat_booking_agent, tool_name_override="transfer_to_seat_booking_agent"),
