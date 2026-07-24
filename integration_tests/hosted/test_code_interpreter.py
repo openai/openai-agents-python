@@ -15,7 +15,11 @@ async def test_code_interpreter_reasoning_items_survive_follow_up_replay(
     agent = Agent(
         name="Packaged code interpreter agent",
         model=integration_model,
-        instructions="Use code interpreter for calculations and answer with RESULT:<integer>.",
+        instructions=(
+            "Before using any tools, reason through conditional arithmetic to determine which "
+            "calculation is required. Then use code interpreter for the calculation and "
+            "answer with RESULT:<integer>."
+        ),
         tools=[
             CodeInterpreterTool(
                 tool_config={"type": "code_interpreter", "container": {"type": "auto"}}
