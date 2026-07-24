@@ -11,8 +11,8 @@ from agents import (
     ProgrammaticToolCallingTool,
     Runner,
     ToolCallItem,
-    function_tool,
 )
+from agents.decorators import tool
 
 Sku = Literal["desk-lamp", "ergonomic-keyboard", "usb-c-dock"]
 
@@ -50,21 +50,21 @@ class InboundUnitsOutput(BaseModel):
     inbound_units: int
 
 
-@function_tool(allowed_callers=["programmatic"])
+@tool(allowed_callers=["programmatic"])
 def get_inventory(sku: Sku) -> InventoryOutput:
     """Return the currently available units for one SKU."""
     print(f"[tool] get_inventory({sku})")
     return InventoryOutput(sku=sku, available_units=inventory[sku])
 
 
-@function_tool(allowed_callers=["programmatic"])
+@tool(allowed_callers=["programmatic"])
 def get_weekly_demand(sku: Sku) -> WeeklyDemandOutput:
     """Return forecast demand for one SKU for the next seven days."""
     print(f"[tool] get_weekly_demand({sku})")
     return WeeklyDemandOutput(sku=sku, forecast_units=weekly_demand[sku])
 
 
-@function_tool(allowed_callers=["programmatic"])
+@tool(allowed_callers=["programmatic"])
 def get_inbound_units(sku: Sku) -> InboundUnitsOutput:
     """Return units already scheduled to arrive for one SKU."""
     print(f"[tool] get_inbound_units({sku})")

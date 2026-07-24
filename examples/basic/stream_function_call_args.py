@@ -3,16 +3,20 @@ from typing import Annotated, Any
 
 from openai.types.responses import ResponseFunctionCallArgumentsDeltaEvent
 
-from agents import Agent, Runner, function_tool
+from agents import (
+    Agent,
+    Runner,
+)
+from agents.decorators import tool
 
 
-@function_tool
+@tool
 def write_file(filename: Annotated[str, "Name of the file"], content: str) -> str:
     """Write content to a file."""
     return f"File {filename} written successfully"
 
 
-@function_tool
+@tool
 def create_config(
     project_name: Annotated[str, "Project name"],
     version: Annotated[str, "Project version"],

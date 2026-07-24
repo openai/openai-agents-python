@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import sounddevice as sd
 
-from agents import function_tool
+from agents.decorators import tool
 from agents.realtime import (
     RealtimeAgent,
     RealtimePlaybackTracker,
@@ -34,7 +34,7 @@ PLAYBACK_ECHO_MARGIN = 0.002  # extra energy above playback echo required to cou
 # logger.logger.setLevel(logging.ERROR)
 
 
-@function_tool
+@tool
 def get_weather(city: str) -> str:
     """Get the weather in a city."""
     return f"The weather in {city} is sunny."

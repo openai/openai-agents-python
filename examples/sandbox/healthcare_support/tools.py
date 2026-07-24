@@ -6,7 +6,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from agents import RunContextWrapper, function_tool
+from agents import RunContextWrapper
+from agents.decorators import tool
 from examples.sandbox.healthcare_support.data import HealthcareSupportDataStore
 from examples.sandbox.healthcare_support.models import ScenarioCase
 
@@ -32,7 +33,7 @@ class HealthcareSupportContext:
         )
 
 
-@function_tool(name_override="patient_info_lookup")
+@tool(name_override="patient_info_lookup")
 def lookup_patient(
     context: RunContextWrapper[HealthcareSupportContext],
     patient_id: str | None = None,
@@ -47,7 +48,7 @@ def lookup_patient(
     )
 
 
-@function_tool(name_override="insurance_eligibility_lookup")
+@tool(name_override="insurance_eligibility_lookup")
 def lookup_insurance_eligibility(
     context: RunContextWrapper[HealthcareSupportContext],
     payer: str | None = None,
@@ -62,7 +63,7 @@ def lookup_insurance_eligibility(
     )
 
 
-@function_tool(name_override="appointment_referral_status_lookup")
+@tool(name_override="appointment_referral_status_lookup")
 def lookup_referral_status(
     context: RunContextWrapper[HealthcareSupportContext],
     referral_id: str | None = None,
@@ -83,7 +84,7 @@ async def _needs_human_approval(
     return not context.context.human_handoff_approved
 
 
-@function_tool(name_override="route_to_human_queue", needs_approval=_needs_human_approval)
+@tool(name_override="route_to_human_queue", needs_approval=_needs_human_approval)
 def route_to_human_queue(
     context: RunContextWrapper[HealthcareSupportContext],
     queue: str,

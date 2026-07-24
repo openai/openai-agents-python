@@ -16,8 +16,8 @@ from agents import (
     RunConfig,
     Runner,
     ToolErrorFormatterArgs,
-    function_tool,
 )
+from agents.decorators import tool
 from examples.auto_mode import confirm_with_fallback
 
 
@@ -29,7 +29,7 @@ async def tool_error_formatter(args: ToolErrorFormatterArgs[None]) -> str | None
     return "Publish action was canceled because approval was rejected."
 
 
-@function_tool(needs_approval=True)
+@tool(needs_approval=True)
 async def publish_announcement(title: str, body: str) -> str:
     """Simulate publishing an announcement to users."""
     return f"Published announcement '{title}' with body: {body}"

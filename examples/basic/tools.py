@@ -3,7 +3,11 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field
 
-from agents import Agent, Runner, function_tool
+from agents import (
+    Agent,
+    Runner,
+)
+from agents.decorators import tool
 
 
 class Weather(BaseModel):
@@ -12,7 +16,7 @@ class Weather(BaseModel):
     conditions: str = Field(description="The weather conditions")
 
 
-@function_tool
+@tool
 def get_weather(city: Annotated[str, "The city to get the weather for"]) -> Weather:
     """Get the current weather information for a specified city."""
     print("[debug] get_weather called")

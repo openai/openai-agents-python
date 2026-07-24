@@ -11,8 +11,8 @@ from agents import (
     RunContextWrapper,
     Runner,
     TResponseInputItem,
-    input_guardrail,
 )
+from agents.decorators import input_guardrail
 from examples.auto_mode import input_with_fallback, is_auto_mode
 
 """

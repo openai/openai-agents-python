@@ -6,11 +6,11 @@ from openai import AsyncOpenAI
 from agents import (
     Agent,
     Runner,
-    function_tool,
     set_default_openai_api,
     set_default_openai_client,
     set_tracing_disabled,
 )
+from agents.decorators import tool
 
 BASE_URL = os.getenv("EXAMPLE_BASE_URL") or ""
 API_KEY = os.getenv("EXAMPLE_API_KEY") or ""
@@ -41,7 +41,7 @@ set_default_openai_api("chat_completions")
 set_tracing_disabled(disabled=True)
 
 
-@function_tool
+@tool
 def get_weather(city: str):
     print(f"[debug] getting weather for {city}")
     return f"The weather in {city} is sunny."

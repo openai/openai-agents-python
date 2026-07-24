@@ -8,19 +8,21 @@ from agents import (
     ToolInputGuardrailData,
     ToolOutputGuardrailData,
     ToolOutputGuardrailTripwireTriggered,
-    function_tool,
+)
+from agents.decorators import (
+    tool,
     tool_input_guardrail,
     tool_output_guardrail,
 )
 
 
-@function_tool
+@tool
 def send_email(to: str, subject: str, body: str) -> str:
     """Send an email to the specified recipient."""
     return f"Email sent to {to} with subject '{subject}'"
 
 
-@function_tool
+@tool
 def get_user_data(user_id: str) -> dict[str, str]:
     """Get user data by ID."""
     # Simulate returning sensitive data
@@ -33,7 +35,7 @@ def get_user_data(user_id: str) -> dict[str, str]:
     }
 
 
-@function_tool
+@tool
 def get_contact_info(user_id: str) -> dict[str, str]:
     """Get contact info by ID."""
     return {

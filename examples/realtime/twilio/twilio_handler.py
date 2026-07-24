@@ -10,7 +10,7 @@ from typing import Any
 
 from fastapi import WebSocket
 
-from agents import function_tool
+from agents.decorators import tool
 from agents.realtime import (
     RealtimeAgent,
     RealtimePlaybackTracker,
@@ -20,13 +20,13 @@ from agents.realtime import (
 )
 
 
-@function_tool
+@tool
 def get_weather(city: str) -> str:
     """Get the weather in a city."""
     return f"The weather in {city} is sunny."
 
 
-@function_tool
+@tool
 def get_current_time() -> str:
     """Get the current time."""
     return f"The current time is {datetime.now().strftime('%H:%M:%S')}"

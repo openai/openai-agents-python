@@ -1,13 +1,19 @@
 import asyncio
 
-from agents import Agent, Runner, ToolOutputImage, ToolOutputImageDict, function_tool
+from agents import (
+    Agent,
+    Runner,
+    ToolOutputImage,
+    ToolOutputImageDict,
+)
+from agents.decorators import tool
 
 return_typed_dict = True
 
 URL = "https://images.unsplash.com/photo-1505761671935-60b3a7427bad?auto=format&fit=crop&w=400&q=80"
 
 
-@function_tool
+@tool
 def fetch_random_image() -> ToolOutputImage | ToolOutputImageDict:
     """Fetch a random image."""
 

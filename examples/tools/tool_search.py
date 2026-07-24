@@ -9,10 +9,10 @@ from agents import (
     ModelSettings,
     Runner,
     ToolSearchTool,
-    function_tool,
     tool_namespace,
     trace,
 )
+from agents.decorators import tool
 
 CUSTOMER_PROFILES = {
     "customer_42": {
@@ -42,7 +42,7 @@ SHIPPING_CREDIT_BALANCES = {
 }
 
 
-@function_tool(defer_loading=True)
+@tool(defer_loading=True)
 def get_customer_profile(
     customer_id: Annotated[str, "The CRM customer identifier to look up."],
 ) -> str:
@@ -50,7 +50,7 @@ def get_customer_profile(
     return json.dumps(CUSTOMER_PROFILES[customer_id], indent=2)
 
 
-@function_tool(defer_loading=True)
+@tool(defer_loading=True)
 def list_open_orders(
     customer_id: Annotated[str, "The CRM customer identifier to look up."],
 ) -> str:
@@ -58,7 +58,7 @@ def list_open_orders(
     return json.dumps(OPEN_ORDERS.get(customer_id, []), indent=2)
 
 
-@function_tool(defer_loading=True)
+@tool(defer_loading=True)
 def get_invoice_status(
     invoice_id: Annotated[str, "The invoice identifier to look up."],
 ) -> str:
@@ -66,7 +66,7 @@ def get_invoice_status(
     return INVOICE_STATUSES.get(invoice_id, "unknown")
 
 
-@function_tool(defer_loading=True)
+@tool(defer_loading=True)
 def get_shipping_eta(
     tracking_number: Annotated[str, "The shipment tracking number to look up."],
 ) -> str:
@@ -74,7 +74,7 @@ def get_shipping_eta(
     return SHIPPING_ETAS.get(tracking_number, "unavailable")
 
 
-@function_tool(defer_loading=True)
+@tool(defer_loading=True)
 def get_shipping_credit_balance(
     customer_id: Annotated[str, "The customer account identifier to look up."],
 ) -> str:

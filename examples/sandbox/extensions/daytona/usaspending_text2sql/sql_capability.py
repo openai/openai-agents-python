@@ -141,9 +141,9 @@ def _make_run_sql_tool(
 
         return output.strip() if output.strip() else "Query returned no results."
 
-    from agents.tool import function_tool as _function_tool
+    from agents.decorators import tool as _tool
 
-    return _function_tool(run_sql, name_override="run_sql")
+    return _tool(run_sql, name_override="run_sql")
 
 
 class SqlCapability(Capability):

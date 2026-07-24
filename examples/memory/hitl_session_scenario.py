@@ -15,7 +15,14 @@ from typing import Any
 
 from openai.types.shared import Reasoning
 
-from agents import Agent, Model, ModelSettings, OpenAIConversationsSession, Runner, function_tool
+from agents import (
+    Agent,
+    Model,
+    ModelSettings,
+    OpenAIConversationsSession,
+    Runner,
+)
+from agents.decorators import tool
 from agents.items import TResponseInputItem
 
 from .file_session import FileSession
@@ -38,7 +45,7 @@ def tool_output_for(name: str, message: str) -> str:
     raise ValueError(f"Unknown tool name: {name}")
 
 
-@function_tool(
+@tool(
     name_override=TOOL_ECHO,
     description_override="Echoes back the provided query after approval.",
     needs_approval=True,
@@ -48,7 +55,7 @@ def approval_echo(query: str) -> str:
     return tool_output_for(TOOL_ECHO, query)
 
 
-@function_tool(
+@tool(
     name_override=TOOL_NOTE,
     description_override="Records the provided query after approval.",
     needs_approval=True,

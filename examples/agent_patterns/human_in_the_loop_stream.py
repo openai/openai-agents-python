@@ -10,7 +10,11 @@ the request, then pauses for approval when needed.
 
 import asyncio
 
-from agents import Agent, Runner, function_tool
+from agents import (
+    Agent,
+    Runner,
+)
+from agents.decorators import tool
 from examples.auto_mode import confirm_with_fallback
 
 
@@ -19,7 +23,7 @@ async def _needs_temperature_approval(_ctx, params, _call_id) -> bool:
     return "Oakland" in params.get("city", "")
 
 
-@function_tool(
+@tool(
     # Dynamic approval: only require approval for Oakland
     needs_approval=_needs_temperature_approval
 )
@@ -35,7 +39,7 @@ async def get_temperature(city: str) -> str:
     return f"The temperature in {city} is 20° Celsius"
 
 
-@function_tool
+@tool
 async def get_weather(city: str) -> str:
     """Get the weather for a given city.
 

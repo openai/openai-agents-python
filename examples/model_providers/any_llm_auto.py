@@ -4,7 +4,13 @@ import asyncio
 
 from pydantic import BaseModel
 
-from agents import Agent, ModelSettings, Runner, function_tool, set_tracing_disabled
+from agents import (
+    Agent,
+    ModelSettings,
+    Runner,
+    set_tracing_disabled,
+)
+from agents.decorators import tool
 
 """This example uses the built-in any-llm routing through OpenRouter.
 
@@ -14,7 +20,7 @@ Set OPENROUTER_API_KEY before running it.
 set_tracing_disabled(disabled=True)
 
 
-@function_tool
+@tool
 def get_weather(city: str):
     print(f"[debug] getting weather for {city}")
     return f"The weather in {city} is sunny."

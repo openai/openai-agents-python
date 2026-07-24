@@ -17,7 +17,12 @@ from urllib.parse import urljoin
 from openai.types.responses import ResponseTextDeltaEvent
 from pydantic import BaseModel
 
-from agents import Agent, ModelSettings, Runner, function_tool
+from agents import (
+    Agent,
+    ModelSettings,
+    Runner,
+)
+from agents.decorators import tool
 from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
 
@@ -507,7 +512,7 @@ def _build_resource_query_tools(
 ) -> tuple[list[Any], dict[str, RunloopResourceQueryResult]]:
     query_results: dict[str, RunloopResourceQueryResult] = {}
 
-    @function_tool
+    @tool
     async def query_runloop_secret(name: str) -> RunloopResourceQueryResult:
         """Query whether a Runloop secret exists by name and return non-sensitive metadata."""
 
@@ -515,7 +520,7 @@ def _build_resource_query_tools(
         query_results["secret"] = result
         return result
 
-    @function_tool
+    @tool
     async def query_runloop_network_policy(name: str) -> RunloopResourceQueryResult:
         """Query whether a Runloop network policy exists by name and return basic metadata."""
 

@@ -16,7 +16,12 @@ from typing import Literal
 from openai.types.shared import Reasoning
 from pydantic import BaseModel, Field
 
-from agents import Agent, ModelSettings, Runner, function_tool
+from agents import (
+    Agent,
+    ModelSettings,
+    Runner,
+)
+from agents.decorators import tool
 from agents.run import RunConfig
 from agents.sandbox import SandboxAgent, SandboxRunConfig
 from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
@@ -69,7 +74,7 @@ async def _structured_tool_output_extractor(result) -> str:
     return str(final_output)
 
 
-@function_tool
+@tool
 def get_discount_approval_rule(discount_percent: int) -> str:
     """Return the internal approver required for a proposed discount."""
     if discount_percent <= 10:

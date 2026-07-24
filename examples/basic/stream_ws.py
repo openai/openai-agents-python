@@ -28,14 +28,14 @@ from agents import (
     Agent,
     ModelSettings,
     ResponsesWebSocketSession,
-    function_tool,
     responses_websocket_session,
     trace,
 )
+from agents.decorators import tool
 from examples.auto_mode import confirm_with_fallback
 
 
-@function_tool
+@tool
 def lookup_order(order_id: str) -> dict[str, Any]:
     """Return deterministic order data for the demo."""
     orders = {
@@ -69,7 +69,7 @@ def lookup_order(order_id: str) -> dict[str, Any]:
     )
 
 
-@function_tool(needs_approval=True)
+@tool(needs_approval=True)
 def submit_refund(order_id: str, amount: float, reason: str) -> dict[str, Any]:
     """Create a refund request. This tool requires approval."""
     ticket = "RF-1001" if order_id == "ORD-1001" else f"RF-{order_id[-4:]}"

@@ -3,12 +3,19 @@ from __future__ import annotations
 import json
 import random
 
-from agents import Agent, HandoffInputData, Runner, function_tool, handoff, trace
+from agents import (
+    Agent,
+    HandoffInputData,
+    Runner,
+    handoff,
+    trace,
+)
+from agents.decorators import tool
 from agents.extensions import handoff_filters
 from agents.models import is_gpt_5_default
 
 
-@function_tool
+@tool
 def random_number_tool(max: int) -> int:
     """Return a random integer between 0 and the given maximum."""
     return random.randint(0, max)
