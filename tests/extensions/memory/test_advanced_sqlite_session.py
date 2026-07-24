@@ -1459,6 +1459,12 @@ async def test_error_handling_in_usage_tracking(usage_data: Usage):
     run_result = create_mock_run_result(usage_data)
     await session.store_run_usage(run_result)
 
+    # Close the session to simulate database errors
+    session.close()
+
+    # This should not raise an exception (error should be caught)
+    await session.store_run_usage(run_result)
+
 
 @pytest.mark.parametrize(
     ("model_redacted", "tool_redacted"),
@@ -1512,12 +1518,6 @@ async def test_usage_tracking_failure_identity_follows_model_data_policy(
         assert secret in caplog.text
 
     session.close()
-
-    # Close the session to simulate database errors
-    session.close()
-
-    # This should not raise an exception (error should be caught)
-    await session.store_run_usage(run_result)
 
 
 async def test_advanced_tool_name_extraction():
