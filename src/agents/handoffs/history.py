@@ -429,7 +429,10 @@ def _format_transcript_item_legacy(item: TResponseInputItem) -> str:
         if isinstance(name, str) and name:
             prefix = f"{prefix} ({name})"
         content_str = _stringify_content(item.get("content"))
-        return f"{prefix}: {content_str}" if content_str else prefix
+        # Always emit the colon, even for empty content: _parse_summary_line requires one to
+        # find the role/content split, so a bare "role" line (no colon) fails to parse and the
+        # turn silently vanishes on the next re-nesting hop.
+        return f"{prefix}: {content_str}"
 
     item_type = item.get("type", "item")
     rest = {k: v for k, v in item.items() if k not in ("type", "provider_data")}

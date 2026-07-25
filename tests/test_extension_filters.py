@@ -1029,6 +1029,32 @@ def test_nest_handoff_history_parse_summary_line_empty_stripped() -> None:
     assert "Hello" in final_summary["content"] or "Reply" in final_summary["content"]
 
 
+def test_nest_handoff_history_preserves_role_bearing_turn_with_empty_content() -> None:
+    """A role-bearing turn with empty content (e.g. a tool-call-only assistant turn) must
+    survive a second nesting hop. Its formatted summary line used to omit the colon when
+    content was empty ("assistant" instead of "assistant: "), and _parse_summary_line
+    requires a colon to split role from content, so the turn silently vanished on re-parse.
+    """
+    first_data = handoff_data(
+        input_history=(
+            _get_user_input_item("Hello"),
+            cast(TResponseInputItem, {"role": "assistant", "content": ""}),
+            _get_user_input_item("Continue"),
+        ),
+    )
+    first_nested = nest_handoff_history(first_data)
+    assert isinstance(first_nested.input_history, tuple)
+    first_summary = _as_message(first_nested.input_history[0])
+    assert "assistant:" in first_summary["content"]
+
+    # Nest a second time: this flattens and re-parses the first hop's summary lines.
+    second_data = handoff_data(input_history=first_nested.input_history)
+    second_nested = nest_handoff_history(second_data)
+    assert isinstance(second_nested.input_history, tuple)
+    second_summary = _as_message(second_nested.input_history[0])
+    assert "assistant:" in second_summary["content"]
+
+
 def _get_mcp_call_input_item() -> TResponseInputItem:
     return cast(
         TResponseInputItem,
