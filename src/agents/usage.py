@@ -323,9 +323,9 @@ def serialize_usage(usage: Usage) -> dict[str, Any]:
     return {
         "requests": usage.requests,
         "input_tokens": usage.input_tokens,
-        "input_tokens_details": [input_details],
+        "input_tokens_details": input_details,
         "output_tokens": usage.output_tokens,
-        "output_tokens_details": [output_details],
+        "output_tokens_details": output_details,
         "total_tokens": usage.total_tokens,
         "request_usage_entries": [
             _serialize_request_entry(entry) for entry in usage.request_usage_entries

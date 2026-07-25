@@ -1826,9 +1826,9 @@ class TestSerializationRoundTrip:
         new_state = await RunState.from_string(agent, str_data)
 
         assert serialized["$schemaVersion"] == CURRENT_SCHEMA_VERSION
-        assert serialized["context"]["usage"]["input_tokens_details"] == [
-            {"cached_tokens": 3, "cache_write_tokens": 7}
-        ]
+        assert serialized["context"]["usage"]["input_tokens_details"] == {
+            "cached_tokens": 3, "cache_write_tokens": 7
+        }
         assert new_state._context is not None
         assert new_state._context.usage.requests == 5
         assert new_state._context.usage is not None
@@ -2160,9 +2160,9 @@ class TestSerializationRoundTrip:
                 "usage": {
                     "requests": 0,
                     "input_tokens": 0,
-                    "input_tokens_details": [],
+                    "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
                     "output_tokens": 0,
-                    "output_tokens_details": [],
+                    "output_tokens_details": {"reasoning_tokens": 0},
                     "total_tokens": 0,
                     "request_usage_entries": [],
                 },
