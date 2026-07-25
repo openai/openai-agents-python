@@ -1008,3 +1008,59 @@ def test_google_docstring_after_section_body_matches_blank_line_form():
 
     assert fixed.description == control.description
     assert fixed.params_json_schema["properties"] == control.params_json_schema["properties"]
+
+
+def starred_args_google_function(x: int, *numbers: float, **kwargs: str) -> str:
+    """Add numbers to a base.
+
+    Args:
+        x: The base value.
+        *numbers: The numbers to add.
+        **kwargs: Extra options.
+    """
+    return f"{x} {numbers} {kwargs}"
+
+
+def starred_args_numpy_function(x: int, *numbers: float, **kwargs: str) -> str:
+    """Add numbers to a base.
+
+    Parameters
+    ----------
+    x : int
+        The base value.
+    *numbers : float
+        The numbers to add.
+    **kwargs : str
+        Extra options.
+    """
+    return f"{x} {numbers} {kwargs}"
+
+
+def starred_args_sphinx_function(x: int, *numbers: float, **kwargs: str) -> str:
+    """Add numbers to a base.
+
+    :param x: The base value.
+    :param numbers: The numbers to add.
+    :param kwargs: Extra options.
+    """
+    return f"{x} {numbers} {kwargs}"
+
+
+@pytest.mark.parametrize(
+    "func,style",
+    [
+        (starred_args_google_function, "google"),
+        (starred_args_numpy_function, "numpy"),
+        (starred_args_sphinx_function, "sphinx"),
+    ],
+)
+def test_variadic_param_descriptions_preserved(func, style):
+    """Google and NumPy style docstrings write variadic parameters with their stars
+    ("*numbers:", "**kwargs:"). The parsed descriptions must still attach to the bare
+    signature names in the JSON schema, matching the sphinx form."""
+    fs = function_schema(func, docstring_style=style, strict_json_schema=False)
+
+    properties = fs.params_json_schema.get("properties", {})
+    assert properties["x"]["description"] == "The base value."
+    assert properties["numbers"]["description"] == "The numbers to add."
+    assert properties["kwargs"]["description"] == "Extra options."

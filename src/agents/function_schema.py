@@ -233,7 +233,10 @@ def generate_func_documentation(
     )
 
     param_descriptions: dict[str, str] = {
-        param.name: param.description
+        # Google and NumPy style docstrings write variadic parameters with their
+        # stars ("*args:", "**kwargs:") and griffe returns those names verbatim.
+        # Strip the stars so lookups by the signature parameter name succeed.
+        param.name.lstrip("*"): param.description
         for section in parsed
         if section.kind == DocstringSectionKind.parameters
         for param in section.value
