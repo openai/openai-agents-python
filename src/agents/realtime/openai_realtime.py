@@ -195,36 +195,18 @@ AllRealtimeServerEvents = Annotated[
 ServerEventTypeAdapter: TypeAdapter[AllRealtimeServerEvents] | None = None
 
 
-def _server_event_validation_summary(error: BaseException) -> str:
-    if isinstance(error, pydantic.ValidationError):
-        return f"{error.error_count()} validation error(s)"
-
-    if not _debug.DONT_LOG_MODEL_DATA:
-        return type(error).__name__
-    return "validation failed"
-
-
-def _server_event_identity(event: Any) -> tuple[Any, Any]:
+def _server_event_type(event: Any) -> Any:
     if not isinstance(event, dict):
-        return "unknown", None
+        return "unknown"
 
-    return event.get("type", "unknown"), event.get("event_id")
+    return event.get("type", "unknown")
 
 
-def _log_server_event_validation_failure(event: Any, error: BaseException) -> str:
-    event_type, event_id = _server_event_identity(event)
-
+def _log_server_event_validation_failure(event: Any) -> None:
     if _debug.DONT_LOG_MODEL_DATA:
-        logger.error(
-            "Failed to validate server event type=%s event_id=%s: %s",
-            event_type,
-            event_id,
-            _server_event_validation_summary(error),
-        )
+        logger.error("Failed to validate server event")
     else:
         logger.error("Failed to validate server event: %s", event, exc_info=True)
-
-    return str(event_type)
 
 
 @dataclass(frozen=True)
@@ -723,7 +705,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 else:
                     await self._send_raw_message(converted)
             elif _debug.DONT_LOG_MODEL_DATA:
-                logger.error("Failed to convert raw message type=%s", event.message.get("type"))
+                logger.error("Failed to convert raw message")
             else:
                 logger.error("Failed to convert raw message: %s", event)
         elif isinstance(event, RealtimeModelSendUserInput):
@@ -1140,11 +1122,12 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 validation_event
             )
         except pydantic.ValidationError as e:
-            _log_server_event_validation_failure(event, e)
+            _log_server_event_validation_failure(event)
             await self._emit_event(RealtimeModelErrorEvent(error=e))
             return
         except Exception as e:
-            event_type = _log_server_event_validation_failure(event, e)
+            _log_server_event_validation_failure(event)
+            event_type = str(_server_event_type(event))
             exception_event = RealtimeModelExceptionEvent(
                 exception=e,
                 context=f"Failed to validate server event: {event_type}",

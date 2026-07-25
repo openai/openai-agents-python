@@ -7,6 +7,7 @@ from . import _debug
 logger = logging.getLogger("openai.agents")
 
 _DiagnosticExtra = Callable[[], Mapping[str, object]]
+_DiagnosticArgs = Callable[[], tuple[object, ...]]
 _DIAGNOSTIC_CONTEXT_FIELD = "openai_agents_diagnostic_context"
 
 
@@ -242,3 +243,24 @@ def log_model_and_tool_action_warning(
         stacklevel=stacklevel,
         diagnostic_extra=diagnostic_extra,
     )
+
+
+def log_model_and_tool_data_warning(
+    target_logger: logging.Logger,
+    redacted_message: str,
+    *,
+    diagnostic_message: str,
+    diagnostic_args: _DiagnosticArgs | None = None,
+    stacklevel: int = 2,
+) -> None:
+    """Log mixed model/tool data only when both data policies allow it."""
+    if _debug.DONT_LOG_MODEL_DATA or _debug.DONT_LOG_TOOL_DATA:
+        target_logger.warning(redacted_message, stacklevel=stacklevel)
+        return
+
+    try:
+        args = diagnostic_args() if diagnostic_args is not None else ()
+    except Exception:
+        target_logger.warning(redacted_message, stacklevel=stacklevel)
+        return
+    target_logger.warning(diagnostic_message, *args, stacklevel=stacklevel)

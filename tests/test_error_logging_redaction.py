@@ -23,6 +23,7 @@ from openai import AsyncOpenAI
 
 import agents._debug as _debug
 from agents import (
+    Agent,
     ModelSettings,
     ModelTracing,
     OpenAIResponsesModel,
@@ -37,6 +38,7 @@ from agents.logger import (
     log_model_and_tool_action_debug,
     log_model_and_tool_action_error,
     log_model_and_tool_action_warning,
+    log_model_and_tool_data_warning,
     log_tool_action_debug,
     log_tool_action_error as log_shared_tool_action_error,
     log_tool_action_warning,
@@ -45,6 +47,7 @@ from agents.run_internal.tool_execution import (
     log_tool_action_error,
     resolve_approval_rejection_message,
 )
+from agents.run_state import _deserialize_items
 from agents.tracing.processor_interface import TracingProcessor
 from agents.tracing.provider import SynchronousMultiTracingProcessor
 from agents.tracing.spans import Span
@@ -88,6 +91,14 @@ class _TruthinessException(Exception):
         return False
 
 
+class _HostileValue:
+    def __str__(self) -> str:
+        raise AssertionError("redacted logging inspected __str__")
+
+    def __repr__(self) -> str:
+        raise AssertionError("redacted logging inspected __repr__")
+
+
 class _FailingTracingProcessor(TracingProcessor):
     def __init__(self) -> None:
         self.str_calls = 0
@@ -125,6 +136,15 @@ def _emit_shared_error_for_location(test_logger, helper) -> None:
 
 def _emit_tool_execution_error_for_location() -> None:
     log_tool_action_error("Fixed operational message", ValueError("failure"))
+
+
+def _emit_data_warning_for_location(test_logger) -> None:
+    log_model_and_tool_data_warning(
+        test_logger,
+        "Fixed operational warning",
+        diagnostic_message="Warning for %s",
+        diagnostic_args=lambda: ("diagnostic-value",),
+    )
 
 
 def _responses_model() -> OpenAIResponsesModel:
@@ -380,6 +400,176 @@ def test_shared_error_helper_ignores_diagnostic_extra_failure(monkeypatch) -> No
     assert record.exc_info is not None
     assert record.exc_info[1] is error
     assert "original failure" in logging.Formatter().format(record)
+
+
+def test_shared_data_warning_does_not_inspect_or_attach_redacted_arguments(monkeypatch) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    test_logger = logging.Logger("sensitive-logging-data-warning")
+    handler = _RecordingHandler()
+    test_logger.addHandler(handler)
+    hostile = _HostileValue()
+
+    log_model_and_tool_data_warning(
+        test_logger,
+        "Fixed operational warning",
+        diagnostic_message="Warning for %s",
+        diagnostic_args=lambda: (hostile,),
+    )
+
+    assert len(handler.records) == 1
+    record = handler.records[0]
+    assert record.msg == "Fixed operational warning"
+    assert record.args == ()
+    assert record.exc_info is None
+    assert record.exc_text is None
+    assert hostile not in record.__dict__.values()
+    assert logging.Formatter().format(record) == "Fixed operational warning"
+
+
+def test_shared_data_warning_preserves_diagnostics_when_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    test_logger = logging.Logger("sensitive-logging-data-warning")
+    handler = _RecordingHandler()
+    test_logger.addHandler(handler)
+    diagnostic_value = "diagnostic-agent"
+
+    log_model_and_tool_data_warning(
+        test_logger,
+        "Fixed operational warning",
+        diagnostic_message="Warning for %s",
+        diagnostic_args=lambda: (diagnostic_value,),
+    )
+
+    assert len(handler.records) == 1
+    record = handler.records[0]
+    assert record.msg == "Warning for %s"
+    assert record.args == (diagnostic_value,)
+    assert logging.Formatter().format(record) == "Warning for diagnostic-agent"
+
+
+def test_shared_data_warning_falls_back_when_diagnostic_arguments_fail(monkeypatch) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    test_logger = logging.Logger("sensitive-logging-data-warning")
+    handler = _RecordingHandler()
+    test_logger.addHandler(handler)
+
+    def diagnostic_args() -> tuple[object, ...]:
+        raise RuntimeError("SECRET_DIAGNOSTIC_ARGUMENT_FAILURE")
+
+    log_model_and_tool_data_warning(
+        test_logger,
+        "Fixed operational warning",
+        diagnostic_message="Warning for %s",
+        diagnostic_args=diagnostic_args,
+    )
+
+    assert len(handler.records) == 1
+    record = handler.records[0]
+    assert record.msg == "Fixed operational warning"
+    assert record.args == ()
+    assert record.exc_info is None
+    assert "SECRET_DIAGNOSTIC_ARGUMENT_FAILURE" not in logging.Formatter().format(record)
+
+
+def test_shared_data_warning_preserves_direct_caller_location(monkeypatch) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    test_logger = logging.Logger("sensitive-logging-data-warning-location")
+    handler = _RecordingHandler()
+    test_logger.addHandler(handler)
+
+    _emit_data_warning_for_location(test_logger)
+
+    record = handler.records[0]
+    assert Path(record.pathname).resolve() == Path(__file__).resolve()
+    assert record.funcName == "_emit_data_warning_for_location"
+
+
+@pytest.mark.parametrize(
+    ("model_redacted", "tool_redacted"),
+    [
+        (True, False),
+        (False, True),
+        (True, True),
+        (False, False),
+    ],
+)
+@pytest.mark.parametrize(
+    ("scenario", "secrets", "redacted_message"),
+    [
+        (
+            "missing_agent",
+            ("SECRET_AGENT_NAME",),
+            "Agent not found, skipping item",
+        ),
+        (
+            "missing_agent_field",
+            ("SECRET_ITEM_TYPE",),
+            "Item missing agent field, skipping",
+        ),
+        (
+            "missing_handoff_agents",
+            ("SECRET_SOURCE_AGENT", "SECRET_TARGET_AGENT"),
+            "Skipping handoff output item: could not resolve agents",
+        ),
+    ],
+)
+def test_run_state_deserialization_warnings_follow_both_data_policies(
+    monkeypatch,
+    model_redacted: bool,
+    tool_redacted: bool,
+    scenario: str,
+    secrets: tuple[str, ...],
+    redacted_message: str,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", model_redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
+    known_agent = Agent(name="KnownAgent")
+    if scenario == "missing_agent":
+        item_data = {
+            "type": "message_output_item",
+            "agent": secrets[0],
+            "raw_item": {},
+        }
+    elif scenario == "missing_agent_field":
+        item_data = {
+            "type": secrets[0],
+            "raw_item": {},
+        }
+    else:
+        item_data = {
+            "type": "handoff_output_item",
+            "agent": "KnownAgent",
+            "source_agent": secrets[0],
+            "target_agent": secrets[1],
+            "raw_item": {},
+        }
+
+    test_logger = logging.Logger("sensitive-logging-run-state")
+    handler = _RecordingHandler()
+    test_logger.addHandler(handler)
+    with patch("agents.run_state.logger", test_logger):
+        result = _deserialize_items([item_data], {"KnownAgent": known_agent})
+
+    assert result == []
+    assert len(handler.records) == 1
+    record = handler.records[0]
+    rendered = logging.Formatter().format(record)
+    redacted = model_redacted or tool_redacted
+    if redacted:
+        assert record.msg == redacted_message
+        assert record.args == ()
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert rendered == redacted_message
+        for secret in secrets:
+            assert secret not in rendered
+            assert secret not in record.__dict__.values()
+    else:
+        for secret in secrets:
+            assert secret in rendered
 
 
 @pytest.mark.parametrize(

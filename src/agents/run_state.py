@@ -81,7 +81,11 @@ from .items import (
     coerce_tool_search_call_raw_item,
     coerce_tool_search_output_raw_item,
 )
-from .logger import log_model_and_tool_action_warning, logger
+from .logger import (
+    log_model_and_tool_action_warning,
+    log_model_and_tool_data_warning,
+    logger,
+)
 from .run_context import RunContextWrapper
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
@@ -3556,6 +3560,18 @@ def _deserialize_items(
 
     result: list[RunItem] = []
 
+    def _capture_diagnostic_args(*values: object) -> Callable[[], tuple[object, ...]]:
+        def diagnostic_args() -> tuple[object, ...]:
+            return values
+
+        return diagnostic_args
+
+    def _capture_diagnostic_extra(**values: object) -> Callable[[], Mapping[str, object]]:
+        def diagnostic_extra() -> Mapping[str, object]:
+            return values
+
+        return diagnostic_extra
+
     def _resolve_agent_info(
         item_data: Mapping[str, Any], item_type: str
     ) -> tuple[Agent[Any] | None, str | None]:
@@ -3591,9 +3607,19 @@ def _deserialize_items(
         agent, agent_name = _resolve_agent_info(item_data, item_type)
         if not agent:
             if agent_name:
-                logger.warning("Agent %s not found, skipping item", agent_name)
+                log_model_and_tool_data_warning(
+                    logger,
+                    "Agent not found, skipping item",
+                    diagnostic_message="Agent %s not found, skipping item",
+                    diagnostic_args=_capture_diagnostic_args(agent_name),
+                )
             else:
-                logger.warning("Item missing agent field, skipping: %s", item_type)
+                log_model_and_tool_data_warning(
+                    logger,
+                    "Item missing agent field, skipping",
+                    diagnostic_message="Item missing agent field, skipping: %s",
+                    diagnostic_args=_capture_diagnostic_args(item_type),
+                )
             continue
 
         raw_item_data = item_data["raw_item"]
@@ -3682,11 +3708,14 @@ def _deserialize_items(
                 if not source_agent or not target_agent:
                     source_name = item_data.get("source_agent")
                     target_name = item_data.get("target_agent")
-                    logger.warning(
-                        "Skipping handoff_output_item: could not resolve agents "
-                        "(source=%s, target=%s).",
-                        source_name,
-                        target_name,
+                    log_model_and_tool_data_warning(
+                        logger,
+                        "Skipping handoff output item: could not resolve agents",
+                        diagnostic_message=(
+                            "Skipping handoff_output_item: could not resolve agents "
+                            "(source=%s, target=%s)."
+                        ),
+                        diagnostic_args=_capture_diagnostic_args(source_name, target_name),
                     )
                     continue
 
@@ -3753,7 +3782,10 @@ def _deserialize_items(
             raise
         except Exception as e:
             log_model_and_tool_action_warning(
-                logger, f"Failed to deserialize item of type {item_type}", e
+                logger,
+                "Failed to deserialize item",
+                e,
+                diagnostic_extra=_capture_diagnostic_extra(item_type=item_type),
             )
             continue
 

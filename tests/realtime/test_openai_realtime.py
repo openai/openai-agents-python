@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import time
 from types import SimpleNamespace
 from typing import Any, cast
@@ -448,59 +449,145 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         assert error_event.type == "error"
 
     @pytest.mark.asyncio
-    async def test_handle_invalid_event_schema_redacts_payload_from_logs(self, model, monkeypatch):
-        """Test that invalid event logs omit payload data when model data logging is disabled."""
+    async def test_handle_invalid_event_schema_redacts_event_from_logs(
+        self, model, monkeypatch, caplog
+    ):
+        """Invalid event logs omit all event data when model data logging is disabled."""
         mock_listener = AsyncMock()
         model.add_listener(mock_listener)
         monkeypatch.setattr(
             "agents.realtime.openai_realtime._debug.DONT_LOG_MODEL_DATA",
             True,
         )
+        caplog.set_level(logging.ERROR, logger="openai.agents")
 
         invalid_event = {
-            "type": "response.output_audio.delta",
-            "event_id": "evt_123",
-            "delta": "secret transcript",
+            "type": "SECRET_EVENT_TYPE",
+            "event_id": "SECRET_EVENT_ID",
+            "delta": "SECRET_EVENT_PAYLOAD",
         }
 
-        with patch("agents.realtime.openai_realtime.logger") as mock_logger:
-            await model._handle_ws_event(invalid_event)
+        await model._handle_ws_event(invalid_event)
 
-        mock_logger.error.assert_called_once()
-        logged_call = str(mock_logger.error.call_args)
-        assert "secret transcript" not in logged_call
-        assert "response.output_audio.delta" in logged_call
-        assert "evt_123" in logged_call
-        assert mock_logger.error.call_args.kwargs.get("exc_info") is not True
+        records = [
+            record for record in caplog.records if record.msg == "Failed to validate server event"
+        ]
+        assert len(records) == 1
+        record = records[0]
+        assert record.args == ()
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert invalid_event not in record.__dict__.values()
+        rendered = logging.Formatter().format(record)
+        assert rendered == "Failed to validate server event"
+        assert "SECRET_EVENT_TYPE" not in rendered
+        assert "SECRET_EVENT_ID" not in rendered
+        assert "SECRET_EVENT_PAYLOAD" not in rendered
 
         assert mock_listener.on_event.call_count == 2
         error_event = mock_listener.on_event.call_args_list[1][0][0]
         assert error_event.type == "error"
 
     @pytest.mark.asyncio
-    async def test_send_raw_message_conversion_failure_redacts_payload_from_logs(
-        self, model, monkeypatch
+    async def test_handle_invalid_event_schema_preserves_diagnostics_when_enabled(
+        self, model, monkeypatch, caplog
     ):
-        """A raw client message that fails to convert must not leak its payload to the logs
-        when model-data logging is disabled."""
+        """Invalid event logs retain event data when model data logging is enabled."""
+        mock_listener = AsyncMock()
+        model.add_listener(mock_listener)
+        monkeypatch.setattr(
+            "agents.realtime.openai_realtime._debug.DONT_LOG_MODEL_DATA",
+            False,
+        )
+        caplog.set_level(logging.ERROR, logger="openai.agents")
+
+        invalid_event = {
+            "type": "diagnostic.event",
+            "event_id": "diagnostic_event_id",
+            "delta": "diagnostic payload",
+        }
+
+        await model._handle_ws_event(invalid_event)
+
+        records = [
+            record
+            for record in caplog.records
+            if record.msg == "Failed to validate server event: %s"
+        ]
+        assert len(records) == 1
+        record = records[0]
+        assert record.args == invalid_event
+        assert record.exc_info is not None
+        rendered = logging.Formatter().format(record)
+        assert "diagnostic.event" in rendered
+        assert "diagnostic_event_id" in rendered
+        assert "diagnostic payload" in rendered
+
+        assert mock_listener.on_event.call_count == 2
+        error_event = mock_listener.on_event.call_args_list[1][0][0]
+        assert error_event.type == "error"
+
+    @pytest.mark.asyncio
+    async def test_send_raw_message_conversion_failure_redacts_event_from_logs(
+        self, model, monkeypatch, caplog
+    ):
+        """A raw client message that fails to convert must not leak event data to logs."""
         monkeypatch.setattr(
             "agents.realtime.openai_realtime._debug.DONT_LOG_MODEL_DATA",
             True,
         )
+        caplog.set_level(logging.ERROR, logger="openai.agents")
         raw = RealtimeModelSendRawMessage(
             message={
-                "type": "invalid.event.type",
-                "other_data": {"transcript": "secret transcript"},
+                "type": "SECRET_RAW_EVENT_TYPE",
+                "other_data": {"transcript": "SECRET_RAW_EVENT_PAYLOAD"},
             }
         )
 
-        with patch("agents.realtime.openai_realtime.logger") as mock_logger:
-            await model.send_event(raw)
+        await model.send_event(raw)
 
-        mock_logger.error.assert_called_once()
-        logged_call = str(mock_logger.error.call_args)
-        assert "secret transcript" not in logged_call
-        assert "invalid.event.type" in logged_call
+        records = [
+            record for record in caplog.records if record.msg == "Failed to convert raw message"
+        ]
+        assert len(records) == 1
+        record = records[0]
+        assert record.args == ()
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert raw not in record.__dict__.values()
+        rendered = logging.Formatter().format(record)
+        assert rendered == "Failed to convert raw message"
+        assert "SECRET_RAW_EVENT_TYPE" not in rendered
+        assert "SECRET_RAW_EVENT_PAYLOAD" not in rendered
+
+    @pytest.mark.asyncio
+    async def test_send_raw_message_conversion_failure_preserves_diagnostics_when_enabled(
+        self, model, monkeypatch, caplog
+    ):
+        """A raw conversion failure retains event data when model data logging is enabled."""
+        monkeypatch.setattr(
+            "agents.realtime.openai_realtime._debug.DONT_LOG_MODEL_DATA",
+            False,
+        )
+        caplog.set_level(logging.ERROR, logger="openai.agents")
+        raw = RealtimeModelSendRawMessage(
+            message={
+                "type": "diagnostic.raw.event",
+                "other_data": {"transcript": "diagnostic transcript"},
+            }
+        )
+
+        await model.send_event(raw)
+
+        records = [
+            record for record in caplog.records if record.msg == "Failed to convert raw message: %s"
+        ]
+        assert len(records) == 1
+        record = records[0]
+        assert record.args == (raw,)
+        rendered = logging.Formatter().format(record)
+        assert "diagnostic.raw.event" in rendered
+        assert "diagnostic transcript" in rendered
 
     @pytest.mark.asyncio
     async def test_custom_voice_response_events_update_response_sequencer(self, model, monkeypatch):
