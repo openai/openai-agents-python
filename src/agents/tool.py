@@ -4,14 +4,16 @@ import ast
 import asyncio
 import copy
 import dataclasses
+import functools
 import inspect
 import json
 import math
+import typing
 import weakref
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from types import UnionType
+from types import FunctionType, UnionType
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -40,7 +42,7 @@ from openai.types.responses.tool_param import CodeInterpreter, ImageGeneration, 
 from openai.types.responses.web_search_tool import Filters as WebSearchToolFilters
 from openai.types.responses.web_search_tool_param import UserLocation
 from pydantic import BaseModel, TypeAdapter, ValidationError, model_validator
-from typing_extensions import NotRequired, ParamSpec, TypedDict
+from typing_extensions import NotRequired, ParamSpec, Self, TypeAliasType, TypedDict
 
 from . import _debug
 from ._config_coercion import coerce_pydantic_config
@@ -2196,6 +2198,131 @@ def _validate_function_tool_output(
         ) from error
 
 
+def _normalize_function_tool_callable(
+    func: ToolFunction[...],
+) -> ToolFunction[...]:
+    """Adapt one plain callable instance to the existing function-tool pipeline."""
+    if isinstance(func, functools.partial):
+        raise UserError(
+            "Unsupported callable object: function_tool does not infer functools.partial "
+            "contracts. Use an explicit wrapper function."
+        )
+    if inspect.isroutine(func) or inspect.isclass(func):
+        return func
+
+    try:
+        instance_vars = vars(func)
+    except TypeError:
+        instance_vars = {}
+    missing = object()
+    if (
+        inspect.getattr_static(func, "__wrapped__", missing) is not missing
+        or inspect.getattr_static(func, "__signature__", missing) is not missing
+        or "__annotations__" in instance_vars
+        or "__annotate__" in instance_vars
+    ):
+        raise UserError(
+            "Unsupported callable wrapper: function_tool only infers plain callable instances. "
+            "Use an explicit wrapper function."
+        )
+
+    call_owner = next(
+        (owner for owner in type(func).__mro__ if "__call__" in owner.__dict__),
+        None,
+    )
+    if call_owner is None:
+        raise UserError("Unsupported callable object: no inspectable __call__ method was found.")
+    call_descriptor = call_owner.__dict__["__call__"]
+    if (
+        not isinstance(call_descriptor, FunctionType)
+        or hasattr(call_descriptor, "__wrapped__")
+        or hasattr(call_descriptor, "__signature__")
+    ):
+        raise UserError(
+            "Unsupported callable object: function_tool supports instances with a plain "
+            "__call__ method. Use an explicit wrapper function for partials, decorated methods, "
+            "built-in callables, or custom descriptors."
+        )
+    if getattr(call_owner, "__type_params__", ()) or getattr(call_owner, "__parameters__", ()):
+        raise UserError(
+            "Unsupported generic callable object: use an explicit wrapper function with concrete "
+            "parameter and return annotations."
+        )
+
+    call_method = cast(Callable[..., Any], call_descriptor.__get__(func, type(func)))
+    signature = inspect.signature(call_method)
+    globalns = dict(getattr(call_method, "__globals__", {}))
+    localns = dict(vars(call_owner))
+    localns[call_owner.__name__] = call_owner
+    try:
+        type_hints = get_type_hints(
+            call_method,
+            globalns=globalns,
+            localns=localns,
+            include_extras=True,
+        )
+    except (NameError, TypeError) as error:
+        raise UserError(
+            "Unsupported callable object annotations: use an explicit wrapper function with "
+            "annotations resolvable from its module."
+        ) from error
+
+    native_self = getattr(typing, "Self", Self)
+    native_alias_type = getattr(typing, "TypeAliasType", TypeAliasType)
+    alias_types = (TypeAliasType, native_alias_type)
+
+    def contains_specialized_annotation(annotation: Any) -> bool:
+        origin = get_origin(annotation)
+        if (
+            isinstance(annotation, (TypeVar, *alias_types))
+            or isinstance(origin, alias_types)
+            or annotation in (Self, native_self)
+        ):
+            return True
+        return any(contains_specialized_annotation(arg) for arg in get_args(annotation))
+
+    if any(contains_specialized_annotation(annotation) for annotation in type_hints.values()):
+        raise UserError(
+            "Unsupported generic or aliased callable object annotations: use an explicit wrapper "
+            "function with concrete parameter and return annotations."
+        )
+    for name, parameter in signature.parameters.items():
+        annotation = type_hints.get(name, parameter.annotation)
+        if annotation is inspect.Signature.empty:
+            continue
+        plain_annotation = _unwrap_annotated_type(annotation)
+        origin = get_origin(plain_annotation) or plain_annotation
+        if origin is RunContextWrapper or origin is ToolContext:
+            raise UserError(
+                "Unsupported callable object context parameter: use an explicit wrapper function "
+                "to receive RunContextWrapper or ToolContext."
+            )
+
+    if inspect.iscoroutinefunction(call_method):
+
+        async def async_adapter(*args: Any, **kwargs: Any) -> Any:
+            return await call_method(*args, **kwargs)
+
+        adapter: Callable[..., Any] = async_adapter
+    else:
+
+        def sync_adapter(*args: Any, **kwargs: Any) -> Any:
+            return call_method(*args, **kwargs)
+
+        adapter = sync_adapter
+
+    adapter_metadata = cast(Any, adapter)
+    adapter_metadata.__name__ = type(func).__name__
+    adapter_metadata.__doc__ = inspect.getdoc(func) or inspect.getdoc(call_method)
+    adapter_metadata.__annotations__ = {
+        name: annotation
+        for name, annotation in type_hints.items()
+        if name == "return" or name in signature.parameters
+    }
+    adapter_metadata.__signature__ = signature
+    return cast("ToolFunction[...]", adapter)
+
+
 @overload
 def function_tool(
     func: ToolFunction[...],
@@ -2330,6 +2457,7 @@ def function_tool(
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
+        the_func = _normalize_function_tool_callable(the_func)
         is_sync_function_tool = not inspect.iscoroutinefunction(the_func)
         schema = function_schema(
             func=the_func,

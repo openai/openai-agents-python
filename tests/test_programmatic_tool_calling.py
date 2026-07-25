@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+from collections.abc import Awaitable, Coroutine
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, cast
 
@@ -81,6 +83,11 @@ PROGRAM_CALLER = {"type": "program", "caller_id": PROGRAM_CALL_ID}
 class InventoryOutput(BaseModel):
     sku: str
     available_units: int
+
+
+class InventoryAwaitable(Awaitable[InventoryOutput]):
+    def __await__(self) -> Any:
+        raise NotImplementedError
 
 
 class InventoryDict(TypedDict):
@@ -258,6 +265,49 @@ def test_function_tool_infers_typed_dict_and_dataclass_output_schemas() -> None:
     assert dataclass_tool.output_json_schema is not None
     assert dataclass_tool.output_json_schema["type"] == "object"
     assert dataclass_tool.output_json_schema["additionalProperties"] is False
+
+
+@pytest.mark.parametrize(
+    "return_annotation",
+    [
+        Awaitable[InventoryOutput],
+        Coroutine[Any, Any, InventoryOutput],
+        InventoryAwaitable,
+        Awaitable[InventoryOutput] | InventoryOutput,
+        Awaitable,
+        Coroutine,
+    ],
+)
+def test_sync_callable_does_not_infer_through_awaitable_output(
+    return_annotation: Any,
+) -> None:
+    class LookupInventory:
+        def __call__(self) -> Any:
+            raise AssertionError("The handler must not run during tool construction.")
+
+    cast(Any, LookupInventory.__call__).__annotations__["return"] = return_annotation
+
+    with pytest.raises(UserError, match="programmatic function tool return annotation"):
+        function_tool(LookupInventory(), allowed_callers=["programmatic"])
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 requires Python 3.12")
+def test_sync_callable_does_not_infer_through_pep695_awaitable_alias() -> None:
+    namespace = {
+        "Any": Any,
+        "Awaitable": Awaitable,
+        "InventoryOutput": InventoryOutput,
+    }
+    exec(
+        "type OutputAwaitable = Awaitable[InventoryOutput]\n"
+        "class LookupInventory:\n"
+        "    def __call__(self) -> OutputAwaitable:\n"
+        "        raise AssertionError\n",
+        namespace,
+    )
+
+    with pytest.raises(UserError, match="explicit wrapper function"):
+        function_tool(namespace["LookupInventory"](), allowed_callers=["programmatic"])
 
 
 def test_function_tool_treats_annotated_plain_returns_as_untyped() -> None:

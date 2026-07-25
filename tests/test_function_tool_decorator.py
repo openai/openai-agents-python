@@ -1,12 +1,21 @@
+from __future__ import annotations
+
 import asyncio
+import functools
 import inspect
 import json
-from typing import Any
+import operator
+import sys
+from collections.abc import Callable
+from types import ModuleType
+from typing import Any, Generic, TypeVar, cast
 
 import pytest
 from inline_snapshot import snapshot
+from pydantic import BaseModel
+from typing_extensions import Self
 
-from agents import function_tool
+from agents import UserError, function_tool
 from agents.run_context import RunContextWrapper
 from agents.tool_context import ToolContext
 
@@ -20,6 +29,9 @@ def ctx_wrapper() -> ToolContext[DummyContext]:
     return ToolContext(
         context=DummyContext(), tool_name="dummy", tool_call_id="1", tool_arguments=""
     )
+
+
+CallableValueT = TypeVar("CallableValueT")
 
 
 @function_tool
@@ -261,6 +273,491 @@ def test_decorator_timeout_configuration_is_applied() -> None:
     assert timeout_configured_tool.timeout_seconds == 1.25
     assert timeout_configured_tool.timeout_behavior == "raise_exception"
     assert timeout_configured_tool.timeout_error_function is sync_error_handler
+
+
+@pytest.mark.asyncio
+async def test_async_callable_object_works_as_bare_function_tool() -> None:
+    class AsyncCallable:
+        """Double a value.
+
+        Args:
+            value: The value to double.
+        """
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, value: int) -> int:
+            self.calls += 1
+            await asyncio.sleep(0)
+            return value * 2
+
+    handler = AsyncCallable()
+    tool = function_tool(handler)
+
+    assert tool.name == "AsyncCallable"
+    assert tool.description == "Double a value."
+    assert tool.params_json_schema["properties"]["value"] == {
+        "description": "The value to double.",
+        "title": "Value",
+        "type": "integer",
+    }
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 8
+    assert handler.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_slotted_async_callable_object_works_as_function_tool() -> None:
+    class AsyncCallable:
+        __slots__ = ()
+
+        async def __call__(self, value: int) -> int:
+            return value * 2
+
+    tool = function_tool(AsyncCallable())
+
+    assert tool.params_json_schema["properties"]["value"]["type"] == "integer"
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 8
+
+
+@pytest.mark.asyncio
+async def test_callable_object_uses_call_docstring_when_class_docstring_missing() -> None:
+    class AsyncCallable:
+        async def __call__(self, value: int) -> int:
+            """Double a value.
+
+            Args:
+                value: The value to double.
+            """
+            return value * 2
+
+    tool = function_tool(AsyncCallable())
+
+    assert tool.description == "Double a value."
+    assert tool.params_json_schema["properties"]["value"] == {
+        "description": "The value to double.",
+        "title": "Value",
+        "type": "integer",
+    }
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 8
+
+
+@pytest.mark.asyncio
+async def test_async_callable_object_works_with_configured_function_tool() -> None:
+    class AsyncCallable:
+        async def __call__(self, value: int) -> int:
+            return value + 1
+
+    configured_function_tool = function_tool(
+        name_override="increment",
+        description_override="Increment a value.",
+        timeout=1,
+    )
+    tool = configured_function_tool(AsyncCallable())
+
+    assert tool.name == "increment"
+    assert tool.description == "Increment a value."
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 5
+
+
+@pytest.mark.asyncio
+async def test_callable_object_invokes_the_resolved_call_method(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Handler:
+        async def __call__(self, value: int) -> int:
+            return value + 1
+
+    handler = Handler()
+    tool = function_tool(handler)
+
+    async def replacement(self: Handler, value: int) -> int:
+        return value + 100
+
+    monkeypatch.setattr(Handler, "__call__", replacement)
+
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 5
+
+
+@pytest.mark.asyncio
+async def test_sync_callable_object_preserves_awaitable_result() -> None:
+    class AwaitableReturningCallable:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, value: int) -> Any:
+            self.calls += 1
+
+            async def result() -> int:
+                return value * 3
+
+            return result()
+
+    handler = AwaitableReturningCallable()
+    tool = function_tool(handler)
+
+    returned = await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}')
+    assert inspect.isawaitable(returned)
+    assert handler.calls == 1
+    assert await returned == 12
+
+
+@pytest.mark.asyncio
+async def test_sync_function_preserves_awaitable_result() -> None:
+    async def result() -> int:
+        return 12
+
+    awaitable = result()
+
+    def handler() -> Any:
+        return awaitable
+
+    tool = function_tool(handler)
+
+    returned = await tool.on_invoke_tool(ctx_wrapper(), "{}")
+    assert returned is awaitable
+    assert await returned == 12
+
+
+def test_callable_contract_rejects_unknown_call_descriptor() -> None:
+    class CustomDescriptor:
+        def __get__(self, instance: Any, owner: type[Any]) -> Callable[..., Any]:
+            return lambda value: value
+
+    class Handler:
+        __call__ = CustomDescriptor()
+
+    with pytest.raises(UserError, match="Unsupported callable object"):
+        function_tool(Handler())
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "partial",
+        "partialmethod",
+        "staticmethod",
+        "classmethod",
+        "decorated-call",
+        "update-wrapper",
+        "published-annotations",
+        "published-annotate",
+        "custom-signature",
+        "method-signature",
+        "local-annotation",
+        "singledispatchmethod",
+        "builtin",
+        "nested-wrapper",
+        "context",
+        "keyword-only-context",
+        "variadic-context",
+        "context-with-kwargs",
+        "generic",
+        "generic-signature",
+        "self",
+        "pydantic-generic",
+        pytest.param(
+            "pep695-generic",
+            marks=pytest.mark.skipif(
+                sys.version_info < (3, 12),
+                reason="PEP 695 requires Python 3.12",
+            ),
+        ),
+        pytest.param(
+            "pep695-context-alias",
+            marks=pytest.mark.skipif(
+                sys.version_info < (3, 12),
+                reason="PEP 695 requires Python 3.12",
+            ),
+        ),
+    ],
+)
+def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> None:
+    async def target(value: int) -> int:
+        return value
+
+    if shape == "partial":
+        handler: Any = functools.partial(target, 1)
+    elif shape == "partialmethod":
+
+        class PartialMethodHandler:
+            __call__ = functools.partialmethod(target, 1)
+
+        handler = PartialMethodHandler()
+    elif shape == "staticmethod":
+
+        class StaticMethodHandler:
+            __call__ = staticmethod(target)
+
+        handler = StaticMethodHandler()
+    elif shape == "classmethod":
+
+        class ClassMethodHandler:
+            __call__: Any = classmethod(cast(Any, target))
+
+        handler = ClassMethodHandler()
+    elif shape == "decorated-call":
+
+        class DecoratedCallHandler:
+            @functools.wraps(target)
+            async def __call__(self, *args: Any, **kwargs: Any) -> int:
+                return await target(*args, **kwargs)
+
+        handler = DecoratedCallHandler()
+    elif shape == "update-wrapper":
+
+        class UpdatedWrapper:
+            def __init__(self, wrapped: Any) -> None:
+                self.wrapped = wrapped
+                functools.update_wrapper(self, wrapped)
+
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return self.wrapped(*args, **kwargs)
+
+        handler = UpdatedWrapper(target)
+    elif shape == "published-annotations":
+
+        class PublishedAnnotationsHandler:
+            def __init__(self) -> None:
+                self.__annotations__ = {"value": int, "return": int}
+
+            async def __call__(self, value: int) -> int:
+                return value
+
+        handler = PublishedAnnotationsHandler()
+    elif shape == "published-annotate":
+
+        class PublishedAnnotateHandler:
+            def __init__(self) -> None:
+                self.__annotate__ = lambda _format: {"value": int, "return": int}
+
+            async def __call__(self, value: int) -> int:
+                return value
+
+        handler = PublishedAnnotateHandler()
+    elif shape == "custom-signature":
+
+        class CustomSignatureHandler:
+            __signature__ = inspect.Signature(
+                [
+                    inspect.Parameter(
+                        "value",
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        annotation=int,
+                    )
+                ]
+            )
+
+            async def __call__(self, *args: Any, **kwargs: Any) -> int:
+                return cast(int, args[0])
+
+        handler = CustomSignatureHandler()
+    elif shape == "method-signature":
+
+        class MethodSignatureHandler:
+            async def __call__(self, value: int) -> int:
+                return value
+
+        cast(Any, MethodSignatureHandler.__call__).__signature__ = inspect.Signature(
+            [
+                inspect.Parameter(
+                    "value",
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    annotation=int,
+                )
+            ]
+        )
+        handler = MethodSignatureHandler()
+    elif shape == "local-annotation":
+
+        class LocalPayload(BaseModel):
+            value: int
+
+        class LocalAnnotationHandler:
+            async def __call__(self, value: LocalPayload) -> int:
+                return value.value
+
+        handler = LocalAnnotationHandler()
+    elif shape == "singledispatchmethod":
+
+        class SingleDispatchHandler:
+            __call__ = functools.singledispatchmethod(target)
+
+        handler = SingleDispatchHandler()
+    elif shape == "builtin":
+        handler = operator.itemgetter(0)
+    elif shape == "nested-wrapper":
+
+        class NestedHandler:
+            async def __call__(self, value: int) -> int:
+                return value
+
+        class NestedWrapper:
+            def __init__(self, wrapped: Any) -> None:
+                self.wrapped = wrapped
+                functools.update_wrapper(self, wrapped)
+
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return self.wrapped(*args, **kwargs)
+
+        handler = NestedWrapper(NestedHandler())
+    elif shape == "context":
+
+        class ContextHandler:
+            async def __call__(self, ctx: ToolContext[Any], value: int) -> int:
+                return value
+
+        handler = ContextHandler()
+    elif shape == "keyword-only-context":
+
+        class KeywordOnlyContextHandler:
+            async def __call__(self, *, ctx: ToolContext[Any], value: int) -> int:
+                return value
+
+        handler = KeywordOnlyContextHandler()
+    elif shape == "variadic-context":
+
+        class VariadicContextHandler:
+            async def __call__(self, *ctx: ToolContext[Any]) -> int:
+                return len(ctx)
+
+        handler = VariadicContextHandler()
+    elif shape == "context-with-kwargs":
+
+        class ContextWithKwargsHandler:
+            async def __call__(self, ctx: ToolContext[Any], **kwargs: Any) -> int:
+                return len(kwargs)
+
+        handler = ContextWithKwargsHandler()
+    elif shape == "generic":
+
+        class GenericHandler(Generic[CallableValueT]):
+            async def __call__(self, value: CallableValueT) -> CallableValueT:
+                return value
+
+        handler = GenericHandler[int]()
+    elif shape == "generic-signature":
+
+        class GenericSignatureHandler(Generic[CallableValueT]):
+            __signature__ = inspect.Signature(
+                [
+                    inspect.Parameter(
+                        "value",
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        annotation="CallableValueT",
+                    )
+                ]
+            )
+
+            async def __call__(self, *args: Any, **kwargs: Any) -> CallableValueT:
+                return cast(CallableValueT, args[0])
+
+        handler = GenericSignatureHandler[int]()
+    elif shape == "self":
+
+        class SelfHandler:
+            async def __call__(self, other: Self) -> Self:
+                return other
+
+        handler = SelfHandler()
+    elif shape == "pydantic-generic":
+
+        class PydanticGenericHandler(BaseModel, Generic[CallableValueT]):
+            async def __call__(self, value: CallableValueT) -> CallableValueT:
+                return value
+
+        handler = PydanticGenericHandler[int]()
+    elif shape == "pep695-generic":
+        namespace: dict[str, Any] = {}
+        exec(
+            "from __future__ import annotations\n"
+            "class Handler[T]:\n"
+            "    async def __call__(self, value: T) -> T:\n"
+            "        return value\n",
+            namespace,
+        )
+        handler = namespace["Handler"][int]()
+    elif shape == "pep695-context-alias":
+        namespace = {"Any": Any, "ToolContext": ToolContext}
+        exec(
+            "type LiveContext = ToolContext[Any]\n"
+            "class AliasContextHandler:\n"
+            "    async def __call__(self, ctx: LiveContext, value: int) -> int:\n"
+            "        return value\n",
+            namespace,
+        )
+        handler = namespace["AliasContextHandler"]()
+    else:
+        raise AssertionError(f"Unhandled shape: {shape}")
+
+    with pytest.raises(
+        UserError,
+        match="explicit wrapper function|Unsupported generic|annotations resolvable",
+    ):
+        function_tool(handler)
+
+
+@pytest.mark.asyncio
+async def test_callable_object_resolves_class_scoped_call_annotations() -> None:
+    class BaseHandler:
+        class Payload(BaseModel):
+            value: int
+
+        async def __call__(self, payload: Payload) -> int:
+            return payload.value
+
+    class Handler(BaseHandler):
+        pass
+
+    tool = function_tool(Handler())
+
+    assert tool.params_json_schema["properties"]["payload"] == {"$ref": "#/$defs/Payload"}
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"payload": {"value": 4}}') == 4
+
+
+def test_inherited_callable_resolves_defining_module_annotations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_module_name = "tests._callable_base_module"
+    subclass_module_name = "tests._callable_subclass_module"
+    base_module = ModuleType(base_module_name)
+    subclass_module = ModuleType(subclass_module_name)
+    monkeypatch.setitem(sys.modules, base_module_name, base_module)
+    monkeypatch.setitem(sys.modules, subclass_module_name, subclass_module)
+
+    exec(
+        "from __future__ import annotations\n"
+        "from pydantic import BaseModel\n"
+        "class Payload(BaseModel):\n"
+        "    value: int\n"
+        "class BaseHandler:\n"
+        "    async def __call__(self, payload: Payload) -> int:\n"
+        "        return payload.value\n",
+        base_module.__dict__,
+    )
+    subclass_module.__dict__["BaseHandler"] = base_module.__dict__["BaseHandler"]
+    exec(
+        "from __future__ import annotations\nclass Handler(BaseHandler):\n    pass\n",
+        subclass_module.__dict__,
+    )
+
+    tool = function_tool(subclass_module.__dict__["Handler"]())
+
+    assert tool.params_json_schema["properties"]["payload"]["$ref"] == "#/$defs/Payload"
+
+
+@pytest.mark.asyncio
+async def test_callable_object_ignores_class_state_annotations() -> None:
+    class Handler:
+        value: str
+
+        async def __call__(self, value: int) -> int:
+            return value * 2
+
+    tool = function_tool(Handler())
+
+    assert tool.params_json_schema["properties"]["value"]["type"] == "integer"
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 8
 
 
 def test_function_tool_timeout_arguments_are_keyword_only() -> None:
