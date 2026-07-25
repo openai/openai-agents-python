@@ -852,14 +852,44 @@ class Converter:
                     )
 
                 if should_replay:
-                    summary_items = reasoning_item.get("summary", [])
-                    if summary_items:
-                        reasoning_texts = []
-                        for summary_item in summary_items:
-                            if isinstance(summary_item, dict) and summary_item.get("text"):
-                                reasoning_texts.append(summary_item["text"])
-                        if reasoning_texts:
-                            pending_reasoning_content = "\n".join(reasoning_texts)
+                    reasoning_texts: list[str] = []
+                    summary_items = (
+                        reasoning_item.get("summary")
+                        if isinstance(reasoning_item, dict)
+                        else getattr(reasoning_item, "summary", None)
+                    ) or []
+                    for summary_item in summary_items:
+                        text = (
+                            summary_item.get("text")
+                            if isinstance(summary_item, dict)
+                            else getattr(summary_item, "text", None)
+                        )
+                        if text:
+                            reasoning_texts.append(text)
+
+                    if not reasoning_texts:
+                        content_items = (
+                            reasoning_item.get("content")
+                            if isinstance(reasoning_item, dict)
+                            else getattr(reasoning_item, "content", None)
+                        ) or []
+                        for content_item in content_items:
+                            item_type = (
+                                content_item.get("type")
+                                if isinstance(content_item, dict)
+                                else getattr(content_item, "type", None)
+                            )
+                            if item_type == "reasoning_text":
+                                text = (
+                                    content_item.get("text")
+                                    if isinstance(content_item, dict)
+                                    else getattr(content_item, "text", None)
+                                )
+                                if text:
+                                    reasoning_texts.append(text)
+
+                    if reasoning_texts:
+                        pending_reasoning_content = "\n".join(reasoning_texts)
 
             # 8) compaction items => reject for chat completions
             elif isinstance(item, dict) and item.get("type") == "compaction":

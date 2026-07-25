@@ -401,3 +401,94 @@ async def test_litellm_hook_can_enable_reasoning_content_replay(monkeypatch) -> 
     assert contexts[0].model == REASONING_CONTENT_MODEL_B
     assert contexts[0].base_url is None
     assert contexts[0].reasoning.origin_model == REASONING_CONTENT_MODEL_B
+
+
+def test_converter_replays_reasoning_content_from_content_items() -> None:
+    def should_replay_reasoning_content(_context: ReasoningContentReplayContext) -> bool:
+        return True
+
+    items = [
+        {"role": "user", "content": "What's the weather in Tokyo?"},
+        {
+            "id": "__fake_id__",
+            "summary": [],
+            "content": [{"type": "reasoning_text", "text": "Reasoning from content block."}],
+            "type": "reasoning",
+            "provider_data": {"model": REASONING_CONTENT_MODEL_A},
+        },
+        {
+            "arguments": '{"city": "Tokyo"}',
+            "call_id": "call_weather_123",
+            "name": "get_weather",
+            "type": "function_call",
+            "id": "__fake_id__",
+        },
+    ]
+
+    messages = Converter.items_to_messages(
+        items,  # type: ignore[arg-type]
+        model=REASONING_CONTENT_MODEL_A,
+        should_replay_reasoning_content=should_replay_reasoning_content,
+    )
+
+    assistant = _assistant_with_tool_calls(messages)
+    assert assistant["reasoning_content"] == "Reasoning from content block."
+
+
+def test_converter_replays_reasoning_content_from_summary_and_content_objects() -> None:
+    from openai.types.responses.response_reasoning_item import Content, Summary
+
+    def should_replay_reasoning_content(_context: ReasoningContentReplayContext) -> bool:
+        return True
+
+    items_summary_obj = [
+        {"role": "user", "content": "What's the weather in Tokyo?"},
+        {
+            "id": "__fake_id__",
+            "summary": [Summary(text="Reasoning from Summary object.", type="summary_text")],
+            "content": [],
+            "type": "reasoning",
+            "provider_data": {"model": REASONING_CONTENT_MODEL_A},
+        },
+        {
+            "arguments": '{"city": "Tokyo"}',
+            "call_id": "call_weather_123",
+            "name": "get_weather",
+            "type": "function_call",
+            "id": "__fake_id__",
+        },
+    ]
+
+    messages_summary = Converter.items_to_messages(
+        items_summary_obj,  # type: ignore[arg-type]
+        model=REASONING_CONTENT_MODEL_A,
+        should_replay_reasoning_content=should_replay_reasoning_content,
+    )
+    assistant_summary = _assistant_with_tool_calls(messages_summary)
+    assert assistant_summary["reasoning_content"] == "Reasoning from Summary object."
+
+    items_content_obj = [
+        {"role": "user", "content": "What's the weather in Tokyo?"},
+        {
+            "id": "__fake_id__",
+            "summary": [],
+            "content": [Content(text="Reasoning from Content object.", type="reasoning_text")],
+            "type": "reasoning",
+            "provider_data": {"model": REASONING_CONTENT_MODEL_A},
+        },
+        {
+            "arguments": '{"city": "Tokyo"}',
+            "call_id": "call_weather_123",
+            "name": "get_weather",
+            "type": "function_call",
+            "id": "__fake_id__",
+        },
+    ]
+
+    messages_content = Converter.items_to_messages(
+        items_content_obj,  # type: ignore[arg-type]
+        model=REASONING_CONTENT_MODEL_A,
+        should_replay_reasoning_content=should_replay_reasoning_content,
+    )
+    assistant_content = _assistant_with_tool_calls(messages_content)
+    assert assistant_content["reasoning_content"] == "Reasoning from Content object."
