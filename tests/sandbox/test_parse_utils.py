@@ -85,9 +85,9 @@ def test_parse_ls_la_strips_trailing_alternate_access_markers() -> None:
     assert entries[2].permissions.owner & FileMode.READ
 
 
-def test_parse_ls_la_includes_device_nodes() -> None:
-    # Character and block devices print "major, minor" in place of the single
-    # size column, which shifts every following field by one.
+def test_parse_ls_la_includes_gnu_device_nodes() -> None:
+    # GNU coreutils prints "major, minor" in place of the single size column,
+    # which shifts every following field by one.
     output = (
         "-rw-r--r-- 1 root root      123 Jan  1 00:00 regular.txt\n"
         "crw-rw-rw- 1 root root     1, 3 Jan  1 00:00 null\n"
@@ -105,6 +105,28 @@ def test_parse_ls_la_includes_device_nodes() -> None:
     assert entries[1].size == 0
     assert entries[2].owner == "root"
     assert entries[2].group == "disk"
+
+
+def test_parse_ls_la_includes_bsd_device_nodes() -> None:
+    # BSD ls prints a single hexadecimal device identifier instead of the
+    # "major, minor" pair, so the fields are not shifted.
+    output = (
+        "-rw-r--r--  1 root  wheel           123 Jan  1 00:00 regular.txt\n"
+        "crw-rw-rw-  1 root  wheel     0x3000002 Jan  1 00:00 null\n"
+        "brw-r-----  1 root  operator  0x1000000 Jan  1 00:00 disk0\n"
+    )
+
+    entries = parse_ls_la(output, base="/dev")
+
+    assert [entry.path for entry in entries] == [
+        "/dev/regular.txt",
+        "/dev/null",
+        "/dev/disk0",
+    ]
+    assert entries[1].kind == EntryKind.OTHER
+    assert entries[1].size == 0
+    assert entries[2].owner == "root"
+    assert entries[2].group == "operator"
 
 
 @pytest.mark.parametrize(

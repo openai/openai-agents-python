@@ -20,15 +20,20 @@ def parse_ls_la(output: str, *, base: str) -> list[FileEntry]:
         permissions_str = parts[0]
         owner = parts[2]
         group = parts[3]
-        if parts[4].endswith(","):
-            # Character and block devices print "major, minor" in place of the
-            # size column, which shifts every following field by one. `stat`
-            # reports size 0 for device nodes.
-            parts = line.split(maxsplit=9)
-            if len(parts) < 10:
-                continue
+        # Character and block devices report a device identifier in place of the
+        # size column, in one of two formats. `stat` reports size 0 for them.
+        if permissions_str[:1] in {"c", "b"}:
             size = 0
-            name = parts[9]
+            if parts[4].endswith(","):
+                # GNU coreutils prints "major, minor", which occupies two
+                # fields and shifts every following field by one.
+                parts = line.split(maxsplit=9)
+                if len(parts) < 10:
+                    continue
+                name = parts[9]
+            else:
+                # BSD ls prints a single hexadecimal identifier, e.g. 0x3000002.
+                name = parts[8]
         else:
             try:
                 size = int(parts[4])
