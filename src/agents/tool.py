@@ -49,6 +49,7 @@ from ._config_coercion import coerce_pydantic_config
 from ._tool_identity import (
     get_explicit_function_tool_namespace,
     tool_qualified_name,
+    validate_function_tool_fallback_name,
     validate_function_tool_lookup_configuration,
     validate_function_tool_namespace_shape,
 )
@@ -2201,6 +2202,7 @@ def _validate_function_tool_output(
 def _normalize_function_tool_callable(
     func: ToolFunction[...],
     docstring_style: DocstringStyle | None,
+    name_override: str | None,
 ) -> tuple[ToolFunction[...], str | None]:
     """Adapt one plain callable instance to the existing function-tool pipeline."""
     if isinstance(func, functools.partial):
@@ -2313,7 +2315,10 @@ def _normalize_function_tool_callable(
         adapter = sync_adapter
 
     adapter_metadata = cast(Any, adapter)
-    adapter_metadata.__name__ = type(func).__name__
+    fallback_name = type(func).__name__
+    adapter_metadata.__name__ = (
+        fallback_name if name_override else validate_function_tool_fallback_name(fallback_name)
+    )
     class_doc = inspect.getdoc(type(func))
     call_doc = inspect.cleandoc(call_descriptor.__doc__) if call_descriptor.__doc__ else None
     adapter_metadata.__doc__ = call_doc or class_doc
@@ -2468,6 +2473,7 @@ def function_tool(
         the_func, callable_description = _normalize_function_tool_callable(
             the_func,
             docstring_style,
+            name_override,
         )
         is_sync_function_tool = not inspect.iscoroutinefunction(the_func)
         schema = function_schema(

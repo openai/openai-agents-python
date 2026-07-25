@@ -364,6 +364,19 @@ def test_callable_object_combines_class_summary_with_call_parameter_docs() -> No
     }
 
 
+@pytest.mark.parametrize("class_name", ["Café", "A" * 65])
+def test_callable_object_requires_override_for_invalid_fallback_name(class_name: str) -> None:
+    async def call(self: Any, value: int) -> int:
+        return value
+
+    handler = type(class_name, (), {"__call__": call})()
+
+    with pytest.raises(UserError, match="Pass name_override"):
+        function_tool(handler)
+
+    assert function_tool(handler, name_override="safe_name").name == "safe_name"
+
+
 @pytest.mark.asyncio
 async def test_async_callable_object_works_with_configured_function_tool() -> None:
     class AsyncCallable:
