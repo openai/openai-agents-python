@@ -11,7 +11,7 @@ from typing import Any, cast
 from openai import AsyncOpenAI
 
 from ... import _debug
-from ...exceptions import AgentsException
+from ...exceptions import AgentsException, UserError
 from ...logger import logger
 from ...tracing import Span, SpanError, TranscriptionSpanData, transcription_span
 from ...util._error_tracing import get_trace_error
@@ -49,6 +49,8 @@ def _audio_buffer_to_base64(buffer: npt.NDArray[np.int16 | np.float32]) -> str:
         # Convert to int16.
         buffer = np.clip(buffer, -1.0, 1.0)
         buffer = (buffer * 32767).astype(np.int16)
+    elif buffer.dtype != np.int16:
+        raise UserError("Buffer must be a numpy array of int16 or float32")
     return base64.b64encode(buffer.tobytes()).decode("utf-8")
 
 

@@ -11,6 +11,7 @@ import numpy.typing as npt
 import pytest
 
 from agents import trace
+from agents.exceptions import UserError
 from tests.testing_processor import fetch_span_errors
 
 try:
@@ -22,7 +23,10 @@ try:
         STTModelSettings,
     )
     from agents.voice.exceptions import STTWebsocketConnectionError
-    from agents.voice.models.openai_stt import EVENT_INACTIVITY_TIMEOUT
+    from agents.voice.models.openai_stt import (
+        EVENT_INACTIVITY_TIMEOUT,
+        _audio_buffer_to_base64,
+    )
 
     from .fake_models import FakeStreamedAudioInput
 except ImportError:
@@ -219,6 +223,14 @@ async def test_stream_audio_sends_pcm16(
     np.testing.assert_array_equal(buffer, original_buffer)
 
     await session.close()
+
+
+@pytest.mark.parametrize("dtype", [np.int32, np.float64], ids=["int32", "float64"])
+def test_stream_audio_rejects_unsupported_dtype(dtype: npt.DTypeLike) -> None:
+    buffer = np.array([1, 2], dtype=dtype)
+
+    with pytest.raises(UserError, match="Buffer must be a numpy array of int16 or float32"):
+        _audio_buffer_to_base64(buffer)
 
 
 @pytest.mark.asyncio
