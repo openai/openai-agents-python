@@ -1,5 +1,6 @@
 import logging
 import sys
+import threading
 from typing import TYPE_CHECKING, Any, Literal
 
 from openai import AsyncOpenAI
@@ -333,6 +334,7 @@ def set_default_openai_harness(harness_id: str | None) -> None:
 
 
 _verbose_stdout_handler: "logging.StreamHandler[Any] | None" = None
+_verbose_stdout_handler_lock = threading.Lock()
 
 
 def enable_verbose_stdout_logging() -> None:
@@ -340,18 +342,20 @@ def enable_verbose_stdout_logging() -> None:
     global _verbose_stdout_handler
 
     logger = logging.getLogger("openai.agents")
-    logger.setLevel(logging.DEBUG)
+    with _verbose_stdout_handler_lock:
+        logger.setLevel(logging.DEBUG)
+        stream = sys.stdout if sys.stdout is not None else sys.stderr
 
-    if _verbose_stdout_handler is None:
-        _verbose_stdout_handler = logging.StreamHandler(sys.stdout)
-    else:
-        _verbose_stdout_handler.acquire()
-        try:
-            _verbose_stdout_handler.stream = sys.stdout
-        finally:
-            _verbose_stdout_handler.release()
+        if _verbose_stdout_handler is None:
+            _verbose_stdout_handler = logging.StreamHandler(stream)
+        else:
+            _verbose_stdout_handler.acquire()
+            try:
+                _verbose_stdout_handler.stream = stream
+            finally:
+                _verbose_stdout_handler.release()
 
-    logger.addHandler(_verbose_stdout_handler)
+        logger.addHandler(_verbose_stdout_handler)
 
 
 __all__ = [
