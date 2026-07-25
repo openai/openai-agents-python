@@ -332,11 +332,26 @@ def set_default_openai_harness(harness_id: str | None) -> None:
     _config.set_default_openai_harness(harness_id)
 
 
-def enable_verbose_stdout_logging():
+_verbose_stdout_handler: "logging.StreamHandler[Any] | None" = None
+
+
+def enable_verbose_stdout_logging() -> None:
     """Enables verbose logging to stdout. This is useful for debugging."""
+    global _verbose_stdout_handler
+
     logger = logging.getLogger("openai.agents")
     logger.setLevel(logging.DEBUG)
-    logger.addHandler(logging.StreamHandler(sys.stdout))
+
+    if _verbose_stdout_handler is None:
+        _verbose_stdout_handler = logging.StreamHandler(sys.stdout)
+    else:
+        _verbose_stdout_handler.acquire()
+        try:
+            _verbose_stdout_handler.stream = sys.stdout
+        finally:
+            _verbose_stdout_handler.release()
+
+    logger.addHandler(_verbose_stdout_handler)
 
 
 __all__ = [
