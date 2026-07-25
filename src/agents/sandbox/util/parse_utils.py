@@ -20,10 +20,21 @@ def parse_ls_la(output: str, *, base: str) -> list[FileEntry]:
         permissions_str = parts[0]
         owner = parts[2]
         group = parts[3]
-        try:
-            size = int(parts[4])
-        except ValueError:
-            continue
+        if parts[4].endswith(","):
+            # Character and block devices print "major, minor" in place of the
+            # size column, which shifts every following field by one. `stat`
+            # reports size 0 for device nodes.
+            parts = line.split(maxsplit=9)
+            if len(parts) < 10:
+                continue
+            size = 0
+            name = parts[9]
+        else:
+            try:
+                size = int(parts[4])
+            except ValueError:
+                continue
+            name = parts[8]
 
         kind_map: dict[str, EntryKind] = {
             "d": EntryKind.DIRECTORY,
@@ -37,7 +48,6 @@ def parse_ls_la(output: str, *, base: str) -> list[FileEntry]:
         if permissions_str[:1] not in {"d", "-"} and len(permissions_str) >= 2:
             permissions_str = "-" + permissions_str[1:]
 
-        name = parts[8]
         if kind == EntryKind.SYMLINK and " -> " in name:
             name = name.split(" -> ", 1)[0]
 
