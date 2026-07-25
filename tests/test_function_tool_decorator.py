@@ -8,7 +8,7 @@ import operator
 import sys
 from collections.abc import Callable
 from types import ModuleType
-from typing import Any, Generic, TypeVar, cast
+from typing import Annotated, Any, Generic, TypeVar, cast
 
 import pytest
 from inline_snapshot import snapshot
@@ -340,6 +340,28 @@ async def test_callable_object_uses_call_docstring_when_class_docstring_missing(
         "type": "integer",
     }
     assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 8
+
+
+def test_callable_object_combines_class_summary_with_call_parameter_docs() -> None:
+    class AsyncCallable:
+        """Configure a reusable multiplier."""
+
+        async def __call__(self, value: Annotated[int, "Annotated fallback."]) -> int:
+            """Multiply a value.
+
+            Args:
+                value: The value supplied to this invocation.
+            """
+            return value * 2
+
+    tool = function_tool(AsyncCallable())
+
+    assert tool.description == "Configure a reusable multiplier."
+    assert tool.params_json_schema["properties"]["value"] == {
+        "description": "The value supplied to this invocation.",
+        "title": "Value",
+        "type": "integer",
+    }
 
 
 @pytest.mark.asyncio

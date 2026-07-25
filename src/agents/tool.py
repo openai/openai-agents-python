@@ -55,7 +55,7 @@ from ._tool_identity import (
 from .computer import AsyncComputer, Computer
 from .editor import ApplyPatchEditor, ApplyPatchOperation
 from .exceptions import ModelBehaviorError, ToolTimeoutError, UserError
-from .function_schema import DocstringStyle, function_schema
+from .function_schema import DocstringStyle, function_schema, generate_func_documentation
 from .logger import log_tool_action_warning, logger
 from .run_context import RunContextWrapper
 from .strict_schema import ensure_strict_json_schema
@@ -2200,7 +2200,8 @@ def _validate_function_tool_output(
 
 def _normalize_function_tool_callable(
     func: ToolFunction[...],
-) -> ToolFunction[...]:
+    docstring_style: DocstringStyle | None,
+) -> tuple[ToolFunction[...], str | None]:
     """Adapt one plain callable instance to the existing function-tool pipeline."""
     if isinstance(func, functools.partial):
         raise UserError(
@@ -2208,7 +2209,7 @@ def _normalize_function_tool_callable(
             "contracts. Use an explicit wrapper function."
         )
     if inspect.isroutine(func) or inspect.isclass(func):
-        return func
+        return func, None
 
     try:
         instance_vars = vars(func)
@@ -2313,14 +2314,21 @@ def _normalize_function_tool_callable(
 
     adapter_metadata = cast(Any, adapter)
     adapter_metadata.__name__ = type(func).__name__
-    adapter_metadata.__doc__ = inspect.getdoc(func) or inspect.getdoc(call_method)
+    class_doc = inspect.getdoc(type(func))
+    call_doc = inspect.cleandoc(call_descriptor.__doc__) if call_descriptor.__doc__ else None
+    adapter_metadata.__doc__ = call_doc or class_doc
     adapter_metadata.__annotations__ = {
         name: annotation
         for name, annotation in type_hints.items()
         if name == "return" or name in signature.parameters
     }
     adapter_metadata.__signature__ = signature
-    return cast("ToolFunction[...]", adapter)
+    class_description = (
+        generate_func_documentation(type(func), docstring_style).description
+        if class_doc and call_doc
+        else None
+    )
+    return cast("ToolFunction[...]", adapter), class_description
 
 
 @overload
@@ -2457,12 +2465,16 @@ def function_tool(
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
-        the_func = _normalize_function_tool_callable(the_func)
+        the_func, callable_description = _normalize_function_tool_callable(
+            the_func,
+            docstring_style,
+        )
         is_sync_function_tool = not inspect.iscoroutinefunction(the_func)
         schema = function_schema(
             func=the_func,
             name_override=name_override,
-            description_override=description_override,
+            description_override=description_override
+            or (callable_description if use_docstring_info else None),
             docstring_style=docstring_style,
             use_docstring_info=use_docstring_info,
             strict_json_schema=strict_mode,
