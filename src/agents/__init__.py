@@ -336,6 +336,9 @@ def enable_verbose_stdout_logging():
     """Enables verbose logging to stdout. This is useful for debugging."""
     logger = logging.getLogger("openai.agents")
     logger.setLevel(logging.DEBUG)
+    for handler in logger.handlers:
+        if isinstance(handler, logging.StreamHandler) and handler.stream is sys.stdout:
+            return
     logger.addHandler(logging.StreamHandler(sys.stdout))
 
 

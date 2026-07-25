@@ -1,6 +1,8 @@
 import asyncio
 import gc
+import logging
 import os
+import sys
 import weakref
 
 import openai
@@ -8,6 +10,7 @@ import pytest
 
 from agents import (
     UserError,
+    enable_verbose_stdout_logging,
     responses_websocket_session,
     set_default_openai_api,
     set_default_openai_client,
@@ -497,3 +500,22 @@ async def test_openai_provider_aclose_closes_cached_models(monkeypatch):
     await provider.aclose()
     assert closed_models == [model1]
     assert provider.get_model("gpt-4") is not model1
+
+
+def test_enable_verbose_stdout_logging_no_duplicate_handlers():
+    logger = logging.getLogger("openai.agents")
+    initial_count = len(logger.handlers)
+
+    enable_verbose_stdout_logging()
+    after_first = len(logger.handlers)
+
+    enable_verbose_stdout_logging()
+    after_second = len(logger.handlers)
+
+    assert after_first == initial_count + 1, "First call should add exactly one handler"
+    assert after_second == after_first, "Second call should not add another handler"
+
+    for handler in logger.handlers:
+        if isinstance(handler, logging.StreamHandler) and handler.stream is sys.stdout:
+            logger.removeHandler(handler)
+            break
