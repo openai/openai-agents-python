@@ -2263,6 +2263,16 @@ def _normalize_function_tool_callable(
             "Unsupported generic callable object: use an explicit wrapper function with concrete "
             "parameter and return annotations."
         )
+    if (
+        not isinstance(call_descriptor, FunctionType)
+        or hasattr(call_descriptor, "__wrapped__")
+        or hasattr(call_descriptor, "__signature__")
+    ):
+        raise UserError(
+            "Unsupported callable object: function_tool supports instances with a plain "
+            "__call__ method. Use an explicit wrapper function for partials, decorated methods, "
+            "built-in callables, or custom descriptors."
+        )
 
     try:
         instance_vars = vars(func)
@@ -2286,8 +2296,7 @@ def _normalize_function_tool_callable(
         inspect.isroutine(wrapped) and not inspect.iscoroutinefunction(wrapped)
     )
     has_released_function_contract = (
-        isinstance(call_descriptor, FunctionType)
-        and not inspect.iscoroutinefunction(call_descriptor)
+        not inspect.iscoroutinefunction(call_descriptor)
         and has_supported_wrapped_target
         and (
             (wrapped is not missing and inspect.isroutine(wrapped))
@@ -2312,16 +2321,6 @@ def _normalize_function_tool_callable(
             "Use an explicit wrapper function."
         )
 
-    if (
-        not isinstance(call_descriptor, FunctionType)
-        or hasattr(call_descriptor, "__wrapped__")
-        or hasattr(call_descriptor, "__signature__")
-    ):
-        raise UserError(
-            "Unsupported callable object: function_tool supports instances with a plain "
-            "__call__ method. Use an explicit wrapper function for partials, decorated methods, "
-            "built-in callables, or custom descriptors."
-        )
     call_method = cast(Callable[..., Any], call_descriptor.__get__(func, type(func)))
     signature = inspect.signature(call_method)
     globalns = dict(getattr(call_method, "__globals__", {}))

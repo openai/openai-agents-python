@@ -527,6 +527,7 @@ def test_callable_contract_rejects_unknown_call_descriptor() -> None:
         "staticmethod",
         "classmethod",
         "decorated-call",
+        "sync-decorated-call-with-metadata",
         "published-annotations",
         "published-annotate",
         "custom-signature",
@@ -597,6 +598,21 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return await target(*args, **kwargs)
 
         handler = DecoratedCallHandler()
+    elif shape == "sync-decorated-call-with-metadata":
+
+        def sync_target(value: int) -> int:
+            return value
+
+        class SyncDecoratedCallWithMetadata:
+            def __init__(self) -> None:
+                self.__name__ = "sync_target"
+                self.__annotations__ = {"value": int, "return": int}
+
+            @functools.wraps(sync_target)
+            def __call__(self, *args: Any, **kwargs: Any) -> int:
+                return sync_target(*args, **kwargs)
+
+        handler = SyncDecoratedCallWithMetadata()
     elif shape == "published-annotations":
 
         class PublishedAnnotationsHandler:
