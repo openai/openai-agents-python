@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
 from typing_extensions import Required, TypedDict
@@ -41,7 +41,7 @@ class SerializedFunctionToolLookupKey(TypedDict, total=False):
 
 def get_mapping_or_attr(value: Any, key: str) -> Any:
     """Read a key from either a mapping or object attribute."""
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return value.get(key)
     return getattr(value, key, None)
 
