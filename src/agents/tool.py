@@ -2254,10 +2254,39 @@ def _validate_function_tool_callable_annotations(
             )
 
 
+def _function_tool_wrapped_target_is_sync(target: object) -> bool:
+    """Return whether a wrapper chain has one safely synchronous callable endpoint."""
+    missing = object()
+    current = target
+    seen: set[int] = set()
+
+    while True:
+        current_id = id(current)
+        if current_id in seen or isinstance(current, functools.partial):
+            return False
+        seen.add(current_id)
+
+        signature_override = inspect.getattr_static(current, "__signature__", missing)
+        if signature_override is not missing and signature_override is not None:
+            return False
+
+        nested = inspect.getattr_static(current, "__wrapped__", missing)
+        if nested is missing:
+            break
+        current = nested
+
+    if not callable(current) or inspect.iscoroutinefunction(current):
+        return False
+
+    call_descriptor = inspect.getattr_static(type(current), "__call__", missing)
+    return call_descriptor is missing or not inspect.iscoroutinefunction(call_descriptor)
+
+
 def _normalize_function_tool_callable(
     func: ToolFunction[...],
     docstring_style: DocstringStyle | None,
     name_override: str | None,
+    use_docstring_info: bool,
 ) -> tuple[ToolFunction[...], str | None]:
     """Adapt one plain callable instance to the existing function-tool pipeline."""
     if isinstance(func, functools.partial):
@@ -2306,29 +2335,19 @@ def _normalize_function_tool_callable(
             "Unsupported callable wrapper: function_tool only infers plain callable instances. "
             "Use an explicit wrapper function."
         )
-    has_explicit_function_metadata = (
-        "__annotations__" in instance_vars
-        or "__annotate__" in instance_vars
-        or (
-            isinstance(published_name, str)
-            and (published_annotations is not missing or published_annotate is not missing)
-        )
+    has_instance_function_metadata = (
+        "__annotations__" in instance_vars or "__annotate__" in instance_vars
     )
-    has_supported_wrapped_target = wrapped is missing or (
-        not isinstance(wrapped, functools.partial)
-        and inspect.isroutine(wrapped)
-        and not inspect.iscoroutinefunction(wrapped)
-        and not hasattr(wrapped, "__wrapped__")
-        and getattr(wrapped, "__signature__", None) is None
-    )
+    has_named_class_function_metadata = (
+        name_override is not None or isinstance(published_name, str)
+    ) and (published_annotations is not missing or published_annotate is not missing)
+    has_function_metadata = has_instance_function_metadata or has_named_class_function_metadata
     has_released_function_contract = (
         not inspect.iscoroutinefunction(call_descriptor)
-        and has_supported_wrapped_target
-        and (wrapped is not missing or has_explicit_function_metadata)
+        and (wrapped is not missing or has_function_metadata)
+        and (wrapped is missing or _function_tool_wrapped_target_is_sync(wrapped))
     )
-    if not has_released_function_contract and (
-        wrapped is not missing or has_explicit_function_metadata
-    ):
+    if not has_released_function_contract and (wrapped is not missing or has_function_metadata):
         raise UserError(
             "Unsupported callable wrapper: function_tool only infers plain callable instances. "
             "Use an explicit wrapper function."
@@ -2388,7 +2407,10 @@ def _normalize_function_tool_callable(
         if name == "return" or name in signature.parameters
     }
     adapter_metadata.__signature__ = signature
-    if has_released_function_contract:
+    if not use_docstring_info:
+        adapter_metadata.__doc__ = None
+        class_description = None
+    elif has_released_function_contract:
         adapter_metadata.__doc__ = inspect.getdoc(func)
         class_description = None
     else:
@@ -2541,6 +2563,7 @@ def function_tool(
             the_func,
             docstring_style,
             name_override,
+            use_docstring_info,
         )
         is_sync_function_tool = not inspect.iscoroutinefunction(the_func)
         schema = function_schema(

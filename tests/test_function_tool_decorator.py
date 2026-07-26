@@ -460,9 +460,11 @@ async def test_sync_function_preserves_awaitable_result() -> None:
     "metadata_kind",
     [
         "update-wrapper",
+        "nested-sync-wrapper",
         "bound-method",
         "signature-none",
         "published-annotations",
+        "class-published-annotations",
         "published-name",
         "extra-annotation",
     ],
@@ -489,6 +491,22 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
                 return target(*args, **kwargs)
 
         handler = UpdatedWrapperHandler()
+        expected_name = "target"
+        expected_description = "Double the value."
+    elif metadata_kind == "nested-sync-wrapper":
+
+        @functools.wraps(target)
+        def sync_bridge(*args: Any, **kwargs: Any) -> Any:
+            return target(*args, **kwargs)
+
+        class NestedSyncWrapperHandler:
+            def __init__(self) -> None:
+                functools.update_wrapper(self, sync_bridge)
+
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return sync_bridge(*args, **kwargs)
+
+        handler = NestedSyncWrapperHandler()
         expected_name = "target"
         expected_description = "Double the value."
     elif metadata_kind == "bound-method":
@@ -536,6 +554,21 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
         tool_kwargs = {"name_override": "published_annotations", "use_docstring_info": False}
         expected_name = "published_annotations"
         expected_description = ""
+    elif metadata_kind == "class-published-annotations":
+
+        class ClassPublishedAnnotationsHandler:
+            __annotations__ = {"value": int, "return": int}
+
+            def __call__(self, value: Any) -> int:
+                return cast(int, value) * 2
+
+        handler = ClassPublishedAnnotationsHandler()
+        tool_kwargs = {
+            "name_override": "class_published_annotations",
+            "use_docstring_info": False,
+        }
+        expected_name = "class_published_annotations"
+        expected_description = ""
     elif metadata_kind == "published-name":
 
         class PublishedNameHandler:
@@ -574,6 +607,30 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
     assert tool.description == expected_description
     assert tool.params_json_schema["properties"]["value"]["type"] == "integer"
     assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == expected_result
+
+
+@pytest.mark.asyncio
+async def test_callable_docstring_opt_out_does_not_read_dynamic_doc() -> None:
+    class RaisingDoc:
+        def __get__(self, instance: Any, owner: type[Any] | None = None) -> str:
+            raise AssertionError("The callable docstring should not be read.")
+
+    class Handler:
+        __doc__ = RaisingDoc()
+        __annotations__ = {"value": int, "return": int}
+
+        def __call__(self, value: Any) -> int:
+            return cast(int, value) * 2
+
+    tool = function_tool(
+        Handler(),
+        name_override="handler",
+        use_docstring_info=False,
+    )
+
+    assert tool.description == ""
+    assert tool.params_json_schema["properties"]["value"]["type"] == "integer"
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 8
 
 
 @pytest.mark.skipif(
