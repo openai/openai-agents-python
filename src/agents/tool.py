@@ -2330,6 +2330,8 @@ def _normalize_function_tool_callable(
             "built-in callables, or custom descriptors."
         )
 
+    call_method = cast(Callable[..., Any], call_descriptor.__get__(func, type(func)))
+    call_parameter_names = set(inspect.signature(call_method).parameters)
     try:
         instance_vars = vars(func)
     except TypeError:
@@ -2348,9 +2350,13 @@ def _normalize_function_tool_callable(
     has_instance_function_metadata = (
         "__annotations__" in instance_vars or "__annotate__" in instance_vars
     )
+    class_annotations_match_call = isinstance(published_annotations, Mapping) and any(
+        name == "return" or name in call_parameter_names for name in published_annotations
+    )
     has_named_class_function_metadata = (
-        name_override is not None or isinstance(published_name, str)
-    ) and (published_annotations is not missing or published_annotate is not missing)
+        isinstance(published_name, str)
+        and (published_annotations is not missing or published_annotate is not missing)
+    ) or (name_override is not None and class_annotations_match_call)
     has_function_metadata = has_instance_function_metadata or has_named_class_function_metadata
     has_released_function_contract = (
         not inspect.iscoroutinefunction(call_descriptor)
@@ -2363,7 +2369,6 @@ def _normalize_function_tool_callable(
             "Use an explicit wrapper function."
         )
 
-    call_method = cast(Callable[..., Any], call_descriptor.__get__(func, type(func)))
     signature = inspect.signature(func if has_released_function_contract else call_method)
     try:
         if has_released_function_contract:

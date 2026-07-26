@@ -397,6 +397,24 @@ async def test_async_callable_object_works_with_configured_function_tool() -> No
 
 
 @pytest.mark.asyncio
+async def test_configured_async_callable_ignores_annotated_class_state() -> None:
+    class AsyncCallable:
+        factor: int
+
+        def __init__(self, factor: int) -> None:
+            self.factor = factor
+
+        async def __call__(self, value: int) -> int:
+            return value * self.factor
+
+    tool = function_tool(AsyncCallable(3), name_override="multiply")
+
+    assert list(tool.params_json_schema["properties"]) == ["value"]
+    assert tool.params_json_schema["properties"]["value"]["type"] == "integer"
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 12
+
+
+@pytest.mark.asyncio
 async def test_callable_object_invokes_the_resolved_call_method(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
