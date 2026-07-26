@@ -13,7 +13,7 @@ import weakref
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from types import FunctionType, UnionType
+from types import FunctionType, MethodType, UnionType
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -2306,7 +2306,7 @@ def _normalize_function_tool_callable(
         )
     )
     has_supported_wrapped_target = wrapped is missing or (
-        isinstance(wrapped, FunctionType)
+        isinstance(wrapped, FunctionType | MethodType)
         and not inspect.iscoroutinefunction(wrapped)
         and not hasattr(wrapped, "__wrapped__")
         and getattr(wrapped, "__signature__", None) is None

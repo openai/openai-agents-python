@@ -459,6 +459,7 @@ async def test_sync_function_preserves_awaitable_result() -> None:
     "metadata_kind",
     [
         "update-wrapper",
+        "bound-method",
         "signature-none",
         "published-annotations",
         "published-name",
@@ -475,6 +476,7 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
     tool_kwargs: dict[str, Any] = {}
     expected_name: str
     expected_description: str
+    expected_result = 8
     handler: Any
     if metadata_kind == "update-wrapper":
 
@@ -488,6 +490,24 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
         handler = UpdatedWrapperHandler()
         expected_name = "target"
         expected_description = "Double the value."
+    elif metadata_kind == "bound-method":
+
+        class Service:
+            def method(self, value: int) -> int:
+                """Triple the value."""
+                return value * 3
+
+        class BoundMethodHandler:
+            def __init__(self, service: Service) -> None:
+                functools.update_wrapper(self, service.method)
+
+            def __call__(self, value: int) -> int:
+                return self.__wrapped__(value)
+
+        handler = BoundMethodHandler(Service())
+        expected_name = "method"
+        expected_description = "Triple the value."
+        expected_result = 12
     elif metadata_kind == "signature-none":
 
         class SignatureNoneHandler:
@@ -551,7 +571,7 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
     assert tool.name == expected_name
     assert tool.description == expected_description
     assert tool.params_json_schema["properties"]["value"]["type"] == "integer"
-    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 8
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == expected_result
 
 
 @pytest.mark.skipif(
@@ -617,6 +637,7 @@ def test_callable_contract_rejects_unknown_call_descriptor() -> None:
         "builtin",
         "nested-wrapper",
         "sync-wrapper-async-target",
+        "sync-wrapper-async-bound-method-target",
         "sync-wrapper-async-partial-target",
         "sync-wrapper-nested-async-target",
         "metadata-typevar-wrapper",
@@ -826,6 +847,20 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return target(*args, **kwargs)
 
         handler = SyncWrapperAsyncTarget()
+    elif shape == "sync-wrapper-async-bound-method-target":
+
+        class Service:
+            async def method(self, value: int) -> int:
+                return value
+
+        class SyncWrapperAsyncBoundMethodTarget:
+            def __init__(self, service: Service) -> None:
+                functools.update_wrapper(self, service.method)
+
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return self.__wrapped__(*args, **kwargs)
+
+        handler = SyncWrapperAsyncBoundMethodTarget(Service())
     elif shape == "sync-wrapper-async-partial-target":
         async_partial = functools.partial(target)
 
