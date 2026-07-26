@@ -866,7 +866,7 @@ class RunResultStreaming(RunResultBase):
             input=self.input,
             new_items=self.new_items,
             raw_responses=self.raw_responses,
-            last_agent=self.current_agent,
+            last_agent=self.last_agent,
             context_wrapper=self.context_wrapper,
             input_guardrail_results=self.input_guardrail_results,
             output_guardrail_results=self.output_guardrail_results,
