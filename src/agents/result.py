@@ -860,13 +860,20 @@ class RunResultStreaming(RunResultBase):
         if self._stored_exception:
             raise self._stored_exception
 
-    def _create_error_details(self) -> RunErrorDetails:
-        """Return a `RunErrorDetails` object considering the current attributes of the class."""
+    def _create_error_details(self) -> RunErrorDetails | None:
+        """Return a `RunErrorDetails` object considering the current attributes of the class.
+        Returns ``None`` when the current agent can no longer be resolved, preserving the
+        original terminal exception.
+        """
+        try:
+            last_agent = self.last_agent
+        except AgentsException:
+            return None
         return RunErrorDetails(
             input=self.input,
             new_items=self.new_items,
             raw_responses=self.raw_responses,
-            last_agent=self.last_agent,
+            last_agent=last_agent,
             context_wrapper=self.context_wrapper,
             input_guardrail_results=self.input_guardrail_results,
             output_guardrail_results=self.output_guardrail_results,
