@@ -3567,3 +3567,27 @@ async def test_execute_tools_emits_hosted_mcp_rejection_reason_from_explicit_mes
     assert responses[0].raw_item["approve"] is False
     assert responses[0].raw_item["approval_request_id"] == "mcp-approval-reject-reason"
     assert responses[0].raw_item["reason"] == "Denied by policy"
+
+
+@pytest.mark.parametrize(
+    ("exception", "old_re_raises", "new_re_raises"),
+    [
+        pytest.param(asyncio.CancelledError(), True, False, id="CancelledError"),
+        pytest.param(ValueError(), False, True, id="ValueError"),
+        pytest.param(KeyboardInterrupt(), True, True, id="KeyboardInterrupt"),
+        pytest.param(RuntimeError(), False, True, id="RuntimeError"),
+    ],
+)
+def test_await_invoke_task_failure_condition(
+    exception: BaseException,
+    old_re_raises: bool,
+    new_re_raises: bool,
+) -> None:
+    """The _await_invoke_task condition change makes the intent explicit:
+    only CancelledError should be suppressed; all other BaseException types
+    (including regular Exception subclasses) should propagate.
+    """
+    old_condition = not isinstance(exception, Exception)
+    new_condition = not isinstance(exception, asyncio.CancelledError)
+    assert old_condition == old_re_raises
+    assert new_condition == new_re_raises
