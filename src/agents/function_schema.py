@@ -355,7 +355,7 @@ def function_schema(
         first_name, first_param = params[0]
         # Prefer the evaluated type hint if available
         ann = type_hints.get(first_name, first_param.annotation)
-        if ann != inspect._empty:
+        if ann is not inspect._empty:
             origin = get_origin(ann) or ann
             if origin is RunContextWrapper or origin is ToolContext:
                 takes_context = True  # Mark that the function takes context
@@ -367,7 +367,7 @@ def function_schema(
     # For parameters other than the first, raise error if any use RunContextWrapper or ToolContext.
     for name, param in params[1:]:
         ann = type_hints.get(name, param.annotation)
-        if ann != inspect._empty:
+        if ann is not inspect._empty:
             origin = get_origin(ann) or ann
             if origin is RunContextWrapper or origin is ToolContext:
                 raise UserError(
@@ -385,7 +385,7 @@ def function_schema(
         default = param.default
 
         # If there's no type hint, assume `Any`
-        if ann == inspect._empty:
+        if ann is inspect._empty:
             ann = Any
 
         # If a docstring param description exists, use it
@@ -439,12 +439,12 @@ def function_schema(
                     field_info_from_annotated,
                     description=field_description or field_info_from_annotated.description,
                 )
-                if default != inspect._empty and not isinstance(default, FieldInfo):
+                if default is not inspect._empty and not isinstance(default, FieldInfo):
                     merged = FieldInfo.merge_field_infos(merged, default=default)
                 elif isinstance(default, FieldInfo):
                     merged = FieldInfo.merge_field_infos(merged, default)
                 fields[name] = (ann, merged)
-            elif default == inspect._empty:
+            elif default is inspect._empty:
                 # Required field
                 fields[name] = (
                     ann,

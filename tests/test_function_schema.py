@@ -1064,3 +1064,66 @@ def test_variadic_param_descriptions_preserved(func, style):
     assert properties["x"]["description"] == "The base value."
     assert properties["numbers"]["description"] == "The numbers to add."
     assert properties["kwargs"]["description"] == "Extra options."
+
+
+class _ElementwiseEqual:
+    """Mimics numpy-array equality: ``==`` returns a container whose truthiness raises."""
+
+    def __eq__(self, other: object) -> "_ElementwiseEqual":
+        return _ElementwiseEqual()
+
+    def __ne__(self, other: object) -> "_ElementwiseEqual":
+        return _ElementwiseEqual()
+
+    def __bool__(self) -> bool:
+        raise ValueError("The truth value of an elementwise comparison is ambiguous.")
+
+    def __hash__(self) -> int:
+        return 0
+
+
+class _AlwaysEqual:
+    """A default value whose ``__eq__`` answers True for anything, including sentinels."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    def __hash__(self) -> int:
+        return 0
+
+
+_ELEMENTWISE_DEFAULT = _ElementwiseEqual()
+_ALWAYS_EQUAL_DEFAULT = _AlwaysEqual()
+
+
+def test_default_with_elementwise_eq_does_not_crash():
+    """Defaults must be compared to the inspect sentinel by identity: a numpy-style
+    default whose ``==`` returns a non-boolean container used to crash schema creation."""
+
+    def score(x: int, weights: Any = _ELEMENTWISE_DEFAULT) -> int:
+        return x
+
+    fs = function_schema(score, strict_json_schema=False)
+    assert "weights" not in fs.params_json_schema.get("required", [])
+
+    parsed = fs.params_pydantic_model(x=1)
+    args, kwargs = fs.to_call_args(parsed)
+    assert isinstance((args + list(kwargs.values()))[-1], _ElementwiseEqual)
+
+
+def test_default_with_always_true_eq_stays_optional():
+    """A default whose ``__eq__`` answers True used to be mistaken for the no-default
+    sentinel, silently marking the parameter required and discarding the default."""
+
+    def strip(text: str, punctuation: Any = _ALWAYS_EQUAL_DEFAULT) -> str:
+        return text
+
+    fs = function_schema(strip, strict_json_schema=False)
+    assert fs.params_json_schema.get("required", []) == ["text"]
+
+    parsed = fs.params_pydantic_model(text="hi")
+    args, kwargs = fs.to_call_args(parsed)
+    assert isinstance((args + list(kwargs.values()))[-1], _AlwaysEqual)
