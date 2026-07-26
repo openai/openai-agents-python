@@ -537,6 +537,8 @@ def test_callable_contract_rejects_unknown_call_descriptor() -> None:
         "builtin",
         "nested-wrapper",
         "sync-wrapper-async-target",
+        "sync-wrapper-async-partial-target",
+        "metadata-typevar-wrapper",
         "metadata-keyword-only-context",
         "context",
         "keyword-only-context",
@@ -708,6 +710,34 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return target(*args, **kwargs)
 
         handler = SyncWrapperAsyncTarget()
+    elif shape == "sync-wrapper-async-partial-target":
+        async_partial = functools.partial(target)
+
+        class SyncWrapperAsyncPartialTarget:
+            def __init__(self) -> None:
+                functools.update_wrapper(
+                    self,
+                    async_partial,
+                    assigned=("__annotations__",),
+                )
+
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return async_partial(*args, **kwargs)
+
+        handler = SyncWrapperAsyncPartialTarget()
+    elif shape == "metadata-typevar-wrapper":
+
+        def identity(value: CallableValueT) -> CallableValueT:
+            return value
+
+        class MetadataTypeVarWrapper:
+            def __init__(self) -> None:
+                functools.update_wrapper(self, identity)
+
+            def __call__(self, value: Any) -> Any:
+                return identity(value)
+
+        handler = MetadataTypeVarWrapper()
     elif shape == "metadata-keyword-only-context":
 
         def contextual_target(*, ctx: ToolContext[Any], value: int) -> int:
