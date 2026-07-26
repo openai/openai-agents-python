@@ -1292,7 +1292,7 @@ def _transform_field_names(
 def _serialize_raw_item_value(raw_item: Any) -> Any:
     """Return a serializable representation of a raw item."""
     if hasattr(raw_item, "model_dump"):
-        return raw_item.model_dump(exclude_unset=True)
+        return raw_item.model_dump(mode="json", exclude_unset=True)
     if isinstance(raw_item, dict):
         return dict(raw_item)
     return raw_item
