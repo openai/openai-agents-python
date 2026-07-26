@@ -6,7 +6,7 @@ import inspect
 import json
 import operator
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from types import ModuleType
 from typing import Annotated, Any, Generic, TypeVar, cast
 
@@ -782,6 +782,7 @@ def test_callable_contract_rejects_unknown_call_descriptor() -> None:
         ),
         "sync-wrapper-decorated-async-callable-target",
         "sync-wrapper-async-intermediate-sync-target",
+        "sync-wrapper-custom-call-descriptor-target",
         "sync-wrapper-nested-async-target",
         "metadata-typevar-wrapper",
         "metadata-paramspec-wrapper",
@@ -1075,6 +1076,37 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return intermediate(*args, **kwargs)
 
         handler = SyncOuterWrapper()
+    elif shape == "sync-wrapper-custom-call-descriptor-target":
+
+        class AsyncCallDescriptor:
+            def __get__(
+                self,
+                instance: Any,
+                owner: type[Any] | None = None,
+            ) -> Callable[[int], Awaitable[int]]:
+                async def bound(value: int) -> int:
+                    return value
+
+                return bound
+
+            def __call__(self, value: int) -> int:
+                return value
+
+        class DescriptorTarget:
+            __call__ = AsyncCallDescriptor()
+
+        descriptor_target: Any = DescriptorTarget()
+        descriptor_target.__name__ = "descriptor_target"
+        descriptor_target.__annotations__ = {"value": int, "return": int}
+
+        class SyncWrapperCustomCallDescriptorTarget:
+            def __init__(self) -> None:
+                functools.update_wrapper(self, descriptor_target)
+
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return descriptor_target(*args, **kwargs)
+
+        handler = SyncWrapperCustomCallDescriptorTarget()
     elif shape == "sync-wrapper-nested-async-target":
 
         @functools.wraps(target)

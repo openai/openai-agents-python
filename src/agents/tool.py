@@ -2281,7 +2281,7 @@ def _function_tool_wrapped_target_is_sync(target: object) -> bool:
                 if not callable(current):
                     return False
                 call_descriptor = inspect.getattr_static(type(current), "__call__", missing)
-                if call_descriptor is missing or not resolve(call_descriptor):
+                if not isinstance(call_descriptor, FunctionType) or not resolve(call_descriptor):
                     return False
 
             nested = inspect.getattr_static(current, "__wrapped__", missing)
