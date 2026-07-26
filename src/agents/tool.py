@@ -2206,28 +2206,9 @@ def _normalize_function_tool_callable(
 ) -> tuple[ToolFunction[...], str | None]:
     """Adapt one plain callable instance to the existing function-tool pipeline."""
     if isinstance(func, functools.partial):
-        raise UserError(
-            "Unsupported callable object: function_tool does not infer functools.partial "
-            "contracts. Use an explicit wrapper function."
-        )
+        return func, None
     if inspect.isroutine(func) or inspect.isclass(func):
         return func, None
-
-    try:
-        instance_vars = vars(func)
-    except TypeError:
-        instance_vars = {}
-    missing = object()
-    if (
-        inspect.getattr_static(func, "__wrapped__", missing) is not missing
-        or inspect.getattr_static(func, "__signature__", missing) is not missing
-        or "__annotations__" in instance_vars
-        or "__annotate__" in instance_vars
-    ):
-        raise UserError(
-            "Unsupported callable wrapper: function_tool only infers plain callable instances. "
-            "Use an explicit wrapper function."
-        )
 
     call_owner = next(
         (owner for owner in type(func).__mro__ if "__call__" in owner.__dict__),
@@ -2236,6 +2217,42 @@ def _normalize_function_tool_callable(
     if call_owner is None:
         raise UserError("Unsupported callable object: no inspectable __call__ method was found.")
     call_descriptor = call_owner.__dict__["__call__"]
+
+    try:
+        instance_vars = vars(func)
+    except TypeError:
+        instance_vars = {}
+    missing = object()
+    wrapped = inspect.getattr_static(func, "__wrapped__", missing)
+    signature_override = inspect.getattr_static(func, "__signature__", missing)
+    published_name = inspect.getattr_static(func, "__name__", missing)
+    has_released_function_contract = (
+        isinstance(call_descriptor, FunctionType)
+        and not inspect.iscoroutinefunction(call_descriptor)
+        and (
+            (wrapped is not missing and inspect.isroutine(wrapped))
+            or signature_override is not missing
+            or "__annotations__" in instance_vars
+            or "__annotate__" in instance_vars
+            or isinstance(published_name, str)
+        )
+    )
+    if has_released_function_contract:
+        # Synchronous function-like callables with explicit metadata already flowed through
+        # function_schema() in released versions. Preserve that path instead of reinterpreting it.
+        return func, None
+
+    if (
+        wrapped is not missing
+        or signature_override is not missing
+        or "__annotations__" in instance_vars
+        or "__annotate__" in instance_vars
+    ):
+        raise UserError(
+            "Unsupported callable wrapper: function_tool only infers plain callable instances. "
+            "Use an explicit wrapper function."
+        )
+
     if (
         not isinstance(call_descriptor, FunctionType)
         or hasattr(call_descriptor, "__wrapped__")
@@ -2243,8 +2260,8 @@ def _normalize_function_tool_callable(
     ):
         raise UserError(
             "Unsupported callable object: function_tool supports instances with a plain "
-            "__call__ method. Use an explicit wrapper function for partials, decorated methods, "
-            "built-in callables, or custom descriptors."
+            "__call__ method. Use an explicit wrapper function for partial methods, decorated "
+            "methods, built-in callables, or custom descriptors."
         )
     if getattr(call_owner, "__type_params__", ()) or getattr(call_owner, "__parameters__", ()):
         raise UserError(

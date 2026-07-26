@@ -454,6 +454,92 @@ async def test_sync_function_preserves_awaitable_result() -> None:
     assert await returned == 12
 
 
+@pytest.mark.asyncio
+async def test_released_partial_callable_contract_remains_supported() -> None:
+    def multiply(value: int, factor: int = 2) -> int:
+        return value * factor
+
+    tool = function_tool(
+        functools.partial(multiply, factor=3),
+        name_override="multiply",
+        use_docstring_info=False,
+    )
+
+    assert tool.params_json_schema["properties"]["factor"]["default"] == 3
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 12
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata_kind",
+    ["update-wrapper", "published-annotations", "custom-signature", "published-name"],
+)
+async def test_released_sync_callable_metadata_contract_remains_supported(
+    metadata_kind: str,
+) -> None:
+    def target(value: int) -> int:
+        return value * 2
+
+    tool_kwargs: dict[str, Any] = {}
+    handler: Any
+    if metadata_kind == "update-wrapper":
+
+        class UpdatedWrapperHandler:
+            def __init__(self) -> None:
+                functools.update_wrapper(self, target)
+
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return target(*args, **kwargs)
+
+        handler = UpdatedWrapperHandler()
+    elif metadata_kind == "published-annotations":
+
+        class PublishedAnnotationsHandler:
+            def __init__(self) -> None:
+                self.__annotations__ = {"value": int, "return": int}
+
+            def __call__(self, value: Any) -> int:
+                return cast(int, value) * 2
+
+        handler = PublishedAnnotationsHandler()
+        tool_kwargs = {"name_override": "published_annotations", "use_docstring_info": False}
+    elif metadata_kind == "custom-signature":
+
+        class CustomSignatureHandler:
+            __signature__ = inspect.Signature(
+                [
+                    inspect.Parameter(
+                        "value",
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        annotation=int,
+                    )
+                ]
+            )
+
+            def __call__(self, value: Any) -> int:
+                return cast(int, value) * 2
+
+        handler = CustomSignatureHandler()
+        tool_kwargs = {"name_override": "custom_signature", "use_docstring_info": False}
+    elif metadata_kind == "published-name":
+
+        class PublishedNameHandler:
+            __name__ = "published_name"
+            __annotations__ = {"value": int, "return": int}
+
+            def __call__(self, value: Any) -> int:
+                return cast(int, value) * 2
+
+        handler = PublishedNameHandler()
+    else:
+        raise AssertionError(f"Unhandled metadata kind: {metadata_kind}")
+
+    tool = function_tool(handler, **tool_kwargs)
+
+    assert tool.params_json_schema["properties"]["value"]["type"] == "integer"
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 8
+
+
 def test_callable_contract_rejects_unknown_call_descriptor() -> None:
     class CustomDescriptor:
         def __get__(self, instance: Any, owner: type[Any]) -> Callable[..., Any]:
@@ -469,12 +555,10 @@ def test_callable_contract_rejects_unknown_call_descriptor() -> None:
 @pytest.mark.parametrize(
     "shape",
     [
-        "partial",
         "partialmethod",
         "staticmethod",
         "classmethod",
         "decorated-call",
-        "update-wrapper",
         "published-annotations",
         "published-annotate",
         "custom-signature",
@@ -511,9 +595,8 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
     async def target(value: int) -> int:
         return value
 
-    if shape == "partial":
-        handler: Any = functools.partial(target, 1)
-    elif shape == "partialmethod":
+    handler: Any
+    if shape == "partialmethod":
 
         class PartialMethodHandler:
             __call__ = functools.partialmethod(target, 1)
@@ -539,17 +622,6 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return await target(*args, **kwargs)
 
         handler = DecoratedCallHandler()
-    elif shape == "update-wrapper":
-
-        class UpdatedWrapper:
-            def __init__(self, wrapped: Any) -> None:
-                self.wrapped = wrapped
-                functools.update_wrapper(self, wrapped)
-
-            def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                return self.wrapped(*args, **kwargs)
-
-        handler = UpdatedWrapper(target)
     elif shape == "published-annotations":
 
         class PublishedAnnotationsHandler:
