@@ -13,7 +13,7 @@ import weakref
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from types import FunctionType, MethodType, UnionType
+from types import FunctionType, UnionType
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -21,6 +21,8 @@ from typing import (
     Concatenate,
     Generic,
     Literal,
+    ParamSpecArgs,
+    ParamSpecKwargs,
     Protocol,
     TypeVar,
     Union,
@@ -42,7 +44,13 @@ from openai.types.responses.tool_param import CodeInterpreter, ImageGeneration, 
 from openai.types.responses.web_search_tool import Filters as WebSearchToolFilters
 from openai.types.responses.web_search_tool_param import UserLocation
 from pydantic import BaseModel, TypeAdapter, ValidationError, model_validator
-from typing_extensions import NotRequired, ParamSpec, Self, TypeAliasType, TypedDict
+from typing_extensions import (
+    NotRequired,
+    ParamSpec,
+    Self,
+    TypeAliasType,
+    TypedDict,
+)
 
 from . import _debug
 from ._config_coercion import coerce_pydantic_config
@@ -2207,12 +2215,13 @@ def _validate_function_tool_callable_annotations(
     native_self = getattr(typing, "Self", Self)
     native_alias_type = getattr(typing, "TypeAliasType", TypeAliasType)
     alias_types = (TypeAliasType, native_alias_type)
+    generic_types = (TypeVar, ParamSpec, ParamSpecArgs, ParamSpecKwargs)
 
     def contains_specialized_annotation(annotation: Any) -> bool:
         origin = get_origin(annotation)
         if (
-            isinstance(annotation, (TypeVar, *alias_types))
-            or isinstance(origin, alias_types)
+            isinstance(annotation, (*generic_types, *alias_types))
+            or isinstance(origin, (*generic_types, *alias_types))
             or annotation in (Self, native_self)
         ):
             return True
@@ -2306,7 +2315,7 @@ def _normalize_function_tool_callable(
         )
     )
     has_supported_wrapped_target = wrapped is missing or (
-        isinstance(wrapped, FunctionType | MethodType)
+        inspect.isroutine(wrapped)
         and not inspect.iscoroutinefunction(wrapped)
         and not hasattr(wrapped, "__wrapped__")
         and getattr(wrapped, "__signature__", None) is None

@@ -13,7 +13,7 @@ from typing import Annotated, Any, Generic, TypeVar, cast
 import pytest
 from inline_snapshot import snapshot
 from pydantic import BaseModel
-from typing_extensions import Self
+from typing_extensions import ParamSpec, Self
 
 from agents import UserError, function_tool
 from agents.run_context import RunContextWrapper
@@ -32,6 +32,7 @@ def ctx_wrapper() -> ToolContext[DummyContext]:
 
 
 CallableValueT = TypeVar("CallableValueT")
+CallableParams = ParamSpec("CallableParams")
 
 
 @function_tool
@@ -499,10 +500,11 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
 
         class BoundMethodHandler:
             def __init__(self, service: Service) -> None:
-                functools.update_wrapper(self, service.method)
+                self.method = service.method
+                functools.update_wrapper(self, self.method)
 
             def __call__(self, value: int) -> int:
-                return self.__wrapped__(value)
+                return self.method(value)
 
         handler = BoundMethodHandler(Service())
         expected_name = "method"
@@ -576,6 +578,27 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
 
 @pytest.mark.skipif(
     sys.version_info < (3, 14),
+    reason="Built-in callable type hints require Python 3.14",
+)
+@pytest.mark.asyncio
+async def test_released_sync_builtin_wrapper_remains_supported() -> None:
+    class Handler:
+        def __init__(self) -> None:
+            self.routine = len
+            functools.update_wrapper(self, self.routine)
+
+        def __call__(self, value: Any) -> int:
+            return self.routine(value)
+
+    tool = function_tool(Handler(), use_docstring_info=False)
+
+    assert tool.name == "len"
+    assert list(tool.params_json_schema["properties"]) == ["obj"]
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"obj": [1, 2, 3]}') == 3
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 14),
     reason="Lazy annotations require Python 3.14",
 )
 @pytest.mark.asyncio
@@ -641,6 +664,7 @@ def test_callable_contract_rejects_unknown_call_descriptor() -> None:
         "sync-wrapper-async-partial-target",
         "sync-wrapper-nested-async-target",
         "metadata-typevar-wrapper",
+        "metadata-paramspec-wrapper",
         "metadata-keyword-only-context",
         "context",
         "keyword-only-context",
@@ -855,10 +879,11 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
 
         class SyncWrapperAsyncBoundMethodTarget:
             def __init__(self, service: Service) -> None:
-                functools.update_wrapper(self, service.method)
+                self.method = service.method
+                functools.update_wrapper(self, self.method)
 
             def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                return self.__wrapped__(*args, **kwargs)
+                return self.method(*args, **kwargs)
 
         handler = SyncWrapperAsyncBoundMethodTarget(Service())
     elif shape == "sync-wrapper-async-partial-target":
@@ -903,6 +928,26 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return identity(value)
 
         handler = MetadataTypeVarWrapper()
+    elif shape == "metadata-paramspec-wrapper":
+
+        def forwarding_target(*args: Any, **kwargs: Any) -> int:
+            return len(args) + len(kwargs)
+
+        paramspec_metadata = cast(Any, CallableParams)
+        forwarding_target.__annotations__ = {
+            "args": paramspec_metadata.args,
+            "kwargs": paramspec_metadata.kwargs,
+            "return": int,
+        }
+
+        class MetadataParamSpecWrapper:
+            def __init__(self) -> None:
+                functools.update_wrapper(self, forwarding_target)
+
+            def __call__(self, *args: Any, **kwargs: Any) -> int:
+                return forwarding_target(*args, **kwargs)
+
+        handler = MetadataParamSpecWrapper()
     elif shape == "metadata-keyword-only-context":
 
         def contextual_target(*, ctx: ToolContext[Any], value: int) -> int:
