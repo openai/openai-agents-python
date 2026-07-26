@@ -539,6 +539,7 @@ def test_callable_contract_rejects_unknown_call_descriptor() -> None:
         "nested-wrapper",
         "sync-wrapper-async-target",
         "sync-wrapper-async-partial-target",
+        "sync-wrapper-nested-async-target",
         "metadata-typevar-wrapper",
         "metadata-keyword-only-context",
         "context",
@@ -741,6 +742,20 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return async_partial(*args, **kwargs)
 
         handler = SyncWrapperAsyncPartialTarget()
+    elif shape == "sync-wrapper-nested-async-target":
+
+        @functools.wraps(target)
+        def sync_bridge(*args: Any, **kwargs: Any) -> Any:
+            return target(*args, **kwargs)
+
+        class SyncWrapperNestedAsyncTarget:
+            def __init__(self) -> None:
+                functools.update_wrapper(self, sync_bridge)
+
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return sync_bridge(*args, **kwargs)
+
+        handler = SyncWrapperNestedAsyncTarget()
     elif shape == "metadata-typevar-wrapper":
 
         def identity(value: CallableValueT) -> CallableValueT:

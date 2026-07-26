@@ -2293,15 +2293,15 @@ def _normalize_function_tool_callable(
         )
     )
     has_supported_wrapped_target = wrapped is missing or (
-        inspect.isroutine(wrapped) and not inspect.iscoroutinefunction(wrapped)
+        isinstance(wrapped, FunctionType)
+        and not inspect.iscoroutinefunction(wrapped)
+        and not hasattr(wrapped, "__wrapped__")
+        and not hasattr(wrapped, "__signature__")
     )
     has_released_function_contract = (
         not inspect.iscoroutinefunction(call_descriptor)
         and has_supported_wrapped_target
-        and (
-            (wrapped is not missing and inspect.isroutine(wrapped))
-            or has_explicit_function_metadata
-        )
+        and (wrapped is not missing or has_explicit_function_metadata)
     )
     if has_released_function_contract:
         signature = inspect.signature(func)
