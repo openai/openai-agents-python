@@ -1069,10 +1069,12 @@ def test_variadic_param_descriptions_preserved(func, style):
 class _ElementwiseEqual:
     """Mimics numpy-array equality: ``==`` returns a container whose truthiness raises."""
 
-    def __eq__(self, other: object) -> "_ElementwiseEqual":
+    # Annotated ``Any`` like numpy's own stubs: elementwise ``__eq__`` does not
+    # return ``bool``.
+    def __eq__(self, other: object) -> Any:
         return _ElementwiseEqual()
 
-    def __ne__(self, other: object) -> "_ElementwiseEqual":
+    def __ne__(self, other: object) -> Any:
         return _ElementwiseEqual()
 
     def __bool__(self) -> bool:
