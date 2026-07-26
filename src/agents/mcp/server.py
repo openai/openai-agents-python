@@ -1641,7 +1641,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 request_task.cancel()
             try:
                 await request_task
-            except BaseException:
+            except Exception:
                 pass
             raise
 
