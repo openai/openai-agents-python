@@ -2330,7 +2330,6 @@ def function_tool(
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
-        is_sync_function_tool = not inspect.iscoroutinefunction(the_func)
         schema = function_schema(
             func=the_func,
             name_override=name_override,
@@ -2344,6 +2343,15 @@ def function_tool(
             allowed_callers=allowed_callers,
             output_type=output_type,
             output_json_schema=output_json_schema,
+        )
+
+        # Determine if the function is async. ``inspect.iscoroutinefunction`` returns
+        # ``False`` for callable instances with an async ``__call__``, so we also check
+        # the ``__call__`` attribute for such objects.
+        is_async = inspect.iscoroutinefunction(the_func) or (
+            callable(the_func)
+            and hasattr(the_func, "__call__")
+            and inspect.iscoroutinefunction(the_func.__call__)
         )
 
         async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
@@ -2365,7 +2373,7 @@ def function_tool(
             if not _debug.DONT_LOG_TOOL_DATA:
                 logger.debug("Tool call args: %s, kwargs: %s", args, kwargs_dict)
 
-            if not is_sync_function_tool:
+            if is_async:
                 if schema.takes_context:
                     result = await the_func(ctx, *args, **kwargs_dict)
                 else:

@@ -1063,3 +1063,43 @@ def test_function_tool_timeout_error_function_must_be_callable() -> None:
             on_invoke_tool=_noop_on_invoke_tool,
             timeout_error_function=cast(Any, "not-callable"),
         )
+
+
+@pytest.mark.asyncio
+async def test_function_tool_with_async_callable_object():
+    """FunctionTool should correctly invoke callable objects with async ``__call__``.
+
+    ``inspect.iscoroutinefunction`` returns ``False`` for the instance itself, so the
+    implementation must detect the async ``__call__`` method separately.
+    """
+
+    class AsyncCallableTool:
+        async def __call__(self, x: int) -> int:
+            return x * 2
+
+    tool = function_tool(AsyncCallableTool())
+    assert tool.name == "AsyncCallableTool"
+
+    from agents.run_context import RunContextWrapper
+
+    ctx = RunContextWrapper(context=None)
+    result = await tool.on_invoke_tool(ctx, json.dumps({"x": 5}))
+    assert result == 10
+
+
+@pytest.mark.asyncio
+async def test_function_tool_with_sync_callable_object():
+    """FunctionTool should correctly invoke callable objects with sync ``__call__``."""
+
+    class SyncCallableTool:
+        def __call__(self, x: int) -> int:
+            return x + 1
+
+    tool = function_tool(SyncCallableTool())
+    assert tool.name == "SyncCallableTool"
+
+    from agents.run_context import RunContextWrapper
+
+    ctx = RunContextWrapper(context=None)
+    result = await tool.on_invoke_tool(ctx, json.dumps({"x": 5}))
+    assert result == 6
