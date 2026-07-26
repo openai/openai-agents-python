@@ -706,7 +706,10 @@ async def start_streaming(
             streamed_result.trace.finish(reset_current=True)
         if not streamed_result.is_complete:
             streamed_result.is_complete = True
-            streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+            try:
+                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+            except Exception:
+                pass
         raise
 
     try:
@@ -1850,14 +1853,14 @@ async def run_single_turn(
     output_schema = get_output_schema(execution_agent)
     handoffs = await get_handoffs(execution_agent, context_wrapper)
     if server_conversation_tracker is not None:
-        input = server_conversation_tracker.prepare_input(original_input, generated_items)
+        turn_input = server_conversation_tracker.prepare_input(original_input, generated_items)
     else:
-        input = _prepare_turn_input_items(original_input, generated_items, reasoning_item_id_policy)
+        turn_input = _prepare_turn_input_items(original_input, generated_items, reasoning_item_id_policy)
 
     new_response = await get_new_response(
         bindings,
         system_prompt,
-        input,
+        turn_input,
         output_schema,
         all_tools,
         handoffs,
