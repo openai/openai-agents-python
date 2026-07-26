@@ -1066,6 +1066,7 @@ class RunState(Generic[TContext, TAgent]):
                 include_tracing_api_key=include_tracing_api_key,
             ),
             indent=2,
+            default=str,
         )
 
     def set_trace(self, trace: Trace | None) -> None:
