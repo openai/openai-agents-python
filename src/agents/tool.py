@@ -2260,38 +2260,6 @@ def _validate_function_tool_callable_annotations(
         )
 
 
-def _function_tool_wrapped_target_is_sync(target: object) -> bool:
-    """Return whether every dispatch in a wrapper chain is safely synchronous."""
-    missing = object()
-    active: set[int] = set()
-
-    def resolve(current: object) -> bool:
-        current_id = id(current)
-        if current_id in active or isinstance(current, functools.partial):
-            return False
-        active.add(current_id)
-        try:
-            signature_override = inspect.getattr_static(current, "__signature__", missing)
-            if signature_override is not missing and signature_override is not None:
-                return False
-
-            if inspect.iscoroutinefunction(current):
-                return False
-            if not inspect.isroutine(current):
-                if not callable(current):
-                    return False
-                call_descriptor = inspect.getattr_static(type(current), "__call__", missing)
-                if not isinstance(call_descriptor, FunctionType) or not resolve(call_descriptor):
-                    return False
-
-            nested = inspect.getattr_static(current, "__wrapped__", missing)
-            return nested is missing or resolve(nested)
-        finally:
-            active.remove(current_id)
-
-    return resolve(target)
-
-
 def _normalize_function_tool_callable(
     func: ToolFunction[...],
     docstring_style: DocstringStyle | None,
@@ -2306,6 +2274,22 @@ def _normalize_function_tool_callable(
         )
     if inspect.isroutine(func) or inspect.isclass(func):
         return func, None
+
+    try:
+        instance_vars = vars(func)
+    except TypeError:
+        instance_vars = {}
+    missing = object()
+    if (
+        inspect.getattr_static(func, "__wrapped__", missing) is not missing
+        or inspect.getattr_static(func, "__signature__", missing) is not missing
+        or "__annotations__" in instance_vars
+        or "__annotate__" in instance_vars
+    ):
+        raise UserError(
+            "Unsupported callable wrapper: function_tool only infers plain callable instances. "
+            "Use an explicit wrapper function."
+        )
 
     call_owner = next(
         (owner for owner in type(func).__mro__ if "__call__" in owner.__dict__),
@@ -2322,7 +2306,7 @@ def _normalize_function_tool_callable(
     if (
         not isinstance(call_descriptor, FunctionType)
         or hasattr(call_descriptor, "__wrapped__")
-        or getattr(call_descriptor, "__signature__", None) is not None
+        or hasattr(call_descriptor, "__signature__")
     ):
         raise UserError(
             "Unsupported callable object: function_tool supports instances with a plain "
@@ -2330,54 +2314,18 @@ def _normalize_function_tool_callable(
             "built-in callables, or custom descriptors."
         )
 
-    try:
-        instance_vars = vars(func)
-    except TypeError:
-        instance_vars = {}
-    missing = object()
-    wrapped = inspect.getattr_static(func, "__wrapped__", missing)
-    signature_override = inspect.getattr_static(func, "__signature__", missing)
-    published_annotations = inspect.getattr_static(func, "__annotations__", missing)
-    published_annotate = inspect.getattr_static(func, "__annotate__", missing)
-    published_name = inspect.getattr_static(func, "__name__", missing)
-    if signature_override is not missing and signature_override is not None:
-        raise UserError(
-            "Unsupported callable wrapper: function_tool only infers plain callable instances. "
-            "Use an explicit wrapper function."
-        )
-    has_instance_function_metadata = (
-        "__annotations__" in instance_vars or "__annotate__" in instance_vars
-    )
-    has_named_class_function_metadata = isinstance(published_name, str) and (
-        published_annotations is not missing or published_annotate is not missing
-    )
-    has_function_metadata = has_instance_function_metadata or has_named_class_function_metadata
-    has_released_function_contract = (
-        not inspect.iscoroutinefunction(call_descriptor)
-        and (wrapped is not missing or has_function_metadata)
-        and (wrapped is missing or _function_tool_wrapped_target_is_sync(wrapped))
-    )
-    if not has_released_function_contract and (wrapped is not missing or has_function_metadata):
-        raise UserError(
-            "Unsupported callable wrapper: function_tool only infers plain callable instances. "
-            "Use an explicit wrapper function."
-        )
-
     call_method = cast(Callable[..., Any], call_descriptor.__get__(func, type(func)))
-    signature = inspect.signature(func if has_released_function_contract else call_method)
+    signature = inspect.signature(call_method)
+    globalns = dict(getattr(call_method, "__globals__", {}))
+    localns = dict(vars(call_owner))
+    localns[call_owner.__name__] = call_owner
     try:
-        if has_released_function_contract:
-            type_hints = get_type_hints(func, include_extras=True)
-        else:
-            globalns = dict(getattr(call_method, "__globals__", {}))
-            localns = dict(vars(call_owner))
-            localns[call_owner.__name__] = call_owner
-            type_hints = get_type_hints(
-                call_method,
-                globalns=globalns,
-                localns=localns,
-                include_extras=True,
-            )
+        type_hints = get_type_hints(
+            call_method,
+            globalns=globalns,
+            localns=localns,
+            include_extras=True,
+        )
     except (NameError, TypeError) as error:
         raise UserError(
             "Unsupported callable object annotations: use an explicit wrapper function with "
@@ -2401,15 +2349,8 @@ def _normalize_function_tool_callable(
 
     adapter_metadata = cast(Any, adapter)
     fallback_name = type(func).__name__
-    published_fallback_name = (
-        published_name
-        if has_released_function_contract and isinstance(published_name, str)
-        else fallback_name
-    )
     adapter_metadata.__name__ = (
-        fallback_name
-        if name_override
-        else validate_function_tool_fallback_name(published_fallback_name)
+        fallback_name if name_override else validate_function_tool_fallback_name(fallback_name)
     )
     adapter_metadata.__annotations__ = {
         name: annotation
@@ -2419,9 +2360,6 @@ def _normalize_function_tool_callable(
     adapter_metadata.__signature__ = signature
     if not use_docstring_info:
         adapter_metadata.__doc__ = None
-        class_description = None
-    elif has_released_function_contract:
-        adapter_metadata.__doc__ = inspect.getdoc(func)
         class_description = None
     else:
         class_doc = inspect.getdoc(type(func))

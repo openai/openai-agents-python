@@ -6,14 +6,14 @@ import inspect
 import json
 import operator
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from types import ModuleType
 from typing import Annotated, Any, Generic, TypeVar, cast
 
 import pytest
 from inline_snapshot import snapshot
 from pydantic import BaseModel
-from typing_extensions import ParamSpec, Self
+from typing_extensions import Self
 
 from agents import UserError, function_tool
 from agents.run_context import RunContextWrapper
@@ -32,7 +32,6 @@ def ctx_wrapper() -> ToolContext[DummyContext]:
 
 
 CallableValueT = TypeVar("CallableValueT")
-CallableParams = ParamSpec("CallableParams")
 
 
 @function_tool
@@ -475,186 +474,6 @@ async def test_sync_function_preserves_awaitable_result() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "metadata_kind",
-    [
-        "update-wrapper",
-        "nested-sync-wrapper",
-        "bound-method",
-        "signature-none",
-        "published-annotations",
-        "published-name",
-        "extra-annotation",
-    ],
-)
-async def test_released_sync_callable_metadata_contract_remains_supported(
-    metadata_kind: str,
-) -> None:
-    def target(value: int) -> int:
-        """Double the value."""
-        return value * 2
-
-    tool_kwargs: dict[str, Any] = {}
-    expected_name: str
-    expected_description: str
-    expected_result = 8
-    handler: Any
-    if metadata_kind == "update-wrapper":
-
-        class UpdatedWrapperHandler:
-            def __init__(self) -> None:
-                functools.update_wrapper(self, target)
-
-            def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                return target(*args, **kwargs)
-
-        handler = UpdatedWrapperHandler()
-        expected_name = "target"
-        expected_description = "Double the value."
-    elif metadata_kind == "nested-sync-wrapper":
-
-        class SyncIntermediate:
-            def __init__(self) -> None:
-                functools.update_wrapper(self, target)
-
-            @functools.wraps(target)
-            def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                return target(*args, **kwargs)
-
-        intermediate = SyncIntermediate()
-
-        class NestedSyncWrapperHandler:
-            def __init__(self) -> None:
-                functools.update_wrapper(self, intermediate)
-
-            def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                return intermediate(*args, **kwargs)
-
-        handler = NestedSyncWrapperHandler()
-        expected_name = "target"
-        expected_description = "Double the value."
-    elif metadata_kind == "bound-method":
-
-        class Service:
-            def method(self, value: int) -> int:
-                """Triple the value."""
-                return value * 3
-
-        class BoundMethodHandler:
-            def __init__(self, service: Service) -> None:
-                self.method = service.method
-                functools.update_wrapper(self, self.method)
-
-            def __call__(self, value: int) -> int:
-                return self.method(value)
-
-        handler = BoundMethodHandler(Service())
-        expected_name = "method"
-        expected_description = "Triple the value."
-        expected_result = 12
-    elif metadata_kind == "signature-none":
-
-        class SignatureNoneHandler:
-            def __init__(self) -> None:
-                functools.update_wrapper(self, target)
-                self.__signature__ = None
-
-            def __call__(self, value: int) -> int:
-                return target(value)
-
-        handler = SignatureNoneHandler()
-        expected_name = "target"
-        expected_description = "Double the value."
-    elif metadata_kind == "published-annotations":
-
-        class PublishedAnnotationsHandler:
-            def __init__(self) -> None:
-                self.__annotations__ = {"value": int, "return": int}
-
-            def __call__(self, value: Any) -> int:
-                return cast(int, value) * 2
-
-        handler = PublishedAnnotationsHandler()
-        tool_kwargs = {"name_override": "published_annotations", "use_docstring_info": False}
-        expected_name = "published_annotations"
-        expected_description = ""
-    elif metadata_kind == "published-name":
-
-        class PublishedNameHandler:
-            __name__ = "published_name"
-            __annotations__ = {"value": int, "return": int}
-
-            def __call__(self, value: Any) -> int:
-                return cast(int, value) * 2
-
-        handler = PublishedNameHandler()
-        expected_name = "published_name"
-        expected_description = inspect.getdoc(PublishedNameHandler) or ""
-    elif metadata_kind == "extra-annotation":
-
-        class ExtraAnnotationHandler:
-            def __init__(self) -> None:
-                self.__name__ = "extra_annotation"
-                self.__annotations__ = {
-                    "value": int,
-                    "return": int,
-                    "cache": CallableValueT,
-                }
-
-            def __call__(self, value: Any) -> int:
-                return cast(int, value) * 2
-
-        handler = ExtraAnnotationHandler()
-        expected_name = "extra_annotation"
-        expected_description = inspect.getdoc(ExtraAnnotationHandler) or ""
-    else:
-        raise AssertionError(f"Unhandled metadata kind: {metadata_kind}")
-
-    tool = function_tool(handler, **tool_kwargs)
-
-    assert tool.name == expected_name
-    assert tool.description == expected_description
-    assert tool.params_json_schema["properties"]["value"]["type"] == "integer"
-    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == expected_result
-
-
-@pytest.mark.asyncio
-async def test_released_sync_metadata_wrapper_preserves_tool_context() -> None:
-    def target(ctx: ToolContext[Any], value: int) -> str:
-        return f"{ctx.tool_name}:{value}"
-
-    class Handler:
-        def __init__(self) -> None:
-            functools.update_wrapper(self, target)
-
-        def __call__(self, *args: Any, **kwargs: Any) -> str:
-            return target(*args, **kwargs)
-
-    tool = function_tool(Handler())
-
-    assert list(tool.params_json_schema["properties"]) == ["value"]
-    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == "dummy:4"
-
-
-@pytest.mark.asyncio
-async def test_released_sync_metadata_wrapper_preserves_positional_only_run_context() -> None:
-    def target(ctx: RunContextWrapper[Any], /, value: int) -> str:
-        return f"{ctx.context.data}:{value}"
-
-    class Handler:
-        def __init__(self) -> None:
-            functools.update_wrapper(self, target)
-
-        def __call__(self, *args: Any, **kwargs: Any) -> str:
-            return target(*args, **kwargs)
-
-    tool = function_tool(Handler())
-
-    assert list(tool.params_json_schema["properties"]) == ["value"]
-    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == "something:4"
-
-
-@pytest.mark.asyncio
 async def test_async_callable_object_preserves_positional_context() -> None:
     class Handler:
         async def __call__(self, ctx: ToolContext[Any], value: int) -> str:
@@ -688,58 +507,6 @@ async def test_callable_docstring_opt_out_does_not_read_dynamic_doc() -> None:
     assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 8
 
 
-@pytest.mark.skipif(
-    sys.version_info < (3, 14),
-    reason="Built-in callable type hints require Python 3.14",
-)
-@pytest.mark.asyncio
-async def test_released_sync_builtin_wrapper_remains_supported() -> None:
-    class Handler:
-        def __init__(self) -> None:
-            self.routine = len
-            functools.update_wrapper(self, self.routine)
-
-        def __call__(self, value: Any) -> int:
-            return self.routine(value)
-
-    tool = function_tool(Handler(), use_docstring_info=False)
-
-    assert tool.name == "len"
-    assert list(tool.params_json_schema["properties"]) == ["obj"]
-    assert await tool.on_invoke_tool(ctx_wrapper(), '{"obj": [1, 2, 3]}') == 3
-
-
-@pytest.mark.skipif(
-    sys.version_info < (3, 14),
-    reason="Lazy annotations require Python 3.14",
-)
-@pytest.mark.asyncio
-async def test_released_lazy_callable_annotations_are_evaluated_once() -> None:
-    annotation_calls = 0
-
-    class Handler:
-        def __init__(self) -> None:
-            self.__name__ = "handler"
-
-            def annotate(_format: Any) -> dict[str, Any]:
-                nonlocal annotation_calls
-                annotation_calls += 1
-                if annotation_calls > 1:
-                    raise RuntimeError("Lazy annotations were evaluated more than once.")
-                return {"value": int, "return": int}
-
-            self.__annotate__ = annotate
-
-        def __call__(self, value: Any) -> int:
-            return cast(int, value) * 2
-
-    tool = function_tool(Handler(), use_docstring_info=False)
-
-    assert annotation_calls == 1
-    assert tool.params_json_schema["properties"]["value"]["type"] == "integer"
-    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 8
-
-
 def test_callable_contract_rejects_unknown_call_descriptor() -> None:
     class CustomDescriptor:
         def __get__(self, instance: Any, owner: type[Any]) -> Callable[..., Any]:
@@ -760,34 +527,15 @@ def test_callable_contract_rejects_unknown_call_descriptor() -> None:
         "staticmethod",
         "classmethod",
         "decorated-call",
-        "sync-decorated-call-with-metadata",
+        "update-wrapper",
         "published-annotations",
         "published-annotate",
         "custom-signature",
-        "metadata-custom-signature",
-        "sync-custom-signature",
         "method-signature",
         "local-annotation",
         "singledispatchmethod",
         "builtin",
         "nested-wrapper",
-        "sync-wrapper-async-target",
-        "sync-wrapper-async-bound-method-target",
-        "sync-wrapper-async-partial-target",
-        pytest.param(
-            "sync-wrapper-async-callable-partial-target",
-            marks=pytest.mark.skipif(
-                sys.version_info < (3, 14),
-                reason="Callable-instance partials are routines on Python 3.14",
-            ),
-        ),
-        "sync-wrapper-decorated-async-callable-target",
-        "sync-wrapper-async-intermediate-sync-target",
-        "sync-wrapper-custom-call-descriptor-target",
-        "sync-wrapper-nested-async-target",
-        "metadata-typevar-wrapper",
-        "metadata-paramspec-wrapper",
-        "metadata-keyword-only-context",
         "keyword-only-context",
         "variadic-context",
         "non-first-context",
@@ -844,21 +592,17 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return await target(*args, **kwargs)
 
         handler = DecoratedCallHandler()
-    elif shape == "sync-decorated-call-with-metadata":
+    elif shape == "update-wrapper":
 
-        def sync_target(value: int) -> int:
-            return value
+        class UpdatedWrapper:
+            def __init__(self, wrapped: Any) -> None:
+                self.wrapped = wrapped
+                functools.update_wrapper(self, wrapped)
 
-        class SyncDecoratedCallWithMetadata:
-            def __init__(self) -> None:
-                self.__name__ = "sync_target"
-                self.__annotations__ = {"value": int, "return": int}
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return self.wrapped(*args, **kwargs)
 
-            @functools.wraps(sync_target)
-            def __call__(self, *args: Any, **kwargs: Any) -> int:
-                return sync_target(*args, **kwargs)
-
-        handler = SyncDecoratedCallWithMetadata()
+        handler = UpdatedWrapper(target)
     elif shape == "published-annotations":
 
         class PublishedAnnotationsHandler:
@@ -896,43 +640,6 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return cast(int, args[0])
 
         handler = CustomSignatureHandler()
-    elif shape == "metadata-custom-signature":
-
-        class MetadataCustomSignatureHandler:
-            __signature__ = inspect.Signature(
-                [
-                    inspect.Parameter(
-                        "value",
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                        annotation=int,
-                    )
-                ]
-            )
-
-            def __init__(self) -> None:
-                self.__annotations__ = {"value": int, "return": int}
-
-            def __call__(self) -> int:
-                return 1
-
-        handler = MetadataCustomSignatureHandler()
-    elif shape == "sync-custom-signature":
-
-        class SyncCustomSignatureHandler:
-            __signature__ = inspect.Signature(
-                [
-                    inspect.Parameter(
-                        "value",
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                        annotation=int,
-                    )
-                ]
-            )
-
-            def __call__(self, value: Any) -> int:
-                return cast(int, value)
-
-        handler = SyncCustomSignatureHandler()
     elif shape == "method-signature":
 
         class MethodSignatureHandler:
@@ -982,192 +689,6 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return self.wrapped(*args, **kwargs)
 
         handler = NestedWrapper(NestedHandler())
-    elif shape == "sync-wrapper-async-target":
-
-        class SyncWrapperAsyncTarget:
-            def __init__(self) -> None:
-                functools.update_wrapper(self, target)
-
-            def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                return target(*args, **kwargs)
-
-        handler = SyncWrapperAsyncTarget()
-    elif shape == "sync-wrapper-async-bound-method-target":
-
-        class Service:
-            async def method(self, value: int) -> int:
-                return value
-
-        class SyncWrapperAsyncBoundMethodTarget:
-            def __init__(self, service: Service) -> None:
-                self.method = service.method
-                functools.update_wrapper(self, self.method)
-
-            def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                return self.method(*args, **kwargs)
-
-        handler = SyncWrapperAsyncBoundMethodTarget(Service())
-    elif shape == "sync-wrapper-async-partial-target":
-        async_partial = functools.partial(target)
-
-        class SyncWrapperAsyncPartialTarget:
-            def __init__(self) -> None:
-                functools.update_wrapper(
-                    self,
-                    async_partial,
-                    assigned=("__annotations__",),
-                )
-
-            def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                return async_partial(*args, **kwargs)
-
-        handler = SyncWrapperAsyncPartialTarget()
-    elif shape == "sync-wrapper-async-callable-partial-target":
-
-        class AsyncCallable:
-            async def __call__(self, value: int) -> int:
-                return value
-
-        async_callable_partial = functools.partial(AsyncCallable())
-
-        class SyncWrapperAsyncCallablePartialTarget:
-            def __init__(self) -> None:
-                functools.update_wrapper(self, async_callable_partial)
-
-            def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                return async_callable_partial(*args, **kwargs)
-
-        handler = SyncWrapperAsyncCallablePartialTarget()
-    elif shape == "sync-wrapper-decorated-async-callable-target":
-
-        class DecoratedAsyncCallable:
-            @functools.wraps(target)
-            def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                return target(*args, **kwargs)
-
-        callable_target = DecoratedAsyncCallable()
-
-        class SyncWrapperDecoratedAsyncCallableTarget:
-            def __init__(self) -> None:
-                functools.update_wrapper(self, callable_target)
-
-            def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                return callable_target(*args, **kwargs)
-
-        handler = SyncWrapperDecoratedAsyncCallableTarget()
-    elif shape == "sync-wrapper-async-intermediate-sync-target":
-
-        def sync_target(value: int) -> int:
-            return value
-
-        class AsyncIntermediate:
-            def __init__(self) -> None:
-                functools.update_wrapper(self, sync_target)
-
-            async def __call__(self, *args: Any, **kwargs: Any) -> int:
-                return sync_target(*args, **kwargs)
-
-        intermediate = AsyncIntermediate()
-
-        class SyncOuterWrapper:
-            def __init__(self) -> None:
-                functools.update_wrapper(self, intermediate)
-
-            def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                return intermediate(*args, **kwargs)
-
-        handler = SyncOuterWrapper()
-    elif shape == "sync-wrapper-custom-call-descriptor-target":
-
-        class AsyncCallDescriptor:
-            def __get__(
-                self,
-                instance: Any,
-                owner: type[Any] | None = None,
-            ) -> Callable[[int], Awaitable[int]]:
-                async def bound(value: int) -> int:
-                    return value
-
-                return bound
-
-            def __call__(self, value: int) -> int:
-                return value
-
-        class DescriptorTarget:
-            __call__ = AsyncCallDescriptor()
-
-        descriptor_target: Any = DescriptorTarget()
-        descriptor_target.__name__ = "descriptor_target"
-        descriptor_target.__annotations__ = {"value": int, "return": int}
-
-        class SyncWrapperCustomCallDescriptorTarget:
-            def __init__(self) -> None:
-                functools.update_wrapper(self, descriptor_target)
-
-            def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                return descriptor_target(*args, **kwargs)
-
-        handler = SyncWrapperCustomCallDescriptorTarget()
-    elif shape == "sync-wrapper-nested-async-target":
-
-        @functools.wraps(target)
-        def sync_bridge(*args: Any, **kwargs: Any) -> Any:
-            return target(*args, **kwargs)
-
-        class SyncWrapperNestedAsyncTarget:
-            def __init__(self) -> None:
-                functools.update_wrapper(self, sync_bridge)
-
-            def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                return sync_bridge(*args, **kwargs)
-
-        handler = SyncWrapperNestedAsyncTarget()
-    elif shape == "metadata-typevar-wrapper":
-
-        def identity(value: CallableValueT) -> CallableValueT:
-            return value
-
-        class MetadataTypeVarWrapper:
-            def __init__(self) -> None:
-                functools.update_wrapper(self, identity)
-
-            def __call__(self, value: Any) -> Any:
-                return identity(value)
-
-        handler = MetadataTypeVarWrapper()
-    elif shape == "metadata-paramspec-wrapper":
-
-        def forwarding_target(*args: Any, **kwargs: Any) -> int:
-            return len(args) + len(kwargs)
-
-        paramspec_metadata = cast(Any, CallableParams)
-        forwarding_target.__annotations__ = {
-            "args": paramspec_metadata.args,
-            "kwargs": paramspec_metadata.kwargs,
-            "return": int,
-        }
-
-        class MetadataParamSpecWrapper:
-            def __init__(self) -> None:
-                functools.update_wrapper(self, forwarding_target)
-
-            def __call__(self, *args: Any, **kwargs: Any) -> int:
-                return forwarding_target(*args, **kwargs)
-
-        handler = MetadataParamSpecWrapper()
-    elif shape == "metadata-keyword-only-context":
-
-        def contextual_target(*, ctx: ToolContext[Any], value: int) -> int:
-            return value
-
-        class MetadataKeywordOnlyContextHandler:
-            def __init__(self) -> None:
-                functools.update_wrapper(self, contextual_target)
-
-            def __call__(self, *, ctx: ToolContext[Any], value: int) -> int:
-                return contextual_target(ctx=ctx, value=value)
-
-        handler = MetadataKeywordOnlyContextHandler()
     elif shape == "keyword-only-context":
 
         class KeywordOnlyContextHandler:
