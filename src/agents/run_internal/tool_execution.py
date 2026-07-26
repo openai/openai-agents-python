@@ -1976,7 +1976,7 @@ class _FunctionToolBatchExecutor:
                 if not invoke_task.cancelled():
                     invoke_failure = invoke_task.exception()
                     if isinstance(invoke_failure, BaseException) and not isinstance(
-                        invoke_failure, Exception
+                        invoke_failure, asyncio.CancelledError
                     ):
                         raise invoke_failure from cancel_exc
             else:
