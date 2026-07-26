@@ -662,6 +662,13 @@ def test_callable_contract_rejects_unknown_call_descriptor() -> None:
         "sync-wrapper-async-target",
         "sync-wrapper-async-bound-method-target",
         "sync-wrapper-async-partial-target",
+        pytest.param(
+            "sync-wrapper-async-callable-partial-target",
+            marks=pytest.mark.skipif(
+                sys.version_info < (3, 14),
+                reason="Callable-instance partials are routines on Python 3.14",
+            ),
+        ),
         "sync-wrapper-nested-async-target",
         "metadata-typevar-wrapper",
         "metadata-paramspec-wrapper",
@@ -901,6 +908,22 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return async_partial(*args, **kwargs)
 
         handler = SyncWrapperAsyncPartialTarget()
+    elif shape == "sync-wrapper-async-callable-partial-target":
+
+        class AsyncCallable:
+            async def __call__(self, value: int) -> int:
+                return value
+
+        async_callable_partial = functools.partial(AsyncCallable())
+
+        class SyncWrapperAsyncCallablePartialTarget:
+            def __init__(self) -> None:
+                functools.update_wrapper(self, async_callable_partial)
+
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return async_callable_partial(*args, **kwargs)
+
+        handler = SyncWrapperAsyncCallablePartialTarget()
     elif shape == "sync-wrapper-nested-async-target":
 
         @functools.wraps(target)

@@ -2315,7 +2315,8 @@ def _normalize_function_tool_callable(
         )
     )
     has_supported_wrapped_target = wrapped is missing or (
-        inspect.isroutine(wrapped)
+        not isinstance(wrapped, functools.partial)
+        and inspect.isroutine(wrapped)
         and not inspect.iscoroutinefunction(wrapped)
         and not hasattr(wrapped, "__wrapped__")
         and getattr(wrapped, "__signature__", None) is None
