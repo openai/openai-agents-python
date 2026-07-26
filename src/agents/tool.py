@@ -2241,45 +2241,55 @@ def _validate_function_tool_callable_annotations(
             "function with concrete parameter and return annotations."
         )
 
-    for name, parameter in signature.parameters.items():
+    for index, (name, parameter) in enumerate(signature.parameters.items()):
         annotation = type_hints.get(name, parameter.annotation)
         if annotation is inspect.Signature.empty:
             continue
         plain_annotation = _unwrap_annotated_type(annotation)
         origin = get_origin(plain_annotation) or plain_annotation
-        if origin is RunContextWrapper or origin is ToolContext:
-            raise UserError(
-                "Unsupported callable object context parameter: use an explicit wrapper function "
-                "to receive RunContextWrapper or ToolContext."
-            )
+        if origin is not RunContextWrapper and origin is not ToolContext:
+            continue
+        if index == 0 and parameter.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            continue
+        raise UserError(
+            "Unsupported callable object context parameter: RunContextWrapper or ToolContext "
+            "must be the first positional parameter. Use an explicit wrapper function."
+        )
 
 
 def _function_tool_wrapped_target_is_sync(target: object) -> bool:
-    """Return whether a wrapper chain has one safely synchronous callable endpoint."""
+    """Return whether every dispatch in a wrapper chain is safely synchronous."""
     missing = object()
-    current = target
-    seen: set[int] = set()
+    active: set[int] = set()
 
-    while True:
+    def resolve(current: object) -> bool:
         current_id = id(current)
-        if current_id in seen or isinstance(current, functools.partial):
+        if current_id in active or isinstance(current, functools.partial):
             return False
-        seen.add(current_id)
+        active.add(current_id)
+        try:
+            signature_override = inspect.getattr_static(current, "__signature__", missing)
+            if signature_override is not missing and signature_override is not None:
+                return False
 
-        signature_override = inspect.getattr_static(current, "__signature__", missing)
-        if signature_override is not missing and signature_override is not None:
-            return False
+            if inspect.iscoroutinefunction(current):
+                return False
+            if not inspect.isroutine(current):
+                if not callable(current):
+                    return False
+                call_descriptor = inspect.getattr_static(type(current), "__call__", missing)
+                if call_descriptor is missing or not resolve(call_descriptor):
+                    return False
 
-        nested = inspect.getattr_static(current, "__wrapped__", missing)
-        if nested is missing:
-            break
-        current = nested
+            nested = inspect.getattr_static(current, "__wrapped__", missing)
+            return nested is missing or resolve(nested)
+        finally:
+            active.remove(current_id)
 
-    if not callable(current) or inspect.iscoroutinefunction(current):
-        return False
-
-    call_descriptor = inspect.getattr_static(type(current), "__call__", missing)
-    return call_descriptor is missing or not inspect.iscoroutinefunction(call_descriptor)
+    return resolve(target)
 
 
 def _normalize_function_tool_callable(

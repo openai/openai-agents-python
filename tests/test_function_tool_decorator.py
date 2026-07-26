@@ -495,16 +495,22 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
         expected_description = "Double the value."
     elif metadata_kind == "nested-sync-wrapper":
 
-        @functools.wraps(target)
-        def sync_bridge(*args: Any, **kwargs: Any) -> Any:
-            return target(*args, **kwargs)
+        class SyncIntermediate:
+            def __init__(self) -> None:
+                functools.update_wrapper(self, target)
+
+            @functools.wraps(target)
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return target(*args, **kwargs)
+
+        intermediate = SyncIntermediate()
 
         class NestedSyncWrapperHandler:
             def __init__(self) -> None:
-                functools.update_wrapper(self, sync_bridge)
+                functools.update_wrapper(self, intermediate)
 
             def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                return sync_bridge(*args, **kwargs)
+                return intermediate(*args, **kwargs)
 
         handler = NestedSyncWrapperHandler()
         expected_name = "target"
@@ -610,18 +616,66 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
 
 
 @pytest.mark.asyncio
+async def test_released_sync_metadata_wrapper_preserves_tool_context() -> None:
+    def target(ctx: ToolContext[Any], value: int) -> str:
+        return f"{ctx.tool_name}:{value}"
+
+    class Handler:
+        def __init__(self) -> None:
+            functools.update_wrapper(self, target)
+
+        def __call__(self, *args: Any, **kwargs: Any) -> str:
+            return target(*args, **kwargs)
+
+    tool = function_tool(Handler())
+
+    assert list(tool.params_json_schema["properties"]) == ["value"]
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == "dummy:4"
+
+
+@pytest.mark.asyncio
+async def test_released_sync_metadata_wrapper_preserves_positional_only_run_context() -> None:
+    def target(ctx: RunContextWrapper[Any], /, value: int) -> str:
+        return f"{ctx.context.data}:{value}"
+
+    class Handler:
+        def __init__(self) -> None:
+            functools.update_wrapper(self, target)
+
+        def __call__(self, *args: Any, **kwargs: Any) -> str:
+            return target(*args, **kwargs)
+
+    tool = function_tool(Handler())
+
+    assert list(tool.params_json_schema["properties"]) == ["value"]
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == "something:4"
+
+
+@pytest.mark.asyncio
+async def test_async_callable_object_preserves_positional_context() -> None:
+    class Handler:
+        async def __call__(self, ctx: ToolContext[Any], value: int) -> str:
+            return f"{ctx.tool_name}:{value}"
+
+    tool = function_tool(Handler(), name_override="handler")
+
+    assert list(tool.params_json_schema["properties"]) == ["value"]
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == "dummy:4"
+
+
+@pytest.mark.asyncio
 async def test_callable_docstring_opt_out_does_not_read_dynamic_doc() -> None:
     class RaisingDoc:
         def __get__(self, instance: Any, owner: type[Any] | None = None) -> str:
             raise AssertionError("The callable docstring should not be read.")
 
     class Handler:
-        __doc__ = RaisingDoc()
         __annotations__ = {"value": int, "return": int}
 
         def __call__(self, value: Any) -> int:
             return cast(int, value) * 2
 
+    cast(Any, Handler).__doc__ = RaisingDoc()
     tool = function_tool(
         Handler(),
         name_override="handler",
@@ -726,14 +780,15 @@ def test_callable_contract_rejects_unknown_call_descriptor() -> None:
                 reason="Callable-instance partials are routines on Python 3.14",
             ),
         ),
+        "sync-wrapper-decorated-async-callable-target",
+        "sync-wrapper-async-intermediate-sync-target",
         "sync-wrapper-nested-async-target",
         "metadata-typevar-wrapper",
         "metadata-paramspec-wrapper",
         "metadata-keyword-only-context",
-        "context",
         "keyword-only-context",
         "variadic-context",
-        "context-with-kwargs",
+        "non-first-context",
         "generic",
         "generic-signature",
         "self",
@@ -981,6 +1036,45 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return async_callable_partial(*args, **kwargs)
 
         handler = SyncWrapperAsyncCallablePartialTarget()
+    elif shape == "sync-wrapper-decorated-async-callable-target":
+
+        class DecoratedAsyncCallable:
+            @functools.wraps(target)
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return target(*args, **kwargs)
+
+        callable_target = DecoratedAsyncCallable()
+
+        class SyncWrapperDecoratedAsyncCallableTarget:
+            def __init__(self) -> None:
+                functools.update_wrapper(self, callable_target)
+
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return callable_target(*args, **kwargs)
+
+        handler = SyncWrapperDecoratedAsyncCallableTarget()
+    elif shape == "sync-wrapper-async-intermediate-sync-target":
+
+        def sync_target(value: int) -> int:
+            return value
+
+        class AsyncIntermediate:
+            def __init__(self) -> None:
+                functools.update_wrapper(self, sync_target)
+
+            async def __call__(self, *args: Any, **kwargs: Any) -> int:
+                return sync_target(*args, **kwargs)
+
+        intermediate = AsyncIntermediate()
+
+        class SyncOuterWrapper:
+            def __init__(self) -> None:
+                functools.update_wrapper(self, intermediate)
+
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return intermediate(*args, **kwargs)
+
+        handler = SyncOuterWrapper()
     elif shape == "sync-wrapper-nested-async-target":
 
         @functools.wraps(target)
@@ -1041,13 +1135,6 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return contextual_target(ctx=ctx, value=value)
 
         handler = MetadataKeywordOnlyContextHandler()
-    elif shape == "context":
-
-        class ContextHandler:
-            async def __call__(self, ctx: ToolContext[Any], value: int) -> int:
-                return value
-
-        handler = ContextHandler()
     elif shape == "keyword-only-context":
 
         class KeywordOnlyContextHandler:
@@ -1062,13 +1149,13 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return len(ctx)
 
         handler = VariadicContextHandler()
-    elif shape == "context-with-kwargs":
+    elif shape == "non-first-context":
 
-        class ContextWithKwargsHandler:
-            async def __call__(self, ctx: ToolContext[Any], **kwargs: Any) -> int:
-                return len(kwargs)
+        class NonFirstContextHandler:
+            async def __call__(self, value: int, ctx: ToolContext[Any]) -> int:
+                return value
 
-        handler = ContextWithKwargsHandler()
+        handler = NonFirstContextHandler()
     elif shape == "generic":
 
         class GenericHandler(Generic[CallableValueT]):
