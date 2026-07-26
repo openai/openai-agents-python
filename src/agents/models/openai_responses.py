@@ -735,7 +735,6 @@ class OpenAIResponsesModel(Model):
         prompt: ResponsePromptParam | None = None,
     ) -> dict[str, Any]:
         list_input = ItemHelpers.input_to_new_input_list(input)
-        list_input = _to_dump_compatible(list_input)
         list_input = self._remove_openai_responses_api_incompatible_fields(list_input)
 
         if model_settings.parallel_tool_calls and tools:
