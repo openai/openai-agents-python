@@ -773,7 +773,7 @@ def function_rejection_item(
         output_json_schema=output_json_schema,
     )
     return ToolCallOutputItem(
-        output=rejection_message,
+        output=provider_output,
         raw_item=ItemHelpers.tool_call_output_item(
             tool_call,
             provider_output,
