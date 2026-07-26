@@ -457,7 +457,13 @@ async def test_sync_function_preserves_awaitable_result() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "metadata_kind",
-    ["update-wrapper", "published-annotations", "published-name"],
+    [
+        "update-wrapper",
+        "signature-none",
+        "published-annotations",
+        "published-name",
+        "extra-annotation",
+    ],
 )
 async def test_released_sync_callable_metadata_contract_remains_supported(
     metadata_kind: str,
@@ -480,6 +486,19 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
                 return target(*args, **kwargs)
 
         handler = UpdatedWrapperHandler()
+        expected_name = "target"
+        expected_description = "Double the value."
+    elif metadata_kind == "signature-none":
+
+        class SignatureNoneHandler:
+            def __init__(self) -> None:
+                functools.update_wrapper(self, target)
+                self.__signature__ = None
+
+            def __call__(self, value: int) -> int:
+                return target(value)
+
+        handler = SignatureNoneHandler()
         expected_name = "target"
         expected_description = "Double the value."
     elif metadata_kind == "published-annotations":
@@ -507,6 +526,23 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
         handler = PublishedNameHandler()
         expected_name = "published_name"
         expected_description = inspect.getdoc(PublishedNameHandler) or ""
+    elif metadata_kind == "extra-annotation":
+
+        class ExtraAnnotationHandler:
+            def __init__(self) -> None:
+                self.__name__ = "extra_annotation"
+                self.__annotations__ = {
+                    "value": int,
+                    "return": int,
+                    "cache": CallableValueT,
+                }
+
+            def __call__(self, value: Any) -> int:
+                return cast(int, value) * 2
+
+        handler = ExtraAnnotationHandler()
+        expected_name = "extra_annotation"
+        expected_description = inspect.getdoc(ExtraAnnotationHandler) or ""
     else:
         raise AssertionError(f"Unhandled metadata kind: {metadata_kind}")
 

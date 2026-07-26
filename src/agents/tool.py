@@ -2218,7 +2218,15 @@ def _validate_function_tool_callable_annotations(
             return True
         return any(contains_specialized_annotation(arg) for arg in get_args(annotation))
 
-    if any(contains_specialized_annotation(annotation) for annotation in type_hints.values()):
+    contract_annotations = [
+        type_hints.get(name, parameter.annotation)
+        for name, parameter in signature.parameters.items()
+    ]
+    contract_annotations.append(type_hints.get("return", signature.return_annotation))
+    if any(
+        annotation is not inspect.Signature.empty and contains_specialized_annotation(annotation)
+        for annotation in contract_annotations
+    ):
         raise UserError(
             "Unsupported generic or aliased callable object annotations: use an explicit wrapper "
             "function with concrete parameter and return annotations."
@@ -2266,7 +2274,7 @@ def _normalize_function_tool_callable(
     if (
         not isinstance(call_descriptor, FunctionType)
         or hasattr(call_descriptor, "__wrapped__")
-        or hasattr(call_descriptor, "__signature__")
+        or getattr(call_descriptor, "__signature__", None) is not None
     ):
         raise UserError(
             "Unsupported callable object: function_tool supports instances with a plain "
@@ -2284,7 +2292,7 @@ def _normalize_function_tool_callable(
     published_annotations = inspect.getattr_static(func, "__annotations__", missing)
     published_annotate = inspect.getattr_static(func, "__annotate__", missing)
     published_name = inspect.getattr_static(func, "__name__", missing)
-    if signature_override is not missing:
+    if signature_override is not missing and signature_override is not None:
         raise UserError(
             "Unsupported callable wrapper: function_tool only infers plain callable instances. "
             "Use an explicit wrapper function."
@@ -2301,7 +2309,7 @@ def _normalize_function_tool_callable(
         isinstance(wrapped, FunctionType)
         and not inspect.iscoroutinefunction(wrapped)
         and not hasattr(wrapped, "__wrapped__")
-        and not hasattr(wrapped, "__signature__")
+        and getattr(wrapped, "__signature__", None) is None
     )
     has_released_function_contract = (
         not inspect.iscoroutinefunction(call_descriptor)
