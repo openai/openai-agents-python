@@ -2199,6 +2199,24 @@ def _validate_function_tool_output(
         ) from error
 
 
+def _reject_function_tool_callable_context(
+    signature: inspect.Signature,
+    type_hints: dict[str, Any],
+) -> None:
+    """Reject context injection for callable objects before tool invocation."""
+    for name, parameter in signature.parameters.items():
+        annotation = type_hints.get(name, parameter.annotation)
+        if annotation is inspect.Signature.empty:
+            continue
+        plain_annotation = _unwrap_annotated_type(annotation)
+        origin = get_origin(plain_annotation) or plain_annotation
+        if origin is RunContextWrapper or origin is ToolContext:
+            raise UserError(
+                "Unsupported callable object context parameter: use an explicit wrapper function "
+                "to receive RunContextWrapper or ToolContext."
+            )
+
+
 def _normalize_function_tool_callable(
     func: ToolFunction[...],
     docstring_style: DocstringStyle | None,
@@ -2229,9 +2247,15 @@ def _normalize_function_tool_callable(
     wrapped = inspect.getattr_static(func, "__wrapped__", missing)
     signature_override = inspect.getattr_static(func, "__signature__", missing)
     published_name = inspect.getattr_static(func, "__name__", missing)
+    wraps_async_routine = (
+        wrapped is not missing
+        and inspect.isroutine(wrapped)
+        and inspect.iscoroutinefunction(wrapped)
+    )
     has_released_function_contract = (
         isinstance(call_descriptor, FunctionType)
         and not inspect.iscoroutinefunction(call_descriptor)
+        and not wraps_async_routine
         and (
             (wrapped is not missing and inspect.isroutine(wrapped))
             or "__annotations__" in instance_vars
@@ -2240,6 +2264,9 @@ def _normalize_function_tool_callable(
         )
     )
     if has_released_function_contract:
+        signature = inspect.signature(func)
+        type_hints = get_type_hints(func, include_extras=True)
+        _reject_function_tool_callable_context(signature, type_hints)
         # Synchronous function-like callables with explicit metadata already flowed through
         # function_schema() in released versions. Preserve that path instead of reinterpreting it.
         return func, None
@@ -2308,17 +2335,7 @@ def _normalize_function_tool_callable(
             "Unsupported generic or aliased callable object annotations: use an explicit wrapper "
             "function with concrete parameter and return annotations."
         )
-    for name, parameter in signature.parameters.items():
-        annotation = type_hints.get(name, parameter.annotation)
-        if annotation is inspect.Signature.empty:
-            continue
-        plain_annotation = _unwrap_annotated_type(annotation)
-        origin = get_origin(plain_annotation) or plain_annotation
-        if origin is RunContextWrapper or origin is ToolContext:
-            raise UserError(
-                "Unsupported callable object context parameter: use an explicit wrapper function "
-                "to receive RunContextWrapper or ToolContext."
-            )
+    _reject_function_tool_callable_context(signature, type_hints)
 
     if inspect.iscoroutinefunction(call_method):
 

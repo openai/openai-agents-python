@@ -536,6 +536,8 @@ def test_callable_contract_rejects_unknown_call_descriptor() -> None:
         "singledispatchmethod",
         "builtin",
         "nested-wrapper",
+        "sync-wrapper-async-target",
+        "metadata-keyword-only-context",
         "context",
         "keyword-only-context",
         "variadic-context",
@@ -696,6 +698,29 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return self.wrapped(*args, **kwargs)
 
         handler = NestedWrapper(NestedHandler())
+    elif shape == "sync-wrapper-async-target":
+
+        class SyncWrapperAsyncTarget:
+            def __init__(self) -> None:
+                functools.update_wrapper(self, target)
+
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return target(*args, **kwargs)
+
+        handler = SyncWrapperAsyncTarget()
+    elif shape == "metadata-keyword-only-context":
+
+        def contextual_target(*, ctx: ToolContext[Any], value: int) -> int:
+            return value
+
+        class MetadataKeywordOnlyContextHandler:
+            def __init__(self) -> None:
+                functools.update_wrapper(self, contextual_target)
+
+            def __call__(self, *, ctx: ToolContext[Any], value: int) -> int:
+                return contextual_target(ctx=ctx, value=value)
+
+        handler = MetadataKeywordOnlyContextHandler()
     elif shape == "context":
 
         class ContextHandler:
