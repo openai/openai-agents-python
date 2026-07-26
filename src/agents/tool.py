@@ -2284,6 +2284,11 @@ def _normalize_function_tool_callable(
     published_annotations = inspect.getattr_static(func, "__annotations__", missing)
     published_annotate = inspect.getattr_static(func, "__annotate__", missing)
     published_name = inspect.getattr_static(func, "__name__", missing)
+    if signature_override is not missing:
+        raise UserError(
+            "Unsupported callable wrapper: function_tool only infers plain callable instances. "
+            "Use an explicit wrapper function."
+        )
     has_explicit_function_metadata = (
         "__annotations__" in instance_vars
         or "__annotate__" in instance_vars
@@ -2303,18 +2308,8 @@ def _normalize_function_tool_callable(
         and has_supported_wrapped_target
         and (wrapped is not missing or has_explicit_function_metadata)
     )
-    if has_released_function_contract:
-        signature = inspect.signature(func)
-        type_hints = get_type_hints(func, include_extras=True)
-        _validate_function_tool_callable_annotations(signature, type_hints)
-        # Synchronous function-like callables with explicit metadata already flowed through
-        # function_schema() in released versions. Preserve that path instead of reinterpreting it.
-        return func, None
-
-    if (
-        wrapped is not missing
-        or signature_override is not missing
-        or has_explicit_function_metadata
+    if not has_released_function_contract and (
+        wrapped is not missing or has_explicit_function_metadata
     ):
         raise UserError(
             "Unsupported callable wrapper: function_tool only infers plain callable instances. "
@@ -2322,17 +2317,20 @@ def _normalize_function_tool_callable(
         )
 
     call_method = cast(Callable[..., Any], call_descriptor.__get__(func, type(func)))
-    signature = inspect.signature(call_method)
-    globalns = dict(getattr(call_method, "__globals__", {}))
-    localns = dict(vars(call_owner))
-    localns[call_owner.__name__] = call_owner
+    signature = inspect.signature(func if has_released_function_contract else call_method)
     try:
-        type_hints = get_type_hints(
-            call_method,
-            globalns=globalns,
-            localns=localns,
-            include_extras=True,
-        )
+        if has_released_function_contract:
+            type_hints = get_type_hints(func, include_extras=True)
+        else:
+            globalns = dict(getattr(call_method, "__globals__", {}))
+            localns = dict(vars(call_owner))
+            localns[call_owner.__name__] = call_owner
+            type_hints = get_type_hints(
+                call_method,
+                globalns=globalns,
+                localns=localns,
+                include_extras=True,
+            )
     except (NameError, TypeError) as error:
         raise UserError(
             "Unsupported callable object annotations: use an explicit wrapper function with "
@@ -2356,23 +2354,34 @@ def _normalize_function_tool_callable(
 
     adapter_metadata = cast(Any, adapter)
     fallback_name = type(func).__name__
-    adapter_metadata.__name__ = (
-        fallback_name if name_override else validate_function_tool_fallback_name(fallback_name)
+    published_fallback_name = (
+        published_name
+        if has_released_function_contract and isinstance(published_name, str)
+        else fallback_name
     )
-    class_doc = inspect.getdoc(type(func))
-    call_doc = inspect.cleandoc(call_descriptor.__doc__) if call_descriptor.__doc__ else None
-    adapter_metadata.__doc__ = call_doc or class_doc
+    adapter_metadata.__name__ = (
+        fallback_name
+        if name_override
+        else validate_function_tool_fallback_name(published_fallback_name)
+    )
     adapter_metadata.__annotations__ = {
         name: annotation
         for name, annotation in type_hints.items()
         if name == "return" or name in signature.parameters
     }
     adapter_metadata.__signature__ = signature
-    class_description = (
-        generate_func_documentation(type(func), docstring_style).description
-        if class_doc and call_doc
-        else None
-    )
+    if has_released_function_contract:
+        adapter_metadata.__doc__ = inspect.getdoc(func)
+        class_description = None
+    else:
+        class_doc = inspect.getdoc(type(func))
+        call_doc = inspect.cleandoc(call_descriptor.__doc__) if call_descriptor.__doc__ else None
+        adapter_metadata.__doc__ = call_doc or class_doc
+        class_description = (
+            generate_func_documentation(type(func), docstring_style).description
+            if class_doc and call_doc
+            else None
+        )
     return cast("ToolFunction[...]", adapter), class_description
 
 

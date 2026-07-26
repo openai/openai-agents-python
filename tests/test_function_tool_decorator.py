@@ -463,9 +463,12 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
     metadata_kind: str,
 ) -> None:
     def target(value: int) -> int:
+        """Double the value."""
         return value * 2
 
     tool_kwargs: dict[str, Any] = {}
+    expected_name: str
+    expected_description: str
     handler: Any
     if metadata_kind == "update-wrapper":
 
@@ -477,6 +480,8 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
                 return target(*args, **kwargs)
 
         handler = UpdatedWrapperHandler()
+        expected_name = "target"
+        expected_description = "Double the value."
     elif metadata_kind == "published-annotations":
 
         class PublishedAnnotationsHandler:
@@ -488,6 +493,8 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
 
         handler = PublishedAnnotationsHandler()
         tool_kwargs = {"name_override": "published_annotations", "use_docstring_info": False}
+        expected_name = "published_annotations"
+        expected_description = ""
     elif metadata_kind == "published-name":
 
         class PublishedNameHandler:
@@ -498,11 +505,46 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
                 return cast(int, value) * 2
 
         handler = PublishedNameHandler()
+        expected_name = "published_name"
+        expected_description = inspect.getdoc(PublishedNameHandler) or ""
     else:
         raise AssertionError(f"Unhandled metadata kind: {metadata_kind}")
 
     tool = function_tool(handler, **tool_kwargs)
 
+    assert tool.name == expected_name
+    assert tool.description == expected_description
+    assert tool.params_json_schema["properties"]["value"]["type"] == "integer"
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 8
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 14),
+    reason="Lazy annotations require Python 3.14",
+)
+@pytest.mark.asyncio
+async def test_released_lazy_callable_annotations_are_evaluated_once() -> None:
+    annotation_calls = 0
+
+    class Handler:
+        def __init__(self) -> None:
+            self.__name__ = "handler"
+
+            def annotate(_format: Any) -> dict[str, Any]:
+                nonlocal annotation_calls
+                annotation_calls += 1
+                if annotation_calls > 1:
+                    raise RuntimeError("Lazy annotations were evaluated more than once.")
+                return {"value": int, "return": int}
+
+            self.__annotate__ = annotate
+
+        def __call__(self, value: Any) -> int:
+            return cast(int, value) * 2
+
+    tool = function_tool(Handler(), use_docstring_info=False)
+
+    assert annotation_calls == 1
     assert tool.params_json_schema["properties"]["value"]["type"] == "integer"
     assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 8
 
@@ -531,6 +573,7 @@ def test_callable_contract_rejects_unknown_call_descriptor() -> None:
         "published-annotations",
         "published-annotate",
         "custom-signature",
+        "metadata-custom-signature",
         "sync-custom-signature",
         "method-signature",
         "local-annotation",
@@ -651,6 +694,26 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return cast(int, args[0])
 
         handler = CustomSignatureHandler()
+    elif shape == "metadata-custom-signature":
+
+        class MetadataCustomSignatureHandler:
+            __signature__ = inspect.Signature(
+                [
+                    inspect.Parameter(
+                        "value",
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        annotation=int,
+                    )
+                ]
+            )
+
+            def __init__(self) -> None:
+                self.__annotations__ = {"value": int, "return": int}
+
+            def __call__(self) -> int:
+                return 1
+
+        handler = MetadataCustomSignatureHandler()
     elif shape == "sync-custom-signature":
 
         class SyncCustomSignatureHandler:
