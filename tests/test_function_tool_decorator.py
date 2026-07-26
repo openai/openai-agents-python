@@ -455,24 +455,9 @@ async def test_sync_function_preserves_awaitable_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_released_partial_callable_contract_remains_supported() -> None:
-    def multiply(value: int, factor: int = 2) -> int:
-        return value * factor
-
-    tool = function_tool(
-        functools.partial(multiply, factor=3),
-        name_override="multiply",
-        use_docstring_info=False,
-    )
-
-    assert tool.params_json_schema["properties"]["factor"]["default"] == 3
-    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 12
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "metadata_kind",
-    ["update-wrapper", "published-annotations", "custom-signature", "published-name"],
+    ["update-wrapper", "published-annotations", "published-name"],
 )
 async def test_released_sync_callable_metadata_contract_remains_supported(
     metadata_kind: str,
@@ -503,24 +488,6 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
 
         handler = PublishedAnnotationsHandler()
         tool_kwargs = {"name_override": "published_annotations", "use_docstring_info": False}
-    elif metadata_kind == "custom-signature":
-
-        class CustomSignatureHandler:
-            __signature__ = inspect.Signature(
-                [
-                    inspect.Parameter(
-                        "value",
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                        annotation=int,
-                    )
-                ]
-            )
-
-            def __call__(self, value: Any) -> int:
-                return cast(int, value) * 2
-
-        handler = CustomSignatureHandler()
-        tool_kwargs = {"name_override": "custom_signature", "use_docstring_info": False}
     elif metadata_kind == "published-name":
 
         class PublishedNameHandler:
@@ -555,6 +522,7 @@ def test_callable_contract_rejects_unknown_call_descriptor() -> None:
 @pytest.mark.parametrize(
     "shape",
     [
+        "partial",
         "partialmethod",
         "staticmethod",
         "classmethod",
@@ -562,6 +530,7 @@ def test_callable_contract_rejects_unknown_call_descriptor() -> None:
         "published-annotations",
         "published-annotate",
         "custom-signature",
+        "sync-custom-signature",
         "method-signature",
         "local-annotation",
         "singledispatchmethod",
@@ -596,7 +565,9 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
         return value
 
     handler: Any
-    if shape == "partialmethod":
+    if shape == "partial":
+        handler = functools.partial(target, 1)
+    elif shape == "partialmethod":
 
         class PartialMethodHandler:
             __call__ = functools.partialmethod(target, 1)
@@ -659,6 +630,23 @@ def test_unsupported_callable_shapes_require_explicit_wrappers(shape: str) -> No
                 return cast(int, args[0])
 
         handler = CustomSignatureHandler()
+    elif shape == "sync-custom-signature":
+
+        class SyncCustomSignatureHandler:
+            __signature__ = inspect.Signature(
+                [
+                    inspect.Parameter(
+                        "value",
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        annotation=int,
+                    )
+                ]
+            )
+
+            def __call__(self, value: Any) -> int:
+                return cast(int, value)
+
+        handler = SyncCustomSignatureHandler()
     elif shape == "method-signature":
 
         class MethodSignatureHandler:

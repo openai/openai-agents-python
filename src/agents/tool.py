@@ -2206,7 +2206,10 @@ def _normalize_function_tool_callable(
 ) -> tuple[ToolFunction[...], str | None]:
     """Adapt one plain callable instance to the existing function-tool pipeline."""
     if isinstance(func, functools.partial):
-        return func, None
+        raise UserError(
+            "Unsupported callable object: function_tool does not infer functools.partial "
+            "contracts. Use an explicit wrapper function."
+        )
     if inspect.isroutine(func) or inspect.isclass(func):
         return func, None
 
@@ -2231,7 +2234,6 @@ def _normalize_function_tool_callable(
         and not inspect.iscoroutinefunction(call_descriptor)
         and (
             (wrapped is not missing and inspect.isroutine(wrapped))
-            or signature_override is not missing
             or "__annotations__" in instance_vars
             or "__annotate__" in instance_vars
             or isinstance(published_name, str)
@@ -2260,8 +2262,8 @@ def _normalize_function_tool_callable(
     ):
         raise UserError(
             "Unsupported callable object: function_tool supports instances with a plain "
-            "__call__ method. Use an explicit wrapper function for partial methods, decorated "
-            "methods, built-in callables, or custom descriptors."
+            "__call__ method. Use an explicit wrapper function for partials, decorated methods, "
+            "built-in callables, or custom descriptors."
         )
     if getattr(call_owner, "__type_params__", ()) or getattr(call_owner, "__parameters__", ()):
         raise UserError(
