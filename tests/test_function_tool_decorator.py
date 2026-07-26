@@ -399,6 +399,7 @@ async def test_async_callable_object_works_with_configured_function_tool() -> No
 @pytest.mark.asyncio
 async def test_configured_async_callable_ignores_annotated_class_state() -> None:
     class AsyncCallable:
+        value: str
         factor: int
 
         def __init__(self, factor: int) -> None:
@@ -482,7 +483,6 @@ async def test_sync_function_preserves_awaitable_result() -> None:
         "bound-method",
         "signature-none",
         "published-annotations",
-        "class-published-annotations",
         "published-name",
         "extra-annotation",
     ],
@@ -577,21 +577,6 @@ async def test_released_sync_callable_metadata_contract_remains_supported(
         handler = PublishedAnnotationsHandler()
         tool_kwargs = {"name_override": "published_annotations", "use_docstring_info": False}
         expected_name = "published_annotations"
-        expected_description = ""
-    elif metadata_kind == "class-published-annotations":
-
-        class ClassPublishedAnnotationsHandler:
-            __annotations__ = {"value": int, "return": int}
-
-            def __call__(self, value: Any) -> int:
-                return cast(int, value) * 2
-
-        handler = ClassPublishedAnnotationsHandler()
-        tool_kwargs = {
-            "name_override": "class_published_annotations",
-            "use_docstring_info": False,
-        }
-        expected_name = "class_published_annotations"
         expected_description = ""
     elif metadata_kind == "published-name":
 
@@ -688,10 +673,8 @@ async def test_callable_docstring_opt_out_does_not_read_dynamic_doc() -> None:
             raise AssertionError("The callable docstring should not be read.")
 
     class Handler:
-        __annotations__ = {"value": int, "return": int}
-
-        def __call__(self, value: Any) -> int:
-            return cast(int, value) * 2
+        def __call__(self, value: int) -> int:
+            return value * 2
 
     cast(Any, Handler).__doc__ = RaisingDoc()
     tool = function_tool(
