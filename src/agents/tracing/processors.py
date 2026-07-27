@@ -668,8 +668,8 @@ class BatchTraceProcessor(TracingProcessor):
         self._export_batches(force=True, deadline=self._shutdown_deadline)
 
     def _export_batches(self, force: bool = False, deadline: float | None = None):
-        """Drains the queue and exports in batches. If force=True, export everything.
-        Otherwise, export up to `max_batch_size` repeatedly until the queue is completely empty.
+        """Drains the queue and exports in batches of up to `max_batch_size` until the queue
+        is completely empty.
         """
         with self._export_lock:
             while True:
@@ -682,9 +682,7 @@ class BatchTraceProcessor(TracingProcessor):
                 items_to_export: list[Span[Any] | Trace] = []
 
                 # Gather a batch of spans up to max_batch_size
-                while not self._queue.empty() and (
-                    force or len(items_to_export) < self._max_batch_size
-                ):
+                while not self._queue.empty() and len(items_to_export) < self._max_batch_size:
                     try:
                         items_to_export.append(self._queue.get_nowait())
                     except queue.Empty:

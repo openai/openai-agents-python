@@ -133,15 +133,14 @@ def test_batch_trace_processor_force_flush(mocked_exporter):
 
     processor.force_flush()
 
-    # Ensure exporter.export was called with all items
-    # Because max_batch_size=2, it may have been called multiple times
-    total_exported = 0
-    for call_args in mocked_exporter.export.call_args_list:
-        batch = call_args[0][0]  # first positional arg to export() is the items list
-        total_exported += len(batch)
+    # Ensure exporter.export was called with all items in batches respecting max_batch_size=2
+    exported_batches = [call_args[0][0] for call_args in mocked_exporter.export.call_args_list]
+    total_exported = sum(len(batch) for batch in exported_batches)
 
-    # We pushed 3 items; ensure they all got exported
+    # We pushed 3 items; ensure they all got exported across 2 batches (sizes 2 and 1)
     assert total_exported == 3
+    assert len(exported_batches) == 2
+    assert all(len(batch) <= 2 for batch in exported_batches)
 
     processor.shutdown()
 
