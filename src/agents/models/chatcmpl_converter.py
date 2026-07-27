@@ -149,9 +149,14 @@ class Converter:
 
             # Store thinking blocks for Anthropic compatibility
             if hasattr(message, "thinking_blocks") and message.thinking_blocks:
-                # Store thinking text in content and signature in encrypted_content
+                # Store thinking text in content and signature in encrypted_content.
+                # Emit exactly one signature slot per reasoning_text content item so the
+                # two lists stay index-aligned. Blocks with text but no signature get an
+                # empty-string placeholder; that keeps a later block's signature bound to
+                # its own block instead of shifting onto an earlier unsigned one.
                 reasoning_item.content = []
                 signatures: list[str] = []
+                has_signature = False
                 for block in message.thinking_blocks:
                     if isinstance(block, dict):
                         thinking_text = block.get("thinking", "")
@@ -159,12 +164,14 @@ class Converter:
                             reasoning_item.content.append(
                                 Content(text=thinking_text, type="reasoning_text")
                             )
-                        # Store the signature if present
-                        if signature := block.get("signature"):
-                            signatures.append(signature)
+                            signature = block.get("signature")
+                            signatures.append(signature or "")
+                            if signature:
+                                has_signature = True
 
-                # Store the signatures in encrypted_content with newline delimiter
-                if signatures:
+                # Only populate encrypted_content when at least one real signature exists,
+                # so the all-unsigned case leaves it unset as before.
+                if has_signature:
                     reasoning_item.encrypted_content = "\n".join(signatures)
 
             items.append(reasoning_item)
@@ -826,9 +833,12 @@ class Converter:
                                 "type": "thinking",
                                 "thinking": content_item.get("text", ""),
                             }
-                            # Add signatures if available
-                            if signatures:
-                                thinking_block["signature"] = signatures.pop(0)
+                            # Signatures are index-aligned with the reasoning_text items.
+                            # Pop the slot for this block; an empty placeholder means the
+                            # block had no signature, so leave it off.
+                            signature = signatures.pop(0) if signatures else ""
+                            if signature:
+                                thinking_block["signature"] = signature
                             reconstructed_thinking_blocks.append(thinking_block)
 
                     # Store thinking blocks as pending for the next assistant message

@@ -305,6 +305,112 @@ def test_items_to_messages_preserves_positional_bool_arguments():
     )
 
 
+def _roundtrip_thinking_blocks(
+    thinking_blocks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Round-trip a set of thinking blocks through message_to_output_items and back.
+
+    Returns the reconstructed thinking blocks (the ``thinking`` content parts) from the
+    rebuilt assistant message, so tests can assert each block keeps its own signature.
+    """
+    message = InternalChatCompletionMessage(
+        role="assistant",
+        content="Here is the answer.",
+        reasoning_content="Reasoning across multiple thinking blocks.",
+        thinking_blocks=cast(Any, thinking_blocks),
+        tool_calls=[
+            ChatCompletionMessageToolCall(
+                id="call_hetero",
+                type="function",
+                function=Function(name="get_weather", arguments='{"city": "Tokyo"}'),
+            )
+        ],
+    )
+
+    output_items = Converter.message_to_output_items(message)
+
+    items_as_dicts: list[dict[str, Any]] = []
+    for item in output_items:
+        if hasattr(item, "model_dump"):
+            items_as_dicts.append(item.model_dump())
+        else:
+            items_as_dicts.append(cast(dict[str, Any], item))
+
+    messages = Converter.items_to_messages(
+        items_as_dicts,  # type: ignore[arg-type]
+        model="claude-sonnet-4",
+        preserve_thinking_blocks=True,
+    )
+
+    assistant_messages = [
+        msg for msg in messages if msg.get("role") == "assistant" and msg.get("tool_calls")
+    ]
+    assert len(assistant_messages) == 1, "Should have exactly one assistant message with tool calls"
+
+    content = assistant_messages[0].get("content")
+    assert isinstance(content, list), "Assistant message content should be a list"
+    return [part for part in content if part.get("type") == "thinking"]
+
+
+def test_heterogeneous_signatures_unsigned_then_signed():
+    """A block with text-but-no-signature must not steal the next block's signature.
+
+    This is the core regression: with the old forward/reverse paths the reasoning text
+    and the signatures lived in two independently filtered lists, so an unsigned first
+    block shifted the second block's signature onto itself via ``pop(0)``.
+    """
+    blocks = _roundtrip_thinking_blocks(
+        [
+            {"type": "thinking", "thinking": "A-no-sig"},
+            {"type": "thinking", "thinking": "B-has-sig", "signature": "SIG_B"},
+        ]
+    )
+
+    assert len(blocks) == 2
+    assert blocks[0].get("thinking") == "A-no-sig"
+    assert blocks[0].get("signature") is None, "Unsigned block must stay unsigned"
+    assert blocks[1].get("thinking") == "B-has-sig"
+    assert blocks[1].get("signature") == "SIG_B", "Signed block must keep its own signature"
+
+
+def test_heterogeneous_signatures_signed_then_unsigned():
+    """A signed block followed by an unsigned one keeps its signature; the other stays None."""
+    blocks = _roundtrip_thinking_blocks(
+        [
+            {"type": "thinking", "thinking": "A-has-sig", "signature": "SIG_A"},
+            {"type": "thinking", "thinking": "B-no-sig"},
+        ]
+    )
+
+    assert len(blocks) == 2
+    assert blocks[0].get("thinking") == "A-has-sig"
+    assert blocks[0].get("signature") == "SIG_A"
+    assert blocks[1].get("thinking") == "B-no-sig"
+    assert blocks[1].get("signature") is None
+
+
+def test_heterogeneous_signatures_with_signature_only_block():
+    """A signature-only (redacted-style) block interleaved must not misalign the others.
+
+    The reverse path can only rebuild thinking blocks from ``reasoning_text`` content
+    items, so a text-less block is not reconstructed; the important guarantee is that its
+    presence does not shift signatures onto the wrong text-bearing blocks.
+    """
+    blocks = _roundtrip_thinking_blocks(
+        [
+            {"type": "thinking", "thinking": "A-no-sig"},
+            {"type": "thinking", "signature": "SIG_ONLY"},
+            {"type": "thinking", "thinking": "C-has-sig", "signature": "SIG_C"},
+        ]
+    )
+
+    assert len(blocks) == 2, "Only the two text-bearing blocks should be reconstructed"
+    assert blocks[0].get("thinking") == "A-no-sig"
+    assert blocks[0].get("signature") is None
+    assert blocks[1].get("thinking") == "C-has-sig"
+    assert blocks[1].get("signature") == "SIG_C"
+
+
 def test_anthropic_thinking_blocks_without_tool_calls():
     """
     Test for models with extended thinking WITHOUT tool calls.
