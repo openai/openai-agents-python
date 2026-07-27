@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from collections.abc import Sequence
@@ -409,3 +410,38 @@ async def test_async_sqlite_session_pop_item_same_timestamp_returns_latest():
         assert _item_ids(remaining) == ["rs_pop_same_ts"]
 
         await session.close()
+
+
+async def test_async_sqlite_session_concurrent_close():
+    """Test that concurrent and repeated calls to close() are safe and idempotent."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "async_close_race.db"
+        session = AsyncSQLiteSession("close_race_test", db_path)
+        await session.add_items([{"role": "user", "content": "hello"}])
+
+        # Multiple concurrent close calls should succeed without raising AttributeError
+        await asyncio.gather(session.close(), session.close(), session.close())
+
+        # Additional sequential close call should also be a safe no-op
+        await session.close()
+
+
+async def test_async_sqlite_session_closed_operations_raise_runtime_error():
+    """Test that operations on a closed AsyncSQLiteSession raise RuntimeError."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "async_closed_ops.db"
+        session = AsyncSQLiteSession("closed_ops_test", db_path)
+        await session.add_items([{"role": "user", "content": "hello"}])
+        await session.close()
+
+        with pytest.raises(RuntimeError, match="AsyncSQLiteSession is closed"):
+            await session.get_items()
+
+        with pytest.raises(RuntimeError, match="AsyncSQLiteSession is closed"):
+            await session.add_items([{"role": "user", "content": "more"}])
+
+        with pytest.raises(RuntimeError, match="AsyncSQLiteSession is closed"):
+            await session.pop_item()
+
+        with pytest.raises(RuntimeError, match="AsyncSQLiteSession is closed"):
+            await session.clear_session()

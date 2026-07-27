@@ -59,6 +59,7 @@ class AsyncSQLiteSession(SessionABC):
         self._connection: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
         self._init_lock = asyncio.Lock()
+        self._closed = False
 
     async def _init_db_for_connection(self, conn: aiosqlite.Connection) -> None:
         """Initialize the database schema for a specific connection."""
@@ -96,10 +97,15 @@ class AsyncSQLiteSession(SessionABC):
 
     async def _get_connection(self) -> aiosqlite.Connection:
         """Get or create a database connection."""
+        if self._closed:
+            raise RuntimeError("AsyncSQLiteSession is closed")
+
         if self._connection is not None:
             return self._connection
 
         async with self._init_lock:
+            if self._closed:
+                raise RuntimeError("AsyncSQLiteSession is closed")
             if self._connection is None:
                 self._connection = await aiosqlite.connect(str(self.db_path))
                 await self._connection.execute("PRAGMA journal_mode=WAL")
@@ -264,8 +270,10 @@ class AsyncSQLiteSession(SessionABC):
 
     async def close(self) -> None:
         """Close the database connection."""
-        if self._connection is None:
-            return
         async with self._lock:
-            await self._connection.close()
-            self._connection = None
+            if self._closed:
+                return
+            self._closed = True
+            if self._connection is not None:
+                await self._connection.close()
+                self._connection = None
