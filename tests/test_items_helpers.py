@@ -90,6 +90,12 @@ def test_none_refusal_is_rejected_before_extract_last_content() -> None:
         ResponseOutputRefusal.model_validate({"refusal": None, "type": "refusal"})
 
 
+def test_extract_last_content_of_refusal_message_with_none_via_model_construct() -> None:
+    refusal = ResponseOutputRefusal.model_construct(refusal=None, type="refusal")
+    message = make_message([refusal])
+    assert ItemHelpers.extract_last_content(message) == ""
+
+
 def test_extract_last_content_non_message_returns_empty() -> None:
     # Construct some other type of output item, e.g. a tool call, to verify non-message returns "".
     tool_call = ResponseFunctionToolCall(

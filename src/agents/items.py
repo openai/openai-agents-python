@@ -704,11 +704,11 @@ class ItemHelpers:
             # ``extract_text`` below.
             return last_content.text or ""
         elif isinstance(last_content, ResponseOutputRefusal):
-            # Unlike output text, supported provider paths only create refusal parts after
-            # receiving refusal text. A ``None`` value requires bypassing model validation
-            # with ``model_construct``, so this intentionally does not mirror the fallback
-            # above.
-            return last_content.refusal
+            # ``last_content.refusal`` is typed as ``str`` per the Responses API schema,
+            # but ``model_construct`` bypasses Pydantic validation and can produce
+            # ``None``. Coerce so callers relying on the ``-> str`` return type don't
+            # see a ``None``.
+            return last_content.refusal or ""
         else:
             raise ModelBehaviorError(f"Unexpected content type: {type(last_content)}")
 
