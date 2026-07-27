@@ -1031,6 +1031,15 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                 replay_safety="safe",
                 reason=str(request.error),
             )
+        if (
+            isinstance(request.error, ResponsesWebSocketError)
+            and request.error.event_type == "error"
+            and request.error.code == "server_is_overloaded"
+        ):
+            return ModelRetryAdvice(
+                suggested=True,
+                reason=str(request.error),
+            )
         return super().get_retry_advice(request)
 
     def _get_ws_request_lock(self) -> asyncio.Lock:

@@ -4009,6 +4009,91 @@ def test_websocket_get_retry_advice_allows_stateless_receive_timeout_retry() -> 
     assert advice.replay_safety is None
 
 
+@pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize("previous_response_id", [None, "resp_prev"])
+def test_websocket_get_retry_advice_marks_pre_response_overload_retryable(
+    previous_response_id: str | None,
+) -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = ResponsesWebSocketError(
+        {
+            "type": "error",
+            "error": {
+                "type": "service_unavailable_error",
+                "code": "server_is_overloaded",
+                "message": "Our servers are currently overloaded. Please try again later.",
+            },
+        }
+    )
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+            previous_response_id=previous_response_id,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety is None
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_keeps_partial_overload_unsafe() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = ResponsesWebSocketError(
+        {
+            "type": "error",
+            "error": {
+                "type": "service_unavailable_error",
+                "code": "server_is_overloaded",
+                "message": "Our servers are currently overloaded. Please try again later.",
+            },
+        }
+    )
+    setattr(error, "_openai_agents_ws_replay_safety", "unsafe")  # noqa: B010
+    setattr(error, "_openai_agents_ws_response_started", True)  # noqa: B010
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is False
+    assert advice.replay_safety == "unsafe"
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_ignores_other_pre_response_error_codes() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = ResponsesWebSocketError(
+        {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_request",
+                "message": "Invalid request.",
+            },
+        }
+    )
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+        )
+    )
+
+    assert advice is None
+
+
 def test_get_client_disables_provider_managed_retries_when_requested() -> None:
     class DummyClient:
         def __init__(self):
