@@ -4041,15 +4041,81 @@ def test_websocket_get_retry_advice_marks_pre_response_overload_retryable(
 
 
 @pytest.mark.allow_call_model_methods
-def test_websocket_get_retry_advice_keeps_partial_overload_unsafe() -> None:
+@pytest.mark.parametrize("previous_response_id", [None, "resp_prev"])
+def test_websocket_get_retry_advice_marks_pre_response_server_error_retryable(
+    previous_response_id: str | None,
+) -> None:
     model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
     error = ResponsesWebSocketError(
         {
             "type": "error",
             "error": {
-                "type": "service_unavailable_error",
-                "code": "server_is_overloaded",
-                "message": "Our servers are currently overloaded. Please try again later.",
+                "type": "server_error",
+                "code": None,
+                "message": "Sorry, something went wrong.",
+            },
+        }
+    )
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=True,
+            previous_response_id=previous_response_id,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety is None
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_does_not_override_non_transient_error_code() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = ResponsesWebSocketError(
+        {
+            "type": "error",
+            "error": {
+                "type": "server_error",
+                "code": "invalid_request_error",
+                "message": "Invalid request.",
+            },
+        }
+    )
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=True,
+        )
+    )
+
+    assert advice is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize(
+    ("error_type", "code"),
+    [
+        ("service_unavailable_error", "server_is_overloaded"),
+        ("server_error", None),
+    ],
+)
+def test_websocket_get_retry_advice_keeps_partial_transient_error_unsafe(
+    error_type: str,
+    code: str | None,
+) -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = ResponsesWebSocketError(
+        {
+            "type": "error",
+            "error": {
+                "type": error_type,
+                "code": code,
+                "message": "Transient provider error.",
             },
         }
     )

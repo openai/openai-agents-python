@@ -1034,7 +1034,10 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
         if (
             isinstance(request.error, ResponsesWebSocketError)
             and request.error.event_type == "error"
-            and request.error.code == "server_is_overloaded"
+            and (
+                request.error.code == "server_is_overloaded"
+                or (request.error.error_type == "server_error" and request.error.code is None)
+            )
         ):
             return ModelRetryAdvice(
                 suggested=True,
