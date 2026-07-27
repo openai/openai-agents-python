@@ -465,8 +465,10 @@ async def test_async_sqlite_session_close_rejects_operation_waiting_on_lock(
 
         assert session._connection is not None
         original_conn_close = session._connection.close
+        original_acquire = session._lock.acquire
         close_started = asyncio.Event()
         release_close = asyncio.Event()
+        operation_waiting = asyncio.Event()
         connect_calls = 0
         real_connect = aiosqlite.connect
 
@@ -475,37 +477,47 @@ async def test_async_sqlite_session_close_rejects_operation_waiting_on_lock(
             await release_close.wait()
             await original_conn_close(*args, **kwargs)
 
+        async def acquire_and_signal(*args: Any, **kwargs: Any) -> bool:
+            # Signal before waiting whenever the lock is already held by close().
+            if session._lock.locked():
+                operation_waiting.set()
+            return await original_acquire(*args, **kwargs)
+
         async def tracking_connect(*args: Any, **kwargs: Any) -> Any:
             nonlocal connect_calls
             connect_calls += 1
             return await real_connect(*args, **kwargs)
 
         session._connection.close = paused_close  # type: ignore[method-assign]
+        session._lock.acquire = acquire_and_signal  # type: ignore[method-assign]
         monkeypatch.setattr(aiosqlite, "connect", tracking_connect)
 
         close_task = asyncio.create_task(session.close())
-        await close_started.wait()
-        assert session._lock.locked()
-        assert session._closed is True
+        get_task: asyncio.Task[Any] | None = None
+        try:
+            await asyncio.wait_for(close_started.wait(), timeout=1)
+            assert session._lock.locked()
+            assert session._closed is True
 
-        get_task = asyncio.create_task(session.get_items())
-        # Wait until get_items() is parked on the session lock held by close().
-        for _ in range(100):
-            waiters = session._lock._waiters
-            if waiters:
-                break
+            get_task = asyncio.create_task(session.get_items())
+            await asyncio.wait_for(operation_waiting.wait(), timeout=1)
             assert not get_task.done()
-            await asyncio.sleep(0)
-        else:
-            pytest.fail("get_items() did not wait on the session lock held by close()")
-        assert not get_task.done()
 
-        release_close.set()
-        await close_task
+            release_close.set()
+            await asyncio.wait_for(close_task, timeout=1)
 
-        with pytest.raises(RuntimeError, match="AsyncSQLiteSession is closed"):
-            await get_task
+            with pytest.raises(RuntimeError, match="AsyncSQLiteSession is closed"):
+                await asyncio.wait_for(get_task, timeout=1)
 
-        assert session._closed is True
-        assert session._connection is None
-        assert connect_calls == 0
+            assert session._closed is True
+            assert session._connection is None
+            assert connect_calls == 0
+        finally:
+            release_close.set()
+            tasks = [task for task in (close_task, get_task) if task is not None]
+            if tasks:
+                _done, pending = await asyncio.wait(tasks, timeout=1)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
