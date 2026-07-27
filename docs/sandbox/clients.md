@@ -113,7 +113,7 @@ Hosted sandbox clients expose provider-specific mount strategies. Choose the bac
 | `DaytonaSandboxClient` | Supports rclone-backed cloud storage mounts with `DaytonaCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
 | `E2BSandboxClient` | Supports rclone-backed cloud storage mounts with `E2BCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
 | `RunloopSandboxClient` | Supports rclone-backed cloud storage mounts with `RunloopCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
-| `VercelSandboxClient` | No hosted-specific mount strategy is currently exposed. Use manifest files, repos, or other workspace inputs instead. |
+| `VercelSandboxClient` | Supports create-time S3 mounts with `VercelCloudBucketMountStrategy` on `S3Mount`. Mounts must be ephemeral; sessions containing them cannot be resumed. |
 
 </div>
 
@@ -130,8 +130,50 @@ The table below summarizes which remote storage entries each backend can mount d
 | `DaytonaSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `E2BSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `RunloopSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
-| `VercelSandboxClient` | - | - | - | - | - | - |
+| `VercelSandboxClient` | ✓ | - | - | - | - | - |
 
 </div>
+
+### Vercel S3 mounts
+
+Vercel supports `S3Mount` through `VercelCloudBucketMountStrategy`. Declare the mount in the manifest passed to `VercelSandboxClient.create`; the mount topology is fixed at sandbox creation time.
+
+```python
+import os
+
+from agents.extensions.sandbox.vercel import (
+    VercelCloudBucketMountStrategy,
+    VercelSandboxClient,
+    VercelSandboxClientOptions,
+)
+from agents.sandbox import Manifest
+from agents.sandbox.entries import S3Mount
+
+manifest = Manifest(
+    root="/workspace",
+    entries={
+        "data": S3Mount(
+            bucket="my-data-bucket",
+            region="us-east-1",
+            access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+            secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+            mount_strategy=VercelCloudBucketMountStrategy(),
+        )
+    },
+)
+
+session = await VercelSandboxClient().create(
+    manifest=manifest,
+    options=VercelSandboxClientOptions(allow_s3_credential_exposure=True),
+)
+```
+
+Important constraints:
+
+-   The strategy supports only `S3Mount`; R2, GCS, Azure Blob, Box, and S3 Files entries are not supported by the Vercel backend.
+-   Vercel S3 mounts must remain ephemeral and cannot target the workspace root, overlap other manifest entries, or change after creation.
+-   Inline S3 credentials are exposed to code running in the sandbox. `allow_s3_credential_exposure=True` is required when credentials are present; use credentials scoped to that sandbox and bucket.
+-   Credentials are removed from serialized session state. A session containing S3 mounts cannot be resumed; create a new sandbox from the trusted manifest instead.
+-   Native snapshots cannot be hydrated while S3 mounts are active. Remote bucket contents are not copied into workspace persistence.
 
 For more runnable examples, browse [examples/sandbox/](https://github.com/openai/openai-agents-python/tree/main/examples/sandbox) for local, coding, memory, handoff, and agent-composition patterns, and [examples/sandbox/extensions/](https://github.com/openai/openai-agents-python/tree/main/examples/sandbox/extensions) for hosted sandbox clients.
