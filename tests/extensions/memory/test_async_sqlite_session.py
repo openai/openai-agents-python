@@ -13,6 +13,7 @@ from typing import Any, cast
 import pytest
 
 pytest.importorskip("aiosqlite")  # Skip tests if aiosqlite is not installed
+import aiosqlite
 
 from agents import Agent, Runner, TResponseInputItem
 from agents.extensions.memory import AsyncSQLiteSession
@@ -445,3 +446,66 @@ async def test_async_sqlite_session_closed_operations_raise_runtime_error():
 
         with pytest.raises(RuntimeError, match="AsyncSQLiteSession is closed"):
             await session.clear_session()
+
+
+async def test_async_sqlite_session_close_rejects_operation_waiting_on_lock(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An operation queued behind close() must fail closed without reconnecting.
+
+    Controlled interleaving: close() acquires the session lock first, an
+    operation starts while close is paused inside the lock, then close
+    completes. The waiter must raise RuntimeError and must not recreate the
+    connection.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "async_close_interleave.db"
+        session = AsyncSQLiteSession("close_interleave_test", db_path)
+        await session.add_items([{"role": "user", "content": "hello"}])
+
+        assert session._connection is not None
+        original_conn_close = session._connection.close
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+        connect_calls = 0
+        real_connect = aiosqlite.connect
+
+        async def paused_close(*args: Any, **kwargs: Any) -> None:
+            close_started.set()
+            await release_close.wait()
+            await original_conn_close(*args, **kwargs)
+
+        async def tracking_connect(*args: Any, **kwargs: Any) -> Any:
+            nonlocal connect_calls
+            connect_calls += 1
+            return await real_connect(*args, **kwargs)
+
+        session._connection.close = paused_close  # type: ignore[method-assign]
+        monkeypatch.setattr(aiosqlite, "connect", tracking_connect)
+
+        close_task = asyncio.create_task(session.close())
+        await close_started.wait()
+        assert session._lock.locked()
+        assert session._closed is True
+
+        get_task = asyncio.create_task(session.get_items())
+        # Wait until get_items() is parked on the session lock held by close().
+        for _ in range(100):
+            waiters = session._lock._waiters
+            if waiters:
+                break
+            assert not get_task.done()
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("get_items() did not wait on the session lock held by close()")
+        assert not get_task.done()
+
+        release_close.set()
+        await close_task
+
+        with pytest.raises(RuntimeError, match="AsyncSQLiteSession is closed"):
+            await get_task
+
+        assert session._closed is True
+        assert session._connection is None
+        assert connect_calls == 0
