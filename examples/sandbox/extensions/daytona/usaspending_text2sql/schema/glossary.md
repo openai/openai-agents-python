@@ -854,7 +854,7 @@ A unique identifier assigned to a federal contract, purchase order, basic orderi
 
 **Official definition:** The unique identifier of the specific award being reported. 
 
-[Read more in the Federal Acquisition Regulation](https://www.acquisition.gov/far/html/Subpart%204_16.html).
+[Read more in the Federal Acquisition Regulation](https://www.acquisition.gov/far/subpart-4.16).
 
 ## Product or Service Code (PSC)
 
