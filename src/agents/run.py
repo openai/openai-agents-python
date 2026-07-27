@@ -1266,14 +1266,17 @@ class AgentRunner:
                             )
 
                             if parallel_guardrails:
+                                guardrail_task = asyncio.create_task(
+                                    run_input_guardrails(
+                                        starting_agent,
+                                        parallel_guardrails,
+                                        copy_input_items(original_input),
+                                        context_wrapper,
+                                    )
+                                )
                                 try:
                                     parallel_results, turn_result = await asyncio.gather(
-                                        run_input_guardrails(
-                                            starting_agent,
-                                            parallel_guardrails,
-                                            copy_input_items(original_input),
-                                            context_wrapper,
-                                        ),
+                                        guardrail_task,
                                         model_task,
                                     )
                                 except InputGuardrailTripwireTriggered:
@@ -1290,6 +1293,19 @@ class AgentRunner:
                                             run_state,
                                             store=store_setting,
                                         )
+                                    )
+                                    raise
+                                except BaseException:
+                                    # A non-tripwire failure (the model turn raising, or a
+                                    # guardrail raising a non-tripwire error) propagates from
+                                    # gather without cancelling the sibling task. Cancel and drain
+                                    # whichever side is still pending so it is not left running
+                                    # after the run has failed and its exception is not swallowed.
+                                    for pending_task in (guardrail_task, model_task):
+                                        if not pending_task.done():
+                                            pending_task.cancel()
+                                    await asyncio.gather(
+                                        guardrail_task, model_task, return_exceptions=True
                                     )
                                     raise
                             else:
