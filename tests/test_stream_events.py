@@ -130,7 +130,7 @@ async def test_stream_events_tool_called_includes_local_mcp_title() -> None:
         tools=[
             MCPTool(
                 name="search_docs",
-                inputSchema={},
+                input_schema={},
                 description=None,
                 title="Search Docs",
             )

@@ -1,7 +1,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from mcp.types import ListToolsResult, Tool as MCPTool
+from mcp_types import ListToolsResult, Tool as MCPTool
 
 from agents import Agent
 from agents.mcp import MCPServerStdio
@@ -28,8 +28,8 @@ async def test_server_caching_works(
     )
 
     tools = [
-        MCPTool(name="tool1", inputSchema={}),
-        MCPTool(name="tool2", inputSchema={}),
+        MCPTool(name="tool1", input_schema={}),
+        MCPTool(name="tool2", input_schema={}),
     ]
 
     mock_list_tools.return_value = ListToolsResult(tools=tools)

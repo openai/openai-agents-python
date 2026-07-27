@@ -144,7 +144,7 @@ async def test_runner_attaches_local_mcp_tool_origin_to_call_and_output_items() 
         tools=[
             MCPTool(
                 name="search_docs",
-                inputSchema={},
+                input_schema={},
                 description="Search the docs.",
                 title="Search Docs",
             )
@@ -173,7 +173,7 @@ async def test_streamed_tool_call_item_includes_local_mcp_origin() -> None:
         tools=[
             MCPTool(
                 name="search_docs",
-                inputSchema={},
+                input_schema={},
                 description=None,
                 title="Search Docs",
             )
@@ -307,7 +307,7 @@ def test_local_mcp_tool_origin_does_not_retain_server_object() -> None:
     function_tool = MCPUtil.to_function_tool(
         MCPTool(
             name="search_docs",
-            inputSchema={},
+            input_schema={},
             description="Search the docs.",
             title="Search Docs",
         ),

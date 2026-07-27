@@ -6,9 +6,9 @@ import shutil
 from typing import Any
 
 from mcp import Tool as MCPTool
-from mcp.types import (
+from mcp_types import (
     CallToolResult,
-    Content,
+    ContentBlock as Content,  # mcp SDK v2: Content renamed to ContentBlock
     GetPromptResult,
     ListPromptsResult,
     ListResourcesResult,
@@ -95,7 +95,7 @@ class FakeMCPServer(MCPServer):
         self._response_meta: dict[str, Any] | None = None
 
     def add_tool(self, name: str, input_schema: dict[str, Any]):
-        self.tools.append(MCPTool(name=name, inputSchema=input_schema))
+        self.tools.append(MCPTool(name=name, input_schema=input_schema))
 
     async def connect(self):
         pass
@@ -153,7 +153,7 @@ class FakeMCPServer(MCPServer):
         self, cursor: str | None = None
     ) -> ListResourceTemplatesResult:
         """Return empty list of resource templates for fake server."""
-        return ListResourceTemplatesResult(resourceTemplates=[])
+        return ListResourceTemplatesResult(resource_templates=[])
 
     async def read_resource(self, uri: str) -> ReadResourceResult:
         """Return empty resource contents for fake server."""

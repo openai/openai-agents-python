@@ -1,7 +1,7 @@
 from typing import Any
 
 import pytest
-from mcp.types import ListResourcesResult, ListResourceTemplatesResult, ReadResourceResult
+from mcp_types import ListResourcesResult, ListResourceTemplatesResult, ReadResourceResult
 
 from agents import Agent, Runner
 from agents.mcp import MCPServer, MCPToolMetaResolver
@@ -25,7 +25,7 @@ class FakeMCPPromptServer(MCPServer):
 
     def add_prompt(self, name: str, description: str, arguments: dict[str, Any] | None = None):
         """Add a prompt to the fake server"""
-        from mcp.types import Prompt
+        from mcp_types import Prompt
 
         prompt = Prompt(name=name, description=description, arguments=[])
         self.prompts.append(prompt)
@@ -42,13 +42,13 @@ class FakeMCPPromptServer(MCPServer):
 
     async def list_prompts(self, run_context=None, agent=None):
         """List available prompts"""
-        from mcp.types import ListPromptsResult
+        from mcp_types import ListPromptsResult
 
         return ListPromptsResult(prompts=self.prompts)
 
     async def get_prompt(self, name: str, arguments: dict[str, Any] | None = None):
         """Get a prompt with arguments"""
-        from mcp.types import GetPromptResult, PromptMessage, TextContent
+        from mcp_types import GetPromptResult, PromptMessage, TextContent
 
         if name not in self.prompt_results:
             raise ValueError(f"Prompt '{name}' not found")
@@ -83,7 +83,7 @@ class FakeMCPPromptServer(MCPServer):
     async def list_resource_templates(
         self, cursor: str | None = None
     ) -> ListResourceTemplatesResult:
-        return ListResourceTemplatesResult(resourceTemplates=[])
+        return ListResourceTemplatesResult(resource_templates=[])
 
     async def read_resource(self, uri: str) -> ReadResourceResult:
         return ReadResourceResult(contents=[])

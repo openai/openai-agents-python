@@ -1,7 +1,7 @@
 import asyncio
 
 import pytest
-from mcp.types import Tool as MCPTool
+from mcp_types import Tool as MCPTool
 
 from agents import Agent, RunContextWrapper, Runner
 from agents.exceptions import UserError

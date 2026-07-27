@@ -91,7 +91,7 @@ def test_process_model_response_shell_call_without_tool_raises() -> None:
 
 def test_process_model_response_sets_title_for_local_mcp_function_tool() -> None:
     agent = Agent(name="local-mcp", model=FakeModel())
-    mcp_tool = MCPTool(name="search_docs", inputSchema={}, description=None, title="Search Docs")
+    mcp_tool = MCPTool(name="search_docs", input_schema={}, description=None, title="Search Docs")
     function_tool = MCPUtil.to_function_tool(
         mcp_tool,
         FakeMCPServer(),

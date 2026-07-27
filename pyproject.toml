@@ -13,7 +13,7 @@ dependencies = [
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
     "websockets>=15.0, <17",
-    "mcp>=1.19.0, <2; python_version >= '3.10'",
+    "mcp>=2.0.0b2,<3; python_version >= '3.10'",
 ]
 classifiers = [
     "Typing :: Typed",

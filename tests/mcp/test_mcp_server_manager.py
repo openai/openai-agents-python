@@ -3,7 +3,7 @@ import logging
 from typing import Any, cast
 
 import pytest
-from mcp.types import (
+from mcp_types import (
     CallToolResult,
     GetPromptResult,
     ListPromptsResult,
@@ -66,7 +66,7 @@ class TaskBoundServer(MCPServer):
     async def list_resource_templates(
         self, cursor: str | None = None
     ) -> ListResourceTemplatesResult:
-        return ListResourceTemplatesResult(resourceTemplates=[])
+        return ListResourceTemplatesResult(resource_templates=[])
 
     async def read_resource(self, uri: str) -> ReadResourceResult:
         return ReadResourceResult(contents=[])
@@ -118,7 +118,7 @@ class FlakyServer(MCPServer):
     async def list_resource_templates(
         self, cursor: str | None = None
     ) -> ListResourceTemplatesResult:
-        return ListResourceTemplatesResult(resourceTemplates=[])
+        return ListResourceTemplatesResult(resource_templates=[])
 
     async def read_resource(self, uri: str) -> ReadResourceResult:
         return ReadResourceResult(contents=[])
@@ -184,7 +184,7 @@ class CleanupAwareServer(MCPServer):
     async def list_resource_templates(
         self, cursor: str | None = None
     ) -> ListResourceTemplatesResult:
-        return ListResourceTemplatesResult(resourceTemplates=[])
+        return ListResourceTemplatesResult(resource_templates=[])
 
     async def read_resource(self, uri: str) -> ReadResourceResult:
         return ReadResourceResult(contents=[])
@@ -314,7 +314,7 @@ class CancelledServer(MCPServer):
     async def list_resource_templates(
         self, cursor: str | None = None
     ) -> ListResourceTemplatesResult:
-        return ListResourceTemplatesResult(resourceTemplates=[])
+        return ListResourceTemplatesResult(resource_templates=[])
 
     async def read_resource(self, uri: str) -> ReadResourceResult:
         return ReadResourceResult(contents=[])

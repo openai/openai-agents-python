@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 import pytest
 from inline_snapshot import snapshot
-from mcp.shared.exceptions import McpError
-from mcp.types import CallToolResult, ErrorData, ImageContent, TextContent, Tool as MCPTool
+from mcp.shared.exceptions import MCPError
+from mcp_types import CallToolResult, ImageContent, TextContent, Tool as MCPTool
 from pydantic import BaseModel, TypeAdapter
 
 import agents._debug as _debug
@@ -512,7 +512,7 @@ async def test_invoke_mcp_tool():
     server.add_tool("test_tool_1", {})
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="test_tool_1", inputSchema={})
+    tool = MCPTool(name="test_tool_1", input_schema={})
 
     await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
     # Just making sure it doesn't crash
@@ -533,7 +533,7 @@ async def test_mcp_meta_resolver_merges_and_passes():
     server.add_tool("test_tool_1", {})
 
     ctx = RunContextWrapper(context={"request_id": "req-123"})
-    tool = MCPTool(name="test_tool_1", inputSchema={})
+    tool = MCPTool(name="test_tool_1", input_schema={})
 
     await MCPUtil.invoke_mcp_tool(
         server,
@@ -561,7 +561,7 @@ async def test_mcp_meta_resolver_does_not_mutate_arguments():
     server.add_tool("test_tool_1", {})
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="test_tool_1", inputSchema={})
+    tool = MCPTool(name="test_tool_1", input_schema={})
 
     await MCPUtil.invoke_mcp_tool(server, tool, ctx, '{"foo": "bar"}')
 
@@ -577,7 +577,7 @@ async def test_to_function_tool_passes_static_mcp_meta():
     server = FakeMCPServer()
     tool = MCPTool(
         name="test_tool_1",
-        inputSchema={},
+        input_schema={},
         _meta={"locale": "en", "extra": "value"},
     )
 
@@ -608,7 +608,7 @@ async def test_to_function_tool_merges_static_mcp_meta_with_resolver():
     server = FakeMCPServer(tool_meta_resolver=resolve_meta)
     tool = MCPTool(
         name="test_tool_1",
-        inputSchema={},
+        input_schema={},
         _meta={"locale": "en", "extra": "value"},
     )
 
@@ -644,7 +644,7 @@ async def test_to_function_tool_does_not_reuse_nested_static_mcp_meta():
     server = MutatingMetaServer()
     tool = MCPTool(
         name="test_tool_1",
-        inputSchema={},
+        input_schema={},
         _meta={"nested": {"headers": ["original"]}},
     )
 
@@ -672,7 +672,7 @@ async def test_mcp_invoke_bad_json_errors(caplog: pytest.LogCaptureFixture):
     server.add_tool("test_tool_1", {})
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="test_tool_1", inputSchema={})
+    tool = MCPTool(name="test_tool_1", input_schema={})
 
     with pytest.raises(ModelBehaviorError):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "not_json")
@@ -691,7 +691,7 @@ async def test_mcp_invoke_bad_json_redacts_payload_when_dont_log_tool_data(
     server.add_tool("test_tool_1", {})
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="test_tool_1", inputSchema={})
+    tool = MCPTool(name="test_tool_1", input_schema={})
     bad_json = '{"secret":"SECRET_TOKEN_123"'
 
     with pytest.raises(ModelBehaviorError) as exc_info:
@@ -715,7 +715,7 @@ async def test_mcp_invoke_bad_json_includes_payload_when_tool_logging_enabled(
     server.add_tool("test_tool_1", {})
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="test_tool_1", inputSchema={})
+    tool = MCPTool(name="test_tool_1", input_schema={})
     bad_json = '{"secret":"SECRET_TOKEN_123"'
 
     with pytest.raises(ModelBehaviorError) as exc_info:
@@ -735,7 +735,7 @@ async def test_mcp_invoke_rejects_non_object_json_input(input_json: str):
     server.add_tool("test_tool_1", {})
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="test_tool_1", inputSchema={})
+    tool = MCPTool(name="test_tool_1", input_schema={})
 
     with pytest.raises(ModelBehaviorError, match="expected a JSON object"):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, input_json)
@@ -802,7 +802,7 @@ async def test_mcp_invocation_crash_causes_error(caplog: pytest.LogCaptureFixtur
     server.add_tool("test_tool_1", {})
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="test_tool_1", inputSchema={})
+    tool = MCPTool(name="test_tool_1", input_schema={})
 
     with pytest.raises(AgentsException):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
@@ -827,7 +827,7 @@ class McpErrorFakeMCPServer(FakeMCPServer):
         arguments: dict[str, Any] | None,
         meta: dict[str, Any] | None = None,
     ):
-        raise McpError(ErrorData(code=-32000, message="upstream said SECRET_MCP_123"))
+        raise MCPError(code=-32000, message="upstream said SECRET_MCP_123")
 
 
 @pytest.mark.asyncio
@@ -840,7 +840,7 @@ async def test_mcp_invocation_crash_redacts_error_when_dont_log_tool_data(
     server = SecretCrashingFakeMCPServer(server_name="SECRET_CUSTOM_MCP_SERVER")
     server.add_tool("SECRET_MCP_TOOL_NAME", {})
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="SECRET_MCP_TOOL_NAME", inputSchema={})
+    tool = MCPTool(name="SECRET_MCP_TOOL_NAME", input_schema={})
 
     with pytest.raises(AgentsException):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
@@ -866,7 +866,7 @@ async def test_mcp_invocation_crash_includes_error_when_tool_logging_enabled(
     )
     server.add_tool("test_tool_1", {})
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="test_tool_1", inputSchema={})
+    tool = MCPTool(name="test_tool_1", input_schema={})
 
     with pytest.raises(AgentsException):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
@@ -887,9 +887,9 @@ async def test_mcp_tool_returned_error_redacts_message_when_dont_log_tool_data(
     server = McpErrorFakeMCPServer(server_name="SECRET_CUSTOM_MCP_SERVER")
     server.add_tool("SECRET_MCP_TOOL_NAME", {})
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="SECRET_MCP_TOOL_NAME", inputSchema={})
+    tool = MCPTool(name="SECRET_MCP_TOOL_NAME", input_schema={})
 
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
 
     assert "MCP tool returned an error" in caplog.text
@@ -908,9 +908,9 @@ async def test_mcp_tool_returned_error_includes_message_when_tool_logging_enable
     server = McpErrorFakeMCPServer()
     server.add_tool("test_tool_1", {})
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="test_tool_1", inputSchema={})
+    tool = MCPTool(name="test_tool_1", input_schema={})
 
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
 
     assert "SECRET_MCP_123" in caplog.text
@@ -922,7 +922,7 @@ async def test_mcp_tool_inner_cancellation_becomes_tool_error():
     server.add_tool("cancel_tool", {})
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="cancel_tool", inputSchema={})
+    tool = MCPTool(name="cancel_tool", input_schema={})
 
     with pytest.raises(MCPToolCancellationError, match="tool execution was cancelled"):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
@@ -956,7 +956,7 @@ async def test_mcp_tool_inner_cancellation_still_becomes_tool_error_with_prior_c
     server.add_tool("cancel_tool", {})
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="cancel_tool", inputSchema={})
+    tool = MCPTool(name="cancel_tool", input_schema={})
 
     with pytest.raises(MCPToolCancellationError, match="tool execution was cancelled"):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
@@ -968,7 +968,7 @@ async def test_mcp_tool_outer_cancellation_still_propagates():
     server.add_tool("slow_tool", {})
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="slow_tool", inputSchema={})
+    tool = MCPTool(name="slow_tool", input_schema={})
 
     task = asyncio.create_task(MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}"))
     await asyncio.sleep(0.05)
@@ -986,7 +986,7 @@ async def test_mcp_tool_outer_cancellation_after_inner_completion_still_propagat
     server.add_tool("fast_tool", {})
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="fast_tool", inputSchema={})
+    tool = MCPTool(name="fast_tool", input_schema={})
 
     async def fake_wait(tasks, *, return_when):
         del return_when
@@ -1008,7 +1008,7 @@ async def test_mcp_tool_outer_cancellation_after_inner_exception_still_propagate
     server.add_tool("boom_tool", {})
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="boom_tool", inputSchema={})
+    tool = MCPTool(name="boom_tool", input_schema={})
 
     async def fake_wait(tasks, *, return_when):
         del return_when
@@ -1033,7 +1033,7 @@ async def test_mcp_tool_outer_cancellation_after_inner_cancellation_still_propag
     server.add_tool("slow_tool", {})
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="slow_tool", inputSchema={})
+    tool = MCPTool(name="slow_tool", input_schema={})
 
     async def fake_wait(tasks, *, return_when):
         del return_when
@@ -1057,7 +1057,7 @@ async def test_mcp_tool_outer_cancellation_waits_for_inner_cleanup():
     server.add_tool("slow_tool", {})
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="slow_tool", inputSchema={})
+    tool = MCPTool(name="slow_tool", input_schema={})
 
     task = asyncio.create_task(MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}"))
     await asyncio.sleep(0.05)
@@ -1071,18 +1071,15 @@ async def test_mcp_tool_outer_cancellation_waits_for_inner_cleanup():
 
 @pytest.mark.asyncio
 async def test_mcp_invocation_mcp_error_reraises(caplog: pytest.LogCaptureFixture):
-    """Test that McpError from server.call_tool is re-raised so the FunctionTool failure
+    """Test that MCPError from server.call_tool is re-raised so the FunctionTool failure
     pipeline (failure_error_function) can handle it.
 
-    When an MCP server raises McpError (e.g. upstream HTTP 4xx/5xx), invoke_mcp_tool
+    When an MCP server raises MCPError (e.g. upstream HTTP 4xx/5xx), invoke_mcp_tool
     re-raises so the configured failure_error_function shapes the model-visible error.
     With the default failure_error_function the FunctionTool returns a string error
     result; with failure_error_function=None the error is propagated to the caller.
     """
     caplog.set_level(logging.DEBUG)
-
-    from mcp.shared.exceptions import McpError
-    from mcp.types import ErrorData
 
     class McpErrorFakeMCPServer(FakeMCPServer):
         async def call_tool(
@@ -1091,23 +1088,23 @@ async def test_mcp_invocation_mcp_error_reraises(caplog: pytest.LogCaptureFixtur
             arguments: dict[str, Any] | None,
             meta: dict[str, Any] | None = None,
         ):
-            raise McpError(ErrorData(code=-32000, message="upstream 422 Unprocessable Entity"))
+            raise MCPError(code=-32000, message="upstream 422 Unprocessable Entity")
 
     server = McpErrorFakeMCPServer()
     server.add_tool("search", {})
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="search", inputSchema={})
+    tool = MCPTool(name="search", input_schema={})
 
-    # invoke_mcp_tool itself should re-raise McpError
-    with pytest.raises(McpError):
+    # invoke_mcp_tool itself should re-raise MCPError
+    with pytest.raises(MCPError):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
     # Warning (not error) should be logged before re-raising
     assert "returned an error" in caplog.text
 
     # Via FunctionTool with default failure_error_function: error becomes a string result
-    mcp_tool = MCPTool(name="search", inputSchema={})
+    mcp_tool = MCPTool(name="search", input_schema={})
     agent = Agent(name="test-agent")
     function_tool = MCPUtil.to_function_tool(
         mcp_tool, server, convert_schemas_to_strict=False, agent=agent
@@ -1138,7 +1135,7 @@ async def test_mcp_tool_graceful_error_handling(caplog: pytest.LogCaptureFixture
     server.add_tool("crashing_tool", {})
 
     # Convert MCP tool to FunctionTool (this wraps invoke_mcp_tool with error handling)
-    mcp_tool = MCPTool(name="crashing_tool", inputSchema={})
+    mcp_tool = MCPTool(name="crashing_tool", input_schema={})
     agent = Agent(name="test-agent")
     function_tool = MCPUtil.to_function_tool(
         mcp_tool, server, convert_schemas_to_strict=False, agent=agent
@@ -1199,7 +1196,7 @@ async def test_mcp_tool_timeout_handling():
     server.add_tool("timeout_tool", {})
 
     # Convert MCP tool to FunctionTool
-    mcp_tool = MCPTool(name="timeout_tool", inputSchema={})
+    mcp_tool = MCPTool(name="timeout_tool", input_schema={})
     agent = Agent(name="test-agent")
     function_tool = MCPUtil.to_function_tool(
         mcp_tool, server, convert_schemas_to_strict=False, agent=agent
@@ -1227,7 +1224,7 @@ async def test_mcp_tool_cancellation_returns_error_message():
     server = CancelledFakeMCPServer()
     server.add_tool("cancelled_tool", {})
 
-    mcp_tool = MCPTool(name="cancelled_tool", inputSchema={})
+    mcp_tool = MCPTool(name="cancelled_tool", input_schema={})
     agent = Agent(name="test-agent")
     function_tool = MCPUtil.to_function_tool(
         mcp_tool, server, convert_schemas_to_strict=False, agent=agent
@@ -1255,7 +1252,7 @@ async def test_to_function_tool_legacy_call_without_agent_uses_server_policy():
 
     # Backward compatibility: old call style omitted the `agent` argument.
     function_tool = MCPUtil.to_function_tool(
-        MCPTool(name="legacy_tool", inputSchema={}),
+        MCPTool(name="legacy_tool", input_schema={}),
         server,
         convert_schemas_to_strict=False,
     )
@@ -1295,7 +1292,7 @@ async def test_to_function_tool_legacy_call_callable_policy_requires_approval():
     server._needs_approval_policy = require_approval  # type: ignore[assignment]
 
     function_tool = MCPUtil.to_function_tool(
-        MCPTool(name="legacy_callable_tool", inputSchema={}),
+        MCPTool(name="legacy_callable_tool", input_schema={}),
         server,
         convert_schemas_to_strict=False,
     )
@@ -1320,7 +1317,7 @@ async def test_to_function_tool_callable_policy_uses_agent_and_tool():
         return tool.name == "guarded_tool"
 
     server = FakeMCPServer(require_approval=require_approval)
-    tool = MCPTool(name="guarded_tool", inputSchema={})
+    tool = MCPTool(name="guarded_tool", input_schema={})
     agent = Agent(name="test-agent")
 
     function_tool = MCPUtil.to_function_tool(
@@ -1354,7 +1351,7 @@ async def test_to_function_tool_async_callable_policy_is_awaited():
         return tool.name == "async_guarded_tool"
 
     server = FakeMCPServer(require_approval=require_approval)
-    tool = MCPTool(name="async_guarded_tool", inputSchema={})
+    tool = MCPTool(name="async_guarded_tool", input_schema={})
     agent = Agent(name="test-agent")
 
     function_tool = MCPUtil.to_function_tool(
@@ -1616,13 +1613,13 @@ async def test_mcp_fastmcp_behavior_verification():
     - [[]] → content=[] → MCPUtil returns "[]" (recursive empty)
     """
 
-    from mcp.types import TextContent
+    from mcp_types import TextContent
 
     server = FakeMCPServer()
     server.add_tool("test_tool", {})
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="test_tool", inputSchema={})
+    tool = MCPTool(name="test_tool", input_schema={})
 
     # Case 1: None -> [].
     server._custom_content = []
@@ -1658,7 +1655,7 @@ async def test_mcp_fastmcp_behavior_verification():
     assert result == expected, f"String should return {expected}, got {result}"
 
     # Case 7: Image content works normally.
-    server._custom_content = [ImageContent(data="AAAA", mimeType="image/png", type="image")]
+    server._custom_content = [ImageContent(data="AAAA", mime_type="image/png", type="image")]
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
     expected = {"type": "image", "image_url": "data:image/png;base64,AAAA"}
     assert result == expected, f"Image should return {expected}, got {result}"
@@ -1731,7 +1728,7 @@ async def test_util_adds_properties():
 
 def test_to_function_tool_does_not_mutate_mcp_input_schema():
     schema = {"type": "object", "description": "Test tool"}
-    tool = MCPTool(name="test_tool", inputSchema=schema)
+    tool = MCPTool(name="test_tool", input_schema=schema)
 
     function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=False)
 
@@ -1741,7 +1738,7 @@ def test_to_function_tool_does_not_mutate_mcp_input_schema():
         "properties": {},
     }
     assert schema == {"type": "object", "description": "Test tool"}
-    assert tool.inputSchema == {"type": "object", "description": "Test tool"}
+    assert tool.input_schema == {"type": "object", "description": "Test tool"}
 
 
 def test_to_function_tool_failed_strict_conversion_keeps_original_schema():
@@ -1755,7 +1752,7 @@ def test_to_function_tool_failed_strict_conversion_keeps_original_schema():
             "x": {"type": "object", "additionalProperties": True},
         },
     }
-    tool = MCPTool(name="test_tool", inputSchema=schema)
+    tool = MCPTool(name="test_tool", input_schema=schema)
 
     function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
 
@@ -1792,7 +1789,7 @@ class StructuredContentTestServer(FakeMCPServer):
         self.tool_calls.append(tool_name)
 
         return CallToolResult(
-            content=self._test_content, structuredContent=self._test_structured_content
+            content=self._test_content, structured_content=self._test_structured_content
         )
 
 
@@ -1881,7 +1878,7 @@ async def test_structured_content_handling(
     server.set_test_result(content, structured_content)
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="test_tool", inputSchema={})
+    tool = MCPTool(name="test_tool", input_schema={})
 
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
     assert result == expected_output
@@ -1904,7 +1901,7 @@ async def test_structured_content_priority_over_text():
     server.set_test_result(text_content, structured_content)
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="priority_test", inputSchema={})
+    tool = MCPTool(name="priority_test", input_schema={})
 
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
@@ -1933,7 +1930,7 @@ async def test_structured_content_fallback_behavior():
     server.set_test_result(text_content, None)
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="fallback_test", inputSchema={})
+    tool = MCPTool(name="fallback_test", input_schema={})
 
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
@@ -1960,7 +1957,7 @@ async def test_backwards_compatibility_unchanged():
     server.set_test_result(text_content, structured_content)
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="compat_test", inputSchema={})
+    tool = MCPTool(name="compat_test", input_schema={})
 
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
@@ -1975,7 +1972,7 @@ async def test_backwards_compatibility_unchanged():
 async def test_empty_structured_content_fallback():
     """Test that empty structured content (falsy values) falls back to text content.
 
-    This tests the condition: if server.use_structured_content and result.structuredContent
+    This tests the condition: if server.use_structured_content and result.structured_content
     where empty dict {} should be falsy and trigger fallback.
     """
 
@@ -1988,7 +1985,7 @@ async def test_empty_structured_content_fallback():
     server.set_test_result(text_content, empty_structured)
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="empty_structured_test", inputSchema={})
+    tool = MCPTool(name="empty_structured_test", input_schema={})
 
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
@@ -2018,7 +2015,7 @@ async def test_complex_structured_content():
     server.set_test_result([], complex_structured)
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="complex_test", inputSchema={})
+    tool = MCPTool(name="complex_test", input_schema={})
 
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
@@ -2053,7 +2050,7 @@ async def test_multiple_content_items_with_structured():
     server.set_test_result(text_content, structured_content)
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="multi_content_test", inputSchema={})
+    tool = MCPTool(name="multi_content_test", input_schema={})
 
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
@@ -2080,7 +2077,7 @@ async def test_multiple_content_items_without_structured():
     server.set_test_result(text_content, None)
 
     ctx = RunContextWrapper(context=None)
-    tool = MCPTool(name="multi_text_test", inputSchema={})
+    tool = MCPTool(name="multi_text_test", input_schema={})
 
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
@@ -2097,7 +2094,7 @@ def test_to_function_tool_preserves_mcp_title_metadata():
     server = FakeMCPServer()
     tool = MCPTool(
         name="search_docs",
-        inputSchema={},
+        input_schema={},
         description="Search the docs.",
         title="Search Docs",
     )
@@ -2112,7 +2109,7 @@ def test_to_function_tool_description_falls_back_to_mcp_title():
     server = FakeMCPServer()
     tool = MCPTool(
         name="search_docs",
-        inputSchema={},
+        input_schema={},
         description=None,
         title="Search Docs",
     )

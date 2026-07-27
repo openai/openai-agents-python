@@ -7,8 +7,8 @@ import httpx
 import pytest
 from anyio import ClosedResourceError
 from mcp import ClientSession, Tool as MCPTool
-from mcp.shared.exceptions import McpError
-from mcp.types import CallToolResult, ErrorData, GetPromptResult, ListPromptsResult, ListToolsResult
+from mcp.shared.exceptions import MCPError
+from mcp_types import CallToolResult, GetPromptResult, ListPromptsResult, ListToolsResult
 
 from agents.exceptions import UserError
 from agents.mcp.server import MCPServerStreamableHttp, _MCPServerWithClientSession
@@ -34,7 +34,7 @@ class DummySession:
         self.list_tools_attempts += 1
         if self.list_tools_attempts <= self.fail_list_tools:
             raise RuntimeError("list_tools failure")
-        return ListToolsResult(tools=[MCPTool(name="tool", inputSchema={})])
+        return ListToolsResult(tools=[MCPTool(name="tool", input_schema={})])
 
 
 class DummyServer(_MCPServerWithClientSession):
@@ -82,7 +82,7 @@ async def test_call_tool_validates_required_parameters_before_remote_call():
     server._tools_list = [  # noqa: SLF001
         MCPTool(
             name="tool",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {"param_a": {"type": "string"}},
                 "required": ["param_a"],
@@ -103,7 +103,7 @@ async def test_call_tool_with_required_parameters_still_calls_remote_tool():
     server._tools_list = [  # noqa: SLF001
         MCPTool(
             name="tool",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {"param_a": {"type": "string"}},
                 "required": ["param_a"],
@@ -120,7 +120,7 @@ async def test_call_tool_with_required_parameters_still_calls_remote_tool():
 async def test_call_tool_skips_validation_when_tool_is_missing_from_cache():
     session = DummySession()
     server = DummyServer(session=session, retries=0)
-    server._tools_list = [MCPTool(name="different_tool", inputSchema={"required": ["param_a"]})]  # noqa: SLF001
+    server._tools_list = [MCPTool(name="different_tool", input_schema={"required": ["param_a"]})]  # noqa: SLF001
 
     await server.call_tool("tool", {})
     assert session.call_tool_attempts == 1
@@ -130,7 +130,7 @@ async def test_call_tool_skips_validation_when_tool_is_missing_from_cache():
 async def test_call_tool_skips_validation_when_required_list_is_absent():
     session = DummySession()
     server = DummyServer(session=session, retries=0)
-    server._tools_list = [MCPTool(name="tool", inputSchema={"type": "object"})]  # noqa: SLF001
+    server._tools_list = [MCPTool(name="tool", input_schema={"type": "object"})]  # noqa: SLF001
 
     await server.call_tool("tool", None)
     assert session.call_tool_attempts == 1
@@ -140,7 +140,7 @@ async def test_call_tool_skips_validation_when_required_list_is_absent():
 async def test_call_tool_validates_required_parameters_when_arguments_is_none():
     session = DummySession()
     server = DummyServer(session=session, retries=0)
-    server._tools_list = [MCPTool(name="tool", inputSchema={"required": ["param_a"]})]  # noqa: SLF001
+    server._tools_list = [MCPTool(name="tool", input_schema={"required": ["param_a"]})]  # noqa: SLF001
 
     with pytest.raises(UserError, match="missing required parameters: param_a"):
         await server.call_tool("tool", None)
@@ -152,7 +152,7 @@ async def test_call_tool_validates_required_parameters_when_arguments_is_none():
 async def test_call_tool_rejects_non_object_arguments_before_remote_call():
     session = DummySession()
     server = DummyServer(session=session, retries=0)
-    server._tools_list = [MCPTool(name="tool", inputSchema={"required": ["param_a"]})]  # noqa: SLF001
+    server._tools_list = [MCPTool(name="tool", input_schema={"required": ["param_a"]})]  # noqa: SLF001
 
     with pytest.raises(UserError, match="arguments must be an object"):
         await server.call_tool("tool", cast(dict[str, object] | None, ["bad"]))
@@ -236,9 +236,7 @@ class McpRequestTimeoutSession:
 
     async def call_tool(self, tool_name, arguments, meta=None):
         self.call_tool_attempts += 1
-        raise McpError(
-            ErrorData(code=httpx.codes.REQUEST_TIMEOUT, message=self.message),
-        )
+        raise MCPError(code=httpx.codes.REQUEST_TIMEOUT, message=self.message)
 
 
 class IsolatedRetrySession:
@@ -270,7 +268,7 @@ class DummyStreamableHttpServer(MCPServerStreamableHttp):
         yield self._isolated_session
 
     async def list_tools(self, run_context=None, agent=None):
-        return [MCPTool(name="tool", inputSchema={})]
+        return [MCPTool(name="tool", input_schema={})]
 
     async def list_prompts(self):
         return ListPromptsResult(prompts=[])
@@ -449,7 +447,7 @@ async def test_streamable_http_preserves_outer_cancellation_during_isolated_retr
 
 class ConcurrentPromptCancellationSession(ConcurrentCancellationSession):
     async def list_tools(self):
-        return ListToolsResult(tools=[MCPTool(name="tool", inputSchema={})])
+        return ListToolsResult(tools=[MCPTool(name="tool", input_schema={})])
 
     async def list_prompts(self):
         await self._slow_started.wait()

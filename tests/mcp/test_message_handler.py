@@ -8,7 +8,7 @@ import pytest
 from mcp.client.session import MessageHandlerFnT
 from mcp.shared.message import SessionMessage
 from mcp.shared.session import RequestResponder
-from mcp.types import (
+from mcp_types import (
     ClientResult,
     Implementation,
     InitializeResult,
@@ -53,9 +53,9 @@ class _StubClientSession:
         capabilities = ServerCapabilities.model_construct()
         server_info = Implementation.model_construct(name="stub", version="1.0")
         return InitializeResult(
-            protocolVersion="2024-11-05",
+            protocol_version="2024-11-05",
             capabilities=capabilities,
-            serverInfo=server_info,
+            server_info=server_info,
         )
 
 

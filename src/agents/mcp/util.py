@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol, Union
 
-import httpx
+import httpx2
 from typing_extensions import NotRequired, TypedDict
 
 from .. import _debug
@@ -20,7 +20,7 @@ from .._mcp_tool_metadata import resolve_mcp_tool_description_for_model, resolve
 from ..exceptions import AgentsException, MCPToolCancellationError, ModelBehaviorError, UserError
 
 try:
-    from mcp.shared.exceptions import McpError as _McpError
+    from mcp.shared.exceptions import MCPError as _McpError
 except ImportError:  # pragma: no cover – mcp is optional on Python < 3.10
     _McpError = None  # type: ignore[assignment, misc]
 from ..logger import log_tool_action_error, logger
@@ -52,7 +52,7 @@ else:
     ToolOutput = Union[str, ToolOutputItem, list[ToolOutputItem]]  # noqa: UP007
 
 if TYPE_CHECKING:
-    from mcp.types import Tool as MCPTool
+    from mcp_types import Tool as MCPTool
 
     from ..agent import AgentBase
     from .server import MCPServer
@@ -73,18 +73,19 @@ class _PrefixedToolNameCandidate:
 
 
 class HttpClientFactory(Protocol):
-    """Protocol for HTTP client factory functions.
+    """Protocol for HTTP client factory functions (mcp SDK v2).
 
-    This interface matches the MCP SDK's McpHttpClientFactory but is defined locally
-    to avoid accessing internal MCP SDK modules.
+    Implementations must return an ``httpx2.AsyncClient``.  This interface
+    matches ``mcp.shared._httpx_utils.McpHttpClientFactory`` and is defined
+    locally to avoid importing from internal mcp SDK modules.
     """
 
     def __call__(
         self,
         headers: dict[str, str] | None = None,
-        timeout: httpx.Timeout | None = None,
-        auth: httpx.Auth | None = None,
-    ) -> httpx.AsyncClient: ...
+        timeout: httpx2.Timeout | None = None,
+        auth: httpx2.Auth | None = None,
+    ) -> httpx2.AsyncClient: ...
 
 
 @dataclass
@@ -531,7 +532,7 @@ class MCPUtil:
         effective_failure_error_function = server._get_failure_error_function(
             failure_error_function
         )
-        schema, is_strict = copy.deepcopy(tool.inputSchema), False
+        schema, is_strict = copy.deepcopy(tool.input_schema), False
 
         # MCP spec doesn't require the inputSchema to have `properties`, but OpenAI spec does.
         if "properties" not in schema:
@@ -619,8 +620,8 @@ class MCPUtil:
             tool_display_name=tool_display_name,
             arguments=MappingProxyType(copy.deepcopy(arguments)),
             result_meta=cls._copy_mapping_proxy(getattr(result, "meta", None)),
-            structured_content=cls._copy_mapping_proxy(getattr(result, "structuredContent", None)),
-            is_error=getattr(result, "isError", None),
+            structured_content=cls._copy_mapping_proxy(getattr(result, "structured_content", None)),
+            is_error=getattr(result, "is_error", None),
             tool_output=copy.deepcopy(tool_output),
         )
         return await maybe_extract_custom_data(extractor, extractor_context)
@@ -758,8 +759,8 @@ class MCPUtil:
 
         # If structured content is requested and available, use it exclusively
         tool_output: ToolOutput
-        if server.use_structured_content and result.structuredContent:
-            tool_output = json.dumps(result.structuredContent)
+        if server.use_structured_content and result.structured_content:
+            tool_output = json.dumps(result.structured_content)
         else:
             tool_output_list: list[ToolOutputItem] = []
             for item in result.content:
@@ -768,7 +769,7 @@ class MCPUtil:
                 elif item.type == "image":
                     tool_output_list.append(
                         ToolOutputImageDict(
-                            type="image", image_url=f"data:{item.mimeType};base64,{item.data}"
+                            type="image", image_url=f"data:{item.mime_type};base64,{item.data}"
                         )
                     )
                 else:

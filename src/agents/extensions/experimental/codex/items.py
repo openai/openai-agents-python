@@ -9,7 +9,7 @@ from .payloads import _DictLike
 # Item payloads are emitted inside item.* events from the Codex CLI JSONL stream.
 
 if TYPE_CHECKING:
-    from mcp.types import ContentBlock as McpContentBlock
+    from mcp_types import ContentBlock as McpContentBlock
 else:
     McpContentBlock = Any  # type: ignore[assignment]
 

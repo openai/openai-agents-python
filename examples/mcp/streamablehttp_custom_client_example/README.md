@@ -1,14 +1,17 @@
-# Custom HTTP Client Factory Example
+# Custom HTTP Configuration Example
 
-This example demonstrates how to use the new `httpx_client_factory` parameter in `MCPServerStreamableHttp` to configure custom HTTP client behavior for MCP StreamableHTTP connections.
+This example demonstrates how to configure custom HTTP client behaviour for
+`MCPServerStreamableHttp` connections when using MCP Python SDK v2.
+
+> **Note (mcp SDK v2):** The `httpx_client_factory` parameter has been removed.
+> The `MCPServerStreamableHttp` transport now uses `httpx2` internally.
+> To customise HTTP behaviour, use the built-in params shown below.
 
 ## Features Demonstrated
 
-- **Custom SSL Configuration**: Configure SSL certificates and verification settings
 - **Custom Headers**: Add custom headers to all HTTP requests
 - **Custom Timeouts**: Set custom timeout values for requests
-- **Proxy Configuration**: Configure HTTP proxy settings
-- **Custom Retry Logic**: Set up custom retry behavior (through httpx configuration)
+- **Custom Authentication**: Pass an `httpx2.Auth` instance via the `auth` param
 
 ## Running the Example
 
@@ -22,24 +25,37 @@ This example demonstrates how to use the new `httpx_client_factory` parameter in
 
 ## Code Examples
 
-### Basic Custom Client
+### Custom Headers and Timeout (recommended)
 
 ```python
-import httpx
 from agents.mcp import MCPServerStreamableHttp
 
-def create_custom_http_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        verify=False,  # Disable SSL verification for testing
-        timeout=httpx.Timeout(60.0, read=120.0),
-        headers={"X-Custom-Client": "my-app"},
-    )
-
 async with MCPServerStreamableHttp(
-    name="Custom Client Server",
+    name="Custom Config Server",
     params={
         "url": "http://localhost:<port>/mcp",
-        "httpx_client_factory": create_custom_http_client,
+        "headers": {
+            "X-Custom-Client": "my-app",
+            "User-Agent": "MyApp/1.0",
+        },
+        "timeout": 60.0,          # connect timeout in seconds
+        "sse_read_timeout": 120.0, # SSE read timeout in seconds
+    },
+) as server:
+    # Use the server...
+```
+
+### Basic Authentication
+
+```python
+import httpx2
+from agents.mcp import MCPServerStreamableHttp
+
+async with MCPServerStreamableHttp(
+    name="Auth Server",
+    params={
+        "url": "http://localhost:<port>/mcp",
+        "auth": httpx2.BasicAuth(username="user", password="secret"),
     },
 ) as server:
     # Use the server...
@@ -47,17 +63,10 @@ async with MCPServerStreamableHttp(
 
 ## Use Cases
 
-- **Corporate Networks**: Configure proxy settings for corporate environments
-- **SSL/TLS Requirements**: Use custom SSL certificates for secure connections
-- **Custom Authentication**: Add custom headers for API authentication
-- **Network Optimization**: Configure timeouts and connection pooling
-- **Debugging**: Disable SSL verification for development environments
+- **Corporate Networks**: Add proxy-bypass headers or authentication
+- **Custom Authentication**: Use `httpx2.Auth` subclasses for OAuth token refresh
+- **Network Optimization**: Set timeouts appropriate for your environment
+- **Debugging**: Inspect headers via the `headers` param
 
-## Benefits
-
-- **Flexibility**: Configure HTTP client behavior to match your network requirements
-- **Security**: Use custom SSL certificates and authentication methods
-- **Performance**: Optimize timeouts and connection settings for your use case
-- **Compatibility**: Work with corporate proxies and network restrictions
-
-This example will auto-pick a free localhost port unless you set `STREAMABLE_HTTP_PORT`; use `STREAMABLE_HTTP_HOST` to change the bind address.
+This example will auto-pick a free localhost port unless you set `STREAMABLE_HTTP_PORT`;
+use `STREAMABLE_HTTP_HOST` to change the bind address.

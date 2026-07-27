@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from mcp.types import (
+from mcp_types import (
     ListResourcesResult,
     ListResourceTemplatesResult,
     ReadResourceResult,
@@ -11,7 +11,6 @@ from mcp.types import (
     ResourceTemplate,
     TextResourceContents,
 )
-from pydantic import AnyUrl
 
 from agents.mcp import MCPServerStreamableHttp
 
@@ -54,7 +53,7 @@ async def test_list_resources_returns_result(server: MCPServerStreamableHttp):
     mock_session = MagicMock()
     expected = ListResourcesResult(
         resources=[
-            Resource(uri=AnyUrl("file:///readme.md"), name="readme.md", mimeType="text/markdown"),
+            Resource(uri="file:///readme.md", name="readme.md", mime_type="text/markdown"),
         ]
     )
     mock_session.list_resources = AsyncMock(return_value=expected)
@@ -85,7 +84,7 @@ async def test_list_resource_templates_returns_result(server: MCPServerStreamabl
     """list_resource_templates delegates to the underlying MCP session."""
     mock_session = MagicMock()
     expected = ListResourceTemplatesResult(
-        resourceTemplates=[
+        resource_templates=[
             ResourceTemplate(uriTemplate="file:///{path}", name="file"),
         ]
     )
@@ -102,7 +101,7 @@ async def test_list_resource_templates_returns_result(server: MCPServerStreamabl
 async def test_list_resource_templates_forwards_cursor(server: MCPServerStreamableHttp):
     """list_resource_templates forwards the cursor argument for pagination."""
     mock_session = MagicMock()
-    page2 = ListResourceTemplatesResult(resourceTemplates=[])
+    page2 = ListResourceTemplatesResult(resource_templates=[])
     mock_session.list_resource_templates = AsyncMock(return_value=page2)
     server.session = mock_session
 
@@ -119,7 +118,7 @@ async def test_read_resource_returns_result(server: MCPServerStreamableHttp):
     uri = "file:///readme.md"
     expected = ReadResourceResult(
         contents=[
-            TextResourceContents(uri=AnyUrl(uri), text="# Hello", mimeType="text/markdown"),
+            TextResourceContents(uri=uri, text="# Hello", mime_type="text/markdown"),
         ]
     )
     mock_session.read_resource = AsyncMock(return_value=expected)
@@ -128,13 +127,15 @@ async def test_read_resource_returns_result(server: MCPServerStreamableHttp):
     result = await server.read_resource(uri)
 
     assert result is expected
-    mock_session.read_resource.assert_awaited_once_with(AnyUrl(uri))
+    # mcp SDK v2 converts str URIs to AnyUrl internally; compare as strings.
+    args, _ = mock_session.read_resource.await_args
+    assert str(args[0]) == uri
 
 
 @pytest.mark.asyncio
 async def test_base_methods_raise_not_implemented():
     """Bare MCPServer subclasses that don't override resource methods get NotImplementedError."""
-    from mcp.types import CallToolResult, GetPromptResult, ListPromptsResult
+    from mcp_types import CallToolResult, GetPromptResult, ListPromptsResult
 
     from agents.mcp import MCPServer
 
