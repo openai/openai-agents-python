@@ -10,6 +10,19 @@ from agents.tool import ShellCallOutcome, ShellCommandOutput
 from tests.fake_model import FakeModel
 
 
+def test_coerce_shell_call_preserves_zero_timeout() -> None:
+    tool_call = {
+        "call_id": "shell-0",
+        "action": {
+            "commands": ["echo hi"],
+            "timeout_ms": 0,
+        },
+        "status": "in_progress",
+    }
+    result = run_loop.coerce_shell_call(tool_call)
+    assert result.action.timeout_ms == 0
+
+
 def test_coerce_shell_call_reads_max_output_length() -> None:
     tool_call = {
         "call_id": "shell-1",
