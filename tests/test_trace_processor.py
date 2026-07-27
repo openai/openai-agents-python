@@ -139,8 +139,7 @@ def test_batch_trace_processor_force_flush(mocked_exporter):
 
     # We pushed 3 items; ensure they all got exported across 2 batches (sizes 2 and 1)
     assert total_exported == 3
-    assert len(exported_batches) == 2
-    assert all(len(batch) <= 2 for batch in exported_batches)
+    assert [len(batch) for batch in exported_batches] == [2, 1]
 
     processor.shutdown()
 
