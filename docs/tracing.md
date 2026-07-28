@@ -231,3 +231,4 @@ The following community and vendor integrations support the OpenAI Agents SDK tr
 -   [Datadog](https://docs.datadoghq.com/llm_observability/instrumentation/auto_instrumentation/?tab=python#openai-agents)
 -   [Latitude](https://docs.latitude.so/telemetry/frameworks/openai-agents)
 -   [DProvenanceKit](https://dprovenance.dev/openai-agents/)
+-   [Pisama](https://docs.pisama.ai/guides/integrations/openai-agents-sdk/)
