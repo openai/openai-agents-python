@@ -1489,15 +1489,46 @@ class AgentRunner:
                                 result._current_turn_persisted_item_count = (
                                     run_state._current_turn_persisted_item_count
                                 )
-                            await save_turn_items_if_needed(
-                                session=session,
-                                run_state=run_state,
-                                session_persistence_enabled=session_persistence_enabled,
-                                input_guardrail_results=input_guardrail_results,
-                                items=items_to_save_turn,
-                                response_id=turn_result.model_response.response_id,
-                                store=store_setting,
-                            )
+                            if (
+                                session_persistence_enabled
+                                and items_to_save_turn
+                                and not input_guardrails_triggered(input_guardrail_results)
+                            ):
+                                # When earlier items from this turn were already persisted
+                                # (resume / soft-cancel), save_turn_items_if_needed would
+                                # no-op. Use the resumed-turn path so accepted final items
+                                # are still appended after output guardrails succeed.
+                                if (
+                                    run_state is not None
+                                    and run_state._current_turn_persisted_item_count > 0
+                                ):
+                                    run_state._current_turn_persisted_item_count = (
+                                        await save_resumed_turn_items(
+                                            session=session,
+                                            items=items_to_save_turn,
+                                            persisted_count=(
+                                                run_state._current_turn_persisted_item_count
+                                            ),
+                                            response_id=turn_result.model_response.response_id,
+                                            reasoning_item_id_policy=(
+                                                run_state._reasoning_item_id_policy
+                                            ),
+                                            store=store_setting,
+                                        )
+                                    )
+                                    result._current_turn_persisted_item_count = (
+                                        run_state._current_turn_persisted_item_count
+                                    )
+                                else:
+                                    await save_turn_items_if_needed(
+                                        session=session,
+                                        run_state=run_state,
+                                        session_persistence_enabled=session_persistence_enabled,
+                                        input_guardrail_results=input_guardrail_results,
+                                        items=items_to_save_turn,
+                                        response_id=turn_result.model_response.response_id,
+                                        store=store_setting,
+                                    )
                             result._original_input = copy_input_items(original_input)
                             return _finalize_result(result)
                         elif isinstance(turn_result.next_step, NextStepInterruption):

@@ -3567,6 +3567,76 @@ async def test_output_guardrail_tripwire_keeps_prior_tool_turn_in_session():
 
 
 @pytest.mark.asyncio
+async def test_resumed_final_output_persists_after_passing_output_guardrail():
+    """Resumed runs with a positive persisted count still save accepted finals."""
+
+    def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=False,
+        )
+
+    @function_tool
+    def foo(a: str) -> str:
+        return f"result:{a}"
+
+    session = SimpleListSession()
+    model = FakeModel()
+    model.set_next_output([get_function_tool_call("foo", json.dumps({"a": "b"}))])
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[foo],
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    streamed = Runner.run_streamed(agent, input="user_message", session=session)
+    async for event in streamed.stream_events():
+        if event.type == "run_item_stream_event" and event.name == "tool_output":
+            streamed.cancel(mode="after_turn")
+
+    items_before_resume = await session.get_items()
+    assert any(
+        cast(dict[str, Any], item).get("type") == "function_call" for item in items_before_resume
+    )
+    assert any(
+        cast(dict[str, Any], item).get("type") == "function_call_output"
+        for item in items_before_resume
+    )
+    assert not any(
+        cast(dict[str, Any], item).get("role") == "assistant"
+        and cast(dict[str, Any], item).get("type") == "message"
+        for item in items_before_resume
+    )
+
+    # Soft-cancel saves the completed tool turn; recreate a resume boundary with a
+    # positive persisted count so deferred FinalOutput saves must use the
+    # resumed-turn path instead of save_turn_items_if_needed.
+    state = streamed.to_state()
+    state._current_turn_persisted_item_count = 2
+
+    model.set_next_output([get_text_message("accepted_final")])
+    resumed = await Runner.run(agent, state, session=session)
+    assert resumed.final_output == "accepted_final"
+
+    items_after_resume = await session.get_items()
+    assert items_after_resume[: len(items_before_resume)] == items_before_resume
+
+    assistant_messages = [
+        item
+        for item in items_after_resume
+        if cast(dict[str, Any], item).get("role") == "assistant"
+        and cast(dict[str, Any], item).get("type") == "message"
+    ]
+    assert len(assistant_messages) == 1
+    content = cast(dict[str, Any], assistant_messages[0]).get("content")
+    assert isinstance(content, list)
+    assert any(isinstance(part, dict) and part.get("text") == "accepted_final" for part in content)
+
+
+@pytest.mark.asyncio
 async def test_input_guardrail_no_tripwire_continues_execution():
     """Test input guardrail that doesn't trigger tripwire continues execution."""
 
