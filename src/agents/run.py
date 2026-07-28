@@ -1414,7 +1414,12 @@ class AgentRunner:
                                     )
                                 ):
                                     items_to_save_turn.append(item)
-                            if items_to_save_turn:
+                            # Defer final-output persistence until after output guardrails
+                            # succeed so a tripwire does not leave rejected assistant output
+                            # in the session (matches the streamed path).
+                            if items_to_save_turn and not isinstance(
+                                turn_result.next_step, NextStepFinalOutput
+                            ):
                                 logger.debug(
                                     "Persisting turn items (types=%s)",
                                     [item.type for item in items_to_save_turn],
@@ -1489,7 +1494,7 @@ class AgentRunner:
                                 run_state=run_state,
                                 session_persistence_enabled=session_persistence_enabled,
                                 input_guardrail_results=input_guardrail_results,
-                                items=session_items_for_turn(turn_result),
+                                items=items_to_save_turn,
                                 response_id=turn_result.model_response.response_id,
                                 store=store_setting,
                             )

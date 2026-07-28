@@ -1543,6 +1543,37 @@ async def test_output_guardrail_tripwire_triggered_causes_exception_streamed():
 
 
 @pytest.mark.asyncio
+async def test_output_guardrail_streamed_does_not_save_assistant_message_to_session():
+    def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=True,
+        )
+
+    session = SimpleListSession()
+    model = FakeModel()
+    model.set_next_output([get_text_message("should_not_be_saved")])
+    agent = Agent(
+        name="test",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        result = Runner.run_streamed(agent, input="user_message", session=session)
+        async for _ in result.stream_events():
+            pass
+
+    items = await session.get_items()
+    assert len(items) == 1
+    first_item = cast(dict[str, Any], items[0])
+    assert first_item["role"] == "user"
+    assert first_item["content"] == "user_message"
+
+
+@pytest.mark.asyncio
 async def test_output_guardrail_tripwire_raises_from_run_loop_task_before_stream_consumption():
     def guardrail_function(
         context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any

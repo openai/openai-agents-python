@@ -3382,6 +3382,9 @@ async def test_session_persists_only_new_step_items(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         "agents.run_internal.session_persistence.save_result_to_session", save_wrapper
     )
+    monkeypatch.setattr(
+        "agents.run_internal.agent_runner_helpers.save_result_to_session", save_wrapper
+    )
     monkeypatch.setattr("agents.run.run_single_turn", fake_run_single_turn)
     monkeypatch.setattr("agents.run_internal.run_loop.run_single_turn", fake_run_single_turn)
     monkeypatch.setattr("agents.run.run_output_guardrails", fake_run_output_guardrails)
@@ -3432,6 +3435,135 @@ async def test_output_guardrail_tripwire_triggered_causes_exception():
 
     with pytest.raises(OutputGuardrailTripwireTriggered):
         await Runner.run(agent, input="user_message")
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_tripwire_does_not_save_assistant_message_to_session():
+    def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=True,
+        )
+
+    session = SimpleListSession()
+    model = FakeModel()
+    model.set_next_output([get_text_message("should_not_be_saved")])
+    agent = Agent(
+        name="test",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        await Runner.run(agent, input="user_message", session=session)
+
+    items = await session.get_items()
+    assert len(items) == 1
+    first_item = cast(dict[str, Any], items[0])
+    assert first_item["role"] == "user"
+    assert first_item["content"] == "user_message"
+
+
+def test_output_guardrail_tripwire_does_not_save_assistant_message_to_session_sync():
+    def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=True,
+        )
+
+    session = SimpleListSession()
+    model = FakeModel()
+    model.set_next_output([get_text_message("should_not_be_saved")])
+    agent = Agent(
+        name="test",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        Runner.run_sync(agent, input="user_message", session=session)
+
+    items = asyncio.run(session.get_items())
+    assert len(items) == 1
+    first_item = cast(dict[str, Any], items[0])
+    assert first_item["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_success_still_saves_assistant_message_to_session():
+    def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=False,
+        )
+
+    session = SimpleListSession()
+    model = FakeModel()
+    model.set_next_output([get_text_message("safe_response")])
+    agent = Agent(
+        name="test",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    result = await Runner.run(agent, input="user_message", session=session)
+    assert result.final_output == "safe_response"
+
+    items = await session.get_items()
+    assert len(items) == 2
+    assert cast(dict[str, Any], items[0])["role"] == "user"
+    assert cast(dict[str, Any], items[1])["role"] == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_tripwire_keeps_prior_tool_turn_in_session():
+    """Earlier completed turns remain persisted when a later final turn is rejected."""
+
+    def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=True,
+        )
+
+    @function_tool
+    def foo(a: str) -> str:
+        return f"result:{a}"
+
+    session = SimpleListSession()
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("foo", json.dumps({"a": "b"}))],
+            [get_text_message("should_not_be_saved")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[foo],
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        await Runner.run(agent, input="user_message", session=session)
+
+    items = await session.get_items()
+    assert any(cast(dict[str, Any], item).get("role") == "user" for item in items)
+    assert any(cast(dict[str, Any], item).get("type") == "function_call" for item in items)
+    assert any(cast(dict[str, Any], item).get("type") == "function_call_output" for item in items)
+    assert not any(
+        cast(dict[str, Any], item).get("role") == "assistant"
+        and cast(dict[str, Any], item).get("type") == "message"
+        for item in items
+    )
 
 
 @pytest.mark.asyncio
