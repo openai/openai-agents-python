@@ -7,7 +7,7 @@ import pytest
 
 from agents import Agent
 from agents.exceptions import UserError
-from agents.mcp.server import MCPServerStreamableHttp, _MCPServerWithClientSession
+from agents.mcp.server import MCPServerSse, MCPServerStreamableHttp, _MCPServerWithClientSession
 from agents.run_context import RunContextWrapper
 
 # Handle Python version compatibility for ExceptionGroups
@@ -83,3 +83,98 @@ async def test_call_tool_nested_exception_group_mapping():
     # 6. Verify that the user-facing message is mapped correctly based on the root cause
     assert "Connection lost" in str(exc_info.value)
     assert exc_info.value.__cause__ is http_error
+
+
+_CREDENTIALED_URL = "https://user:s3cr3t_pw@mcp.example.com/sse?api_key=SECRET_QS_KEY"
+
+
+def _assert_url_credentials_redacted(message: str) -> None:
+    assert "s3cr3t_pw" not in message
+    assert "SECRET_QS_KEY" not in message
+    # The host and path stay so the error still says which server failed.
+    assert "mcp.example.com/sse" in message
+
+
+def test_error_name_strips_url_credentials_from_default_name() -> None:
+    """HTTP server names default to the connection URL, which can embed credentials."""
+    server = MCPServerSse(params={"url": _CREDENTIALED_URL})
+
+    assert "s3cr3t_pw" in server.name  # the raw name still carries them
+    _assert_url_credentials_redacted(server._error_name)
+
+
+def test_error_name_leaves_explicit_names_untouched() -> None:
+    server = MCPServerSse(params={"url": _CREDENTIALED_URL}, name="my server")
+
+    assert server._error_name == "my server"
+
+
+def test_connect_http_error_redacts_url_credentials() -> None:
+    server = MCPServerSse(params={"url": _CREDENTIALED_URL})
+    request = httpx.Request("GET", _CREDENTIALED_URL)
+    http_error = httpx.HTTPStatusError(
+        "boom", request=request, response=httpx.Response(503, request=request)
+    )
+
+    with pytest.raises(UserError) as exc_info:
+        server._raise_user_error_for_http_error(http_error)
+
+    _assert_url_credentials_redacted(str(exc_info.value))
+
+
+@pytest.mark.asyncio
+async def test_list_tools_http_error_redacts_url_credentials() -> None:
+    server = MCPServerSse(params={"url": _CREDENTIALED_URL})
+    server.session = MagicMock()
+    request = httpx.Request("GET", _CREDENTIALED_URL)
+    http_error = httpx.HTTPStatusError(
+        "boom", request=request, response=httpx.Response(500, request=request)
+    )
+
+    with patch.object(server, "_run_with_retries", side_effect=http_error):
+        with pytest.raises(UserError) as exc_info:
+            await server.list_tools(None, None)
+
+    _assert_url_credentials_redacted(str(exc_info.value))
+
+
+@pytest.mark.asyncio
+async def test_call_tool_connect_error_redacts_url_credentials() -> None:
+    server = MCPServerSse(params={"url": _CREDENTIALED_URL})
+    server.session = MagicMock()
+
+    with patch.object(server, "_run_with_retries", side_effect=httpx.ConnectError("down")):
+        with pytest.raises(UserError) as exc_info:
+            await server.call_tool("some_tool", {})
+
+    _assert_url_credentials_redacted(str(exc_info.value))
+
+
+@pytest.mark.asyncio
+async def test_invoke_mcp_tool_error_redacts_url_credentials_in_exception() -> None:
+    """The raised AgentsException must not leak credentials the sibling log call redacts."""
+    from mcp.types import Tool as MCPTool
+
+    from agents.exceptions import AgentsException
+    from agents.mcp import MCPUtil
+    from agents.run_context import RunContextWrapper
+
+    from .helpers import FakeMCPServer
+
+    server = FakeMCPServer(server_name=f"sse: {_CREDENTIALED_URL}")
+    server.add_tool("test_tool", {})
+
+    async def boom(*args, **kwargs):
+        raise ValueError("upstream exploded")
+
+    server.call_tool = boom  # type: ignore[method-assign]
+
+    with pytest.raises(AgentsException) as exc_info:
+        await MCPUtil.invoke_mcp_tool(
+            server,
+            MCPTool(name="test_tool", inputSchema={}),
+            RunContextWrapper(context=None),
+            "",
+        )
+
+    _assert_url_credentials_redacted(str(exc_info.value))

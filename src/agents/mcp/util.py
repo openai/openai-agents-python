@@ -705,8 +705,8 @@ class MCPUtil:
                 finished_task = done.pop()
                 if finished_task.cancelled():
                     raise MCPToolCancellationError(
-                        f"Failed to call tool '{tool.name}' on MCP server '{server.name}': "
-                        "tool execution was cancelled."
+                        f"Failed to call tool '{tool.name}' on MCP server "
+                        f"'{get_mcp_server_log_name(server.name)}': tool execution was cancelled."
                     )
                 result = finished_task.result()
             except asyncio.CancelledError:
@@ -748,7 +748,8 @@ class MCPUtil:
                 )
             log_tool_action_error(logger, log_message, e)
             raise AgentsException(
-                f"Error invoking MCP tool {tool_name_for_display} on server '{server.name}': {e}"
+                f"Error invoking MCP tool {tool_name_for_display} on server "
+                f"'{get_mcp_server_log_name(server.name)}': {e}"
             ) from e
 
         if _debug.DONT_LOG_TOOL_DATA:
