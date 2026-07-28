@@ -568,3 +568,139 @@ def test_usage_snapshot_delta_and_span_preserve_cache_write_tokens() -> None:
         "cached_tokens": 5,
         "cache_write_tokens": 7,
     }
+
+
+def test_usage_copy() -> None:
+    u1 = Usage(
+        requests=1,
+        input_tokens=10,
+        input_tokens_details=InputTokensDetails.model_validate(
+            {"cache_write_tokens": 2, "cached_tokens": 3}
+        ),
+        output_tokens=5,
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=1),
+        total_tokens=15,
+    )
+    u2 = u1.copy()
+
+    assert u2.requests == u1.requests
+    assert u2.input_tokens == u1.input_tokens
+    assert u2.output_tokens == u1.output_tokens
+    assert u2.total_tokens == u1.total_tokens
+    assert u2.input_tokens_details.cached_tokens == 3
+    assert getattr(u2.input_tokens_details, "cache_write_tokens", None) == 2
+    assert u2.output_tokens_details.reasoning_tokens == 1
+
+    # Ensure modifying u1 does not affect u2
+    u1.input_tokens = 999
+    assert u2.input_tokens == 10
+
+
+def test_usage_add_operator() -> None:
+    u1 = Usage(
+        requests=1,
+        input_tokens=10,
+        input_tokens_details=InputTokensDetails.model_validate(
+            {"cache_write_tokens": 2, "cached_tokens": 3}
+        ),
+        output_tokens=5,
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=1),
+        total_tokens=15,
+    )
+    u2 = Usage(
+        requests=2,
+        input_tokens=20,
+        input_tokens_details=InputTokensDetails.model_validate(
+            {"cache_write_tokens": 4, "cached_tokens": 5}
+        ),
+        output_tokens=10,
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=2),
+        total_tokens=30,
+    )
+
+    result = u1 + u2
+
+    # Check that original objects are unchanged
+    assert u1.input_tokens == 10
+    assert u2.input_tokens == 20
+
+    # Check sum
+    assert result.requests == 3
+    assert result.input_tokens == 30
+    assert result.output_tokens == 15
+    assert result.total_tokens == 45
+    assert result.input_tokens_details.cached_tokens == 8
+    assert getattr(result.input_tokens_details, "cache_write_tokens", None) == 6
+    assert result.output_tokens_details.reasoning_tokens == 3
+
+
+def test_usage_iadd_operator() -> None:
+    u1 = Usage(
+        requests=1,
+        input_tokens=10,
+        input_tokens_details=InputTokensDetails.model_validate(
+            {"cache_write_tokens": 2, "cached_tokens": 3}
+        ),
+        output_tokens=5,
+        total_tokens=15,
+    )
+    u2 = Usage(
+        requests=1,
+        input_tokens=5,
+        input_tokens_details=InputTokensDetails.model_validate(
+            {"cache_write_tokens": 1, "cached_tokens": 1}
+        ),
+        output_tokens=5,
+        total_tokens=10,
+    )
+
+    u1 += u2
+
+    assert u1.requests == 2
+    assert u1.input_tokens == 15
+    assert u1.output_tokens == 10
+    assert u1.total_tokens == 25
+    assert u1.input_tokens_details.cached_tokens == 4
+    assert getattr(u1.input_tokens_details, "cache_write_tokens", None) == 3
+
+
+def test_usage_sub_operator() -> None:
+    start = Usage(
+        requests=1,
+        input_tokens=10,
+        input_tokens_details=InputTokensDetails.model_validate(
+            {"cache_write_tokens": 2, "cached_tokens": 3}
+        ),
+        output_tokens=4,
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=1),
+        total_tokens=14,
+    )
+    end = Usage(
+        requests=3,
+        input_tokens=35,
+        input_tokens_details=InputTokensDetails.model_validate(
+            {"cache_write_tokens": 9, "cached_tokens": 8}
+        ),
+        output_tokens=10,
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=5),
+        total_tokens=45,
+    )
+
+    delta = end - start
+
+    assert delta.requests == 2
+    assert delta.input_tokens == 25
+    assert delta.output_tokens == 6
+    assert delta.total_tokens == 31
+    assert delta.input_tokens_details.cached_tokens == 5
+    assert getattr(delta.input_tokens_details, "cache_write_tokens", None) == 7
+    assert delta.output_tokens_details.reasoning_tokens == 4
+
+
+def test_usage_invalid_operand() -> None:
+    u = Usage(requests=1, input_tokens=10)
+    with pytest.raises(TypeError):
+        _ = u + "invalid"  # type: ignore[operator]
+    with pytest.raises(TypeError):
+        _ = u - 123  # type: ignore[operator]
+

@@ -253,6 +253,84 @@ class Usage:
             )
             self.request_usage_entries.append(request_usage)
 
+    def copy(self) -> Usage:
+        """Return an independent copy of this Usage object."""
+        return Usage(
+            requests=self.requests,
+            input_tokens=self.input_tokens,
+            input_tokens_details=_make_input_tokens_details(
+                cached_tokens=_cached_tokens(self.input_tokens_details),
+                cache_write_tokens=_cache_write_tokens(self.input_tokens_details),
+            ),
+            output_tokens=self.output_tokens,
+            output_tokens_details=OutputTokensDetails(
+                reasoning_tokens=self.output_tokens_details.reasoning_tokens
+                if self.output_tokens_details and self.output_tokens_details.reasoning_tokens
+                else 0
+            ),
+            total_tokens=self.total_tokens,
+            request_usage_entries=list(self.request_usage_entries),
+        )
+
+    def __add__(self, other: Usage) -> Usage:
+        """Return a new Usage object containing the sum of self and other."""
+        if not isinstance(other, Usage):
+            return NotImplemented
+        new_usage = self.copy()
+        new_usage.add(other)
+        return new_usage
+
+    def __iadd__(self, other: Usage) -> Usage:
+        """Add another Usage object in-place."""
+        if not isinstance(other, Usage):
+            return NotImplemented
+        self.add(other)
+        return self
+
+    def __sub__(self, other: Usage) -> Usage:
+        """Compute the difference between two Usage objects (self - other)."""
+        if not isinstance(other, Usage):
+            return NotImplemented
+
+        self_cached = _cached_tokens(self.input_tokens_details)
+        self_cache_write = _cache_write_tokens(self.input_tokens_details)
+        other_cached = _cached_tokens(other.input_tokens_details)
+        other_cache_write = _cache_write_tokens(other.input_tokens_details)
+
+        self_reasoning = (
+            self.output_tokens_details.reasoning_tokens
+            if self.output_tokens_details and self.output_tokens_details.reasoning_tokens
+            else 0
+        )
+        other_reasoning = (
+            other.output_tokens_details.reasoning_tokens
+            if other.output_tokens_details and other.output_tokens_details.reasoning_tokens
+            else 0
+        )
+
+        num_other_entries = len(other.request_usage_entries)
+        remaining_entries = (
+            list(self.request_usage_entries[num_other_entries:])
+            if len(self.request_usage_entries) >= num_other_entries
+            else []
+        )
+
+        return Usage(
+            requests=max(0, self.requests - other.requests),
+            input_tokens=max(0, self.input_tokens - other.input_tokens),
+            input_tokens_details=_make_input_tokens_details(
+                cached_tokens=max(0, self_cached - other_cached),
+                cache_write_tokens=max(0, self_cache_write - other_cache_write),
+            ),
+            output_tokens=max(0, self.output_tokens - other.output_tokens),
+            output_tokens_details=OutputTokensDetails(
+                reasoning_tokens=max(0, self_reasoning - other_reasoning)
+            ),
+            total_tokens=max(0, self.total_tokens - other.total_tokens),
+            request_usage_entries=remaining_entries,
+        )
+
+
 
 def _response_usage_to_usage(response_usage: Any) -> Usage:
     """Convert Responses API usage, including adapter-supplied per-request details."""
