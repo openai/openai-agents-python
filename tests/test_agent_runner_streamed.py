@@ -141,6 +141,20 @@ async def test_simple_first_run():
 
 
 @pytest.mark.asyncio
+async def test_empty_list_input_reaches_model():
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+    model.set_next_output([get_text_message("first")])
+
+    result = Runner.run_streamed(agent, input=[])
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "first"
+    assert model.last_turn_args["input"] == []
+
+
+@pytest.mark.asyncio
 async def test_streamed_tool_not_found_behavior_returns_error_to_model() -> None:
     model = FakeModel()
     agent = Agent(name="test", model=model)

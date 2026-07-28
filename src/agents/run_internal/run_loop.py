@@ -1488,8 +1488,6 @@ async def run_single_turn_streamed(
         # Track only the items actually sent after call_model_input_filter runs. Retry helpers
         # explicitly rewind this state before replaying a failed request.
         server_conversation_tracker.mark_input_as_sent(filtered.input)
-    if not filtered.input and server_conversation_tracker is None:
-        raise RuntimeError("Prepared model input is empty")
 
     await asyncio.gather(
         hooks.on_llm_start(context_wrapper, public_agent, filtered.instructions, filtered.input),
