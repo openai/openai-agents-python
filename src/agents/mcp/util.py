@@ -749,20 +749,27 @@ class MCPUtil:
                     f"Error invoking MCP tool {tool_name_for_display} on server", server
                 )
             log_tool_action_error(logger, log_message, e)
-            # Only a safe diagnostic field is copied out while tool data is redacted: the
-            # exception text can carry the credentialed request URL or tool payloads.
-            detail = e.__class__.__name__ if _debug.DONT_LOG_TOOL_DATA else str(e)
-            invocation_error = AgentsException(
-                f"Error invoking MCP tool {tool_name_for_display} on server "
-                f"'{get_mcp_server_log_name(server.name)}': {detail}"
-            )
-            invocation_cause = e
+            # While tool data is redacted the caught exception is not inspected at all and
+            # not retained: its text, its type name, and its attributes are all attacker
+            # controlled for a custom MCPServer, and keeping the object would leave it
+            # reachable through the traceback frame locals of the raising frame.
+            if _debug.DONT_LOG_TOOL_DATA:
+                invocation_error = AgentsException(
+                    f"Error invoking MCP tool {tool_name_for_display} on server "
+                    f"'{get_mcp_server_log_name(server.name)}'"
+                )
+                invocation_cause = None
+            else:
+                invocation_error = AgentsException(
+                    f"Error invoking MCP tool {tool_name_for_display} on server "
+                    f"'{get_mcp_server_log_name(server.name)}': {e}"
+                )
+                invocation_cause = e
 
         if invocation_error is not None:
-            # Raised outside the ``except`` block: the underlying exception can carry the
-            # credentialed request URL or tool data, and it would stay reachable through
-            # ``__context__`` even with ``raise ... from None``.
-            if _debug.DONT_LOG_TOOL_DATA or invocation_cause is None:
+            # Raised outside the ``except`` block: the underlying exception would otherwise
+            # stay reachable through ``__context__`` even with ``raise ... from None``.
+            if invocation_cause is None:
                 raise invocation_error
             raise invocation_error from invocation_cause
 

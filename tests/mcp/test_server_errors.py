@@ -1,4 +1,5 @@
 import builtins
+import os
 import sys
 import traceback
 from unittest.mock import MagicMock, patch
@@ -178,6 +179,24 @@ def _assert_no_credentials_anywhere(error: BaseException) -> None:
     assert "s3cr3t_pw" not in rendered
     assert "SECRET_QS_KEY" not in rendered
 
+    # Telemetry that captures frame locals must not recover the transport error from any
+    # SDK frame. The caller's own frame legitimately still holds the exception it raised,
+    # so only frames inside agents/mcp are checked here.
+    tb = error.__traceback__
+    while tb is not None:
+        filename = tb.tb_frame.f_code.co_filename
+        if f"agents{os.sep}mcp{os.sep}" in filename:
+            for local_name, value in tb.tb_frame.f_locals.items():
+                if isinstance(value, BaseException):
+                    where = f"{os.path.basename(filename)}:{local_name}"
+                    assert "s3cr3t_pw" not in str(value), f"leaked via local {where}"
+                    request = getattr(value, "request", None)
+                    if request is not None:
+                        url = str(getattr(request, "url", ""))
+                        assert "s3cr3t_pw" not in url, f"leaked via local {where}"
+                        assert "SECRET_QS_KEY" not in url, f"leaked via local {where}"
+        tb = tb.tb_next
+
 
 @pytest.mark.asyncio
 async def test_call_tool_does_not_retain_credentialed_cause_by_default() -> None:
@@ -232,6 +251,54 @@ async def test_call_tool_chains_cause_when_tool_logging_enabled(
             await server.call_tool("some_tool", {})
 
     assert exc_info.value.__cause__ is connect_error
+
+
+@pytest.mark.asyncio
+async def test_invoke_mcp_tool_does_not_inspect_exception_while_redacting() -> None:
+    """A custom MCPServer controls its exception type, so redacted mode must not touch it."""
+    from mcp.types import Tool as MCPTool
+
+    from agents.exceptions import AgentsException
+    from agents.mcp import MCPUtil
+    from agents.run_context import RunContextWrapper
+
+    from .helpers import FakeMCPServer
+
+    class _HostileException(Exception):
+        """Reading the message must not happen, and the type name itself is a secret."""
+
+        def __str__(self) -> str:
+            raise AssertionError("redacted error inspected __str__")
+
+        def __repr__(self) -> str:
+            raise AssertionError("redacted error inspected __repr__")
+
+    # A dynamically created exception type can carry a secret in its name, so the type name
+    # is not safe operational metadata either.
+    _HostileException.__name__ = "SECRET_TYPE_NAME_123"
+    _HostileException.__qualname__ = "SECRET_TYPE_NAME_123"
+
+    server = FakeMCPServer(server_name="hostile server")
+    server.add_tool("test_tool", {})
+
+    async def boom(*args, **kwargs):
+        raise _HostileException()
+
+    server.call_tool = boom  # type: ignore[method-assign]
+
+    with pytest.raises(AgentsException) as exc_info:
+        await MCPUtil.invoke_mcp_tool(
+            server,
+            MCPTool(name="test_tool", inputSchema={}),
+            RunContextWrapper(context=None),
+            "",
+        )
+
+    message = str(exc_info.value)
+    assert "Error invoking MCP tool test_tool" in message
+    assert "SECRET_TYPE_NAME_123" not in message
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
 
 
 @pytest.mark.asyncio

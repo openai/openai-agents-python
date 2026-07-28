@@ -236,15 +236,23 @@ MCPStreamTransport = (
 )
 
 
-def _raise_mcp_transport_error(error: UserError, cause: Exception | None) -> NoReturn:
-    """Raise ``error`` for a failed MCP transport call, chaining ``cause`` only when allowed.
+def _transport_error_cause(exc: Exception) -> Exception | None:
+    """Return the cause to retain for a transport failure, or None while redacting.
 
-    ``cause`` is typically an httpx error whose request URL can embed credentials, so the
-    chain is dropped while tool-data logging is disabled. Call this *outside* the ``except``
-    block: ``raise ... from None`` is not enough, because the original exception would stay
-    reachable through ``__context__``.
+    An httpx error keeps the request URL, which can embed credentials. While tool data is
+    redacted the exception is dropped at the point it is caught, so it is not retained by
+    ``__cause__``, ``__context__``, or the traceback frame locals of the raising frames.
     """
-    if _debug.DONT_LOG_TOOL_DATA or cause is None:
+    return None if _debug.DONT_LOG_TOOL_DATA else exc
+
+
+def _raise_mcp_transport_error(error: UserError, cause: Exception | None) -> NoReturn:
+    """Raise ``error`` for a failed MCP transport call, chaining ``cause`` when there is one.
+
+    Call this *outside* the ``except`` block: ``raise ... from None`` is not enough, because
+    the original exception would stay reachable through ``__context__``.
+    """
+    if cause is None:
         raise error
     raise error from cause
 
@@ -840,7 +848,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 # Raised after the try statement so the credential-bearing httpx error is
                 # not retained through __cause__ or __context__.
                 connect_error = self._build_user_error_for_http_error(http_error)
-                connect_cause = http_error
+                connect_cause = _transport_error_cause(http_error)
+                # Drop the local: this frame is part of the raised traceback, and the httpx
+                # error keeps a request URL that can embed credentials.
+                del http_error
 
             # For CancelledError, preserve cancellation semantics - don't wrap it.
             # If it's masking an HTTP error, cleanup() will extract and raise UserError.
@@ -850,7 +861,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             # For HTTP-related errors, wrap them
             elif isinstance(e, httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException):
                 connect_error = self._build_user_error_for_http_error(e)
-                connect_cause = e
+                connect_cause = _transport_error_cause(e)
 
             # For other errors, re-raise as-is (don't wrap non-HTTP errors)
             else:
@@ -924,13 +935,13 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 f"Failed to list tools from MCP server '{self._error_name}': "
                 f"HTTP error {status_code}"
             )
-            transport_cause: Exception = e
+            transport_cause: Exception | None = _transport_error_cause(e)
         except httpx.ConnectError as e:
             transport_error = UserError(
                 f"Failed to list tools from MCP server '{self._error_name}': Connection lost. "
                 f"The server may have disconnected."
             )
-            transport_cause = e
+            transport_cause = _transport_error_cause(e)
 
         _raise_mcp_transport_error(transport_error, transport_cause)
 
@@ -965,13 +976,13 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
                 f"HTTP error {status_code}"
             )
-            transport_cause: Exception = e
+            transport_cause: Exception | None = _transport_error_cause(e)
         except httpx.ConnectError as e:
             transport_error = UserError(
                 f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
                 f"Connection lost. The server may have disconnected."
             )
-            transport_cause = e
+            transport_cause = _transport_error_cause(e)
 
         _raise_mcp_transport_error(transport_error, transport_cause)
 
@@ -1103,7 +1114,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     if is_failed_connection_cleanup:
                         error_message += f"HTTP error {http_error.response.status_code} ({http_error.response.reason_phrase})"  # noqa: E501
                         cleanup_transport_error = UserError(error_message)
-                        cleanup_transport_cause = http_error
+                        cleanup_transport_cause = _transport_error_cause(http_error)
                     else:
                         # Normal teardown - log but don't raise
                         log_tool_action_warning(
@@ -1117,7 +1128,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     if is_failed_connection_cleanup:
                         error_message += "Could not reach the server."
                         cleanup_transport_error = UserError(error_message)
-                        cleanup_transport_cause = connect_error
+                        cleanup_transport_cause = _transport_error_cause(connect_error)
                     else:
                         log_tool_action_warning(
                             logger,
@@ -1130,7 +1141,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     if is_failed_connection_cleanup:
                         error_message += "Connection timeout."
                         cleanup_transport_error = UserError(error_message)
-                        cleanup_transport_cause = timeout_error
+                        cleanup_transport_cause = _transport_error_cause(timeout_error)
                     else:
                         log_tool_action_warning(
                             logger,
@@ -1181,6 +1192,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 self._get_session_id = None
 
             if cleanup_transport_error is not None:
+                # Drop the transport locals: this frame is part of the raised traceback, and
+                # the httpx errors keep a request URL that can embed credentials.
+                http_error = connect_error = timeout_error = None
                 _raise_mcp_transport_error(cleanup_transport_error, cleanup_transport_cause)
 
 
@@ -1749,13 +1763,13 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
                 f"HTTP error {status_code}"
             )
-            transport_cause: Exception = e
+            transport_cause: Exception | None = _transport_error_cause(e)
         except httpx.ConnectError as e:
             transport_error = UserError(
                 f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
                 f"Connection lost. The server may have disconnected."
             )
-            transport_cause = e
+            transport_cause = _transport_error_cause(e)
         except BaseExceptionGroup as e:
             http_error = self._extract_http_error_from_exception(e)
             if isinstance(http_error, httpx.HTTPStatusError):
@@ -1776,7 +1790,10 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 )
             else:
                 raise
-            transport_cause = http_error
+            transport_cause = _transport_error_cause(http_error)
+            # Drop the local: this frame is part of the raised traceback, and the httpx
+            # error keeps a request URL that can embed credentials.
+            del http_error
 
         _raise_mcp_transport_error(transport_error, transport_cause)
 
