@@ -3628,18 +3628,59 @@ class TestDriveMounts:
 
 class TestUnmountBucketLogging:
     @pytest.mark.asyncio
-    async def test_unmount_all_attempts_fail_logs_warning(self) -> None:
+    @pytest.mark.parametrize(
+        ("model_redacted", "tool_redacted"),
+        [(False, True), (True, True), (False, False), (True, False)],
+    )
+    async def test_unmount_all_attempts_follow_tool_data_policy(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        model_redacted: bool,
+        tool_redacted: bool,
+    ) -> None:
         from agents.extensions.sandbox.blaxel.mounts import _unmount_bucket
 
+        mount_path = "/mnt/SECRET_BUCKET_PATH"
         session = _FakeMountSession()
         session._next_results = [
             _FakeExecResultForMount(exit_code=1),  # fusermount fails
             _FakeExecResultForMount(exit_code=1),  # umount fails
             _FakeExecResultForMount(exit_code=1),  # umount -l fails
         ]
+        monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", model_redacted)
+        monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
+        caplog.set_level(logging.DEBUG, logger="agents.extensions.sandbox.blaxel.mounts")
+
         # Should not raise, just log warning.
-        await _unmount_bucket(session, "/mnt/test")  # type: ignore[arg-type]
+        await _unmount_bucket(session, mount_path)  # type: ignore[arg-type]
+
         assert len(session.exec_calls) == 3
+        records = [
+            record
+            for record in caplog.records
+            if record.name == "agents.extensions.sandbox.blaxel.mounts"
+        ]
+        assert len(records) == 3
+        assert [record.levelno for record in records] == [
+            logging.DEBUG,
+            logging.DEBUG,
+            logging.WARNING,
+        ]
+        for record in records:
+            assert record.exc_info is None
+            assert record.exc_text is None
+            assert all(value is not mount_path for value in record.__dict__.values())
+
+        rendered = [logging.Formatter().format(record) for record in records]
+        if tool_redacted:
+            assert all(mount_path not in message for message in rendered)
+            assert [record.args for record in records] == [(1,), (1,), (1,)]
+        else:
+            assert all(mount_path in message for message in rendered)
+            for record in records:
+                assert isinstance(record.args, tuple)
+                assert mount_path in record.args
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from .... import _debug
 from ....logger import log_tool_action_warning
 from ....sandbox.entries import GCSMount, Mount, R2Mount, S3Mount
 from ....sandbox.entries.mounts.base import MountStrategyBase
@@ -407,18 +408,37 @@ async def _unmount_bucket(session: BaseSandboxSession, mount_path: str) -> None:
     result = await _exec(session, f"fusermount -u {path}")
     if result.exit_code == 0:
         return
-    logger.debug("fusermount failed for %s (exit %d), trying umount", mount_path, result.exit_code)
+    if _debug.DONT_LOG_TOOL_DATA:
+        logger.debug("fusermount failed (exit %d), trying umount", result.exit_code)
+    else:
+        logger.debug(
+            "fusermount failed for %s (exit %d), trying umount",
+            mount_path,
+            result.exit_code,
+        )
     # Fallback to regular umount.
     result = await _exec(session, f"umount {path}")
     if result.exit_code == 0:
         return
-    logger.debug("umount failed for %s (exit %d), trying lazy umount", mount_path, result.exit_code)
+    if _debug.DONT_LOG_TOOL_DATA:
+        logger.debug("umount failed (exit %d), trying lazy umount", result.exit_code)
+    else:
+        logger.debug(
+            "umount failed for %s (exit %d), trying lazy umount",
+            mount_path,
+            result.exit_code,
+        )
     # Last resort: lazy unmount.
     result = await _exec(session, f"umount -l {path}")
     if result.exit_code != 0:
-        logger.warning(
-            "all unmount attempts failed for %s (last exit %d)", mount_path, result.exit_code
-        )
+        if _debug.DONT_LOG_TOOL_DATA:
+            logger.warning("all unmount attempts failed (last exit %d)", result.exit_code)
+        else:
+            logger.warning(
+                "all unmount attempts failed for %s (last exit %d)",
+                mount_path,
+                result.exit_code,
+            )
 
 
 # ---------------------------------------------------------------------------
