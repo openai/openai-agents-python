@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import httpx
@@ -40,12 +41,20 @@ from agents import (
     handoff,
     retry_policies,
 )
-from agents.items import RunItem, ToolApprovalItem, TResponseInputItem
+from agents.items import (
+    ModelResponse,
+    RunItem,
+    ToolApprovalItem,
+    TResponseInputItem,
+    TResponseStreamEvent,
+)
 from agents.memory.openai_conversations_session import OpenAIConversationsSession
+from agents.models.interface import Model, ModelTracing
 from agents.run import RunConfig
 from agents.run_internal import run_loop
 from agents.run_internal.run_loop import QueueCompleteSentinel
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent, StreamEvent
+from agents.tool import Tool
 from agents.usage import Usage
 
 from .fake_model import FakeModel, get_response_obj
@@ -383,6 +392,100 @@ async def test_streamed_run_preserves_request_usage_entries_after_retry() -> Non
     assert usage.request_usage_entries[1].input_tokens == 10
     assert usage.request_usage_entries[1].output_tokens == 5
     assert usage.request_usage_entries[1].total_tokens == 15
+
+
+class _RetryThenMissingUsageModel(Model):
+    """Stream a successful retry whose terminal Response omits usage data."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def get_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: Any,
+        handoffs: list[Handoff],
+        tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        prompt: Any | None,
+    ) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            raise APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            )
+        return ModelResponse(
+            output=[get_text_message("done")],
+            usage=Usage(requests=1),
+            response_id="resp-missing-usage",
+        )
+
+    async def stream_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: Any,
+        handoffs: list[Handoff],
+        tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        prompt: Any | None,
+    ) -> AsyncIterator[TResponseStreamEvent]:
+        self.calls += 1
+        if self.calls == 1:
+            raise APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            )
+        response = get_response_obj([get_text_message("done")])
+        response.usage = None
+        yield ResponseCompletedEvent(
+            type="response.completed",
+            response=response,
+            sequence_number=0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_streamed_run_counts_retry_attempts_when_terminal_usage_missing() -> None:
+    """Retry accounting must survive successful streams that omit Response.usage.
+
+    Non-OpenAI chat-completions adapters (e.g. LiteLLM) can complete a stream without a usage
+    chunk, leaving ``Response.usage`` as ``None``. Failed retry attempts must still be counted,
+    matching the non-streaming ``apply_retry_attempt_usage`` path.
+    """
+
+    model = _RetryThenMissingUsageModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+
+    result = Runner.run_streamed(agent, input="test")
+    async for _ in result.stream_events():
+        pass
+
+    usage = result.context_wrapper.usage
+    assert model.calls == 2
+    assert usage.requests == 2
+    assert len(usage.request_usage_entries) == 2
+    assert usage.request_usage_entries[0].total_tokens == 0
+    assert usage.request_usage_entries[1].total_tokens == 0
 
 
 @pytest.mark.asyncio

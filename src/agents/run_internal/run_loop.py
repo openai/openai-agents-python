@@ -1603,13 +1603,17 @@ async def run_single_turn_streamed(
                 # the terminal response output empty. Preserve those items so the runner can
                 # resolve the completed step correctly.
                 terminal_response.output = list(streamed_response_output)
-            usage = (
-                apply_retry_attempt_usage(
-                    _response_usage_to_usage(terminal_response.usage),
-                    stream_failed_retry_attempts[0],
-                )
-                if terminal_response.usage
-                else Usage()
+            # Always fold retry attempts into usage, even when the terminal response omits
+            # provider usage (common for some Chat Completions / LiteLLM streams). Skipping
+            # apply_retry_attempt_usage here would drop failed-attempt accounting and diverge
+            # from the non-streaming get_response_with_retry path.
+            usage = apply_retry_attempt_usage(
+                (
+                    _response_usage_to_usage(terminal_response.usage)
+                    if terminal_response.usage
+                    else Usage()
+                ),
+                stream_failed_retry_attempts[0],
             )
             final_response = ModelResponse(
                 output=terminal_response.output,
