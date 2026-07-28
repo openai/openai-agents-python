@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
+import agents._debug as _debug
 from agents import (
     Agent,
     FunctionTool,
@@ -357,8 +358,12 @@ class CrashingFakeMCPServer(FakeMCPServer):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
-async def test_runner_emits_mcp_error_tool_call_output_item(streaming: bool):
+async def test_runner_emits_mcp_error_tool_call_output_item(
+    streaming: bool, monkeypatch: pytest.MonkeyPatch
+):
     """Runner should emit tool_call_output_item with failure output when MCP tool raises."""
+    # The underlying failure text is only surfaced when tool-data logging is enabled.
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
     server = CrashingFakeMCPServer()
     server.add_tool("crashing_tool", {})
 

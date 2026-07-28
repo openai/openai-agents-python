@@ -692,6 +692,8 @@ class MCPUtil:
         else:
             logger.debug("Invoking MCP tool %s with input %s", tool_name_for_display, input_json)
 
+        invocation_error: AgentsException | None = None
+        invocation_cause: Exception | None = None
         try:
             resolved_meta = await cls._resolve_meta(server, context, tool.name, json_data)
             merged_meta = cls._merge_mcp_meta(resolved_meta, meta)
@@ -747,10 +749,22 @@ class MCPUtil:
                     f"Error invoking MCP tool {tool_name_for_display} on server", server
                 )
             log_tool_action_error(logger, log_message, e)
-            raise AgentsException(
+            # Only a safe diagnostic field is copied out while tool data is redacted: the
+            # exception text can carry the credentialed request URL or tool payloads.
+            detail = e.__class__.__name__ if _debug.DONT_LOG_TOOL_DATA else str(e)
+            invocation_error = AgentsException(
                 f"Error invoking MCP tool {tool_name_for_display} on server "
-                f"'{get_mcp_server_log_name(server.name)}': {e}"
-            ) from e
+                f"'{get_mcp_server_log_name(server.name)}': {detail}"
+            )
+            invocation_cause = e
+
+        if invocation_error is not None:
+            # Raised outside the ``except`` block: the underlying exception can carry the
+            # credentialed request URL or tool data, and it would stay reachable through
+            # ``__context__`` even with ``raise ... from None``.
+            if _debug.DONT_LOG_TOOL_DATA or invocation_cause is None:
+                raise invocation_error
+            raise invocation_error from invocation_cause
 
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug("MCP tool completed.")

@@ -1,10 +1,12 @@
 import builtins
 import sys
+import traceback
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
+import agents._debug as _debug
 from agents import Agent
 from agents.exceptions import UserError
 from agents.mcp.server import MCPServerSse, MCPServerStreamableHttp, _MCPServerWithClientSession
@@ -59,11 +61,14 @@ async def test_not_calling_connect_causes_error():
 
 
 @pytest.mark.asyncio
-async def test_call_tool_nested_exception_group_mapping():
+async def test_call_tool_nested_exception_group_mapping(monkeypatch: pytest.MonkeyPatch):
     """
     Regression test ensuring that nested ExceptionGroups containing HTTP errors
     are recursively extracted and mapped to a UserError in call_tool().
     """
+    # The cause is only chained when tool-data logging is enabled, because an httpx error
+    # keeps the request URL (which can embed credentials) reachable from the raised error.
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
     # 1. Initialize the server with mock streamable parameters
     server = MCPServerStreamableHttp(params={"url": "http://fake-mcp-server"})
 
@@ -116,10 +121,9 @@ def test_connect_http_error_redacts_url_credentials() -> None:
         "boom", request=request, response=httpx.Response(503, request=request)
     )
 
-    with pytest.raises(UserError) as exc_info:
-        server._raise_user_error_for_http_error(http_error)
+    error = server._build_user_error_for_http_error(http_error)
 
-    _assert_url_credentials_redacted(str(exc_info.value))
+    _assert_url_credentials_redacted(str(error))
 
 
 @pytest.mark.asyncio
@@ -135,7 +139,7 @@ async def test_list_tools_http_error_redacts_url_credentials() -> None:
         with pytest.raises(UserError) as exc_info:
             await server.list_tools(None, None)
 
-    _assert_url_credentials_redacted(str(exc_info.value))
+    _assert_no_credentials_anywhere(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -147,7 +151,87 @@ async def test_call_tool_connect_error_redacts_url_credentials() -> None:
         with pytest.raises(UserError) as exc_info:
             await server.call_tool("some_tool", {})
 
-    _assert_url_credentials_redacted(str(exc_info.value))
+    _assert_no_credentials_anywhere(exc_info.value)
+
+
+def _assert_no_credentials_anywhere(error: BaseException) -> None:
+    """The credentials must be absent from the message, the whole chain, and the traceback."""
+    _assert_url_credentials_redacted(str(error))
+
+    # Recursive __cause__ / __context__ walk, including objects the exceptions hold on to.
+    seen: set[int] = set()
+    pending: list[BaseException | None] = [error]
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        assert "s3cr3t_pw" not in str(current)
+        assert "SECRET_QS_KEY" not in str(current)
+        request = getattr(current, "request", None)
+        if request is not None:
+            assert "s3cr3t_pw" not in str(getattr(request, "url", ""))
+            assert "SECRET_QS_KEY" not in str(getattr(request, "url", ""))
+        pending.extend([current.__cause__, current.__context__])
+
+    rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    assert "s3cr3t_pw" not in rendered
+    assert "SECRET_QS_KEY" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_call_tool_does_not_retain_credentialed_cause_by_default() -> None:
+    """The httpx error keeps the credentialed request URL, so it must not stay reachable."""
+    server = MCPServerSse(params={"url": _CREDENTIALED_URL})
+    server.session = MagicMock()
+    request = httpx.Request("GET", _CREDENTIALED_URL)
+    http_error = httpx.HTTPStatusError(
+        "boom", request=request, response=httpx.Response(503, request=request)
+    )
+
+    with patch.object(server, "_run_with_retries", side_effect=http_error):
+        with pytest.raises(UserError) as exc_info:
+            await server.call_tool("some_tool", {})
+
+    error = exc_info.value
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    _assert_no_credentials_anywhere(error)
+
+
+@pytest.mark.asyncio
+async def test_connect_failure_does_not_retain_credentialed_cause() -> None:
+    """connect() wraps transport failures; the httpx error must not survive on the chain."""
+    server = MCPServerSse(params={"url": _CREDENTIALED_URL})
+    request = httpx.Request("GET", _CREDENTIALED_URL)
+    http_error = httpx.HTTPStatusError(
+        "boom", request=request, response=httpx.Response(401, request=request)
+    )
+
+    with patch.object(server, "create_streams", side_effect=http_error):
+        with pytest.raises(UserError) as exc_info:
+            await server.connect()
+
+    error = exc_info.value
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    _assert_no_credentials_anywhere(error)
+
+
+@pytest.mark.asyncio
+async def test_call_tool_chains_cause_when_tool_logging_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    server = MCPServerSse(params={"url": _CREDENTIALED_URL})
+    server.session = MagicMock()
+    connect_error = httpx.ConnectError("down")
+
+    with patch.object(server, "_run_with_retries", side_effect=connect_error):
+        with pytest.raises(UserError) as exc_info:
+            await server.call_tool("some_tool", {})
+
+    assert exc_info.value.__cause__ is connect_error
 
 
 @pytest.mark.asyncio
@@ -165,7 +249,9 @@ async def test_invoke_mcp_tool_error_redacts_url_credentials_in_exception() -> N
     server.add_tool("test_tool", {})
 
     async def boom(*args, **kwargs):
-        raise ValueError("upstream exploded")
+        # The transport error text itself carries the credentialed URL, which is exactly
+        # what the generic wrapper used to copy into the caller-visible message.
+        raise ValueError(f"connection to {_CREDENTIALED_URL} failed")
 
     server.call_tool = boom  # type: ignore[method-assign]
 
@@ -177,4 +263,4 @@ async def test_invoke_mcp_tool_error_redacts_url_credentials_in_exception() -> N
             "",
         )
 
-    _assert_url_credentials_redacted(str(exc_info.value))
+    _assert_no_credentials_anywhere(exc_info.value)

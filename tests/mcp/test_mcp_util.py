@@ -1124,7 +1124,9 @@ async def test_mcp_invocation_mcp_error_reraises(caplog: pytest.LogCaptureFixtur
 
 
 @pytest.mark.asyncio
-async def test_mcp_tool_graceful_error_handling(caplog: pytest.LogCaptureFixture):
+async def test_mcp_tool_graceful_error_handling(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+):
     """Test that MCP tool errors are handled gracefully when invoked via FunctionTool.
 
     When an MCP tool is created via to_function_tool and then invoked, errors should be
@@ -1132,6 +1134,8 @@ async def test_mcp_tool_graceful_error_handling(caplog: pytest.LogCaptureFixture
     the agent to continue running after tool failures.
     """
     caplog.set_level(logging.DEBUG)
+    # The underlying failure text is only surfaced when tool-data logging is enabled.
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
 
     # Create a server that will crash when calling a tool
     server = CrashingFakeMCPServer()
@@ -1175,12 +1179,14 @@ async def test_mcp_tool_graceful_error_handling(caplog: pytest.LogCaptureFixture
 
 
 @pytest.mark.asyncio
-async def test_mcp_tool_timeout_handling():
+async def test_mcp_tool_timeout_handling(monkeypatch: pytest.MonkeyPatch):
     """Test that MCP tool timeouts are handled gracefully.
 
     This simulates a timeout scenario where the MCP server call_tool raises a timeout error.
     The error should be caught and converted to an error message instead of halting the agent.
     """
+    # The underlying failure text is only surfaced when tool-data logging is enabled.
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
 
     class TimeoutFakeMCPServer(FakeMCPServer):
         async def call_tool(
