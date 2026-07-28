@@ -754,9 +754,12 @@ class MCPUtil:
             # controlled for a custom MCPServer, and keeping the object would leave it
             # reachable through the traceback frame locals of the raising frame.
             if _debug.DONT_LOG_TOOL_DATA:
+                # The server name is left out too: an explicit name is caller supplied and a
+                # URL-derived one keeps its path, and this message reaches the model through
+                # the default failure formatter. This matches get_mcp_server_log_message,
+                # which also drops the name while tool data is redacted.
                 invocation_error = AgentsException(
-                    f"Error invoking MCP tool {tool_name_for_display} on server "
-                    f"'{get_mcp_server_log_name(server.name)}'"
+                    f"Error invoking MCP tool {tool_name_for_display}"
                 )
                 invocation_cause = None
             else:
@@ -767,6 +770,9 @@ class MCPUtil:
                 invocation_cause = e
 
         if invocation_error is not None:
+            # A completed task keeps its exception, and repr(task) renders it, so drop the
+            # task references before this frame becomes part of the raised traceback.
+            call_task = finished_task = None  # type: ignore[assignment]
             # Raised outside the ``except`` block: the underlying exception would otherwise
             # stay reachable through ``__context__`` even with ``raise ... from None``.
             if invocation_cause is None:

@@ -1193,8 +1193,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
             if cleanup_transport_error is not None:
                 # Drop the transport locals: this frame is part of the raised traceback, and
-                # the httpx errors keep a request URL that can embed credentials.
+                # the httpx errors keep a request URL that can embed credentials. ``exc`` is
+                # the exception-group loop target, which also outlives the loop.
                 http_error = connect_error = timeout_error = None
+                exc = None
                 _raise_mcp_transport_error(cleanup_transport_error, cleanup_transport_cause)
 
 

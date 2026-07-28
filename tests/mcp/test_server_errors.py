@@ -1,3 +1,4 @@
+import asyncio
 import builtins
 import os
 import sys
@@ -179,18 +180,34 @@ def _assert_no_credentials_anywhere(error: BaseException) -> None:
     assert "s3cr3t_pw" not in rendered
     assert "SECRET_QS_KEY" not in rendered
 
-    # Telemetry that captures frame locals must not recover the transport error from any
-    # SDK frame. The caller's own frame legitimately still holds the exception it raised,
-    # so only frames inside agents/mcp are checked here.
+    _assert_no_credentials_in_frames(error)
+
+
+def _assert_no_credentials_in_frames(error: BaseException) -> None:
+    """Telemetry that captures frame locals must not recover the transport error.
+
+    Only frames inside agents/mcp are checked: the caller's own frame legitimately still
+    holds the exception it raised.
+    """
     tb = error.__traceback__
     while tb is not None:
         filename = tb.tb_frame.f_code.co_filename
         if f"agents{os.sep}mcp{os.sep}" in filename:
             for local_name, value in tb.tb_frame.f_locals.items():
+                where = f"{os.path.basename(filename)}:{local_name}"
+                candidates: list[BaseException] = []
                 if isinstance(value, BaseException):
-                    where = f"{os.path.basename(filename)}:{local_name}"
-                    assert "s3cr3t_pw" not in str(value), f"leaked via local {where}"
-                    request = getattr(value, "request", None)
+                    candidates.append(value)
+                elif isinstance(value, asyncio.Task) and value.done():
+                    # A completed task keeps its exception, and repr(task) renders it.
+                    assert "s3cr3t_pw" not in repr(value), f"leaked via local {where}"
+                    if not value.cancelled():
+                        task_exc = value.exception()
+                        if task_exc is not None:
+                            candidates.append(task_exc)
+                for candidate in candidates:
+                    assert "s3cr3t_pw" not in str(candidate), f"leaked via local {where}"
+                    request = getattr(candidate, "request", None)
                     if request is not None:
                         url = str(getattr(request, "url", ""))
                         assert "s3cr3t_pw" not in url, f"leaked via local {where}"
@@ -330,4 +347,13 @@ async def test_invoke_mcp_tool_error_redacts_url_credentials_in_exception() -> N
             "",
         )
 
-    _assert_no_credentials_anywhere(exc_info.value)
+    error = exc_info.value
+    message = str(error)
+    assert "s3cr3t_pw" not in message
+    assert "SECRET_QS_KEY" not in message
+    # This message reaches the model through the default failure formatter, so while tool
+    # data is redacted it carries no server name at all.
+    assert "mcp.example.com" not in message
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    _assert_no_credentials_in_frames(error)
