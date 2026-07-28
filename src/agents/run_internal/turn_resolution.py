@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, cast
 
@@ -182,6 +183,25 @@ __all__ = [
 ]
 
 
+def _coerce_tool_final_output_for_plain_text(final_output: Any) -> str:
+    """Convert a tool-produced final output into a plain-text agent result.
+
+    Structured tool outputs (`ToolOutputText`, images, files, and TypedDict forms) must not be
+    coerced through Pydantic/`dict` `__str__`/`__repr__`. Reuse the same structured conversion
+    used for tool wire payloads so plain-text agents receive the text content or stable JSON.
+    """
+    structured_output = ItemHelpers._convert_tool_output_as_structured(final_output)
+    if structured_output is not None:
+        if len(structured_output) == 1:
+            first_item = cast(Mapping[str, Any], structured_output[0])
+            if first_item.get("type") == "input_text":
+                text = first_item.get("text")
+                if isinstance(text, str):
+                    return text
+        return json.dumps(structured_output, ensure_ascii=False)
+    return str(final_output)
+
+
 async def _maybe_finalize_from_tool_results(
     *,
     public_agent: Agent[TContext],
@@ -202,7 +222,9 @@ async def _maybe_finalize_from_tool_results(
         return None
 
     if not public_agent.output_type or public_agent.output_type is str:
-        check_tool_use.final_output = str(check_tool_use.final_output)
+        check_tool_use.final_output = _coerce_tool_final_output_for_plain_text(
+            check_tool_use.final_output
+        )
 
     if check_tool_use.final_output is None:
         logger.error(

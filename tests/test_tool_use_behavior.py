@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 
 import pytest
@@ -11,7 +12,11 @@ from agents import (
     Agent,
     FunctionToolResult,
     RunContextWrapper,
+    Runner,
     ToolCallOutputItem,
+    ToolOutputImage,
+    ToolOutputText,
+    ToolOutputTextDict,
     ToolsToFinalOutputResult,
     UserError,
     function_tool,
@@ -19,7 +24,8 @@ from agents import (
 )
 from agents.run_internal import run_loop
 
-from .test_responses import get_function_tool
+from .fake_model import FakeModel
+from .test_responses import get_function_tool, get_function_tool_call
 
 
 def _make_function_tool_result(
@@ -261,3 +267,127 @@ async def test_stop_at_tool_names_supports_public_and_qualified_names_for_namesp
         context_wrapper=RunContextWrapper(context=None),
     )
     assert result.is_final_output is True
+    assert result.final_output == "billing-output"
+
+
+@pytest.mark.asyncio
+async def test_stop_on_first_tool_coerces_tool_output_text_to_plain_text() -> None:
+    """Structured ToolOutputText must become its text, not a Pydantic __str__ repr."""
+
+    @function_tool
+    def text_tool() -> ToolOutputText:
+        return ToolOutputText(text="hello structured")
+
+    model = FakeModel()
+    model.set_next_output([get_function_tool_call("text_tool", "{}")])
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[text_tool],
+        tool_use_behavior="stop_on_first_tool",
+    )
+
+    result = await Runner.run(agent, "hi")
+    assert result.final_output == "hello structured"
+    assert "type=" not in result.final_output
+
+
+@pytest.mark.asyncio
+async def test_stop_on_first_tool_coerces_tool_output_text_dict_to_plain_text() -> None:
+    @function_tool
+    def text_tool() -> ToolOutputTextDict:
+        return {"type": "text", "text": "hello from dict"}
+
+    model = FakeModel()
+    model.set_next_output([get_function_tool_call("text_tool", "{}")])
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[text_tool],
+        tool_use_behavior="stop_on_first_tool",
+    )
+
+    result = await Runner.run(agent, "hi")
+    assert result.final_output == "hello from dict"
+
+
+@pytest.mark.asyncio
+async def test_stop_at_tool_names_coerces_tool_output_text_to_plain_text() -> None:
+    @function_tool
+    def text_tool() -> ToolOutputText:
+        return ToolOutputText(text="stopped structured")
+
+    model = FakeModel()
+    model.set_next_output([get_function_tool_call("text_tool", "{}")])
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[text_tool],
+        tool_use_behavior={"stop_at_tool_names": ["text_tool"]},
+    )
+
+    result = await Runner.run(agent, "hi")
+    assert result.final_output == "stopped structured"
+
+
+@pytest.mark.asyncio
+async def test_stop_on_first_tool_coerces_tool_output_image_without_pydantic_repr() -> None:
+    @function_tool
+    def image_tool() -> ToolOutputImage:
+        return ToolOutputImage(image_url="data:image/png;base64,AAAA")
+
+    model = FakeModel()
+    model.set_next_output([get_function_tool_call("image_tool", "{}")])
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[image_tool],
+        tool_use_behavior="stop_on_first_tool",
+    )
+
+    result = await Runner.run(agent, "hi")
+    assert isinstance(result.final_output, str)
+    assert "type='image'" not in result.final_output
+    assert "image_url=" not in result.final_output
+    parsed = json.loads(result.final_output)
+    assert parsed == [{"type": "input_image", "image_url": "data:image/png;base64,AAAA"}]
+
+
+@pytest.mark.asyncio
+async def test_stop_on_first_tool_structured_output_streamed() -> None:
+    @function_tool
+    def text_tool() -> ToolOutputText:
+        return ToolOutputText(text="streamed structured")
+
+    model = FakeModel()
+    model.set_next_output([get_function_tool_call("text_tool", "{}")])
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[text_tool],
+        tool_use_behavior="stop_on_first_tool",
+    )
+
+    result = Runner.run_streamed(agent, "hi")
+    async for _ in result.stream_events():
+        pass
+    assert result.final_output == "streamed structured"
+
+
+@pytest.mark.asyncio
+async def test_stop_on_first_tool_still_stringifies_non_structured_values() -> None:
+    @function_tool
+    def int_tool() -> int:
+        return 42
+
+    model = FakeModel()
+    model.set_next_output([get_function_tool_call("int_tool", "{}")])
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[int_tool],
+        tool_use_behavior="stop_on_first_tool",
+    )
+
+    result = await Runner.run(agent, "hi")
+    assert result.final_output == "42"
