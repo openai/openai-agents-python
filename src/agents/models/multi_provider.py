@@ -204,7 +204,10 @@ class MultiProvider(ModelProvider):
     ) -> tuple[ModelProvider, str | None]:
         # Explicit provider_map entries are the least surprising routing mechanism, so they always
         # win over the built-in OpenAI alias and unknown-prefix fallback behavior.
-        if self.provider_map and (provider := self.provider_map.get_provider(prefix)):
+        if (
+            self.provider_map is not None
+            and (provider := self.provider_map.get_provider(prefix)) is not None
+        ):
             return provider, stripped_model_name
 
         if prefix in {"litellm", "any-llm"}:
