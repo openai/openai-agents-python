@@ -141,6 +141,33 @@ async def test_async_sqlite_session_get_items_limit():
         await session.close()
 
 
+async def test_async_sqlite_session_get_items_limit_skips_corrupt_newest_rows():
+    """limit counts valid items, expanding past corrupt newest rows."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "async_limit_corrupt.db"
+        session = AsyncSQLiteSession("async_limit_corrupt", db_path)
+
+        await session.add_items(
+            [
+                {"role": "user", "content": "valid 0"},
+                {"role": "assistant", "content": "valid 1"},
+                {"role": "user", "content": "valid 2"},
+            ]
+        )
+
+        conn = await session._get_connection()
+        await conn.execute(
+            f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
+            (session.session_id, "not valid json {{{"),
+        )
+        await conn.commit()
+
+        limited = await session.get_items(limit=2)
+        assert [item.get("content") for item in limited] == ["valid 1", "valid 2"]
+
+        await session.close()
+
+
 async def test_async_sqlite_session_session_settings_default():
     """Test that session_settings defaults to empty SessionSettings."""
     session = AsyncSQLiteSession("async_default_settings")

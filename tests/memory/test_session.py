@@ -430,6 +430,67 @@ async def test_sqlite_session_get_items_with_limit():
         session.close()
 
 
+@pytest.mark.asyncio
+async def test_sqlite_session_get_items_limit_skips_corrupt_newest_rows():
+    """limit counts valid items, expanding past corrupt newest rows."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_limit_corrupt.db"
+        session = SQLiteSession("limit_corrupt", db_path)
+
+        await session.add_items(
+            [
+                {"role": "user", "content": "valid 0"},
+                {"role": "assistant", "content": "valid 1"},
+                {"role": "user", "content": "valid 2"},
+            ]
+        )
+
+        with session._locked_connection() as conn:
+            conn.execute(
+                f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
+                (session.session_id, "not valid json {{{"),
+            )
+            conn.commit()
+
+        # Newest row is corrupt; limit=2 should still return the two latest valid items.
+        limited = await session.get_items(limit=2)
+        assert [item.get("content") for item in limited] == ["valid 1", "valid 2"]
+
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_get_items_session_settings_limit_skips_corrupt_rows():
+    """session_settings.limit also counts valid items when newest rows are corrupt."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_settings_limit_corrupt.db"
+        session = SQLiteSession(
+            "settings_limit_corrupt",
+            db_path,
+            session_settings=SessionSettings(limit=2),
+        )
+
+        await session.add_items(
+            [
+                {"role": "user", "content": "valid 0"},
+                {"role": "assistant", "content": "valid 1"},
+                {"role": "user", "content": "valid 2"},
+            ]
+        )
+
+        with session._locked_connection() as conn:
+            conn.execute(
+                f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
+                (session.session_id, "not valid json {{{"),
+            )
+            conn.commit()
+
+        limited = await session.get_items()
+        assert [item.get("content") for item in limited] == ["valid 1", "valid 2"]
+
+        session.close()
+
+
 @pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
 @pytest.mark.asyncio
 async def test_session_memory_appends_list_input_by_default(runner_method):
