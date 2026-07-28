@@ -390,3 +390,17 @@ def test_run_result_streaming_agent_tool_invocation_returns_metadata() -> None:
         tool_call_id="call_stream",
         tool_arguments='{"input":"stream"}',
     )
+
+
+def test_run_result_usage_property() -> None:
+    from agents.usage import Usage
+
+    result = create_run_result("output")
+    result.context_wrapper.usage.add(Usage(requests=1, input_tokens=100, output_tokens=50, total_tokens=150))
+
+    assert result.usage.requests == 1
+    assert result.usage.input_tokens == 100
+    assert result.usage.output_tokens == 50
+    assert result.usage.total_tokens == 150
+    assert result.usage is result.context_wrapper.usage
+

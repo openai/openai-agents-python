@@ -48,7 +48,9 @@ from .stream_events import StreamEvent
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Trace
 from .tracing.traces import TraceState
+from .usage import Usage
 from .util._pretty_print import (
+
     pretty_print_result,
     pretty_print_run_result_streaming,
 )
@@ -312,6 +314,12 @@ class RunResultBase(abc.ABC):
     @abc.abstractmethod
     def last_agent(self) -> Agent[Any]:
         """The last agent that was run."""
+
+    @property
+    def usage(self) -> Usage:
+        """The total token usage for this agent run."""
+        return self.context_wrapper.usage
+
 
     def release_agents(self, *, release_new_items: bool = True) -> None:
         """
