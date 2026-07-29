@@ -43,6 +43,52 @@ def _disabled_billing_realtime_tool(*, is_enabled: Any = False) -> FunctionTool:
     )
 
 
+def _agent_with_cross_group_enablement_failure() -> tuple[
+    RealtimeAgent[Any], asyncio.Event, asyncio.Event
+]:
+    handoff_started = asyncio.Event()
+    handoff_cancelled = asyncio.Event()
+    handoff_finished = asyncio.Event()
+
+    async def failing_tool_enabled(_ctx: RunContextWrapper[Any], _agent: AgentBase[Any]) -> bool:
+        await handoff_started.wait()
+        raise RuntimeError("tool enablement failed")
+
+    async def blocking_handoff_enabled(
+        _ctx: RunContextWrapper[Any], _agent: RealtimeAgent[Any]
+    ) -> bool:
+        handoff_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            handoff_cancelled.set()
+            raise
+        finally:
+            handoff_finished.set()
+        return True
+
+    return (
+        RealtimeAgent(
+            name="parent",
+            tools=[
+                function_tool(
+                    lambda: "failing",
+                    name_override="failing_tool",
+                    is_enabled=failing_tool_enabled,
+                )
+            ],
+            handoffs=[
+                realtime_handoff(
+                    RealtimeAgent(name="blocking"),
+                    is_enabled=blocking_handoff_enabled,
+                )
+            ],
+        ),
+        handoff_cancelled,
+        handoff_finished,
+    )
+
+
 @pytest.mark.asyncio
 async def test_collect_enabled_handoffs_filters_disabled() -> None:
     parent = RealtimeAgent(name="parent")
@@ -93,6 +139,23 @@ async def test_filter_enabled_tools_cancels_sibling_checks_on_error() -> None:
 
     assert slow_cancelled.is_set()
     assert slow_finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_build_model_settings_cancels_cross_group_enablement_on_error() -> None:
+    agent, handoff_cancelled, handoff_finished = _agent_with_cross_group_enablement_failure()
+
+    with pytest.raises(RuntimeError, match="tool enablement failed"):
+        await _build_model_settings_from_agent(
+            agent=agent,
+            context_wrapper=RunContextWrapper(None),
+            base_settings={},
+            starting_settings=None,
+            run_config=None,
+        )
+
+    assert handoff_cancelled.is_set()
+    assert handoff_finished.is_set()
 
 
 @pytest.mark.asyncio

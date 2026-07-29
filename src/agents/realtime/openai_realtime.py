@@ -95,6 +95,7 @@ from agents.tool import (
     ensure_function_tool_supports_responses_only_features,
     ensure_tool_choice_supports_backend,
 )
+from agents.util._asyncio_tasks import gather_with_cancel
 from agents.util._types import MaybeAwaitable
 
 from .. import _debug
@@ -445,7 +446,7 @@ async def _build_model_settings_from_agent(
     if agent.prompt is not None:
         updated_settings["prompt"] = agent.prompt
 
-    instructions, tools, handoffs = await asyncio.gather(
+    instructions, tools, handoffs = await gather_with_cancel(
         agent.get_system_prompt(context_wrapper),
         agent.get_all_tools(context_wrapper),
         _collect_enabled_handoffs(agent, context_wrapper),

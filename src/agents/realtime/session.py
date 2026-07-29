@@ -33,6 +33,7 @@ from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, Tool, invok
 from ..tool_context import ToolContext
 from ..tool_guardrails import ToolInputGuardrailData
 from ..util._approvals import evaluate_needs_approval_setting, parse_function_tool_arguments
+from ..util._asyncio_tasks import gather_with_cancel
 from ._tool_filtering import filter_enabled_tools
 from ._tool_validation import validate_realtime_tool_names
 from .agent import RealtimeAgent
@@ -1576,7 +1577,7 @@ class RealtimeSession(RealtimeModelListener):
         ):
             return self._current_dispatch_snapshot
 
-        tools, handoffs = await asyncio.gather(
+        tools, handoffs = await gather_with_cancel(
             agent.get_all_tools(self._context_wrapper),
             self._get_handoffs(agent, self._context_wrapper),
         )
@@ -1586,7 +1587,7 @@ class RealtimeSession(RealtimeModelListener):
         self,
         snapshot: _RealtimeDispatchSnapshot,
     ) -> _RealtimeDispatchSnapshot:
-        tools, handoffs = await asyncio.gather(
+        tools, handoffs = await gather_with_cancel(
             filter_enabled_tools(snapshot.tools, self._context_wrapper, snapshot.agent),
             filter_enabled_handoffs(snapshot.handoffs, self._context_wrapper, snapshot.agent),
         )
@@ -1607,7 +1608,7 @@ class RealtimeSession(RealtimeModelListener):
         if agent.prompt is not None:
             updated_settings["prompt"] = agent.prompt
 
-        instructions, tools, handoffs = await asyncio.gather(
+        instructions, tools, handoffs = await gather_with_cancel(
             agent.get_system_prompt(self._context_wrapper),
             agent.get_all_tools(self._context_wrapper),
             self._get_handoffs(agent, self._context_wrapper),

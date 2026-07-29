@@ -10,6 +10,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 import agents._debug as _debug
+from agents.agent import AgentBase
 from agents.exceptions import ToolTimeoutError, UserError
 from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
 from agents.handoffs import Handoff
@@ -148,6 +149,47 @@ def _disabled_billing_tool(*, is_enabled: Any = False) -> FunctionTool:
         lambda: "ok",
         name_override="transfer_to_billing",
         is_enabled=is_enabled,
+    )
+
+
+def _agent_with_cross_group_enablement_failure() -> tuple[
+    RealtimeAgent[Any], asyncio.Event, asyncio.Event
+]:
+    handoff_started = asyncio.Event()
+    handoff_cancelled = asyncio.Event()
+    handoff_finished = asyncio.Event()
+
+    async def failing_tool_enabled(_ctx: RunContextWrapper[Any], _agent: AgentBase[Any]) -> bool:
+        await handoff_started.wait()
+        raise RuntimeError("tool enablement failed")
+
+    async def blocking_handoff_enabled(
+        _ctx: RunContextWrapper[Any], _agent: RealtimeAgent[Any]
+    ) -> bool:
+        handoff_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            handoff_cancelled.set()
+            raise
+        finally:
+            handoff_finished.set()
+        return True
+
+    return (
+        RealtimeAgent(
+            name="parent",
+            tools=[
+                function_tool(
+                    lambda: "failing",
+                    name_override="failing_tool",
+                    is_enabled=failing_tool_enabled,
+                )
+            ],
+            handoffs=[_disabled_billing_handoff(is_enabled=blocking_handoff_enabled)],
+        ),
+        handoff_cancelled,
+        handoff_finished,
     )
 
 
@@ -742,6 +784,38 @@ async def test_get_handoffs_async_is_enabled(monkeypatch):
     enabled = await RealtimeSession._get_handoffs(a, session._context_wrapper)
     # Both should be enabled
     assert len(enabled) == 2
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "resolve_dispatch_snapshot",
+        "filter_enabled_dispatch_snapshot",
+        "get_updated_model_settings",
+    ],
+)
+@pytest.mark.asyncio
+async def test_realtime_session_boundaries_cancel_cross_group_enablement_on_error(
+    boundary: str,
+) -> None:
+    agent, handoff_cancelled, handoff_finished = _agent_with_cross_group_enablement_failure()
+    session = RealtimeSession(_DummyModel(), agent, None)
+
+    with pytest.raises(RuntimeError, match="tool enablement failed"):
+        if boundary == "resolve_dispatch_snapshot":
+            await session._resolve_dispatch_snapshot(agent, None)
+        elif boundary == "filter_enabled_dispatch_snapshot":
+            settings = cast(
+                RealtimeSessionModelSettings,
+                {"tools": agent.tools, "handoffs": agent.handoffs},
+            )
+            snapshot = session._dispatch_snapshot_from_settings(agent, settings)
+            await session._filter_enabled_dispatch_snapshot(snapshot)
+        else:
+            await session._get_updated_model_settings_from_agent(None, agent)
+
+    assert handoff_cancelled.is_set()
+    assert handoff_finished.is_set()
 
 
 @pytest.mark.asyncio
