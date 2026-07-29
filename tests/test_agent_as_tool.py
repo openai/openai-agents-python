@@ -1053,6 +1053,66 @@ async def test_agent_as_tool_supports_custom_input_builder(
 
 
 @pytest.mark.asyncio
+async def test_agent_as_tool_supports_falsey_callable_input_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TranslationInput(BaseModel):
+        text: str
+
+    custom_items = [{"role": "user", "content": "custom input"}]
+
+    class FalseyInputBuilder:
+        def __bool__(self) -> bool:
+            return False
+
+        def __call__(self, _options: StructuredToolInputBuilderOptions):
+            return custom_items
+
+    agent = Agent(name="builder_agent")
+    tool = agent.as_tool(
+        tool_name="builder_tool",
+        tool_description="Builder tool",
+        parameters=TranslationInput,
+        input_builder=FalseyInputBuilder(),
+    )
+    captured: dict[str, Any] = {}
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        captured["input"] = input
+        return DummyResult()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    args = {"text": "hola"}
+    tool_context = ToolContext(
+        context=None,
+        tool_name="builder_tool",
+        tool_call_id="call_builder",
+        tool_arguments=json.dumps(args),
+    )
+
+    await tool.on_invoke_tool(tool_context, json.dumps(args))
+
+    assert captured["input"] == custom_items
+
+
+@pytest.mark.asyncio
 async def test_agent_as_tool_rejects_invalid_builder_output() -> None:
     """Invalid builder output should surface as a tool error."""
 
