@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from agents import Agent
 from agents.exceptions import ModelBehaviorError, UserError
 from agents.realtime import RealtimeAgent, realtime_handoff
+from agents.realtime.handoffs import collect_enabled_handoffs
 from agents.run_context import RunContextWrapper
 
 
@@ -44,6 +45,42 @@ def test_realtime_handoff_with_custom_params():
     assert handoff_obj.tool_name == "custom_handoff"
     assert handoff_obj.tool_description == "Custom handoff description"
     assert handoff_obj.is_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_collect_enabled_handoffs_cancels_sibling_checks_on_error() -> None:
+    slow_started = asyncio.Event()
+    slow_cancelled = asyncio.Event()
+    slow_finished = asyncio.Event()
+
+    async def slow_enabled(_ctx: RunContextWrapper[Any], _agent: RealtimeAgent[Any]) -> bool:
+        slow_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            slow_cancelled.set()
+            raise
+        finally:
+            slow_finished.set()
+        return True
+
+    async def failing_enabled(_ctx: RunContextWrapper[Any], _agent: RealtimeAgent[Any]) -> bool:
+        await slow_started.wait()
+        raise RuntimeError("enablement failed")
+
+    parent = RealtimeAgent(
+        name="parent",
+        handoffs=[
+            realtime_handoff(RealtimeAgent(name="slow"), is_enabled=slow_enabled),
+            realtime_handoff(RealtimeAgent(name="failing"), is_enabled=failing_enabled),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="enablement failed"):
+        await collect_enabled_handoffs(parent, RunContextWrapper(None))
+
+    assert slow_cancelled.is_set()
+    assert slow_finished.is_set()
 
 
 @pytest.mark.asyncio

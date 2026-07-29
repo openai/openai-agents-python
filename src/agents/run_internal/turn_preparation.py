@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import inspect
 from typing import Any
 
@@ -18,6 +17,7 @@ from ..run_context import RunContextWrapper, TContext
 from ..tool import Tool
 from ..tracing import SpanError
 from ..util import _error_tracing
+from ..util._asyncio_tasks import gather_with_cancel
 
 __all__ = [
     "validate_run_hooks",
@@ -111,7 +111,7 @@ async def get_handoffs(agent: Agent[Any], context_wrapper: RunContextWrapper[Any
             return bool(await res)
         return bool(res)
 
-    results = await asyncio.gather(*(check_handoff_enabled(h) for h in handoffs))
+    results = await gather_with_cancel(*(check_handoff_enabled(h) for h in handoffs))
     enabled: list[Handoff] = [h for h, ok in zip(handoffs, results, strict=False) if ok]
     return enabled
 

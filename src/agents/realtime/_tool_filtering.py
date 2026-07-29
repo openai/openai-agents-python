@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import inspect
 from collections.abc import Iterable
 from typing import Any
@@ -8,6 +7,7 @@ from typing import Any
 from ..agent import AgentBase
 from ..run_context import RunContextWrapper
 from ..tool import FunctionTool, Tool
+from ..util._asyncio_tasks import gather_with_cancel
 
 
 async def filter_enabled_tools(
@@ -29,7 +29,7 @@ async def filter_enabled_tools(
             return bool(await result)
         return bool(result)
 
-    results = await asyncio.gather(*(_check_tool_enabled(tool) for tool in tools_list))
+    results = await gather_with_cancel(*(_check_tool_enabled(tool) for tool in tools_list))
     return [tool for tool, ok in zip(tools_list, results, strict=False) if ok]
 
 

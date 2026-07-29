@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import inspect
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, cast, overload
@@ -14,6 +13,7 @@ from ..run_context import RunContextWrapper, TContext
 from ..strict_schema import ensure_strict_json_schema
 from ..tracing.spans import SpanError
 from ..util import _error_tracing, _json
+from ..util._asyncio_tasks import gather_with_cancel
 from ..util._types import MaybeAwaitable
 from . import RealtimeAgent
 
@@ -44,7 +44,7 @@ async def filter_enabled_handoffs(
             return await result
         return result
 
-    results = await asyncio.gather(*(_check_handoff_enabled(h) for h in handoffs_list))
+    results = await gather_with_cancel(*(_check_handoff_enabled(h) for h in handoffs_list))
     return [h for h, ok in zip(handoffs_list, results, strict=False) if ok]
 
 

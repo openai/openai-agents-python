@@ -93,6 +93,7 @@ from ..tool_guardrails import (
 from ..tracing import Span, SpanError, function_span, get_current_trace
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting, parse_function_tool_arguments
+from ..util._asyncio_tasks import gather_with_cancel
 from ..util._custom_data import maybe_extract_custom_data, merge_custom_data
 from ..util._tool_errors import get_trace_tool_error
 from ..util._types import MaybeAwaitable
@@ -581,7 +582,9 @@ async def resolve_enabled_function_tools(
     if not function_tools:
         return []
 
-    enabled_results = await asyncio.gather(*(_check_tool_enabled(tool) for tool in function_tools))
+    enabled_results = await gather_with_cancel(
+        *(_check_tool_enabled(tool) for tool in function_tools)
+    )
     return [tool for tool, enabled in zip(function_tools, enabled_results, strict=False) if enabled]
 
 

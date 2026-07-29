@@ -499,6 +499,44 @@ async def test_is_enabled_bool_and_callable():
 
 
 @pytest.mark.asyncio
+async def test_get_all_tools_cancels_sibling_enablement_checks_on_error() -> None:
+    slow_started = asyncio.Event()
+    slow_cancelled = asyncio.Event()
+    slow_finished = asyncio.Event()
+
+    async def slow_enabled(_ctx: RunContextWrapper[Any], _agent: AgentBase) -> bool:
+        slow_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            slow_cancelled.set()
+            raise
+        finally:
+            slow_finished.set()
+        return True
+
+    async def failing_enabled(_ctx: RunContextWrapper[Any], _agent: AgentBase) -> bool:
+        await slow_started.wait()
+        raise RuntimeError("enablement failed")
+
+    @function_tool(is_enabled=slow_enabled)
+    def slow_tool() -> str:
+        return "slow"
+
+    @function_tool(is_enabled=failing_enabled)
+    def failing_tool() -> str:
+        return "failing"
+
+    agent = Agent(name="t", tools=[slow_tool, failing_tool])
+
+    with pytest.raises(RuntimeError, match="enablement failed"):
+        await agent.get_all_tools(RunContextWrapper(None))
+
+    assert slow_cancelled.is_set()
+    assert slow_finished.is_set()
+
+
+@pytest.mark.asyncio
 async def test_get_all_tools_preserves_explicit_tool_search_when_deferred_tools_are_disabled():
     async def deferred_enabled(ctx: RunContextWrapper[BoolCtx], agent: AgentBase) -> bool:
         return ctx.context.enable_tools

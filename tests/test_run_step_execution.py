@@ -1528,6 +1528,57 @@ async def test_function_tool_disabled_before_execution_fails_before_starting_sib
 
 
 @pytest.mark.asyncio
+async def test_function_tool_enablement_error_cancels_sibling_checks_before_execution() -> None:
+    slow_check_count = 0
+    failing_check_count = 0
+    slow_started = asyncio.Event()
+    slow_cancelled = asyncio.Event()
+    slow_finished = asyncio.Event()
+
+    async def slow_enabled(_ctx: RunContextWrapper[Any], _agent: AgentBase[Any]) -> bool:
+        nonlocal slow_check_count
+        slow_check_count += 1
+        if slow_check_count == 1:
+            return True
+        slow_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            slow_cancelled.set()
+            raise
+        finally:
+            slow_finished.set()
+        return True
+
+    async def failing_enabled(_ctx: RunContextWrapper[Any], _agent: AgentBase[Any]) -> bool:
+        nonlocal failing_check_count
+        failing_check_count += 1
+        if failing_check_count == 1:
+            return True
+        await slow_started.wait()
+        raise RuntimeError("enablement failed")
+
+    slow_tool = function_tool(lambda: "slow", name_override="slow_tool", is_enabled=slow_enabled)
+    failing_tool = function_tool(
+        lambda: "failing",
+        name_override="failing_tool",
+        is_enabled=failing_enabled,
+    )
+    agent = Agent(name="test", tools=[slow_tool, failing_tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("slow_tool", "{}", call_id="call-1")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with pytest.raises(RuntimeError, match="enablement failed"):
+        await get_execute_result(agent, response)
+
+    assert slow_cancelled.is_set()
+    assert slow_finished.is_set()
+
+
+@pytest.mark.asyncio
 async def test_execute_function_tool_calls_allows_non_agent_function_tool() -> None:
     @function_tool(name_override="synthetic_tool")
     def synthetic_tool() -> str:

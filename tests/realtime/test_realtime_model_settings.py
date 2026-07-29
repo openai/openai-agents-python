@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -9,7 +10,9 @@ from openai.types.realtime.realtime_session_create_request import (
 )
 from openai.types.realtime.session_update_event import SessionUpdateEvent
 
+from agents.agent import AgentBase
 from agents.handoffs import Handoff
+from agents.realtime._tool_filtering import filter_enabled_tools
 from agents.realtime.agent import RealtimeAgent
 from agents.realtime.config import RealtimeRunConfig, RealtimeSessionModelSettings
 from agents.realtime.handoffs import realtime_handoff
@@ -54,6 +57,42 @@ async def test_collect_enabled_handoffs_filters_disabled() -> None:
     assert len(enabled) == 1
     assert isinstance(enabled[0], Handoff)
     assert enabled[0].agent_name == "child_enabled"
+
+
+@pytest.mark.asyncio
+async def test_filter_enabled_tools_cancels_sibling_checks_on_error() -> None:
+    slow_started = asyncio.Event()
+    slow_cancelled = asyncio.Event()
+    slow_finished = asyncio.Event()
+
+    async def slow_enabled(_ctx: RunContextWrapper[Any], _agent: AgentBase[Any]) -> bool:
+        slow_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            slow_cancelled.set()
+            raise
+        finally:
+            slow_finished.set()
+        return True
+
+    async def failing_enabled(_ctx: RunContextWrapper[Any], _agent: AgentBase[Any]) -> bool:
+        await slow_started.wait()
+        raise RuntimeError("enablement failed")
+
+    slow_tool = function_tool(lambda: "slow", is_enabled=slow_enabled)
+    failing_tool = function_tool(lambda: "failing", is_enabled=failing_enabled)
+    agent = RealtimeAgent(name="parent")
+
+    with pytest.raises(RuntimeError, match="enablement failed"):
+        await filter_enabled_tools(
+            [slow_tool, failing_tool],
+            RunContextWrapper(None),
+            agent,
+        )
+
+    assert slow_cancelled.is_set()
+    assert slow_finished.is_set()
 
 
 @pytest.mark.asyncio

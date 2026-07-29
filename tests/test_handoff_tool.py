@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import json
 import logging
@@ -468,6 +469,42 @@ async def test_handoff_is_enabled_filtering_integration():
     agent_names = {h.agent_name for h in filtered_handoffs}
     assert agent_names == {"agent_1", "agent_3"}
     assert "agent_2" not in agent_names
+
+
+@pytest.mark.asyncio
+async def test_get_handoffs_cancels_sibling_enablement_checks_on_error() -> None:
+    slow_started = asyncio.Event()
+    slow_cancelled = asyncio.Event()
+    slow_finished = asyncio.Event()
+
+    async def slow_enabled(_ctx: RunContextWrapper[Any], _agent: Agent[Any]) -> bool:
+        slow_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            slow_cancelled.set()
+            raise
+        finally:
+            slow_finished.set()
+        return True
+
+    async def failing_enabled(_ctx: RunContextWrapper[Any], _agent: Agent[Any]) -> bool:
+        await slow_started.wait()
+        raise RuntimeError("enablement failed")
+
+    parent = Agent(
+        name="parent",
+        handoffs=[
+            handoff(Agent(name="slow"), is_enabled=slow_enabled),
+            handoff(Agent(name="failing"), is_enabled=failing_enabled),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="enablement failed"):
+        await get_handoffs(parent, RunContextWrapper(None))
+
+    assert slow_cancelled.is_set()
+    assert slow_finished.is_set()
 
 
 @pytest.mark.asyncio
