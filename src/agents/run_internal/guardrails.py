@@ -104,6 +104,7 @@ async def run_input_guardrails_with_queue(
         if (
             isinstance(error, Exception)
             and asyncio.current_task() is streamed_result._input_guardrails_task
+            and not streamed_result.is_complete
         ):
             if streamed_result.run_loop_task and not streamed_result.run_loop_task.done():
                 streamed_result.run_loop_task.cancel()
