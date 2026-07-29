@@ -726,6 +726,52 @@ async def test_parallel_guardrail_non_tripwire_error_not_swallowed():
 
 
 @pytest.mark.asyncio
+async def test_parallel_guardrail_error_cancels_streaming_model():
+    model_started = asyncio.Event()
+    model_cancelled = asyncio.Event()
+    model_finished = asyncio.Event()
+
+    @input_guardrail(run_in_parallel=True)
+    async def raising_parallel_check(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await asyncio.wait_for(model_started.wait(), timeout=1)
+        raise ValueError("guardrail boom")
+
+    model = FakeModel()
+
+    async def blocking_stream_response(*args, **kwargs):
+        model_started.set()
+        try:
+            await asyncio.Event().wait()
+            yield
+        except asyncio.CancelledError:
+            model_cancelled.set()
+            raise
+        finally:
+            model_finished.set()
+
+    agent = Agent(
+        name="streaming_guardrail_error_agent",
+        input_guardrails=[raising_parallel_check],
+        model=model,
+    )
+
+    async def consume_stream() -> None:
+        async for _event in result.stream_events():
+            pass
+
+    with patch.object(model, "stream_response", side_effect=blocking_stream_response):
+        result = Runner.run_streamed(agent, "trigger guardrail")
+        with pytest.raises(ValueError, match="guardrail boom"):
+            await asyncio.wait_for(consume_stream(), timeout=1)
+
+    await asyncio.wait_for(model_finished.wait(), timeout=1)
+    assert model_started.is_set() is True
+    assert model_cancelled.is_set() is True
+
+
+@pytest.mark.asyncio
 async def test_parallel_guardrail_may_not_prevent_tool_execution_streaming():
     tool_was_executed = False
     guardrail_executed = False
