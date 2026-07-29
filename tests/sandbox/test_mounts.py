@@ -1250,6 +1250,58 @@ async def test_blobfuse_generated_config_is_written_owner_only() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("attr_cache_timeout_sec", [0, 5])
+async def test_blobfuse_config_preserves_explicit_attr_cache_timeout(
+    attr_cache_timeout_sec: int,
+) -> None:
+    session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    session = _GeneratedConfigApplySession(session_id=session_id)
+    pattern = FuseMountPattern(attr_cache_timeout_sec=attr_cache_timeout_sec)
+
+    await pattern.apply(
+        session,
+        Path("/workspace/mnt"),
+        FuseMountConfig(
+            account="acct",
+            container="container",
+            endpoint=None,
+            identity_client_id=None,
+            account_key="secret",
+            mount_type="azure_blob_mount",
+            read_only=True,
+        ),
+    )
+
+    (_, generated_config) = session.write_calls[0]
+    assert b"attr_cache:\n  timeout-sec: %d\n" % attr_cache_timeout_sec in generated_config
+
+
+@pytest.mark.asyncio
+async def test_blobfuse_config_defaults_attr_cache_timeout_when_unset() -> None:
+    session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    session = _GeneratedConfigApplySession(session_id=session_id)
+    pattern = FuseMountPattern()
+    assert pattern.attr_cache_timeout_sec is None
+
+    await pattern.apply(
+        session,
+        Path("/workspace/mnt"),
+        FuseMountConfig(
+            account="acct",
+            container="container",
+            endpoint=None,
+            identity_client_id=None,
+            account_key="secret",
+            mount_type="azure_blob_mount",
+            read_only=True,
+        ),
+    )
+
+    (_, generated_config) = session.write_calls[0]
+    assert b"attr_cache:\n  timeout-sec: 7200\n" in generated_config
+
+
+@pytest.mark.asyncio
 async def test_blobfuse_cache_path_must_be_relative_to_workspace() -> None:
     with pytest.raises(MountConfigError) as exc_info:
         FuseMountPattern(cache_path=Path("/tmp/blobfuse-cache"))

@@ -271,7 +271,9 @@ class FuseMountPattern(MountPatternBase):
                     ]
                 )
 
-            attr_cache_timeout = self.attr_cache_timeout_sec or 7200
+            attr_cache_timeout = (
+                7200 if self.attr_cache_timeout_sec is None else self.attr_cache_timeout_sec
+            )
             lines.extend(
                 [
                     "attr_cache:",
