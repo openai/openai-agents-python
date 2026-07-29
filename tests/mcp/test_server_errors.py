@@ -96,21 +96,41 @@ _CREDENTIALED_URL = "https://user:s3cr3t_pw@mcp.example.com/sse?api_key=SECRET_Q
 
 
 def _assert_url_credentials_redacted(message: str) -> None:
+    """While tool data is redacted, no part of the connection URL may appear."""
     assert "s3cr3t_pw" not in message
     assert "SECRET_QS_KEY" not in message
-    # The host and path stay so the error still says which server failed.
-    assert "mcp.example.com/sse" in message
+    assert "mcp.example.com" not in message
 
 
-def test_error_name_strips_url_credentials_from_default_name() -> None:
-    """HTTP server names default to the connection URL, which can embed credentials."""
+def test_error_name_is_a_fixed_label_while_redacting() -> None:
+    """These errors reach the model, so the server name is replaced by a fixed label."""
     server = MCPServerSse(params={"url": _CREDENTIALED_URL})
 
     assert "s3cr3t_pw" in server.name  # the raw name still carries them
-    _assert_url_credentials_redacted(server._error_name)
+    assert server._error_name == "<redacted>"
 
 
-def test_error_name_leaves_explicit_names_untouched() -> None:
+def test_error_name_is_sanitized_when_tool_logging_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    server = MCPServerSse(params={"url": _CREDENTIALED_URL})
+
+    # Credentials, query, and fragment are stripped; the host and path stay for debugging.
+    assert server._error_name == "sse: https://mcp.example.com/sse"
+
+
+def test_error_name_hides_explicit_names_while_redacting() -> None:
+    """An explicit name is caller supplied, so it is not surfaced either."""
+    server = MCPServerSse(params={"url": _CREDENTIALED_URL}, name="my server")
+
+    assert server._error_name == "<redacted>"
+
+
+def test_error_name_shows_explicit_names_when_tool_logging_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
     server = MCPServerSse(params={"url": _CREDENTIALED_URL}, name="my server")
 
     assert server._error_name == "my server"
@@ -125,7 +145,10 @@ def test_connect_http_error_redacts_url_credentials() -> None:
 
     error = server._build_user_error_for_http_error(http_error)
 
-    _assert_url_credentials_redacted(str(error))
+    message = str(error)
+    _assert_url_credentials_redacted(message)
+    # The status code stays: it is a safe diagnostic field.
+    assert "503" in message
 
 
 @pytest.mark.asyncio
@@ -312,7 +335,8 @@ async def test_invoke_mcp_tool_does_not_inspect_exception_while_redacting() -> N
         )
 
     message = str(exc_info.value)
-    assert "Error invoking MCP tool test_tool" in message
+    # Fixed text: the tool name comes from the server and is not surfaced either.
+    assert message == "Error invoking MCP tool"
     assert "SECRET_TYPE_NAME_123" not in message
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None

@@ -236,6 +236,9 @@ MCPStreamTransport = (
 )
 
 
+_REDACTED_SERVER_LABEL = "<redacted>"
+
+
 def _transport_error_cause(exc: Exception) -> Exception | None:
     """Return the cause to retain for a transport failure, or None while redacting.
 
@@ -313,13 +316,17 @@ class MCPServer(abc.ABC):
 
     @property
     def _error_name(self) -> str:
-        """The server name with URL credentials stripped, for use in raised errors.
+        """The server label to use in raised errors.
 
         HTTP server names default to the connection URL (for example
-        ``sse: https://user:password@host/path?api_key=...``), which can embed credentials.
-        Errors are raised to callers regardless of the tool-data logging flags, so the
-        credentials are always stripped while the host and path are kept for debugging.
+        ``sse: https://user:password@host/path?api_key=...``), and these errors reach the
+        model through the tool-failure formatter. While tool data is redacted the name is
+        replaced by a fixed label, because an explicit name is caller supplied and a
+        URL-derived one keeps its path. Otherwise the name is returned with its
+        credentials, query, and fragment stripped.
         """
+        if _debug.DONT_LOG_TOOL_DATA:
+            return _REDACTED_SERVER_LABEL
         return get_mcp_server_log_name(self.name)
 
     @abc.abstractmethod

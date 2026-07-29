@@ -706,6 +706,10 @@ class MCPUtil:
                 done, _ = await asyncio.wait({call_task}, return_when=asyncio.FIRST_COMPLETED)
                 finished_task = done.pop()
                 if finished_task.cancelled():
+                    # This reaches the model through the tool-failure formatter, so the tool
+                    # and server names are left out while tool data is redacted.
+                    if _debug.DONT_LOG_TOOL_DATA:
+                        raise MCPToolCancellationError("MCP tool execution was cancelled.")
                     raise MCPToolCancellationError(
                         f"Failed to call tool '{tool.name}' on MCP server "
                         f"'{get_mcp_server_log_name(server.name)}': tool execution was cancelled."
@@ -754,13 +758,11 @@ class MCPUtil:
             # controlled for a custom MCPServer, and keeping the object would leave it
             # reachable through the traceback frame locals of the raising frame.
             if _debug.DONT_LOG_TOOL_DATA:
-                # The server name is left out too: an explicit name is caller supplied and a
-                # URL-derived one keeps its path, and this message reaches the model through
-                # the default failure formatter. This matches get_mcp_server_log_message,
-                # which also drops the name while tool data is redacted.
-                invocation_error = AgentsException(
-                    f"Error invoking MCP tool {tool_name_for_display}"
-                )
+                # Names are left out as well: a tool name is supplied by the server and a
+                # server name is caller supplied, and this message reaches the model through
+                # the default failure formatter. This mirrors the "Invoking MCP tool" debug
+                # log above, which also drops both names while tool data is redacted.
+                invocation_error = AgentsException("Error invoking MCP tool")
                 invocation_cause = None
             else:
                 invocation_error = AgentsException(
