@@ -653,3 +653,17 @@ def test_host_path_grant_rejects_symlink_to_root(tmp_path: Path) -> None:
         match="sandbox path grant path must not resolve to filesystem root",
     ):
         sandbox_path_grant_host_path(grant)
+
+
+def test_host_path_grant_returns_validated_resolved_source(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    source_alias = tmp_path / "source-alias"
+    os.symlink(source, source_alias, target_is_directory=True)
+    grant = SandboxPathGrant(path="/mnt/shared-data", host_path=str(source_alias))
+
+    resolved_source = sandbox_path_grant_host_path(grant)
+    source_alias.unlink()
+    os.symlink(Path("/"), source_alias, target_is_directory=True)
+
+    assert resolved_source == source.resolve()

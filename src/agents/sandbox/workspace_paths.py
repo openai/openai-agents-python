@@ -173,8 +173,9 @@ def sandbox_path_grant_host_path(grant: SandboxPathGrant) -> Path:
             f"sandbox path grant host_path must be drive-qualified on Windows: {raw_path}"
         )
     _raise_if_filesystem_root(native_path)
-    _raise_if_filesystem_root(native_path.resolve(strict=False), resolved=True)
-    return native_path
+    resolved_path = native_path.resolve(strict=False)
+    _raise_if_filesystem_root(resolved_path, resolved=True)
+    return resolved_path
 
 
 class WorkspacePathPolicy:

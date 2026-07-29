@@ -767,14 +767,16 @@ class _ManifestUsersCapability(Capability):
 class _ManifestPathGrantsCapability(Capability):
     type: str = "manifest-path-grants"
     grants: tuple[SandboxPathGrant, ...]
+    process_calls: int
 
     def __init__(self, grants: tuple[SandboxPathGrant, ...]) -> None:
         super().__init__(
             type="manifest-path-grants",
-            **cast(Any, {"grants": grants}),
+            **cast(Any, {"grants": grants, "process_calls": 0}),
         )
 
     def process_manifest(self, manifest: Manifest) -> Manifest:
+        self.process_calls += 1
         manifest.extra_path_grants = self.grants
         return manifest
 
@@ -3331,6 +3333,123 @@ async def test_session_manager_rebinds_persisted_path_grants_from_current_manife
     assert client.resume_state is not None
     assert client.resume_state.manifest.extra_path_grants == trusted_manifest.extra_path_grants
     assert client.resume_state.path_grants_require_rebind == ()
+
+
+@pytest.mark.asyncio
+async def test_session_manager_rebinds_capability_host_path_grant_once(
+    tmp_path: Path,
+) -> None:
+    host_grant = SandboxPathGrant(
+        path="/mnt/shared-data",
+        host_path=str(tmp_path),
+        read_only=True,
+    )
+    capability = _ManifestPathGrantsCapability((host_grant,))
+    client = _FakeClient(_FakeSession(Manifest()))
+    agent = SandboxAgent(
+        name="worker",
+        model=FakeModel(),
+        instructions="Worker.",
+        default_manifest=Manifest(),
+    )
+    session_state = TestSessionState(
+        manifest=Manifest(extra_path_grants=(host_grant,)),
+        snapshot=NoopSnapshot(id="resume"),
+    )
+    serialized_state = client.serialize_session_state(session_state)
+    run_state = cast(
+        RunState[Any, Agent[Any]],
+        RunState(
+            context=RunContextWrapper(context={}),
+            original_input="hello",
+            starting_agent=agent,
+        ),
+    )
+    run_state._current_agent = agent
+    run_state._sandbox = {
+        "backend_id": client.backend_id,
+        "current_agent_key": agent.name,
+        "current_agent_name": agent.name,
+        "session_state": serialized_state,
+        "sessions_by_agent": {
+            agent.name: {
+                "agent_name": agent.name,
+                "session_state": serialized_state,
+            }
+        },
+    }
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(client=client, options={"image": "sandbox"}),
+        run_state=run_state,
+    )
+
+    manager.acquire_agent(agent)
+    await manager.ensure_session(
+        agent=agent,
+        capabilities=[capability],
+        is_resumed_state=True,
+    )
+
+    assert capability.process_calls == 1
+    assert client.resume_state is not None
+    assert client.resume_state.manifest.extra_path_grants == (host_grant,)
+    assert client.resume_state.path_grants_require_rebind == ()
+
+
+@pytest.mark.asyncio
+async def test_session_manager_rejects_unmarked_serialized_host_path(
+    tmp_path: Path,
+) -> None:
+    client = _FakeClient(_FakeSession(Manifest()))
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    serialized_state = TestSessionState(
+        manifest=Manifest(
+            extra_path_grants=(
+                SandboxPathGrant(
+                    path="/mnt/shared-data",
+                    host_path=str(tmp_path),
+                ),
+            )
+        ),
+        snapshot=NoopSnapshot(id="resume"),
+    ).model_dump(mode="json")
+    run_state = cast(
+        RunState[Any, Agent[Any]],
+        RunState(
+            context=RunContextWrapper(context={}),
+            original_input="hello",
+            starting_agent=agent,
+        ),
+    )
+    run_state._current_agent = agent
+    run_state._sandbox = {
+        "backend_id": client.backend_id,
+        "current_agent_key": agent.name,
+        "current_agent_name": agent.name,
+        "session_state": serialized_state,
+        "sessions_by_agent": {
+            agent.name: {
+                "agent_name": agent.name,
+                "session_state": serialized_state,
+            }
+        },
+    }
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(client=client, options={"image": "sandbox"}),
+        run_state=run_state,
+    )
+
+    manager.acquire_agent(agent)
+    with pytest.raises(ValueError, match="requires current trusted host_path"):
+        await manager.ensure_session(
+            agent=agent,
+            capabilities=[],
+            is_resumed_state=True,
+        )
+
+    assert client.resume_state is None
 
 
 @pytest.mark.asyncio

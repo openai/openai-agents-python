@@ -381,3 +381,36 @@ class TestSandboxSessionStateRoundTrip:
         assert restored.path_grants_require_rebind == ()
         assert client.resume_state is not None
         assert client.resume_state.manifest.extra_path_grants == ()
+
+    @pytest.mark.asyncio
+    async def test_deserialization_discards_unmarked_serialized_host_path(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client = _RoundTripClient()
+        trusted_manifest = Manifest(
+            extra_path_grants=(
+                SandboxPathGrant(
+                    path="/mnt/shared-data",
+                    host_path=str(tmp_path),
+                ),
+            )
+        )
+        state = _SimpleSessionState(
+            manifest=trusted_manifest,
+            snapshot=NoopSnapshot(id="snapshot"),
+        )
+        payload = cast(dict[str, object], state.model_dump(mode="json"))
+
+        restored = client.deserialize_session_state(payload)
+
+        assert restored.manifest.extra_path_grants == ()
+        assert restored.path_grants_require_rebind == ("/mnt/shared-data",)
+        with pytest.raises(ValueError, match="must be rebound"):
+            await client.resume(restored)
+
+        rebound = restored.rebind_persisted_path_grants(trusted_manifest)
+        await client.resume(rebound)
+
+        assert client.resume_state is rebound
+        assert rebound.manifest.extra_path_grants == trusted_manifest.extra_path_grants

@@ -99,13 +99,30 @@ class SandboxSessionState(BaseModel):
         payload: dict[str, object],
     ) -> SandboxSessionState:
         redacted_value = payload.get(REDACTED_HOST_PATH_GRANT_PATHS_KEY)
-        redacted_paths = (
+        marker_paths = (
             tuple(path for path in redacted_value if isinstance(path, str))
             if isinstance(redacted_value, list | tuple)
             else ()
         )
-        marked = state.model_copy()
-        marked._path_grants_require_rebind = redacted_paths
+        serialized_host_path_grant_paths = tuple(
+            grant.path for grant in state.manifest.extra_path_grants if grant.host_path is not None
+        )
+        persistent_grants = tuple(
+            grant for grant in state.manifest.extra_path_grants if grant.host_path is None
+        )
+        sanitized_manifest = state.manifest.model_copy(
+            update={"extra_path_grants": persistent_grants},
+        )
+        marked = state.model_copy(update={"manifest": sanitized_manifest})
+        marked._path_grants_require_rebind = tuple(
+            dict.fromkeys(
+                (
+                    *state.path_grants_require_rebind,
+                    *marker_paths,
+                    *serialized_host_path_grant_paths,
+                )
+            )
+        )
         return marked
 
     def rebind_persisted_path_grants(

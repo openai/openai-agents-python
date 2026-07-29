@@ -334,15 +334,11 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             resume_from_run_state = True
 
         if explicit_state is not None:
-            explicit_state = explicit_state.rebind_persisted_path_grants(
-                self._resolve_trusted_resume_manifest(
-                    agent=agent,
-                )
-            )
             explicit_state = self._process_resumed_state_manifest(
                 agent=agent,
                 capabilities=capabilities,
                 session_state=explicit_state,
+                trusted_manifest=self._resolve_trusted_resume_manifest(agent=agent),
             )
             span_cm = (
                 custom_span(
@@ -774,15 +770,26 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         agent: SandboxAgent[TContext],
         capabilities: list[Capability],
         session_state: SandboxSessionState,
+        trusted_manifest: Manifest | None,
     ) -> SandboxSessionState:
+        resume_manifest = session_state.manifest
+        if session_state.path_grants_require_rebind and trusted_manifest is not None:
+            resume_manifest = resume_manifest.model_copy(
+                update={
+                    "extra_path_grants": tuple(
+                        grant.model_copy() for grant in trusted_manifest.extra_path_grants
+                    )
+                },
+            )
         processed_manifest = cls._process_manifest(
             capabilities,
-            session_state.manifest,
+            resume_manifest,
             run_as_user=cls._agent_run_as_user(agent),
         )
         if processed_manifest is None:
             return session_state
-        return session_state.model_copy(update={"manifest": processed_manifest})
+        processed_state = session_state.model_copy(update={"manifest": processed_manifest})
+        return processed_state.rebind_persisted_path_grants(processed_manifest)
 
     @staticmethod
     def _agent_run_as_user(agent: SandboxAgent[Any]) -> User | None:
