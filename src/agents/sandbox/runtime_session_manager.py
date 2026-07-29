@@ -337,7 +337,6 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             explicit_state = explicit_state.rebind_persisted_path_grants(
                 self._resolve_trusted_resume_manifest(
                     agent=agent,
-                    capabilities=capabilities,
                 )
             )
             explicit_state = self._process_resumed_state_manifest(
@@ -533,15 +532,9 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         self,
         *,
         agent: SandboxAgent[TContext],
-        capabilities: list[Capability],
     ) -> Manifest | None:
         sandbox_config = self._require_sandbox_config()
-        configured_manifest = sandbox_config.manifest or agent.default_manifest
-        return self._process_manifest(
-            capabilities,
-            configured_manifest,
-            run_as_user=self._agent_run_as_user(agent),
-        )
+        return sandbox_config.manifest or agent.default_manifest
 
     @staticmethod
     def _process_manifest(

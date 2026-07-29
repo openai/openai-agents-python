@@ -11,17 +11,18 @@ import io
 import json
 import uuid
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, cast
 
 import pytest
 from pydantic import ConfigDict, ValidationError, field_serializer, field_validator
 
 from agents.sandbox import Manifest, SandboxPathGrant
-from agents.sandbox.sandboxes.unix_local import (
-    UnixLocalSandboxClient,
-    UnixLocalSandboxSessionState,
+from agents.sandbox.session import (
+    BaseSandboxClient,
+    Dependencies,
+    SandboxSession,
+    SandboxSessionState,
 )
-from agents.sandbox.session import Dependencies, SandboxSessionState
 from agents.sandbox.snapshot import LocalSnapshot, NoopSnapshot, SnapshotBase
 
 # ---------------------------------------------------------------------------
@@ -48,6 +49,35 @@ class _EmptyDefaultSessionState(SandboxSessionState):
 class _SimpleSessionState(SandboxSessionState):
     __test__ = False
     type: Literal["simple-roundtrip"] = "simple-roundtrip"
+
+
+class _RoundTripClient(BaseSandboxClient[None]):
+    backend_id = "roundtrip"
+    supports_default_options = True
+
+    def __init__(self) -> None:
+        self.resume_state: SandboxSessionState | None = None
+
+    async def create(
+        self,
+        *,
+        snapshot: object | None = None,
+        manifest: Manifest | None = None,
+        options: None = None,
+    ) -> SandboxSession:
+        _ = (snapshot, manifest, options)
+        raise AssertionError("create() is not used by round-trip tests")
+
+    async def delete(self, session: SandboxSession) -> SandboxSession:
+        raise AssertionError("delete() is not used by round-trip tests")
+
+    async def resume(self, state: SandboxSessionState) -> SandboxSession:
+        state.assert_path_grants_rebound()
+        self.resume_state = state
+        return cast(SandboxSession, object())
+
+    def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
+        return self._deserialize_session_state_payload(payload, _SimpleSessionState)
 
 
 class _NonCopyable:
@@ -245,7 +275,7 @@ class TestSandboxSessionStateRoundTrip:
         self,
         tmp_path: Path,
     ) -> None:
-        client = UnixLocalSandboxClient()
+        client = _RoundTripClient()
         trusted_manifest = Manifest(
             extra_path_grants=(
                 SandboxPathGrant(
@@ -255,10 +285,9 @@ class TestSandboxSessionStateRoundTrip:
                 ),
             )
         )
-        state = UnixLocalSandboxSessionState(
+        state = _SimpleSessionState(
             manifest=trusted_manifest,
             snapshot=NoopSnapshot(id="snapshot"),
-            workspace_root_owned=False,
         )
 
         payload = client.serialize_session_state(state)
@@ -266,47 +295,51 @@ class TestSandboxSessionStateRoundTrip:
 
         assert str(tmp_path) not in encoded
         assert payload["__openai_agents_redacted_host_path_grant_paths"] == ["/mnt/shared-data"]
+        manifest_payload = payload["manifest"]
+        assert isinstance(manifest_payload, dict)
+        assert manifest_payload["extra_path_grants"] == []
         restored = client.deserialize_session_state(payload)
-        assert restored.manifest.extra_path_grants[0].host_path is None
+        assert restored.manifest.extra_path_grants == ()
         assert restored.path_grants_require_rebind == ("/mnt/shared-data",)
 
         rebound = restored.rebind_persisted_path_grants(trusted_manifest)
 
         assert rebound.manifest.extra_path_grants == trusted_manifest.extra_path_grants
         assert rebound.path_grants_require_rebind == ()
-        assert restored.manifest.extra_path_grants[0].host_path is None
+        assert restored.manifest.extra_path_grants == ()
 
-    def test_rebind_preserves_duplicate_path_grant_order_and_permissions(self) -> None:
-        client = UnixLocalSandboxClient()
-        trusted_manifest = Manifest(
+    @pytest.mark.asyncio
+    async def test_path_only_grants_preserve_direct_client_resume_roundtrip(self) -> None:
+        client = _RoundTripClient()
+        manifest = Manifest(
             extra_path_grants=(
                 SandboxPathGrant(path="/mnt/shared-data", read_only=True),
                 SandboxPathGrant(path="/mnt/shared-data", read_only=False),
             )
         )
-        state = UnixLocalSandboxSessionState(
-            manifest=trusted_manifest,
+        state = _SimpleSessionState(
+            manifest=manifest,
             snapshot=NoopSnapshot(id="snapshot"),
-            workspace_root_owned=False,
         )
 
         restored = client.deserialize_session_state(client.serialize_session_state(state))
-        rebound = restored.rebind_persisted_path_grants(trusted_manifest)
+        await client.resume(restored)
 
-        assert rebound.manifest.extra_path_grants == trusted_manifest.extra_path_grants
+        assert restored.path_grants_require_rebind == ()
+        assert client.resume_state is not None
+        assert client.resume_state.manifest.extra_path_grants == manifest.extra_path_grants
 
     def test_client_state_roundtrip_does_not_deepcopy_extension_state(self) -> None:
-        client = UnixLocalSandboxClient()
+        client = _RoundTripClient()
         trusted_manifest = Manifest(
             extra_path_grants=(SandboxPathGrant(path="/mnt/shared-data"),),
         )
-        state = UnixLocalSandboxSessionState(
+        state = _SimpleSessionState(
             manifest=trusted_manifest,
             snapshot=_SerializableNonCopyableSnapshot(
                 id="snapshot",
                 token=_NonCopyable(),
             ),
-            workspace_root_owned=False,
         )
 
         payload = client.serialize_session_state(state)
@@ -322,21 +355,29 @@ class TestSandboxSessionStateRoundTrip:
         assert isinstance(snapshot, _SerializableNonCopyableSnapshot)
         assert isinstance(snapshot.token, _NonCopyable)
 
-    def test_deserialized_grants_require_rebind_even_if_redaction_marker_is_removed(
+    @pytest.mark.asyncio
+    async def test_removed_redaction_marker_does_not_restore_host_backed_grant(
         self,
+        tmp_path: Path,
     ) -> None:
-        client = UnixLocalSandboxClient()
-        state = UnixLocalSandboxSessionState(
-            manifest=Manifest(extra_path_grants=(SandboxPathGrant(path="/mnt/shared-data"),)),
+        client = _RoundTripClient()
+        state = _SimpleSessionState(
+            manifest=Manifest(
+                extra_path_grants=(
+                    SandboxPathGrant(
+                        path="/mnt/shared-data",
+                        host_path=str(tmp_path),
+                    ),
+                )
+            ),
             snapshot=NoopSnapshot(id="snapshot"),
-            workspace_root_owned=False,
         )
         payload = client.serialize_session_state(state)
         payload.pop("__openai_agents_redacted_host_path_grant_paths", None)
 
         restored = client.deserialize_session_state(payload)
+        await client.resume(restored)
 
-        with pytest.raises(ValueError, match="current trusted manifest"):
-            restored.assert_path_grants_rebound()
-        with pytest.raises(ValueError, match="not present"):
-            restored.rebind_persisted_path_grants(Manifest())
+        assert restored.path_grants_require_rebind == ()
+        assert client.resume_state is not None
+        assert client.resume_state.manifest.extra_path_grants == ()

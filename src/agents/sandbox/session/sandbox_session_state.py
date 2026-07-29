@@ -16,7 +16,6 @@ from pydantic import (
 
 from ..manifest import Manifest
 from ..snapshot import SnapshotBase
-from ..workspace_paths import SandboxPathGrant
 
 SessionStateClass = type["SandboxSessionState"]
 REDACTED_HOST_PATH_GRANT_PATHS_KEY = "__openai_agents_redacted_host_path_grant_paths"
@@ -35,15 +34,10 @@ class SandboxSessionState(BaseModel):
 
     _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}
     _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())
-    _redacted_host_path_grant_paths: tuple[str, ...] = PrivateAttr(default=())
 
     @property
     def path_grants_require_rebind(self) -> tuple[str, ...]:
         return self._path_grants_require_rebind
-
-    @property
-    def redacted_host_path_grant_paths(self) -> tuple[str, ...]:
-        return self._redacted_host_path_grant_paths
 
     @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
@@ -111,10 +105,7 @@ class SandboxSessionState(BaseModel):
             else ()
         )
         marked = state.model_copy()
-        marked._path_grants_require_rebind = tuple(
-            grant.path for grant in state.manifest.extra_path_grants
-        )
-        marked._redacted_host_path_grant_paths = redacted_paths
+        marked._path_grants_require_rebind = redacted_paths
         return marked
 
     def rebind_persisted_path_grants(
@@ -131,35 +122,15 @@ class SandboxSessionState(BaseModel):
                 "manifest before resume"
             )
 
-        trusted_grants: dict[str, list[SandboxPathGrant]] = {}
-        for grant in trusted_manifest.extra_path_grants:
-            trusted_grants.setdefault(grant.path, []).append(grant)
-
-        matched_grant_counts: dict[str, int] = {}
-        rebound_grants: list[SandboxPathGrant] = []
-        missing_paths: list[str] = []
-        for persisted_grant in self.manifest.extra_path_grants:
-            candidates = trusted_grants.get(persisted_grant.path, [])
-            candidate_index = matched_grant_counts.get(persisted_grant.path, 0)
-            if candidate_index >= len(candidates):
-                missing_paths.append(persisted_grant.path)
-                continue
-            rebound_grants.append(candidates[candidate_index].model_copy())
-            matched_grant_counts[persisted_grant.path] = candidate_index + 1
-
-        if missing_paths:
-            raise ValueError(
-                "Sandbox session state contains path grants that are not present in the "
-                f"current trusted manifest: {', '.join(missing_paths)}"
-            )
-
-        rebound_host_path_grant_paths = {
-            grant.path for grant in rebound_grants if grant.host_path is not None
+        trusted_host_path_grant_paths = {
+            grant.path
+            for grant in trusted_manifest.extra_path_grants
+            if grant.host_path is not None
         }
         missing_host_paths = [
             path
-            for path in self.redacted_host_path_grant_paths
-            if path in self.path_grants_require_rebind and path not in rebound_host_path_grant_paths
+            for path in self.path_grants_require_rebind
+            if path not in trusted_host_path_grant_paths
         ]
         if missing_host_paths:
             raise ValueError(
@@ -168,11 +139,14 @@ class SandboxSessionState(BaseModel):
             )
 
         rebound_manifest = self.manifest.model_copy(
-            update={"extra_path_grants": tuple(rebound_grants)},
+            update={
+                "extra_path_grants": tuple(
+                    grant.model_copy() for grant in trusted_manifest.extra_path_grants
+                )
+            },
         )
         rebound = self.model_copy(update={"manifest": rebound_manifest})
         rebound._path_grants_require_rebind = ()
-        rebound._redacted_host_path_grant_paths = ()
         return rebound
 
     def assert_path_grants_rebound(self) -> None:

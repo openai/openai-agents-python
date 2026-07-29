@@ -1718,7 +1718,7 @@ def _validate_docker_path_grants(manifest: Manifest) -> None:
             continue
         explicit_targets.add(target_str)
         sandbox_path_grant_host_path(grant)
-        if target == root or root in target.parents:
+        if target == root or root in target.parents or target in root.parents:
             raise ValueError(
                 "Docker sandbox path grant host_path target must be outside "
                 f"the workspace root: {grant.path}"

@@ -175,25 +175,19 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
 
     def serialize_session_state(self, state: SandboxSessionState) -> dict[str, object]:
         """Serialize backend-specific sandbox state into a JSON-compatible payload."""
-        redacted_paths = set(state.redacted_host_path_grant_paths)
+        redacted_paths = set(state.path_grants_require_rebind)
         persistent_grants = []
         for grant in state.manifest.extra_path_grants:
             if grant.host_path is not None:
                 redacted_paths.add(grant.path)
-            persistent_grants.append(grant.model_copy(update={"host_path": None}))
+                continue
+            persistent_grants.append(grant)
 
         persistent_manifest = state.manifest.model_copy(
             update={"extra_path_grants": tuple(persistent_grants)},
         )
         persistent_state = state.model_copy(update={"manifest": persistent_manifest})
         payload = cast(dict[str, object], persistent_state.model_dump(mode="json"))
-        manifest_payload = payload.get("manifest")
-        if isinstance(manifest_payload, dict):
-            grant_payloads = manifest_payload.get("extra_path_grants")
-            if isinstance(grant_payloads, list):
-                for grant_payload in grant_payloads:
-                    if isinstance(grant_payload, dict):
-                        grant_payload.pop("host_path", None)
         if redacted_paths:
             payload[REDACTED_HOST_PATH_GRANT_PATHS_KEY] = sorted(redacted_paths)
         return payload

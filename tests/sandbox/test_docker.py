@@ -1829,9 +1829,19 @@ async def test_docker_rejects_duplicate_target_shared_by_split_and_path_only_gra
 
 
 @pytest.mark.asyncio
-async def test_docker_rejects_host_path_target_inside_workspace_before_image_lookup(
+@pytest.mark.parametrize(
+    ("root", "target"),
+    [
+        ("/workspace", "/workspace/shared-data"),
+        ("/workspace/project", "/workspace"),
+    ],
+    ids=["target-inside-workspace", "target-contains-workspace"],
+)
+async def test_docker_rejects_host_path_target_overlapping_workspace_before_image_lookup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    root: str,
+    target: str,
 ) -> None:
     client = DockerSandboxClient(docker_client=cast(object, _FakeDockerClient()))
     image_lookups = 0
@@ -1850,12 +1860,13 @@ async def test_docker_rejects_host_path_target_inside_workspace_before_image_loo
         await client._create_container(
             DEFAULT_PYTHON_SANDBOX_IMAGE,
             manifest=Manifest(
+                root=root,
                 extra_path_grants=(
                     SandboxPathGrant(
-                        path="/workspace/shared-data",
+                        path=target,
                         host_path=str(tmp_path),
                     ),
-                )
+                ),
             ),
         )
 

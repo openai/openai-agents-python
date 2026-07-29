@@ -732,6 +732,7 @@ class _ManifestMutationCapability(Capability):
     type: str = "manifest-mutation"
     rel_path: str
     content: bytes
+    process_calls: int
 
     def __init__(self, *, rel_path: str = "cap.txt", content: bytes = b"capability") -> None:
         super().__init__(
@@ -741,11 +742,13 @@ class _ManifestMutationCapability(Capability):
                 {
                     "rel_path": rel_path,
                     "content": content,
+                    "process_calls": 0,
                 },
             ),
         )
 
     def process_manifest(self, manifest: Manifest) -> Manifest:
+        self.process_calls += 1
         manifest.entries[self.rel_path] = File(content=self.content)
         return manifest
 
@@ -3204,7 +3207,12 @@ async def test_session_manager_reapplies_capability_manifest_mutations_on_resume
 ) -> None:
     client = _FakeClient(_FakeSession(Manifest()))
     capability = _ManifestMutationCapability()
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(
+        name="worker",
+        model=FakeModel(),
+        instructions="Worker.",
+        default_manifest=Manifest(),
+    )
     session_state = TestSessionState(
         manifest=Manifest(),
         snapshot=NoopSnapshot(id="resume"),
@@ -3258,6 +3266,7 @@ async def test_session_manager_reapplies_capability_manifest_mutations_on_resume
     assert session.state.manifest.entries["cap.txt"] == File(content=b"capability")
     assert client.resume_state is not None
     assert client.resume_state.manifest.entries["cap.txt"] == File(content=b"capability")
+    assert capability.process_calls == 1
 
 
 @pytest.mark.asyncio
@@ -3285,7 +3294,6 @@ async def test_session_manager_rebinds_persisted_path_grants_from_current_manife
         snapshot=NoopSnapshot(id="resume"),
     )
     serialized_state = client.serialize_session_state(session_state)
-    serialized_state.pop("__openai_agents_redacted_host_path_grant_paths", None)
     run_state = cast(
         RunState[Any, Agent[Any]],
         RunState(

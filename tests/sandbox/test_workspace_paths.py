@@ -15,6 +15,7 @@ from agents.sandbox.workspace_paths import (
     WorkspacePathPolicy,
     coerce_posix_path,
     posix_path_as_path,
+    sandbox_path_grant_host_path,
 )
 
 PathInput = str | PurePath
@@ -640,3 +641,15 @@ def test_host_io_rejects_extra_path_grant_symlink_to_root(tmp_path: Path) -> Non
         policy.normalize_path(root_alias / "etc" / "passwd", resolve_symlinks=True)
 
     assert str(exc_info.value) == "sandbox path grant path must not resolve to filesystem root"
+
+
+def test_host_path_grant_rejects_symlink_to_root(tmp_path: Path) -> None:
+    root_alias = tmp_path / "root-alias"
+    os.symlink(Path("/"), root_alias, target_is_directory=True)
+    grant = SandboxPathGrant(path="/mnt/shared-data", host_path=str(root_alias))
+
+    with pytest.raises(
+        ValueError,
+        match="sandbox path grant path must not resolve to filesystem root",
+    ):
+        sandbox_path_grant_host_path(grant)
