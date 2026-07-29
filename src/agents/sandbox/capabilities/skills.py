@@ -509,7 +509,9 @@ class Skills(Capability):
     skills_path: str = Field(default=".agents")
 
     _skills_metadata: list[SkillMetadata] | None = PrivateAttr(default=None)
-    _skills_metadata_cache_key: tuple[tuple[str, bool], ...] | None = PrivateAttr(default=None)
+    _skills_metadata_cache_key: tuple[tuple[str, bool, str | None], ...] | None = PrivateAttr(
+        default=None
+    )
 
     @field_validator("skills", mode="before")
     @classmethod
@@ -762,10 +764,15 @@ class Skills(Capability):
         self._skills_metadata_cache_key = cache_key
         return self._skills_metadata
 
-    def _metadata_cache_key(self, manifest: Manifest) -> tuple[tuple[str, bool], ...]:
+    def _metadata_cache_key(
+        self,
+        manifest: Manifest,
+    ) -> tuple[tuple[str, bool, str | None], ...]:
         if self.lazy_from is None:
             return ()
-        return tuple((grant.path, grant.read_only) for grant in manifest.extra_path_grants)
+        return tuple(
+            (grant.path, grant.read_only, grant.host_path) for grant in manifest.extra_path_grants
+        )
 
     async def instructions(self, manifest: Manifest) -> str | None:
         skills = await self._skill_metadata(manifest)

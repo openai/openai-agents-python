@@ -512,7 +512,7 @@ class TestShellCapability:
         )
 
     @pytest.mark.asyncio
-    async def test_exec_command_tool_allows_extra_path_grant_workdir(
+    async def test_exec_command_tool_allows_split_path_grant_workdir(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -520,7 +520,13 @@ class TestShellCapability:
         session = _ShellSession(
             Manifest(
                 root="/workspace",
-                extra_path_grants=(SandboxPathGrant(path="/tmp", read_only=True),),
+                extra_path_grants=(
+                    SandboxPathGrant(
+                        path="/mnt/shared-data",
+                        host_path="/native/shared-data",
+                        read_only=True,
+                    ),
+                ),
             )
         )
         capability.bind(session)
@@ -536,20 +542,20 @@ class TestShellCapability:
             cast(ToolContext[object], None),
             ExecCommandArgs(
                 cmd="pwd",
-                workdir="/tmp",
+                workdir="/mnt/shared-data",
                 shell="/bin/bash",
                 login=False,
             ).model_dump_json(),
         )
 
-        assert session.exec_calls == [("cd /tmp && pwd", 10.0, ["/bin/bash", "-c"])]
+        assert session.exec_calls == [("cd /mnt/shared-data && pwd", 10.0, ["/bin/bash", "-c"])]
         assert (
             output == "Chunk ID: 111111\n"
             "Wall time: 0.2500 seconds\n"
             "Process exited with code 7\n"
             "Output:\n"
-            "stdout: cd /tmp && pwd\n"
-            "stderr: cd /tmp && pwd"
+            "stdout: cd /mnt/shared-data && pwd\n"
+            "stderr: cd /mnt/shared-data && pwd"
         )
 
     @pytest.mark.asyncio

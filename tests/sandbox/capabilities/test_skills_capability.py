@@ -776,3 +776,48 @@ class TestSkillsLazyLoading:
             "- cached-skill: old description (file: .agents/dynamic-skill)" in second_instructions
         )
         assert "- cached-skill: new description (file: .agents/dynamic-skill)" in third_instructions
+
+    @pytest.mark.asyncio
+    async def test_lazy_metadata_cache_is_invalidated_when_host_path_changes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        src_root = tmp_path / "skills"
+        skill_dir = src_root / "dynamic-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: cached-skill\ndescription: cached description\n---\n# Skill\n",
+            encoding="utf-8",
+        )
+        other_root = tmp_path / "other-skills"
+        other_root.mkdir()
+        capability = Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)))
+
+        first_instructions = await capability.instructions(
+            Manifest(
+                root="/workspace",
+                extra_path_grants=(
+                    SandboxPathGrant(
+                        path="/mnt/skills",
+                        host_path=str(src_root),
+                    ),
+                ),
+            )
+        )
+        second_instructions = await capability.instructions(
+            Manifest(
+                root="/workspace",
+                extra_path_grants=(
+                    SandboxPathGrant(
+                        path="/mnt/skills",
+                        host_path=str(other_root),
+                    ),
+                ),
+            )
+        )
+
+        assert first_instructions is not None
+        assert (
+            "- cached-skill: cached description (file: .agents/dynamic-skill)" in first_instructions
+        )
+        assert second_instructions is None

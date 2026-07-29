@@ -761,6 +761,21 @@ class _ManifestUsersCapability(Capability):
         return manifest
 
 
+class _ManifestPathGrantsCapability(Capability):
+    type: str = "manifest-path-grants"
+    grants: tuple[SandboxPathGrant, ...]
+
+    def __init__(self, grants: tuple[SandboxPathGrant, ...]) -> None:
+        super().__init__(
+            type="manifest-path-grants",
+            **cast(Any, {"grants": grants}),
+        )
+
+    def process_manifest(self, manifest: Manifest) -> Manifest:
+        manifest.extra_path_grants = self.grants
+        return manifest
+
+
 class _ProcessContextSessionCapability(Capability):
     type: str = "process-context-session"
     bound_session: BaseSandboxSession | None = None
@@ -3246,6 +3261,71 @@ async def test_session_manager_reapplies_capability_manifest_mutations_on_resume
 
 
 @pytest.mark.asyncio
+async def test_session_manager_rebinds_persisted_path_grants_from_current_manifest(
+    tmp_path: Path,
+) -> None:
+    trusted_manifest = Manifest(
+        extra_path_grants=(
+            SandboxPathGrant(
+                path="/mnt/shared-data",
+                host_path=str(tmp_path),
+                read_only=True,
+            ),
+        )
+    )
+    client = _FakeClient(_FakeSession(Manifest()))
+    agent = SandboxAgent(
+        name="worker",
+        model=FakeModel(),
+        instructions="Worker.",
+        default_manifest=trusted_manifest,
+    )
+    session_state = TestSessionState(
+        manifest=trusted_manifest,
+        snapshot=NoopSnapshot(id="resume"),
+    )
+    serialized_state = client.serialize_session_state(session_state)
+    serialized_state.pop("__openai_agents_redacted_host_path_grant_paths", None)
+    run_state = cast(
+        RunState[Any, Agent[Any]],
+        RunState(
+            context=RunContextWrapper(context={}),
+            original_input="hello",
+            starting_agent=agent,
+        ),
+    )
+    run_state._current_agent = agent
+    run_state._sandbox = {
+        "backend_id": client.backend_id,
+        "current_agent_key": agent.name,
+        "current_agent_name": agent.name,
+        "session_state": serialized_state,
+        "sessions_by_agent": {
+            agent.name: {
+                "agent_name": agent.name,
+                "session_state": serialized_state,
+            }
+        },
+    }
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(client=client, options={"image": "sandbox"}),
+        run_state=run_state,
+    )
+
+    manager.acquire_agent(agent)
+    await manager.ensure_session(
+        agent=agent,
+        capabilities=[],
+        is_resumed_state=True,
+    )
+
+    assert client.resume_state is not None
+    assert client.resume_state.manifest.extra_path_grants == trusted_manifest.extra_path_grants
+    assert client.resume_state.path_grants_require_rebind == ()
+
+
+@pytest.mark.asyncio
 async def test_session_manager_adds_run_as_user_on_resume() -> None:
     client = _FakeClient(_FakeSession(Manifest()))
     run_as = User(name="sandbox-user")
@@ -3371,6 +3451,61 @@ async def test_session_manager_starts_stopped_injected_session_with_manifest_mut
     assert live_session.shutdown_calls == 0
     assert session.state.manifest.entries["cap.txt"] == File(content=b"capability")
     assert payload is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processed_grants",
+    [
+        (
+            SandboxPathGrant(
+                path="/mnt/shared-data",
+                host_path="/native/new",
+                read_only=True,
+            ),
+        ),
+        (
+            SandboxPathGrant(path="/mnt/shared-data"),
+            SandboxPathGrant(
+                path="/mnt/shared-data",
+                host_path="/native/old",
+                read_only=True,
+            ),
+        ),
+    ],
+    ids=["changed-host-source", "mixed-duplicate-target"],
+)
+async def test_session_manager_rejects_stopped_injected_session_host_mount_changes(
+    processed_grants: tuple[SandboxPathGrant, ...],
+) -> None:
+    current_grants = (
+        SandboxPathGrant(
+            path="/mnt/shared-data",
+            host_path="/native/old",
+            read_only=True,
+        ),
+    )
+    live_session = _LiveSessionDeltaRecorder(
+        Manifest(extra_path_grants=current_grants),
+    )
+    capability = _ManifestPathGrantsCapability(processed_grants)
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(session=live_session),
+        run_state=None,
+    )
+
+    manager.acquire_agent(agent)
+    with pytest.raises(ValueError, match="host-backed `manifest.extra_path_grants`"):
+        await manager.ensure_session(
+            agent=agent,
+            capabilities=[capability],
+            is_resumed_state=False,
+        )
+
+    assert live_session.start_calls == 0
+    assert live_session.state.manifest.extra_path_grants == current_grants
 
 
 @pytest.mark.asyncio

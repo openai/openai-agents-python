@@ -1770,6 +1770,7 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
     ) -> SandboxSession:
         if not isinstance(state, E2BSandboxSessionState):
             raise TypeError("E2BSandboxClient.resume expects an E2BSandboxSessionState")
+        state.assert_path_grants_rebound()
 
         sandbox_type = _coerce_sandbox_type(state.sandbox_type)
         SandboxClass = _import_sandbox_class(sandbox_type)
@@ -1817,7 +1818,7 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
-        return E2BSandboxSessionState.model_validate(payload)
+        return self._deserialize_session_state_payload(payload, E2BSandboxSessionState)
 
 
 __all__ = [

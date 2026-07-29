@@ -1145,6 +1145,7 @@ class BlaxelSandboxClient(BaseSandboxClient["BlaxelSandboxClientOptions"]):
         """
         if not isinstance(state, BlaxelSandboxSessionState):
             raise TypeError("BlaxelSandboxClient.resume expects a BlaxelSandboxSessionState")
+        state.assert_path_grants_rebound()
 
         SandboxInstance = _import_blaxel_sdk()
         blaxel_sandbox = None
@@ -1179,7 +1180,7 @@ class BlaxelSandboxClient(BaseSandboxClient["BlaxelSandboxClientOptions"]):
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
-        return BlaxelSandboxSessionState.model_validate(payload)
+        return self._deserialize_session_state_payload(payload, BlaxelSandboxSessionState)
 
 
 # ---------------------------------------------------------------------------

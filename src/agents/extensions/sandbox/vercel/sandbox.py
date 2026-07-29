@@ -1414,6 +1414,7 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
     async def resume(self, state: SandboxSessionState) -> SandboxSession:
         if not isinstance(state, VercelSandboxSessionState):
             raise TypeError("VercelSandboxClient.resume expects a VercelSandboxSessionState")
+        state.assert_path_grants_rebound()
         if state.s3_mounts_non_resumable or _vercel_s3_mounts(state.manifest):
             raise MountConfigError(
                 message=(
@@ -1482,7 +1483,7 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
-        return VercelSandboxSessionState.model_validate(payload)
+        return self._deserialize_session_state_payload(payload, VercelSandboxSessionState)
 
 
 __all__ = [

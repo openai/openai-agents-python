@@ -204,7 +204,7 @@ class BaseSandboxSession(abc.ABC):
     _runtime_helpers_installed: set[PurePath] | None = None
     _runtime_helper_cache_key: object = _RUNTIME_HELPER_CACHE_KEY_UNSET
     _workspace_path_policy_cache: (
-        tuple[str, tuple[tuple[str, bool], ...], WorkspacePathPolicy] | None
+        tuple[str, tuple[tuple[str, bool, str | None], ...], WorkspacePathPolicy] | None
     ) = None
     # True when start() is reusing a backend whose workspace files may still be present.
     # This controls whether start() can avoid a full manifest apply for non-snapshot resumes.
@@ -742,7 +742,8 @@ class BaseSandboxSession(abc.ABC):
     def _workspace_path_policy(self) -> WorkspacePathPolicy:
         root = self.state.manifest.root
         grants_key = tuple(
-            (grant.path, grant.read_only) for grant in self.state.manifest.extra_path_grants
+            (grant.path, grant.read_only, grant.host_path)
+            for grant in self.state.manifest.extra_path_grants
         )
         cached = self._workspace_path_policy_cache
         if cached is not None and cached[0] == root and cached[1] == grants_key:

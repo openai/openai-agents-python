@@ -2171,6 +2171,7 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
     ) -> SandboxSession:
         if not isinstance(state, ModalSandboxSessionState):
             raise TypeError("ModalSandboxClient.resume expects a ModalSandboxSessionState")
+        state.assert_path_grants_rebound()
         inner = ModalSandboxSession.from_state(state)
         reconnected = await inner._ensure_sandbox()
         if reconnected:
@@ -2178,4 +2179,4 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
-        return ModalSandboxSessionState.model_validate(payload)
+        return self._deserialize_session_state_payload(payload, ModalSandboxSessionState)

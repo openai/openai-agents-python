@@ -1491,6 +1491,7 @@ class CloudflareSandboxClient(BaseSandboxClient[CloudflareSandboxClientOptions])
             raise TypeError(
                 "CloudflareSandboxClient.resume expects a CloudflareSandboxSessionState"
             )
+        state.assert_path_grants_rebound()
         inner = CloudflareSandboxSession.from_state(
             state,
             exec_timeout_s=self._exec_timeout_s,
@@ -1503,7 +1504,7 @@ class CloudflareSandboxClient(BaseSandboxClient[CloudflareSandboxClientOptions])
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
-        return CloudflareSandboxSessionState.model_validate(payload)
+        return self._deserialize_session_state_payload(payload, CloudflareSandboxSessionState)
 
     async def _request_sandbox_id(
         self,

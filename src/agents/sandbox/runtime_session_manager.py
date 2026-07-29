@@ -327,9 +327,19 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         )
         if resumed_payload is not None:
             explicit_state = client.deserialize_session_state(resumed_payload)
+            explicit_state = SandboxSessionState._mark_persisted_path_grants(
+                explicit_state,
+                payload=resumed_payload,
+            )
             resume_from_run_state = True
 
         if explicit_state is not None:
+            explicit_state = explicit_state.rebind_persisted_path_grants(
+                self._resolve_trusted_resume_manifest(
+                    agent=agent,
+                    capabilities=capabilities,
+                )
+            )
             explicit_state = self._process_resumed_state_manifest(
                 agent=agent,
                 capabilities=capabilities,
@@ -519,6 +529,20 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             return sandbox_config.manifest
         return agent.default_manifest
 
+    def _resolve_trusted_resume_manifest(
+        self,
+        *,
+        agent: SandboxAgent[TContext],
+        capabilities: list[Capability],
+    ) -> Manifest | None:
+        sandbox_config = self._require_sandbox_config()
+        configured_manifest = sandbox_config.manifest or agent.default_manifest
+        return self._process_manifest(
+            capabilities,
+            configured_manifest,
+            run_as_user=self._agent_run_as_user(agent),
+        )
+
     @staticmethod
     def _process_manifest(
         capabilities: list[Capability],
@@ -554,6 +578,11 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         if processed_manifest is None or processed_manifest == current_manifest:
             return _LiveSessionManifestUpdate(processed_manifest=None, entries_to_apply=[])
 
+        cls._validate_live_session_host_path_grants(
+            current_manifest=current_manifest,
+            processed_manifest=processed_manifest,
+        )
+
         entries_to_apply: list[tuple[Path, BaseEntry]] = []
         if running:
             cls._validate_running_live_session_manifest_update(
@@ -576,6 +605,34 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             processed_manifest=processed_manifest,
             entries_to_apply=entries_to_apply,
         )
+
+    @staticmethod
+    def _host_path_grant_topology(
+        manifest: Manifest,
+    ) -> tuple[tuple[str, bool, str | None], ...]:
+        mounted_targets = {
+            grant.path for grant in manifest.extra_path_grants if grant.host_path is not None
+        }
+        return tuple(
+            (grant.path, grant.read_only, grant.host_path)
+            for grant in manifest.extra_path_grants
+            if grant.path in mounted_targets
+        )
+
+    @classmethod
+    def _validate_live_session_host_path_grants(
+        cls,
+        *,
+        current_manifest: Manifest,
+        processed_manifest: Manifest,
+    ) -> None:
+        if cls._host_path_grant_topology(current_manifest) != cls._host_path_grant_topology(
+            processed_manifest
+        ):
+            raise ValueError(
+                "Injected sandbox sessions do not support capability changes to host-backed "
+                "`manifest.extra_path_grants`; use a fresh session or a session_state resume flow."
+            )
 
     @classmethod
     def _validate_running_live_session_manifest_update(

@@ -7,17 +7,22 @@ fields, or the ``type`` discriminator under ``exclude_unset``.
 
 from __future__ import annotations
 
+import io
 import json
 import uuid
 from pathlib import Path
 from typing import ClassVar, Literal
 
 import pytest
-from pydantic import ValidationError
+from pydantic import ConfigDict, ValidationError, field_serializer, field_validator
 
-from agents.sandbox import Manifest
-from agents.sandbox.session import SandboxSessionState
-from agents.sandbox.snapshot import LocalSnapshot
+from agents.sandbox import Manifest, SandboxPathGrant
+from agents.sandbox.sandboxes.unix_local import (
+    UnixLocalSandboxClient,
+    UnixLocalSandboxSessionState,
+)
+from agents.sandbox.session import Dependencies, SandboxSessionState
+from agents.sandbox.snapshot import LocalSnapshot, NoopSnapshot, SnapshotBase
 
 # ---------------------------------------------------------------------------
 # Test-only stubs
@@ -43,6 +48,46 @@ class _EmptyDefaultSessionState(SandboxSessionState):
 class _SimpleSessionState(SandboxSessionState):
     __test__ = False
     type: Literal["simple-roundtrip"] = "simple-roundtrip"
+
+
+class _NonCopyable:
+    def __deepcopy__(self, memo: dict[int, object]) -> object:
+        _ = memo
+        raise RuntimeError("not copyable")
+
+
+class _SerializableNonCopyableSnapshot(SnapshotBase):
+    __test__ = False
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    type: Literal["serializable-noncopyable-roundtrip"] = "serializable-noncopyable-roundtrip"
+    token: _NonCopyable
+
+    @field_serializer("token")
+    def _serialize_token(self, value: _NonCopyable) -> str:
+        _ = value
+        return "token"
+
+    @field_validator("token", mode="before")
+    @classmethod
+    def _parse_token(cls, value: object) -> object:
+        return _NonCopyable() if value == "token" else value
+
+    async def persist(
+        self,
+        data: io.IOBase,
+        *,
+        dependencies: Dependencies | None = None,
+    ) -> None:
+        _ = (data, dependencies)
+
+    async def restore(self, *, dependencies: Dependencies | None = None) -> io.IOBase:
+        _ = dependencies
+        raise FileNotFoundError(Path("<serializable-noncopyable>"))
+
+    async def restorable(self, *, dependencies: Dependencies | None = None) -> bool:
+        _ = dependencies
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -195,3 +240,103 @@ class TestSandboxSessionStateRoundTrip:
                 custom_field="my-value",
                 exposed_ports=raw_ports,  # type: ignore[arg-type]
             )
+
+    def test_client_serialization_redacts_host_paths_and_rebinds_from_trusted_manifest(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client = UnixLocalSandboxClient()
+        trusted_manifest = Manifest(
+            extra_path_grants=(
+                SandboxPathGrant(
+                    path="/mnt/shared-data",
+                    host_path=str(tmp_path),
+                    read_only=True,
+                ),
+            )
+        )
+        state = UnixLocalSandboxSessionState(
+            manifest=trusted_manifest,
+            snapshot=NoopSnapshot(id="snapshot"),
+            workspace_root_owned=False,
+        )
+
+        payload = client.serialize_session_state(state)
+        encoded = json.dumps(payload)
+
+        assert str(tmp_path) not in encoded
+        assert payload["__openai_agents_redacted_host_path_grant_paths"] == ["/mnt/shared-data"]
+        restored = client.deserialize_session_state(payload)
+        assert restored.manifest.extra_path_grants[0].host_path is None
+        assert restored.path_grants_require_rebind == ("/mnt/shared-data",)
+
+        rebound = restored.rebind_persisted_path_grants(trusted_manifest)
+
+        assert rebound.manifest.extra_path_grants == trusted_manifest.extra_path_grants
+        assert rebound.path_grants_require_rebind == ()
+        assert restored.manifest.extra_path_grants[0].host_path is None
+
+    def test_rebind_preserves_duplicate_path_grant_order_and_permissions(self) -> None:
+        client = UnixLocalSandboxClient()
+        trusted_manifest = Manifest(
+            extra_path_grants=(
+                SandboxPathGrant(path="/mnt/shared-data", read_only=True),
+                SandboxPathGrant(path="/mnt/shared-data", read_only=False),
+            )
+        )
+        state = UnixLocalSandboxSessionState(
+            manifest=trusted_manifest,
+            snapshot=NoopSnapshot(id="snapshot"),
+            workspace_root_owned=False,
+        )
+
+        restored = client.deserialize_session_state(client.serialize_session_state(state))
+        rebound = restored.rebind_persisted_path_grants(trusted_manifest)
+
+        assert rebound.manifest.extra_path_grants == trusted_manifest.extra_path_grants
+
+    def test_client_state_roundtrip_does_not_deepcopy_extension_state(self) -> None:
+        client = UnixLocalSandboxClient()
+        trusted_manifest = Manifest(
+            extra_path_grants=(SandboxPathGrant(path="/mnt/shared-data"),),
+        )
+        state = UnixLocalSandboxSessionState(
+            manifest=trusted_manifest,
+            snapshot=_SerializableNonCopyableSnapshot(
+                id="snapshot",
+                token=_NonCopyable(),
+            ),
+            workspace_root_owned=False,
+        )
+
+        payload = client.serialize_session_state(state)
+
+        assert payload["snapshot"] == {
+            "type": "serializable-noncopyable-roundtrip",
+            "id": "snapshot",
+            "token": "token",
+        }
+        restored = client.deserialize_session_state(payload)
+        rebound = restored.rebind_persisted_path_grants(trusted_manifest)
+        snapshot = rebound.snapshot
+        assert isinstance(snapshot, _SerializableNonCopyableSnapshot)
+        assert isinstance(snapshot.token, _NonCopyable)
+
+    def test_deserialized_grants_require_rebind_even_if_redaction_marker_is_removed(
+        self,
+    ) -> None:
+        client = UnixLocalSandboxClient()
+        state = UnixLocalSandboxSessionState(
+            manifest=Manifest(extra_path_grants=(SandboxPathGrant(path="/mnt/shared-data"),)),
+            snapshot=NoopSnapshot(id="snapshot"),
+            workspace_root_owned=False,
+        )
+        payload = client.serialize_session_state(state)
+        payload.pop("__openai_agents_redacted_host_path_grant_paths", None)
+
+        restored = client.deserialize_session_state(payload)
+
+        with pytest.raises(ValueError, match="current trusted manifest"):
+            restored.assert_path_grants_rebound()
+        with pytest.raises(ValueError, match="not present"):
+            restored.rebind_persisted_path_grants(Manifest())

@@ -177,6 +177,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         only_ephemeral: bool = False,
         provision_accounts: bool = True,
     ) -> MaterializationResult:
+        _assert_unix_local_host_path_grants_unsupported(self.state.manifest)
         if self.state.manifest.users or self.state.manifest.groups:
             raise ValueError(
                 "UnixLocalSandboxSession does not support manifest users or groups because "
@@ -1100,6 +1101,8 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         options: UnixLocalSandboxClientOptions | None = None,
     ) -> SandboxSession:
         resolved_options = options or UnixLocalSandboxClientOptions()
+        if manifest is not None:
+            _assert_unix_local_host_path_grants_unsupported(manifest)
         # For local execution, runner-created sessions should always get an isolated temp root
         # unless the caller explicitly chose a custom host path.
         workspace_root_owned = False
@@ -1159,8 +1162,24 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
     ) -> SandboxSession:
         if not isinstance(state, UnixLocalSandboxSessionState):
             raise TypeError("UnixLocalSandboxClient.resume expects a UnixLocalSandboxSessionState")
+        state.assert_path_grants_rebound()
+        _assert_unix_local_host_path_grants_unsupported(state.manifest)
         inner = UnixLocalSandboxSession.from_state(state)
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
-        return UnixLocalSandboxSessionState.model_validate(payload)
+        return self._deserialize_session_state_payload(payload, UnixLocalSandboxSessionState)
+
+
+def _assert_unix_local_host_path_grants_unsupported(manifest: Manifest) -> None:
+    grant = next(
+        (grant for grant in manifest.extra_path_grants if grant.host_path is not None),
+        None,
+    )
+    if grant is None:
+        return
+    raise ValueError(
+        "UnixLocalSandboxClient does not support sandbox path grant host_path "
+        f"for {grant.path!r}; omit host_path when both paths are the same or use "
+        "DockerSandboxClient"
+    )

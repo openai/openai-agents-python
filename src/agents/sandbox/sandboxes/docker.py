@@ -3,6 +3,7 @@ import errno
 import hashlib
 import io
 import logging
+import os
 import re
 import socket
 import tarfile
@@ -74,6 +75,7 @@ from ..workspace_paths import (
     coerce_posix_path,
     posix_path_as_path,
     posix_path_for_error,
+    sandbox_path_grant_host_path,
     sandbox_path_str,
 )
 
@@ -1468,6 +1470,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         image = options.image
         session_id = uuid.uuid4()
         manifest = manifest or Manifest()
+        _validate_docker_path_grants(manifest)
 
         container = await self._create_container(
             image,
@@ -1534,8 +1537,12 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
     ) -> SandboxSession:
         if not isinstance(state, DockerSandboxSessionState):
             raise TypeError("DockerSandboxClient.resume expects a DockerSandboxSessionState")
+        state.assert_path_grants_rebound()
+        _validate_docker_path_grants(state.manifest)
         container = self.get_container(state.container_id)
         reused_existing_container = container is not None
+        if container is not None:
+            _assert_existing_container_path_grants_match(container, state.manifest)
         if container is None:
             container = await self._create_container(
                 state.image,
@@ -1557,7 +1564,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
-        return DockerSandboxSessionState.model_validate(payload)
+        return self._deserialize_session_state_payload(payload, DockerSandboxSessionState)
 
     async def _create_container(
         self,
@@ -1567,6 +1574,8 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         exposed_ports: tuple[int, ...] = (),
         session_id: uuid.UUID | None = None,
     ) -> Container:
+        if manifest is not None:
+            _validate_docker_path_grants(manifest)
         # create image if it does not exist
         if not self.image_exists(image):
             repo, tag = parse_repository_tag(image)
@@ -1660,6 +1669,18 @@ def _build_docker_volume_mounts(
 ) -> list[DockerSDKMount]:
     mounts: list[DockerSDKMount] = []
 
+    for grant in manifest.extra_path_grants:
+        if grant.host_path is None:
+            continue
+        mounts.append(
+            DockerSDKMount(
+                target=grant.path,
+                source=str(sandbox_path_grant_host_path(grant)),
+                type="bind",
+                read_only=grant.read_only,
+            )
+        )
+
     for artifact, mount_path in _docker_volume_mounts_for_manifest(manifest):
         driver_config = artifact.mount_strategy.build_docker_volume_driver_config(artifact)
         assert driver_config is not None
@@ -1675,6 +1696,89 @@ def _build_docker_volume_mounts(
         )
 
     return mounts
+
+
+def _validate_docker_path_grants(manifest: Manifest) -> None:
+    root = coerce_posix_path(manifest.root)
+    seen_targets: set[str] = set()
+    explicit_targets: set[str] = set()
+    volume_targets = {
+        coerce_posix_path(mount_path).as_posix()
+        for _artifact, mount_path in _docker_volume_mounts_for_manifest(manifest)
+    }
+    for grant in manifest.extra_path_grants:
+        target = coerce_posix_path(grant.path)
+        target_str = target.as_posix()
+        if target_str in seen_targets and (
+            grant.host_path is not None or target_str in explicit_targets
+        ):
+            raise ValueError(f"duplicate Docker sandbox path grant target: {grant.path}")
+        seen_targets.add(target_str)
+        if grant.host_path is None:
+            continue
+        explicit_targets.add(target_str)
+        sandbox_path_grant_host_path(grant)
+        if target == root or root in target.parents:
+            raise ValueError(
+                "Docker sandbox path grant host_path target must be outside "
+                f"the workspace root: {grant.path}"
+            )
+        if target_str in volume_targets:
+            raise ValueError(
+                f"Docker sandbox path grant target conflicts with a manifest mount: {grant.path}"
+            )
+
+
+def _assert_existing_container_path_grants_match(
+    container: Container,
+    manifest: Manifest,
+) -> None:
+    container.reload()
+    raw_mounts = container.attrs.get("Mounts")
+    mounts = raw_mounts if isinstance(raw_mounts, list) else []
+    expected_grants = {
+        grant.path: grant for grant in manifest.extra_path_grants if grant.host_path is not None
+    }
+    actual_bind_mounts: dict[str, list[dict[object, object]]] = {}
+    for mount in mounts:
+        if not isinstance(mount, dict) or mount.get("Type") != "bind":
+            continue
+        destination = mount.get("Destination")
+        if not isinstance(destination, str):
+            raise ValueError(
+                "Existing Docker sandbox has a bind mount without a valid destination; "
+                "create a fresh sandbox session"
+            )
+        actual_bind_mounts.setdefault(destination, []).append(mount)
+
+    unexpected_targets = sorted(set(actual_bind_mounts) - set(expected_grants))
+    if unexpected_targets:
+        raise ValueError(
+            "Existing Docker sandbox has bind mounts that are not present in the current "
+            f"trusted manifest: {', '.join(unexpected_targets)}; create a fresh sandbox session"
+        )
+
+    for grant in expected_grants.values():
+        target_mounts = actual_bind_mounts.get(grant.path, [])
+        if len(target_mounts) != 1:
+            raise ValueError(
+                "Existing Docker sandbox path grant mount does not match the current trusted "
+                f"manifest for {grant.path!r}; create a fresh sandbox session"
+            )
+        expected_source = os.path.normcase(
+            os.path.normpath(str(sandbox_path_grant_host_path(grant)))
+        )
+        mount = target_mounts[0]
+        raw_source = mount.get("Source")
+        source = (
+            os.path.normcase(os.path.normpath(raw_source)) if isinstance(raw_source, str) else None
+        )
+        read_only = mount.get("RW") is False
+        if source != expected_source or read_only != grant.read_only:
+            raise ValueError(
+                "Existing Docker sandbox path grant mount does not match the current trusted "
+                f"manifest for {grant.path!r}; create a fresh sandbox session"
+            )
 
 
 def _docker_volume_names_for_manifest(
