@@ -774,6 +774,11 @@ class SlowFakeMCPServer(FakeMCPServer):
         return await super().call_tool(tool_name, arguments, meta=meta)
 
 
+_CREDENTIALED_SERVER_NAME = (
+    "sse: https://user:s3cr3t_pw@mcp.example.com/sse?api_key=SECRET_QS_KEY#SECRET_FRAGMENT"
+)
+
+
 class CleanupOnCancelFakeMCPServer(FakeMCPServer):
     def __init__(self, cleanup_finished: asyncio.Event):
         super().__init__()
@@ -941,6 +946,45 @@ async def test_mcp_tool_inner_cancellation_becomes_tool_error():
     result = await function_tool.on_invoke_tool(tool_context, "{}")
     assert isinstance(result, str)
     assert "tool execution was cancelled" in result
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_inner_cancellation_sanitizes_url_derived_server_name():
+    server = CancelledFakeMCPServer(server_name=_CREDENTIALED_SERVER_NAME)
+    server.add_tool("cancel_tool", {})
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="cancel_tool", inputSchema={})
+
+    with pytest.raises(MCPToolCancellationError) as exc_info:
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+    message = str(exc_info.value)
+    assert "cancel_tool" in message
+    assert "mcp.example.com/sse" in message
+    assert "s3cr3t_pw" not in message
+    assert "SECRET_QS_KEY" not in message
+    assert "SECRET_FRAGMENT" not in message
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_generic_error_sanitizes_only_url_derived_server_name():
+    server = CrashingFakeMCPServer(server_name=_CREDENTIALED_SERVER_NAME)
+    server.add_tool("crashing_tool", {})
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="crashing_tool", inputSchema={})
+
+    with pytest.raises(AgentsException) as exc_info:
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+    message = str(exc_info.value)
+    assert "crashing_tool" in message
+    assert "mcp.example.com/sse" in message
+    assert "Crash!" in message
+    assert "s3cr3t_pw" not in message
+    assert "SECRET_QS_KEY" not in message
+    assert "SECRET_FRAGMENT" not in message
+    assert isinstance(exc_info.value.__cause__, Exception)
+    assert str(exc_info.value.__cause__) == "Crash!"
 
 
 @pytest.mark.asyncio
