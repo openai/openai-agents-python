@@ -2864,7 +2864,7 @@ async def _build_run_state_from_json(
                 if session_index_value is None:
                     continue
                 if (
-                    type(session_index_value) is not int
+                    not isinstance(session_index_value, int)
                     or session_index_value < 0
                     or session_index_value >= len(serialized_session_items)
                     or session_index_value in used_session_indexes
@@ -2906,11 +2906,11 @@ async def _build_run_state_from_json(
     for item_ref in nested_history_refs_json:
         if (
             not isinstance(item_ref, Mapping)
-            or type(item_ref.get("index")) is not int
+            or not isinstance(item_ref.get("index"), int)
             or cast(int, item_ref["index"]) < 0
             or not isinstance(item_ref.get("digest"), str)
             or len(cast(str, item_ref["digest"])) != 64
-            or type(item_ref.get("input_index")) is not int
+            or not isinstance(item_ref.get("input_index"), int)
             or cast(int, item_ref["input_index"]) < 0
         ):
             raise UserError(
