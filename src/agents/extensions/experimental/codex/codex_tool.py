@@ -530,19 +530,32 @@ def _validate_default_run_context_thread_id_suffix(value: str) -> str:
 
 
 def _parse_tool_input(parameters_model: type[BaseModel], input_json: str) -> BaseModel:
+    base_message = "Invalid JSON input for codex tool"
+    decode_failed = False
     try:
         json_data = json.loads(input_json) if input_json else {}
     except Exception as exc:
-        if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug("Invalid JSON input for codex tool")
-        else:
-            logger.debug("Invalid JSON input for codex tool: %s", input_json)
-        raise ModelBehaviorError(f"Invalid JSON input for codex tool: {input_json}") from exc
+        if not _debug.DONT_LOG_TOOL_DATA:
+            logger.debug("%s: %s", base_message, input_json)
+            raise ModelBehaviorError(f"{base_message}: {input_json}") from exc
+        logger.debug(base_message)
+        # Under DONT_LOG_TOOL_DATA, do not copy the payload-bearing JSONDecodeError to an
+        # outer local; the redacted error below is raised with no exception in this frame's
+        # locals and no ``__cause__``/``__context__``.
+        decode_failed = True
+
+    if decode_failed:
+        raise ModelBehaviorError(base_message)
 
     try:
         return parameters_model.model_validate(json_data)
     except ValidationError as exc:
-        raise ModelBehaviorError(f"Invalid JSON input for codex tool: {exc}") from exc
+        if not _debug.DONT_LOG_TOOL_DATA:
+            raise ModelBehaviorError(f"{base_message}: {exc}") from exc
+
+    # Reached only when validation failed under DONT_LOG_TOOL_DATA; raised outside the
+    # ``except`` block with no ValidationError retained in this frame's locals.
+    raise ModelBehaviorError(base_message)
 
 
 def _normalize_parameters(params: BaseModel) -> CodexToolCallArguments:

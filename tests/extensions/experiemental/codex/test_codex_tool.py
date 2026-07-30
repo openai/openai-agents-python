@@ -2055,3 +2055,91 @@ def test_codex_tool_coerce_options_rejects_empty_run_context_key() -> None:
                 "run_context_thread_id_key": " ",
             }
         )
+
+
+class _CodexRedactionModel(BaseModel):
+    value: int
+
+
+_CODEX_ARG_SECRET = "SECRET_SSN_123-45-6789"
+
+
+@pytest.mark.parametrize(
+    "input_json",
+    [
+        '{"value": "SECRET_SSN_123-45-6789"}',
+        "not valid json SECRET_SSN_123-45-6789",
+    ],
+    ids=["validation_error", "json_decode_error"],
+)
+def test_codex_parse_tool_input_redacts_payload_when_tool_data_disabled(
+    monkeypatch: pytest.MonkeyPatch, input_json: str
+) -> None:
+    # Both the JSON-decode and the pydantic validation failure paths embed the raw model
+    # payload in their underlying exception. Neither may leak into the raised
+    # ModelBehaviorError (message, __cause__, or __context__) when tool-data logging is off.
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        codex_tool_module._parse_tool_input(_CodexRedactionModel, input_json)
+
+    error = exc_info.value
+    assert _CODEX_ARG_SECRET not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+@pytest.mark.parametrize(
+    "input_json",
+    [
+        '{"value": "SECRET_SSN_123-45-6789"}',
+        "not valid json SECRET_SSN_123-45-6789",
+    ],
+    ids=["validation_error", "json_decode_error"],
+)
+def test_codex_parse_tool_input_includes_payload_when_tool_data_enabled(
+    monkeypatch: pytest.MonkeyPatch, input_json: str
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        codex_tool_module._parse_tool_input(_CodexRedactionModel, input_json)
+
+    error = exc_info.value
+    assert _CODEX_ARG_SECRET in str(error)
+    assert error.__cause__ is not None
+
+
+@pytest.mark.parametrize(
+    "input_json",
+    [
+        '{"inputs": "SECRET_SSN_123-45-6789"}',
+        "not valid json SECRET_SSN_123-45-6789",
+    ],
+    ids=["validation_error", "json_decode_error"],
+)
+@pytest.mark.asyncio
+async def test_codex_tool_on_invoke_redacts_payload_when_tool_data_disabled(
+    monkeypatch: pytest.MonkeyPatch, input_json: str
+) -> None:
+    # Caller-level: the ModelBehaviorError escaping on_invoke_tool must be a fixed message
+    # with no payload in the message, __cause__, or __context__ when tool logging is off.
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(CodexMockState())),
+            failure_error_function=None,
+        )
+    )
+    context = ToolContext(
+        context=None, tool_name=tool.name, tool_call_id="call-1", tool_arguments=input_json
+    )
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await tool.on_invoke_tool(context, input_json)
+
+    error = exc_info.value
+    assert str(error) == "Invalid JSON input for codex tool"
+    assert _CODEX_ARG_SECRET not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None

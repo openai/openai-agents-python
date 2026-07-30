@@ -20,15 +20,18 @@ from unittest.mock import patch
 import httpx
 import pytest
 from openai import AsyncOpenAI
+from pydantic import BaseModel, ValidationError
 
 import agents._debug as _debug
 from agents import (
     Agent,
+    ModelBehaviorError,
     ModelSettings,
     ModelTracing,
     OpenAIResponsesModel,
     RunConfig,
     RunContextWrapper,
+    function_tool,
     trace,
 )
 from agents.logger import (
@@ -48,6 +51,7 @@ from agents.run_internal.tool_execution import (
     resolve_approval_rejection_message,
 )
 from agents.run_state import _deserialize_items
+from agents.tool_context import ToolContext
 from agents.tracing.processor_interface import TracingProcessor
 from agents.tracing.provider import SynchronousMultiTracingProcessor
 from agents.tracing.spans import Span
@@ -753,3 +757,125 @@ async def test_approval_rejection_formatter_error_logs_full_when_enabled(
     assert record.__dict__["openai_agents_diagnostic_context"] == {"tool_name": tool_name}
     assert record.exc_info is not None
     assert "SECRET_FMT_123" in caplog.text
+
+
+_TOOL_ARG_SECRET = "SECRET_SSN_123-45-6789"
+
+
+def _requires_int_tool_arg(value: int) -> str:
+    return str(value)
+
+
+def _validation_errors_in_traceback_locals(error: BaseException) -> list[ValidationError]:
+    """Collect any ValidationError retained in the raised error's traceback frame locals.
+
+    Telemetry that captures frame locals could otherwise recover the raw tool arguments from
+    the payload-bearing ValidationError even after ``__cause__``/``__context__`` are cleared.
+    """
+    found: list[ValidationError] = []
+    tb = error.__traceback__
+    while tb is not None:
+        found.extend(v for v in tb.tb_frame.f_locals.values() if isinstance(v, ValidationError))
+        tb = tb.tb_next
+    return found
+
+
+@pytest.mark.asyncio
+async def test_function_tool_validation_error_redacts_payload_when_tool_data_disabled(
+    monkeypatch,
+) -> None:
+    # A mistyped tool argument raises a pydantic ValidationError whose string form embeds
+    # the raw offending value. That exception must not leak into the raised
+    # ModelBehaviorError (message, __cause__, or __context__) when tool-data logging is off.
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+    tool = function_tool(_requires_int_tool_arg, failure_error_function=None)
+    payload = '{"value": "SECRET_SSN_123-45-6789"}'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await tool.on_invoke_tool(
+            ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=payload),
+            payload,
+        )
+
+    error = exc_info.value
+    assert str(error) == f"Invalid JSON input for tool {tool.name}"
+    assert _TOOL_ARG_SECRET not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert _validation_errors_in_traceback_locals(error) == []
+
+
+@pytest.mark.asyncio
+async def test_function_tool_validation_error_includes_payload_when_tool_data_enabled(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    tool = function_tool(_requires_int_tool_arg, failure_error_function=None)
+    payload = '{"value": "SECRET_SSN_123-45-6789"}'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await tool.on_invoke_tool(
+            ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=payload),
+            payload,
+        )
+
+    error = exc_info.value
+    assert _TOOL_ARG_SECRET in str(error)
+    assert isinstance(error.__cause__, ValidationError)
+
+
+class _AgentToolParams(BaseModel):
+    value: int
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_validation_error_redacts_payload_when_tool_data_disabled(
+    monkeypatch,
+) -> None:
+    # Agent.as_tool validates model-supplied arguments too; in redacted mode the raised error
+    # must be a fixed message with no value in the message, __cause__, or __context__.
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+    tool = Agent(name="worker").as_tool(
+        tool_name="worker_tool",
+        tool_description="Runs the worker agent.",
+        parameters=_AgentToolParams,
+        failure_error_function=None,
+    )
+    payload = '{"value": "SECRET_SSN_123-45-6789"}'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await tool.on_invoke_tool(
+            ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=payload),
+            payload,
+        )
+
+    error = exc_info.value
+    assert str(error) == f"Invalid JSON input for tool {tool.name}"
+    assert _TOOL_ARG_SECRET not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert _validation_errors_in_traceback_locals(error) == []
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_validation_error_includes_payload_when_tool_data_enabled(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    tool = Agent(name="worker").as_tool(
+        tool_name="worker_tool",
+        tool_description="Runs the worker agent.",
+        parameters=_AgentToolParams,
+        failure_error_function=None,
+    )
+    payload = '{"value": "SECRET_SSN_123-45-6789"}'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await tool.on_invoke_tool(
+            ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=payload),
+            payload,
+        )
+
+    error = exc_info.value
+    assert _TOOL_ARG_SECRET in str(error)
+    assert isinstance(error.__cause__, ValidationError)
