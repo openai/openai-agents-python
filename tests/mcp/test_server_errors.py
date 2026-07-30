@@ -39,6 +39,14 @@ def _assert_url_credentials_hidden(error: BaseException) -> None:
     assert error.__context__ is None
 
 
+def _assert_not_retained_in_traceback_locals(error: BaseException, sensitive_value: object) -> None:
+    current = error.__traceback__
+    while current is not None:
+        if current.tb_frame.f_code.co_filename.endswith("/src/agents/mcp/server.py"):
+            assert all(value is not sensitive_value for value in current.tb_frame.f_locals.values())
+        current = current.tb_next
+
+
 def _assert_url_credentials_hidden_from_log_record(record: logging.LogRecord) -> None:
     rendered = logging.Formatter("%(levelname)s %(message)s").format(record)
     attached_values = repr(
@@ -133,6 +141,7 @@ async def test_call_tool_nested_exception_group_mapping(url: str, retains_cause:
     else:
         assert "mcp.example.com/sse" in str(exc_info.value)
         _assert_url_credentials_hidden(exc_info.value)
+        _assert_not_retained_in_traceback_locals(exc_info.value, http_error)
 
 
 @pytest.mark.parametrize("server_type", [MCPServerSse, MCPServerStreamableHttp])
@@ -163,6 +172,7 @@ async def test_connect_http_error_hides_url_credentials_from_exception_graph():
     assert "mcp.example.com/sse" in str(exc_info.value)
     assert "HTTP error 503 (Service Unavailable)" in str(exc_info.value)
     _assert_url_credentials_hidden(exc_info.value)
+    _assert_not_retained_in_traceback_locals(exc_info.value, http_error)
 
 
 @pytest.mark.asyncio
@@ -210,6 +220,29 @@ async def test_list_tools_http_error_hides_redirect_history_url_credentials():
     assert "mcp.example.com/sse" in str(exc_info.value)
     assert "HTTP error 500" in str(exc_info.value)
     _assert_url_credentials_hidden(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_list_tools_http_error_hides_current_redirect_location_credentials():
+    server = MCPServerSse(params={"url": _SAFE_URL})
+    server.session = MagicMock()
+    request = httpx.Request("GET", _SAFE_URL)
+    response = httpx.Response(
+        302,
+        request=request,
+        headers={"location": _CREDENTIALED_URL},
+    )
+    with pytest.raises(httpx.HTTPStatusError) as http_error_info:
+        response.raise_for_status()
+    http_error = http_error_info.value
+
+    with patch.object(server, "_run_with_retries", side_effect=http_error):
+        with pytest.raises(UserError) as exc_info:
+            await server.list_tools(None, None)
+
+    assert "HTTP error 302" in str(exc_info.value)
+    _assert_url_credentials_hidden(exc_info.value)
+    _assert_not_retained_in_traceback_locals(exc_info.value, http_error)
 
 
 @pytest.mark.asyncio
@@ -302,6 +335,94 @@ async def test_call_tool_direct_timeout_only_maps_credentialed_urls(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        httpx.ReadError,
+        httpx.WriteError,
+        httpx.RemoteProtocolError,
+        httpx.ProxyError,
+    ],
+)
+@pytest.mark.parametrize(
+    ("url", "maps_to_user_error"),
+    [
+        (_SAFE_URL, False),
+        (_CREDENTIALED_URL, True),
+    ],
+)
+async def test_list_tools_request_errors_only_map_credentialed_urls(
+    error_type, url: str, maps_to_user_error: bool
+):
+    server = MCPServerSse(params={"url": url})
+    server.session = MagicMock()
+    request_error = error_type(
+        "request failed",
+        request=httpx.Request("GET", url),
+    )
+
+    with patch.object(server, "_run_with_retries", side_effect=request_error):
+        if maps_to_user_error:
+            with pytest.raises(UserError) as user_error_info:
+                await server.list_tools(None, None)
+
+            assert "Request failed" in str(user_error_info.value)
+            _assert_url_credentials_hidden(user_error_info.value)
+            _assert_not_retained_in_traceback_locals(
+                user_error_info.value,
+                request_error,
+            )
+        else:
+            with pytest.raises(error_type) as request_error_info:
+                await server.list_tools(None, None)
+
+            assert request_error_info.value is request_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_type", [MCPServerSse, MCPServerStreamableHttp])
+@pytest.mark.parametrize(
+    ("url", "maps_to_user_error"),
+    [
+        (_SAFE_URL, False),
+        (_CREDENTIALED_URL, True),
+    ],
+)
+async def test_call_tool_request_error_only_maps_credentialed_urls(
+    server_type, url: str, maps_to_user_error: bool
+):
+    server = server_type(params={"url": url})
+    server.session = MagicMock()
+    server.max_retry_attempts = 0
+    request_error = httpx.ReadError(
+        "request failed",
+        request=httpx.Request("POST", url),
+    )
+    retry_method = (
+        "_call_tool_with_isolated_retry"
+        if server_type is MCPServerStreamableHttp
+        else "_run_with_retries"
+    )
+
+    with patch.object(server, retry_method, side_effect=request_error):
+        if maps_to_user_error:
+            with pytest.raises(UserError) as user_error_info:
+                await server.call_tool("safe_tool", {})
+
+            assert "Request failed" in str(user_error_info.value)
+            _assert_url_credentials_hidden(user_error_info.value)
+            _assert_not_retained_in_traceback_locals(
+                user_error_info.value,
+                request_error,
+            )
+        else:
+            with pytest.raises(httpx.ReadError) as request_error_info:
+                await server.call_tool("safe_tool", {})
+
+            assert request_error_info.value is request_error
+
+
+@pytest.mark.asyncio
 async def test_failed_connection_cleanup_hides_url_credentials_from_exception_graph():
     server = MCPServerSse(params={"url": _CREDENTIALED_URL})
     request = httpx.Request("GET", _CREDENTIALED_URL)
@@ -317,6 +438,7 @@ async def test_failed_connection_cleanup_hides_url_credentials_from_exception_gr
     assert "mcp.example.com/sse" in str(exc_info.value)
     assert "HTTP error 502" in str(exc_info.value)
     _assert_url_credentials_hidden(exc_info.value)
+    _assert_not_retained_in_traceback_locals(exc_info.value, http_error)
 
 
 @pytest.mark.asyncio

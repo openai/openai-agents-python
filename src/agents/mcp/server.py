@@ -103,7 +103,7 @@ T = TypeVar("T")
 
 
 def _safe_transport_cause(http_error: Exception) -> Exception | None:
-    """Keep a transport exception only when its request URLs need no sanitization."""
+    """Keep a transport exception only when its HTTPX URLs need no sanitization."""
     if not isinstance(http_error, httpx.HTTPStatusError | httpx.RequestError):
         return http_error
 
@@ -114,11 +114,19 @@ def _safe_transport_cause(http_error: Exception) -> Exception | None:
         pass
 
     if isinstance(http_error, httpx.HTTPStatusError):
-        for response in http_error.response.history:
+        for response in [*http_error.response.history, http_error.response]:
             try:
-                request_urls.append(str(response.request.url))
+                response_url = response.request.url
             except RuntimeError:
-                continue
+                return None
+
+            request_urls.append(str(response_url))
+            redirect_location = response.headers.get("location")
+            if redirect_location is not None:
+                try:
+                    request_urls.append(str(response_url.join(redirect_location)))
+                except (httpx.InvalidURL, ValueError):
+                    return None
 
     return http_error if all(get_mcp_server_log_name(url) == url for url in request_urls) else None
 
@@ -778,7 +786,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     def _extract_http_error_from_exception(self, e: BaseException) -> Exception | None:
         """Extract HTTP error from exception or ExceptionGroup."""
-        if isinstance(e, httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException):
+        if isinstance(e, httpx.HTTPStatusError | httpx.RequestError):
             return e
 
         # Recursively check ExceptionGroups for HTTP errors
@@ -801,6 +809,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         elif isinstance(http_error, httpx.TimeoutException):
             error_message += "Connection timeout."
+
+        elif isinstance(http_error, httpx.RequestError):
+            error_message += "Request failed."
 
         return UserError(error_message)
 
@@ -854,23 +865,20 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         except Exception as e:
             # Try to extract HTTP error from exception or ExceptionGroup
             http_error = self._extract_http_error_from_exception(e)
-            if http_error:
-                connection_error = self._user_error_for_http_error(http_error)
-                connection_cause = _safe_transport_cause(http_error)
-
-            # For CancelledError, preserve cancellation semantics - don't wrap it.
-            # If it's masking an HTTP error, cleanup() will extract and raise UserError.
-            elif isinstance(e, asyncio.CancelledError):
+            if http_error is None:
                 raise
 
-            # For HTTP-related errors, wrap them
-            elif isinstance(e, httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException):
-                connection_error = self._user_error_for_http_error(e)
-                connection_cause = _safe_transport_cause(e)
-
-            # For other errors, re-raise as-is (don't wrap non-HTTP errors)
-            else:
+            connection_cause = _safe_transport_cause(http_error)
+            maps_safe_error = isinstance(
+                http_error,
+                httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException,
+            )
+            if connection_cause is not None and not maps_safe_error:
                 raise
+
+            connection_error = self._user_error_for_http_error(http_error)
+            if connection_cause is None:
+                http_error = None
         finally:
             # Always attempt cleanup on error, but suppress cleanup errors that mask the original
             if not connection_succeeded:
@@ -943,19 +951,24 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 f"HTTP error {status_code}"
             )
             transport_cause = _safe_transport_cause(e)
-        except httpx.ConnectError as e:
-            transport_error = UserError(
-                f"Failed to list tools from MCP server '{self._error_name}': Connection lost. "
-                f"The server may have disconnected."
-            )
+        except httpx.RequestError as e:
             transport_cause = _safe_transport_cause(e)
-        except httpx.TimeoutException as e:
-            transport_cause = _safe_transport_cause(e)
-            if transport_cause is not None:
+            if transport_cause is not None and not isinstance(e, httpx.ConnectError):
                 raise
-            transport_error = UserError(
-                f"Failed to list tools from MCP server '{self._error_name}': Connection timeout."
-            )
+            if isinstance(e, httpx.ConnectError):
+                transport_error = UserError(
+                    f"Failed to list tools from MCP server '{self._error_name}': Connection lost. "
+                    f"The server may have disconnected."
+                )
+            elif isinstance(e, httpx.TimeoutException):
+                transport_error = UserError(
+                    f"Failed to list tools from MCP server '{self._error_name}': "
+                    "Connection timeout."
+                )
+            else:
+                transport_error = UserError(
+                    f"Failed to list tools from MCP server '{self._error_name}': Request failed."
+                )
 
         assert transport_error is not None
         self._raise_mapped_transport_error(transport_error, transport_cause)
@@ -994,20 +1007,25 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 f"HTTP error {status_code}"
             )
             transport_cause = _safe_transport_cause(e)
-        except httpx.ConnectError as e:
-            transport_error = UserError(
-                f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
-                f"Connection lost. The server may have disconnected."
-            )
+        except httpx.RequestError as e:
             transport_cause = _safe_transport_cause(e)
-        except httpx.TimeoutException as e:
-            transport_cause = _safe_transport_cause(e)
-            if transport_cause is not None:
+            if transport_cause is not None and not isinstance(e, httpx.ConnectError):
                 raise
-            transport_error = UserError(
-                f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
-                "Connection timeout."
-            )
+            if isinstance(e, httpx.ConnectError):
+                transport_error = UserError(
+                    f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
+                    "Connection lost. The server may have disconnected."
+                )
+            elif isinstance(e, httpx.TimeoutException):
+                transport_error = UserError(
+                    f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
+                    "Connection timeout."
+                )
+            else:
+                transport_error = UserError(
+                    f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
+                    "Request failed."
+                )
 
         assert transport_error is not None
         self._raise_mapped_transport_error(transport_error, transport_cause)
@@ -1132,6 +1150,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                         connect_error = exc
                     elif isinstance(exc, httpx.TimeoutException):
                         timeout_error = exc
+                del exc
 
                 # Only raise HTTP errors if we're cleaning up after a failed connection.
                 # During normal teardown, log them instead.
@@ -1139,6 +1158,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     if is_failed_connection_cleanup:
                         cleanup_error = self._user_error_for_http_error(http_error)
                         cleanup_cause = _safe_transport_cause(http_error)
+                        if cleanup_cause is None:
+                            http_error = None
                     else:
                         # Normal teardown - log but don't raise
                         _log_transport_warning(
@@ -1151,6 +1172,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     if is_failed_connection_cleanup:
                         cleanup_error = self._user_error_for_http_error(connect_error)
                         cleanup_cause = _safe_transport_cause(connect_error)
+                        if cleanup_cause is None:
+                            connect_error = None
                     else:
                         _log_transport_warning(
                             get_mcp_server_log_message(
@@ -1162,6 +1185,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     if is_failed_connection_cleanup:
                         cleanup_error = self._user_error_for_http_error(timeout_error)
                         cleanup_cause = _safe_transport_cause(timeout_error)
+                        if cleanup_cause is None:
+                            timeout_error = None
                     else:
                         _log_transport_warning(
                             get_mcp_server_log_message(
@@ -1782,22 +1807,28 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 f"HTTP error {status_code}"
             )
             transport_cause = _safe_transport_cause(e)
-        except httpx.ConnectError as e:
-            transport_error = UserError(
-                f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
-                f"Connection lost. The server may have disconnected."
-            )
+        except httpx.RequestError as e:
             transport_cause = _safe_transport_cause(e)
-        except httpx.TimeoutException as e:
-            transport_cause = _safe_transport_cause(e)
-            if transport_cause is not None:
+            if transport_cause is not None and not isinstance(e, httpx.ConnectError):
                 raise
-            transport_error = UserError(
-                f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
-                "Connection timeout."
-            )
+            if isinstance(e, httpx.ConnectError):
+                transport_error = UserError(
+                    f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
+                    "Connection lost. The server may have disconnected."
+                )
+            elif isinstance(e, httpx.TimeoutException):
+                transport_error = UserError(
+                    f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
+                    "Connection timeout."
+                )
+            else:
+                transport_error = UserError(
+                    f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
+                    "Request failed."
+                )
         except BaseExceptionGroup as e:
             http_error = self._extract_http_error_from_exception(e)
+            transport_cause = _safe_transport_cause(http_error) if http_error is not None else None
             if isinstance(http_error, httpx.HTTPStatusError):
                 status_code = http_error.response.status_code
                 transport_error = UserError(
@@ -1814,9 +1845,17 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                     f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
                     "Connection timeout."
                 )
+            elif isinstance(http_error, httpx.RequestError):
+                if transport_cause is not None:
+                    raise
+                transport_error = UserError(
+                    f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
+                    "Request failed."
+                )
             else:
                 raise
-            transport_cause = _safe_transport_cause(http_error)
+            if transport_cause is None:
+                http_error = None
 
         assert transport_error is not None
         self._raise_mapped_transport_error(transport_error, transport_cause)
