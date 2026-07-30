@@ -884,8 +884,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             connection_error = self._user_error_for_http_error(http_error)
             if connection_cause is None:
                 http_errors.clear()
-                http_error = None
-                unsafe_http_error = None
+                del http_error
+                del unsafe_http_error
         finally:
             # Always attempt cleanup on error, but suppress cleanup errors that mask the original
             if not connection_succeeded:
@@ -1868,8 +1868,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 raise
             if transport_cause is None:
                 http_errors.clear()
-                http_error = None
-                unsafe_http_error = None
+                del http_error
+                del unsafe_http_error
 
         assert transport_error is not None
         self._raise_mapped_transport_error(transport_error, transport_cause)
