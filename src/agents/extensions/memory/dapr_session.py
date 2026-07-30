@@ -284,7 +284,23 @@ class DaprSession(SessionABC):
             if session_limit is not None:
                 if session_limit <= 0:
                     return []
-                messages = messages[-session_limit:]
+                # Walk back from the newest entry so limit counts valid conversation items:
+                # a corrupt entry is skipped instead of spending the caller's budget, matching
+                # pop_item and the other session backends.
+                latest_first: list[TResponseInputItem] = []
+                for msg in reversed(messages):
+                    try:
+                        if isinstance(msg, str):
+                            item = await self._deserialize_item(msg)
+                        else:
+                            item = msg
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    latest_first.append(item)
+                    if len(latest_first) == session_limit:
+                        break
+                latest_first.reverse()
+                return latest_first
             items: list[TResponseInputItem] = []
             for msg in messages:
                 try:

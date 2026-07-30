@@ -706,6 +706,49 @@ async def test_add_items_preserves_created_at_metadata():
         await session.close()
 
 
+async def test_get_items_limit_skips_corrupt_newest_messages():
+    """limit counts valid items, expanding past corrupt newest messages."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for direct data manipulation")
+
+    session = await _create_test_session("limit_corrupt_test")
+
+    try:
+        await session.clear_session()
+        await session.add_items(
+            [
+                {"role": "user", "content": "valid 0"},
+                {"role": "assistant", "content": "valid 1"},
+                {"role": "user", "content": "valid 2"},
+            ]
+        )
+
+        # Append a corrupt newest message.
+        await _safe_rpush(fake_redis, session._messages_key, "not valid json {{{")
+
+        limited = await session.get_items(limit=2)
+        assert [item.get("content") for item in limited] == ["valid 1", "valid 2"]
+    finally:
+        await session.close()
+
+
+async def test_get_items_limit_returns_fewer_when_history_exhausted():
+    """Window expansion stops at the end of history instead of looping."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for direct data manipulation")
+
+    session = await _create_test_session("limit_exhausted_test")
+
+    try:
+        await session.clear_session()
+        await session.add_items([{"role": "user", "content": "only valid"}])
+
+        retrieved = await session.get_items(limit=5)
+        assert [item.get("content") for item in retrieved] == ["only valid"]
+    finally:
+        await session.close()
+
+
 async def test_corrupted_data_handling():
     """Test that corrupted JSON data is handled gracefully."""
     if not USE_FAKE_REDIS:
@@ -720,7 +763,7 @@ async def test_corrupted_data_handling():
         await session.add_items([{"role": "user", "content": "valid message"}])
 
         # Inject corrupted data directly into Redis
-        messages_key = "test:corruption_test:messages"
+        messages_key = session._messages_key
 
         # Add invalid JSON directly using the typed Redis client
         await _safe_rpush(fake_redis, messages_key, "invalid json data")

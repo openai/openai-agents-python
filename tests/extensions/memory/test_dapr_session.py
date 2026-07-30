@@ -396,6 +396,42 @@ async def test_pop_from_empty_session(fake_dapr_client: FakeDaprClient):
         await session.close()
 
 
+async def test_get_items_limit_skips_corrupt_newest_entries(fake_dapr_client: FakeDaprClient):
+    """limit counts valid items, expanding past corrupt newest entries."""
+    session = await _create_test_session(fake_dapr_client, "limit_corrupt")
+
+    try:
+        serialized = [
+            await session._serialize_item({"role": "user", "content": "valid 0"}),
+            await session._serialize_item({"role": "assistant", "content": "valid 1"}),
+            await session._serialize_item({"role": "user", "content": "valid 2"}),
+            "not valid json {{{",
+        ]
+        fake_dapr_client._state[session._messages_key] = json.dumps(
+            serialized, separators=(",", ":")
+        ).encode("utf-8")
+
+        limited = await session.get_items(limit=2)
+        assert [item.get("content") for item in limited] == ["valid 1", "valid 2"]
+    finally:
+        await session.close()
+
+
+async def test_get_items_limit_returns_fewer_when_history_exhausted(
+    fake_dapr_client: FakeDaprClient,
+):
+    """A limit larger than the stored history returns what exists."""
+    session = await _create_test_session(fake_dapr_client, "limit_exhausted")
+
+    try:
+        await session.add_items([{"role": "user", "content": "only valid"}])
+
+        retrieved = await session.get_items(limit=5)
+        assert [item.get("content") for item in retrieved] == ["only valid"]
+    finally:
+        await session.close()
+
+
 async def test_pop_item_skips_corrupt_most_recent(fake_dapr_client: FakeDaprClient):
     """pop_item skips corrupt newest entries and returns the next valid item."""
     session = await _create_test_session(fake_dapr_client, "pop_corrupt")

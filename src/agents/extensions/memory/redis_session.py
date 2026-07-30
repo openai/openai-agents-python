@@ -165,17 +165,7 @@ class RedisSession(SessionABC):
         """
         session_limit = resolve_session_limit(limit, self.session_settings)
 
-        async with self._lock:
-            if session_limit is None:
-                # Get all messages in chronological order
-                raw_messages = await self._redis.lrange(self._messages_key, 0, -1)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
-            else:
-                if session_limit <= 0:
-                    return []
-                # Get the latest N messages (Redis list is ordered chronologically)
-                # Use negative indices to get from the end - Redis uses -N to -1 for last N items
-                raw_messages = await self._redis.lrange(self._messages_key, -session_limit, -1)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
-
+        async def _decode_messages(raw_messages: list[Any]) -> list[TResponseInputItem]:
             items: list[TResponseInputItem] = []
             for raw_msg in raw_messages:
                 try:
@@ -189,8 +179,30 @@ class RedisSession(SessionABC):
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     # Skip corrupted messages
                     continue
-
             return items
+
+        async with self._lock:
+            if session_limit is None:
+                # Get all messages in chronological order
+                raw_messages = await self._redis.lrange(self._messages_key, 0, -1)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
+                return await _decode_messages(raw_messages)
+
+            if session_limit <= 0:
+                return []
+
+            # Get the latest N messages (Redis list is ordered chronologically)
+            # Use negative indices to get from the end - Redis uses -N to -1 for last N items.
+            # Expand the fetch window when corrupt messages sit among the newest entries so
+            # limit counts valid conversation items, matching pop_item and the other backends.
+            window = session_limit
+            while True:
+                raw_messages = await self._redis.lrange(self._messages_key, -window, -1)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
+                items = await _decode_messages(raw_messages)
+                if len(items) >= session_limit:
+                    return items[-session_limit:]
+                if len(raw_messages) < window:
+                    return items
+                window *= 2
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Add new items to the conversation history.
