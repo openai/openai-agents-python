@@ -708,7 +708,7 @@ class ItemHelpers:
             # receiving refusal text. A ``None`` value requires bypassing model validation
             # with ``model_construct``, so this intentionally does not mirror the fallback
             # above.
-            return last_content.refusal
+            return last_content.refusal or ""
         else:
             raise ModelBehaviorError(f"Unexpected content type: {type(last_content)}")
 
@@ -720,7 +720,7 @@ class ItemHelpers:
                 return None
             last_content = message.content[-1]
             if isinstance(last_content, ResponseOutputText):
-                return last_content.text
+                return last_content.text or ""
 
         return None
 
