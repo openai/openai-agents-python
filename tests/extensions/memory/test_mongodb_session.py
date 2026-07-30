@@ -541,6 +541,39 @@ async def test_non_string_message_data_is_skipped(session: MongoDBSession) -> No
     assert items[0].get("content") == "valid"
 
 
+async def test_get_items_limit_skips_corrupt_newest_docs(session: MongoDBSession) -> None:
+    """limit counts valid items, expanding past corrupt newest documents."""
+    await session.add_items(
+        [
+            {"role": "user", "content": "valid 0"},
+            {"role": "assistant", "content": "valid 1"},
+            {"role": "user", "content": "valid 2"},
+        ]
+    )
+
+    # Inject a corrupt document with a higher seq so it sorts as "most recent".
+    bad_doc = {
+        "_id": FakeObjectId(),
+        "session_id": session.session_id,
+        "seq": 999,
+        "message_data": "not valid json {{{",
+    }
+    session._messages._docs[id(bad_doc["_id"])] = bad_doc
+
+    limited = await session.get_items(limit=2)
+    assert [item.get("content") for item in limited] == ["valid 1", "valid 2"]
+
+
+async def test_get_items_limit_returns_fewer_when_history_exhausted(
+    session: MongoDBSession,
+) -> None:
+    """Window expansion stops at the end of history instead of looping."""
+    await session.add_items([{"role": "user", "content": "only valid"}])
+
+    retrieved = await session.get_items(limit=5)
+    assert [item.get("content") for item in retrieved] == ["only valid"]
+
+
 async def test_pop_item_skips_corrupt_most_recent(session: MongoDBSession) -> None:
     """pop_item must skip a corrupt most-recent document and return the next valid one."""
     await session.add_items([{"role": "user", "content": "valid"}])

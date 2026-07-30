@@ -256,6 +256,41 @@ async def test_pop_item_skips_corrupt_most_recent():
     assert await session.get_items() == []
 
 
+async def test_get_items_limit_skips_corrupt_newest_rows():
+    """limit counts valid items, expanding past corrupt newest rows."""
+    session = SQLAlchemySession.from_url("limit_corrupt", url=DB_URL, create_tables=True)
+
+    await session.add_items(
+        [
+            {"role": "user", "content": "valid 0"},
+            {"role": "assistant", "content": "valid 1"},
+            {"role": "user", "content": "valid 2"},
+        ]
+    )
+
+    await session._ensure_tables()
+    async with session._session_factory() as sess:
+        async with sess.begin():
+            await sess.execute(
+                insert(session._messages).values(
+                    {"session_id": session.session_id, "message_data": "not valid json {{{"}
+                )
+            )
+
+    limited = await session.get_items(limit=2)
+    assert [item.get("content") for item in limited] == ["valid 1", "valid 2"]
+
+
+async def test_get_items_limit_returns_fewer_when_history_exhausted():
+    """Window expansion stops at the end of history instead of looping."""
+    session = SQLAlchemySession.from_url("limit_exhausted", url=DB_URL, create_tables=True)
+
+    await session.add_items([{"role": "user", "content": "only valid"}])
+
+    retrieved = await session.get_items(limit=5)
+    assert [item.get("content") for item in retrieved] == ["only valid"]
+
+
 async def test_pop_item_returns_none_after_dropping_only_corrupt_rows():
     """pop_item removes corrupt rows and returns None when no valid items remain."""
     session = SQLAlchemySession.from_url("pop_only_corrupt", url=DB_URL, create_tables=True)

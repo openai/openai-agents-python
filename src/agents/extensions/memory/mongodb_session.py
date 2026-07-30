@@ -277,25 +277,34 @@ class MongoDBSession(SessionABC):
 
         query = {"session_id": self.session_id}
 
+        async def _decode_docs(docs: list[Any]) -> list[TResponseInputItem]:
+            items: list[TResponseInputItem] = []
+            for doc in docs:
+                try:
+                    items.append(await self._deserialize_item(doc["message_data"]))
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    # Skip corrupted or malformed documents (including non-string BSON values).
+                    continue
+            return items
+
         if session_limit is None:
             cursor = self._messages.find(query).sort("seq", 1)
-            docs = await cursor.to_list()
-        else:
-            # Fetch the latest N documents in reverse order, then reverse the
-            # list to restore chronological order.
-            cursor = self._messages.find(query).sort("seq", -1).limit(session_limit)
-            docs = await cursor.to_list()
-            docs.reverse()
+            return await _decode_docs(await cursor.to_list())
 
-        items: list[TResponseInputItem] = []
-        for doc in docs:
-            try:
-                items.append(await self._deserialize_item(doc["message_data"]))
-            except (json.JSONDecodeError, KeyError, TypeError):
-                # Skip corrupted or malformed documents (including non-string BSON values).
-                continue
-
-        return items
+        # Fetch the latest N documents in reverse order, then reverse the
+        # list to restore chronological order. Expand the fetch window when corrupt
+        # documents sit among the newest entries so limit counts valid conversation
+        # items, matching pop_item and the SQLite backends.
+        window = session_limit
+        while True:
+            cursor = self._messages.find(query).sort("seq", -1).limit(window)
+            docs = await cursor.to_list()
+            items = await _decode_docs(docs[::-1])
+            if len(items) >= session_limit:
+                return items[-session_limit:]
+            if len(docs) < window:
+                return items
+            window *= 2
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Add new items to the conversation history.

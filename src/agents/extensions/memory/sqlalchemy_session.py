@@ -35,6 +35,7 @@ from sqlalchemy import (
     Index,
     Integer,
     MetaData,
+    Select,
     String,
     Table,
     Text,
@@ -300,6 +301,29 @@ class SQLAlchemySession(SessionABC):
 
         session_limit = resolve_session_limit(limit, self.session_settings)
 
+        async def _decode_rows(rows: list[str]) -> list[TResponseInputItem]:
+            items: list[TResponseInputItem] = []
+            for raw in rows:
+                try:
+                    items.append(await self._deserialize_item(raw))
+                except json.JSONDecodeError:
+                    # Skip corrupted rows
+                    continue
+            return items
+
+        def _latest_first_stmt(row_limit: int) -> Select[tuple[str]]:
+            # Use DESC + LIMIT to get the latest N
+            # then reverse later for chronological order.
+            return (
+                select(self._messages.c.message_data)
+                .where(self._messages.c.session_id == self.session_id)
+                .order_by(
+                    self._messages.c.created_at.desc(),
+                    self._messages.c.id.desc(),
+                )
+                .limit(row_limit)
+            )
+
         async with self._session_factory() as sess:
             if session_limit is None:
                 stmt = (
@@ -310,33 +334,27 @@ class SQLAlchemySession(SessionABC):
                         self._messages.c.id.asc(),
                     )
                 )
-            else:
-                stmt = (
-                    select(self._messages.c.message_data)
-                    .where(self._messages.c.session_id == self.session_id)
-                    # Use DESC + LIMIT to get the latest N
-                    # then reverse later for chronological order.
-                    .order_by(
-                        self._messages.c.created_at.desc(),
-                        self._messages.c.id.desc(),
-                    )
-                    .limit(session_limit)
-                )
+                result = await sess.execute(stmt)
+                return await _decode_rows([row[0] for row in result.all()])
 
-            result = await sess.execute(stmt)
-            rows: list[str] = [row[0] for row in result.all()]
+            if session_limit > 0:
+                # Expand the fetch window when corrupt rows sit among the newest entries so
+                # limit counts valid conversation items, matching pop_item and the SQLite
+                # backends.
+                window = session_limit
+                while True:
+                    result = await sess.execute(_latest_first_stmt(window))
+                    rows: list[str] = [row[0] for row in result.all()]
+                    items = await _decode_rows(rows[::-1])
+                    if len(items) >= session_limit:
+                        return items[-session_limit:]
+                    if len(rows) < window:
+                        return items
+                    window *= 2
 
-            if session_limit is not None:
-                rows.reverse()
-
-            items: list[TResponseInputItem] = []
-            for raw in rows:
-                try:
-                    items.append(await self._deserialize_item(raw))
-                except json.JSONDecodeError:
-                    # Skip corrupted rows
-                    continue
-            return items
+            # Preserve existing non-positive LIMIT semantics, which are dialect-defined.
+            result = await sess.execute(_latest_first_stmt(session_limit))
+            return await _decode_rows([row[0] for row in result.all()][::-1])
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Add new items to the conversation history.
