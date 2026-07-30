@@ -520,12 +520,26 @@ class FunctionTool:
     _emit_tool_origin: bool = field(default=True, kw_only=True, repr=False)
     """Whether runtime item generation should emit tool origin metadata for this tool."""
 
+    _func: Callable[..., Any] | None = field(default=None, kw_only=True, repr=False)
+    """Internal reference to the underlying function."""
+
     @property
     def qualified_name(self) -> str:
         """Return the public qualified name used to identify this function tool."""
         return (
             tool_qualified_name(self.name, get_explicit_function_tool_namespace(self)) or self.name
         )
+
+    @property
+    def func(self) -> Callable[..., Any] | None:
+        """Return the underlying function wrapped by this tool."""
+        return self._func
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Forward calls directly to the underlying function."""
+        if self._func is None:
+            raise RuntimeError("FunctionTool has no underlying function")
+        return self._func(*args, **kwargs)
 
     def __post_init__(self):
         self.allowed_callers = _normalize_tool_allowed_callers(
@@ -657,6 +671,7 @@ def _build_wrapped_function_tool(
     sync_invoker: bool = False,
     mcp_title: str | None = None,
     tool_origin: ToolOrigin | None = None,
+    _func: Callable[..., Any] | None = None,
 ) -> FunctionTool:
     """Create a FunctionTool with copied-tool-aware failure handling bound in one place."""
     on_invoke_tool = _with_context_function_tool_failure_error_handler(
@@ -687,6 +702,7 @@ def _build_wrapped_function_tool(
             _output_type_adapter=output_type_adapter,
             _mcp_title=mcp_title,
             _tool_origin=tool_origin,
+            _func=_func,
         ),
         failure_error_function,
     )
@@ -2598,6 +2614,7 @@ def function_tool(
             output_json_schema=resolved_output_json_schema,
             output_type_adapter=output_type_adapter,
             sync_invoker=is_sync_function_tool,
+            _func=the_func,
         )
         return function_tool
 

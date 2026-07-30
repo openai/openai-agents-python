@@ -1150,3 +1150,12 @@ def test_function_tool_timeout_error_function_must_be_callable() -> None:
             on_invoke_tool=_noop_on_invoke_tool,
             timeout_error_function=cast(Any, "not-callable"),
         )
+
+
+def test_function_tool_exposes_raw_callable() -> None:
+    def my_cool_tool(x: int) -> int:
+        return x + 42
+
+    tool = function_tool(my_cool_tool)
+    assert tool.func is my_cool_tool
+    assert tool(10) == 52
