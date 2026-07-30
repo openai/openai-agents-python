@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 
 import httpx
+import pytest
 
 from agents.models._openai_retry import get_openai_retry_advice
 from agents.models._retry_runtime import (
@@ -75,6 +76,24 @@ def test_parse_retry_after_numeric_and_http_date() -> None:
     assert parsed is not None and parsed > 0
 
     assert _parse_retry_after("definitely not a date") is None
+
+
+@pytest.mark.parametrize("header", ["inf", "+inf", "INF", "Infinity", "infinity", "1e400"])
+def test_parse_retry_after_rejects_non_finite_delays(header: str) -> None:
+    """`float()` accepts these but they are not delays a run can ever wake up from.
+
+    An infinite delay is passed straight to ``asyncio.sleep()``, so accepting one parks the
+    run permanently instead of retrying. Falling back to the configured backoff is the only
+    recoverable behavior.
+    """
+    assert _parse_retry_after(header) is None
+    assert _parse_retry_after_ms(header) is None
+
+
+def test_parse_retry_after_keeps_large_finite_delays() -> None:
+    """Only non-finite values are rejected; a long-but-finite wait is still the provider's call."""
+    assert _parse_retry_after("86400") == 86400.0
+    assert _parse_retry_after_ms("86400000") == 86400.0
 
 
 def test_get_retry_after_preserves_outer_exception_precedence() -> None:

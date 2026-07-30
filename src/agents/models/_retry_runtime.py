@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -55,6 +56,17 @@ def get_error_header(error: Exception, key: str) -> str | None:
     return None
 
 
+def _usable_delay(parsed: float) -> float | None:
+    """Return the delay only when it is a wait a caller can actually finish.
+
+    `float()` accepts `inf`, `Infinity`, and overflowing literals such as `1e400`, none of
+    which RFC 9110 allows in `Retry-After`. An infinite delay reaches `asyncio.sleep()`
+    unchanged and parks the run permanently, so it is rejected here alongside the negative
+    and NaN values this module already refuses.
+    """
+    return parsed if math.isfinite(parsed) and parsed >= 0 else None
+
+
 def parse_retry_after_ms(value: str | None) -> float | None:
     if value is None:
         return None
@@ -62,7 +74,7 @@ def parse_retry_after_ms(value: str | None) -> float | None:
         parsed = float(value) / 1000.0
     except ValueError:
         return None
-    return parsed if parsed >= 0 else None
+    return _usable_delay(parsed)
 
 
 def parse_retry_after_value(value: str | None) -> float | None:
@@ -74,7 +86,7 @@ def parse_retry_after_value(value: str | None) -> float | None:
     except ValueError:
         parsed = None
     if parsed is not None:
-        return parsed if parsed >= 0 else None
+        return _usable_delay(parsed)
 
     try:
         retry_datetime = parsedate_to_datetime(value)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -1298,6 +1299,62 @@ async def test_get_response_with_retry_prefers_retry_after_over_backoff(monkeypa
 
     assert rewinds == 1
     assert sleeps == [1.75]
+    assert result.usage.requests == 2
+
+
+@pytest.mark.asyncio
+async def test_get_response_with_retry_falls_back_to_backoff_for_infinite_retry_after(
+    monkeypatch,
+) -> None:
+    """A `Retry-After: inf` header must not become the sleep the run waits on.
+
+    `float("inf")` reaches `asyncio.sleep()` unchanged, which never wakes up, so the retry
+    budget is never spent and the run parks forever. Ignoring the unusable hint and using the
+    configured backoff is the only outcome that still makes progress.
+    """
+    calls = 0
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    async def rewind() -> None:
+        return None
+
+    def _rate_limit_error() -> APIStatusError:
+        request = httpx.Request("POST", "https://example.com")
+        response = httpx.Response(429, request=request, headers={"retry-after": "inf"})
+        return APIStatusError("rate limited", response=response, body=None)
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _rate_limit_error()
+        return ModelResponse(
+            output=[get_text_message("ok")],
+            usage=Usage(requests=1),
+            response_id="resp_inf_retry_after",
+        )
+
+    result = await get_response_with_retry(
+        get_response=get_response,
+        rewind=rewind,
+        retry_settings=ModelRetrySettings(
+            max_retries=1,
+            backoff=ModelRetryBackoffSettings(initial_delay=0.5, jitter=False),
+            policy=retry_policies.http_status([429]),
+        ),
+        get_retry_advice=lambda _request: None,
+        previous_response_id=None,
+        conversation_id=None,
+    )
+
+    assert calls == 2
+    assert sleeps == [0.5]
+    assert all(math.isfinite(delay) for delay in sleeps)
     assert result.usage.requests == 2
 
 
