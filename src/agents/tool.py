@@ -1685,7 +1685,9 @@ def prune_orphaned_tool_search_tools(tools: list[Tool]) -> list[Tool]:
 
 def _extract_json_decode_error(error: BaseException) -> json.JSONDecodeError | None:
     current: BaseException | None = error
-    while current is not None:
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
         if isinstance(current, json.JSONDecodeError):
             return current
         current = current.__cause__ or current.__context__
