@@ -166,6 +166,38 @@ async def test_runner_attaches_local_mcp_tool_origin_to_call_and_output_items() 
 
 
 @pytest.mark.asyncio
+async def test_local_mcp_tool_origin_hides_url_credentials_in_run_state() -> None:
+    raw_server_name = (
+        "streamable_http: https://user:s3cr3t_pw@mcp.example.test:8443/mcp"
+        "?api_key=SECRET_QS_KEY#SECRET_FRAGMENT"
+    )
+    safe_server_name = "streamable_http: https://mcp.example.test:8443/mcp"
+    model = FakeModel()
+    server = FakeMCPServer(
+        server_name=raw_server_name,
+        tools=[MCPTool(name="search_docs", inputSchema={})],
+    )
+    agent = Agent(name="mcp-agent", model=model, mcp_servers=[server])
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("search_docs", json.dumps({}), call_id="call_search_docs")],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="hello")
+
+    expected = ToolOrigin(type=ToolOriginType.MCP, mcp_server_name=safe_server_name)
+    assert _first_item(result.new_items, ToolCallItem).tool_origin == expected
+    assert _first_item(result.new_items, ToolCallOutputItem).tool_origin == expected
+    serialized_state = json.dumps(result.to_state().to_json())
+    assert safe_server_name in serialized_state
+    for secret in ("user", "s3cr3t_pw", "SECRET_QS_KEY", "SECRET_FRAGMENT"):
+        assert secret not in serialized_state
+    assert server.name == raw_server_name
+
+
+@pytest.mark.asyncio
 async def test_streamed_tool_call_item_includes_local_mcp_origin() -> None:
     model = FakeModel()
     server = FakeMCPServer(

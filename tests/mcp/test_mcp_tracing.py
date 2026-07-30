@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from inline_snapshot import snapshot
 
@@ -272,3 +274,37 @@ async def test_mcp_tracing_redacts_output_when_sensitive_data_disabled():
             }
         ]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trace_include_sensitive_data", [True, False])
+async def test_mcp_tracing_always_hides_url_credentials(
+    trace_include_sensitive_data: bool,
+):
+    model = FakeModel()
+    server = FakeMCPServer(
+        server_name=(
+            "streamable_http: https://user:s3cr3t_pw@mcp.example.test:8443/mcp"
+            "?api_key=SECRET_QS_KEY#SECRET_FRAGMENT"
+        )
+    )
+    server.add_tool("search", {})
+    agent = Agent(name="test", model=model, mcp_servers=[server])
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("search", "")],
+            [get_text_message("done")],
+        ]
+    )
+
+    await Runner.run(
+        agent,
+        input="trace_url_credentials",
+        run_config=RunConfig(trace_include_sensitive_data=trace_include_sensitive_data),
+    )
+
+    serialized_spans = json.dumps(fetch_normalized_spans())
+    safe_server_name = "streamable_http: https://mcp.example.test:8443/mcp"
+    assert serialized_spans.count(safe_server_name) == 3
+    for secret in ("user", "s3cr3t_pw", "SECRET_QS_KEY", "SECRET_FRAGMENT"):
+        assert secret not in serialized_spans

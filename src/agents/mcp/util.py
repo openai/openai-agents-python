@@ -342,7 +342,7 @@ class MCPUtil:
         run_context: RunContextWrapper[Any],
         agent: AgentBase,
     ) -> list[MCPTool]:
-        with mcp_tools_span(server=server.name) as span:
+        with mcp_tools_span(server=get_mcp_server_log_name(server.name)) as span:
             tools = await server.list_tools(run_context, agent)
             span.span_data.result = [tool.name for tool in tools]
             return tools
@@ -451,7 +451,7 @@ class MCPUtil:
         not depend on object identity or cross any serialization boundary.
         """
         base_names = [
-            cls._build_prefixed_tool_base_name(server.name, tool.name)
+            cls._build_prefixed_tool_base_name(get_mcp_server_log_name(server.name), tool.name)
             for _, server, tools in server_tool_batches
             for tool in tools
         ]
@@ -459,9 +459,10 @@ class MCPUtil:
 
         candidates: list[_PrefixedToolNameCandidate] = []
         for server_index, server, tools in server_tool_batches:
+            server_name = get_mcp_server_log_name(server.name)
             for tool_index, tool in enumerate(tools):
-                base_name = cls._build_prefixed_tool_base_name(server.name, tool.name)
-                seed = f"{server.name}\0{tool.name}"
+                base_name = cls._build_prefixed_tool_base_name(server_name, tool.name)
+                seed = f"{server_name}\0{tool.name}"
                 force_hash = base_name_counts[base_name] > 1 or base_name in reserved_names
                 initial_name = cls._shorten_tool_name(base_name, seed, force_hash=force_hash)
                 candidates.append(
@@ -571,7 +572,7 @@ class MCPUtil:
             mcp_title=resolve_mcp_tool_title(tool),
             tool_origin=ToolOrigin(
                 type=ToolOriginType.MCP,
-                mcp_server_name=server.name,
+                mcp_server_name=get_mcp_server_log_name(server.name),
             ),
         )
         return function_tool
@@ -803,7 +804,7 @@ class MCPUtil:
                 ):
                     current_span.span_data.output = tool_output
                 current_span.span_data.mcp_data = {
-                    "server": server.name,
+                    "server": get_mcp_server_log_name(server.name),
                 }
             else:
                 if _debug.DONT_LOG_MODEL_DATA or _debug.DONT_LOG_TOOL_DATA:

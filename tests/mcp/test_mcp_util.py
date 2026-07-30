@@ -43,6 +43,13 @@ class Bar(BaseModel):
 
 Baz = TypeAdapter(dict[str, str])
 
+_URL_DERIVED_SECRET_SERVER_NAME = (
+    "streamable_http: https://user:s3cr3t_pw@mcp.example.test:8443/mcp"
+    "?api_key=SECRET_QS_KEY#SECRET_FRAGMENT"
+)
+_SANITIZED_SERVER_NAME = "streamable_http: https://mcp.example.test:8443/mcp"
+_SERVER_URL_SECRETS = ("user", "s3cr3t_pw", "SECRET_QS_KEY", "SECRET_FRAGMENT")
+
 
 def _convertible_schema() -> dict[str, Any]:
     schema = Foo.model_json_schema()
@@ -208,6 +215,31 @@ async def test_get_all_function_tools_can_prefix_server_tool_names():
     assert server1.tool_calls == []
     assert server2.tool_calls == ["search"]
     assert captured_meta_context == {"server_name": "calendar", "tool_name": "search"}
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_hides_url_credentials_from_public_name_and_origin():
+    server = FakeMCPServer(server_name=_URL_DERIVED_SECRET_SERVER_NAME)
+    server.add_tool("search", {})
+
+    tools = await MCPUtil.get_all_function_tools(
+        [server],
+        False,
+        RunContextWrapper(context=None),
+        Agent(name="test_agent", instructions="Test agent"),
+        include_server_in_tool_names=True,
+    )
+
+    assert len(tools) == 1
+    function_tool = tools[0]
+    assert isinstance(function_tool, FunctionTool)
+    assert function_tool.name == ("mcp_streamable_http__https___mcp_example_test_8443_mcp__search")
+    assert function_tool._tool_origin is not None
+    assert function_tool._tool_origin.mcp_server_name == _SANITIZED_SERVER_NAME
+    assert server.name == _URL_DERIVED_SECRET_SERVER_NAME
+    for secret in _SERVER_URL_SECRETS:
+        assert secret not in function_tool.name
+        assert secret not in repr(function_tool._tool_origin)
 
 
 @pytest.mark.asyncio
@@ -1216,6 +1248,30 @@ async def test_mcp_tool_graceful_error_handling(caplog: pytest.LogCaptureFixture
     assert (
         "MCP tool crashing_tool failed" in caplog.text or "Error invoking MCP tool" in caplog.text
     )
+
+
+@pytest.mark.asyncio
+async def test_mcp_default_tool_error_hides_url_credentials():
+    server = SecretCrashingFakeMCPServer(server_name=_URL_DERIVED_SECRET_SERVER_NAME)
+    function_tool = MCPUtil.to_function_tool(
+        MCPTool(name="crashing_tool", inputSchema={}),
+        server,
+        convert_schemas_to_strict=False,
+        agent=Agent(name="test-agent"),
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="crashing_tool",
+        tool_call_id="test_call_url_credentials",
+        tool_arguments="{}",
+    )
+
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+
+    assert isinstance(result, str)
+    assert _SANITIZED_SERVER_NAME in result
+    for secret in _SERVER_URL_SECRETS:
+        assert secret not in result
 
 
 @pytest.mark.asyncio
