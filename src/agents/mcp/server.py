@@ -131,6 +131,11 @@ def _safe_transport_cause(http_error: Exception) -> Exception | None:
     return http_error if all(get_mcp_server_log_name(url) == url for url in request_urls) else None
 
 
+def _first_unsafe_transport_error(http_errors: list[Exception]) -> Exception | None:
+    """Return the first transport error whose HTTPX URLs require sanitization."""
+    return next((error for error in http_errors if _safe_transport_cause(error) is None), None)
+
+
 def _log_transport_warning(message: str, http_error: Exception) -> None:
     """Log a transport failure without attaching credential-bearing request URLs."""
     if _debug.DONT_LOG_TOOL_DATA:
@@ -784,19 +789,18 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         """Invalidate the tools cache."""
         self._cache_dirty = True
 
-    def _extract_http_error_from_exception(self, e: BaseException) -> Exception | None:
-        """Extract HTTP error from exception or ExceptionGroup."""
+    def _extract_http_errors_from_exception(self, e: BaseException) -> list[Exception]:
+        """Extract all HTTP errors from an exception or nested ExceptionGroup."""
         if isinstance(e, httpx.HTTPStatusError | httpx.RequestError):
-            return e
+            return [e]
 
-        # Recursively check ExceptionGroups for HTTP errors
         if isinstance(e, BaseExceptionGroup):
+            http_errors: list[Exception] = []
             for exc in e.exceptions:
-                result = self._extract_http_error_from_exception(exc)
-                if result is not None:
-                    return result
+                http_errors.extend(self._extract_http_errors_from_exception(exc))
+            return http_errors
 
-        return None
+        return []
 
     def _user_error_for_http_error(self, http_error: Exception) -> UserError:
         """Build a UserError from safe HTTP diagnostics."""
@@ -863,12 +867,13 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             self.session = session
             connection_succeeded = True
         except Exception as e:
-            # Try to extract HTTP error from exception or ExceptionGroup
-            http_error = self._extract_http_error_from_exception(e)
-            if http_error is None:
+            http_errors = self._extract_http_errors_from_exception(e)
+            if not http_errors:
                 raise
 
-            connection_cause = _safe_transport_cause(http_error)
+            unsafe_http_error = _first_unsafe_transport_error(http_errors)
+            http_error = unsafe_http_error or http_errors[0]
+            connection_cause = None if unsafe_http_error is not None else http_error
             maps_safe_error = isinstance(
                 http_error,
                 httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException,
@@ -878,7 +883,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
             connection_error = self._user_error_for_http_error(http_error)
             if connection_cause is None:
+                http_errors.clear()
                 http_error = None
+                unsafe_http_error = None
         finally:
             # Always attempt cleanup on error, but suppress cleanup errors that mask the original
             if not connection_succeeded:
@@ -1827,8 +1834,13 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                     "Request failed."
                 )
         except BaseExceptionGroup as e:
-            http_error = self._extract_http_error_from_exception(e)
-            transport_cause = _safe_transport_cause(http_error) if http_error is not None else None
+            http_errors = self._extract_http_errors_from_exception(e)
+            if not http_errors:
+                raise
+
+            unsafe_http_error = _first_unsafe_transport_error(http_errors)
+            http_error = unsafe_http_error or http_errors[0]
+            transport_cause = None if unsafe_http_error is not None else http_error
             if isinstance(http_error, httpx.HTTPStatusError):
                 status_code = http_error.response.status_code
                 transport_error = UserError(
@@ -1855,7 +1867,9 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             else:
                 raise
             if transport_cause is None:
+                http_errors.clear()
                 http_error = None
+                unsafe_http_error = None
 
         assert transport_error is not None
         self._raise_mapped_transport_error(transport_error, transport_cause)

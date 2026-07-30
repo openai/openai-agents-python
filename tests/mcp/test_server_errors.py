@@ -144,6 +144,65 @@ async def test_call_tool_nested_exception_group_mapping(url: str, retains_cause:
         _assert_not_retained_in_traceback_locals(exc_info.value, http_error)
 
 
+def _mixed_request_error_group(
+    later_url: str,
+) -> tuple[BaseExceptionGroup, httpx.ReadError, httpx.ConnectError]:
+    safe_error = httpx.ReadError(
+        "safe read failed",
+        request=httpx.Request("GET", _SAFE_URL),
+    )
+    later_error = httpx.ConnectError(
+        "later connection failed",
+        request=httpx.Request("GET", later_url),
+    )
+    nested_group = BaseExceptionGroup("later failures", [later_error])
+    return BaseExceptionGroup("mixed failures", [safe_error, nested_group]), safe_error, later_error
+
+
+@pytest.mark.asyncio
+async def test_connect_checks_every_request_error_before_preserving_exception_group():
+    server = MCPServerSse(params={"url": _SAFE_URL})
+    error_group, _, unsafe_error = _mixed_request_error_group(_CREDENTIALED_URL)
+
+    with patch.object(server, "create_streams", side_effect=error_group):
+        with pytest.raises(UserError) as exc_info:
+            await server.connect()
+
+    assert "Could not reach the server" in str(exc_info.value)
+    _assert_url_credentials_hidden(exc_info.value)
+    _assert_not_retained_in_traceback_locals(exc_info.value, error_group)
+    _assert_not_retained_in_traceback_locals(exc_info.value, unsafe_error)
+
+
+@pytest.mark.asyncio
+async def test_call_tool_checks_every_request_error_before_preserving_exception_group():
+    server = MCPServerStreamableHttp(params={"url": _SAFE_URL})
+    server.session = MagicMock()
+    server.max_retry_attempts = 0
+    error_group, _, unsafe_error = _mixed_request_error_group(_CREDENTIALED_URL)
+
+    with patch.object(server, "_call_tool_with_isolated_retry", side_effect=error_group):
+        with pytest.raises(UserError) as exc_info:
+            await server.call_tool("test_tool", {})
+
+    assert "Connection lost" in str(exc_info.value)
+    _assert_url_credentials_hidden(exc_info.value)
+    _assert_not_retained_in_traceback_locals(exc_info.value, error_group)
+    _assert_not_retained_in_traceback_locals(exc_info.value, unsafe_error)
+
+
+@pytest.mark.asyncio
+async def test_connect_preserves_exception_group_when_every_request_error_is_safe():
+    server = MCPServerSse(params={"url": _SAFE_URL})
+    error_group, _, _ = _mixed_request_error_group(_SAFE_URL)
+
+    with patch.object(server, "create_streams", side_effect=error_group):
+        with pytest.raises(BaseExceptionGroup) as exc_info:
+            await server.connect()
+
+    assert exc_info.value is error_group
+
+
 @pytest.mark.parametrize("server_type", [MCPServerSse, MCPServerStreamableHttp])
 def test_error_name_sanitizes_url_derived_names_without_changing_runtime_name(server_type):
     server = server_type(params={"url": _CREDENTIALED_URL})
