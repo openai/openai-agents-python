@@ -2121,3 +2121,25 @@ def test_to_function_tool_description_falls_back_to_mcp_title():
 
     assert function_tool.description == "Search Docs"
     assert function_tool._mcp_title == "Search Docs"
+
+
+def test_mcp_function_tool_origin_redacts_url_derived_server_name() -> None:
+    server = FakeMCPServer(
+        server_name=(
+            "streamable_http: "
+            "http://client:URL_CREDENTIAL_9x@127.0.0.1:1/mcp?api_key=URL_QUERY_TOKEN_9x"
+            "#fragment"
+        )
+    )
+    function_tool = MCPUtil.to_function_tool(
+        MCPTool(name="search", inputSchema={}),
+        server,
+        convert_schemas_to_strict=False,
+    )
+
+    assert function_tool._tool_origin is not None
+    serialized_origin = function_tool._tool_origin.to_json_dict()
+    assert serialized_origin["mcp_server_name"] == "streamable_http: http://127.0.0.1:1/mcp"
+    assert "URL_CREDENTIAL_9x" not in str(serialized_origin)
+    assert "URL_QUERY_TOKEN_9x" not in str(serialized_origin)
+    assert "fragment" not in str(serialized_origin)

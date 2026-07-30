@@ -355,7 +355,7 @@ class MCPServer(abc.ABC):
         unimplemented; it will raise :exc:`NotImplementedError` at call time.
         """
         raise NotImplementedError(
-            f"MCP server '{self.name}' does not support list_resources. "
+            f"MCP server '{get_mcp_server_log_name(self.name)}' does not support list_resources. "
             "Override this method in your server implementation."
         )
 
@@ -377,7 +377,8 @@ class MCPServer(abc.ABC):
         call time.
         """
         raise NotImplementedError(
-            f"MCP server '{self.name}' does not support list_resource_templates. "
+            f"MCP server '{get_mcp_server_log_name(self.name)}' "
+            "does not support list_resource_templates. "
             "Override this method in your server implementation."
         )
 
@@ -393,7 +394,7 @@ class MCPServer(abc.ABC):
         :exc:`NotImplementedError` at call time.
         """
         raise NotImplementedError(
-            f"MCP server '{self.name}' does not support read_resource. "
+            f"MCP server '{get_mcp_server_log_name(self.name)}' does not support read_resource. "
             "Override this method in your server implementation."
         )
 
@@ -753,7 +754,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     def _raise_user_error_for_http_error(self, http_error: Exception) -> None:
         """Raise appropriate UserError for HTTP error."""
-        error_message = f"Failed to connect to MCP server '{self.name}': "
+        error_message = f"Failed to connect to MCP server '{get_mcp_server_log_name(self.name)}': "
         if isinstance(http_error, httpx.HTTPStatusError):
             error_message += f"HTTP error {http_error.response.status_code} ({http_error.response.reason_phrase})"  # noqa: E501
 
@@ -883,11 +884,13 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
             raise UserError(
-                f"Failed to list tools from MCP server '{self.name}': HTTP error {status_code}"
+                f"Failed to list tools from MCP server '{get_mcp_server_log_name(self.name)}': "
+                f"HTTP error {status_code}"
             ) from e
         except httpx.ConnectError as e:
             raise UserError(
-                f"Failed to list tools from MCP server '{self.name}': Connection lost. "
+                f"Failed to list tools from MCP server '{get_mcp_server_log_name(self.name)}': "
+                "Connection lost. "
                 f"The server may have disconnected."
             ) from e
 
@@ -919,12 +922,14 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
             raise UserError(
-                f"Failed to call tool '{tool_name}' on MCP server '{self.name}': "
+                f"Failed to call tool '{tool_name}' on MCP server "
+                f"'{get_mcp_server_log_name(self.name)}': "
                 f"HTTP error {status_code}"
             ) from e
         except httpx.ConnectError as e:
             raise UserError(
-                f"Failed to call tool '{tool_name}' on MCP server '{self.name}': Connection lost. "
+                f"Failed to call tool '{tool_name}' on MCP server "
+                f"'{get_mcp_server_log_name(self.name)}': Connection lost. "
                 f"The server may have disconnected."
             ) from e
 
@@ -949,7 +954,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             arguments_to_validate = arguments
         else:
             raise UserError(
-                f"Failed to call tool '{tool_name}' on MCP server '{self.name}': "
+                f"Failed to call tool '{tool_name}' on MCP server "
+                f"'{get_mcp_server_log_name(self.name)}': "
                 "arguments must be an object."
             )
 
@@ -958,7 +964,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         if missing:
             missing_text = ", ".join(sorted(missing))
             raise UserError(
-                f"Failed to call tool '{tool_name}' on MCP server '{self.name}': "
+                f"Failed to call tool '{tool_name}' on MCP server "
+                f"'{get_mcp_server_log_name(self.name)}': "
                 f"missing required parameters: {missing_text}"
             )
 
@@ -1038,7 +1045,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 http_error = None
                 connect_error = None
                 timeout_error = None
-                error_message = f"Failed to connect to MCP server '{self.name}': "
+                error_message = (
+                    f"Failed to connect to MCP server '{get_mcp_server_log_name(self.name)}': "
+                )
 
                 for exc in eg.exceptions:
                     if isinstance(exc, httpx.HTTPStatusError):
@@ -1691,12 +1700,14 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
             raise UserError(
-                f"Failed to call tool '{tool_name}' on MCP server '{self.name}': "
+                f"Failed to call tool '{tool_name}' on MCP server "
+                f"'{get_mcp_server_log_name(self.name)}': "
                 f"HTTP error {status_code}"
             ) from e
         except httpx.ConnectError as e:
             raise UserError(
-                f"Failed to call tool '{tool_name}' on MCP server '{self.name}': Connection lost. "
+                f"Failed to call tool '{tool_name}' on MCP server "
+                f"'{get_mcp_server_log_name(self.name)}': Connection lost. "
                 f"The server may have disconnected."
             ) from e
         except BaseExceptionGroup as e:
@@ -1704,17 +1715,20 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             if isinstance(http_error, httpx.HTTPStatusError):
                 status_code = http_error.response.status_code
                 raise UserError(
-                    f"Failed to call tool '{tool_name}' on MCP server '{self.name}': "
+                    f"Failed to call tool '{tool_name}' on MCP server "
+                    f"'{get_mcp_server_log_name(self.name)}': "
                     f"HTTP error {status_code}"
                 ) from http_error
             if isinstance(http_error, httpx.ConnectError):
                 raise UserError(
-                    f"Failed to call tool '{tool_name}' on MCP server '{self.name}': "
+                    f"Failed to call tool '{tool_name}' on MCP server "
+                    f"'{get_mcp_server_log_name(self.name)}': "
                     "Connection lost. The server may have disconnected."
                 ) from http_error
             if isinstance(http_error, httpx.TimeoutException):
                 raise UserError(
-                    f"Failed to call tool '{tool_name}' on MCP server '{self.name}': "
+                    f"Failed to call tool '{tool_name}' on MCP server "
+                    f"'{get_mcp_server_log_name(self.name)}': "
                     "Connection timeout."
                 ) from http_error
             raise

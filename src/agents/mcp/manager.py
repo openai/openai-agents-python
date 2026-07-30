@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..logger import log_tool_action_debug, log_tool_action_error, logger
-from ._logging import get_mcp_server_log_message
+from ._logging import get_mcp_server_log_message, get_mcp_server_log_name
 from .server import MCPServer
 
 
@@ -398,7 +398,9 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
                 error = self.errors.get(first_failure)
                 if error is not None:
                     raise error
-                raise RuntimeError(f"Failed to connect MCP server '{first_failure.name}'")
+                raise RuntimeError(
+                    f"Failed to connect MCP server '{get_mcp_server_log_name(first_failure.name)}'"
+                )
 
     def _get_worker(self, server: MCPServer) -> _ServerWorker:
         worker = self._workers.get(server)

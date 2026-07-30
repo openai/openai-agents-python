@@ -217,6 +217,35 @@ async def test_mcp_tracing():
 
 
 @pytest.mark.asyncio
+async def test_mcp_tracing_redacts_url_derived_server_name():
+    model = FakeModel()
+    server = FakeMCPServer(
+        server_name=(
+            "streamable_http: "
+            "http://client:URL_CREDENTIAL_9x@127.0.0.1:1/mcp?api_key=URL_QUERY_TOKEN_9x"
+            "#fragment"
+        )
+    )
+    server.add_tool("search", {})
+    agent = Agent(name="test", model=model, mcp_servers=[server])
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("search", "")],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="find documentation")
+
+    assert result.final_output == "done"
+    spans = str(fetch_normalized_spans())
+    assert "streamable_http: http://127.0.0.1:1/mcp" in spans
+    assert "URL_CREDENTIAL_9x" not in spans
+    assert "URL_QUERY_TOKEN_9x" not in spans
+    assert "fragment" not in spans
+
+
+@pytest.mark.asyncio
 async def test_mcp_tracing_redacts_output_when_sensitive_data_disabled():
     model = FakeModel()
     server = FakeMCPServer()

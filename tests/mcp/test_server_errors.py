@@ -83,3 +83,23 @@ async def test_call_tool_nested_exception_group_mapping():
     # 6. Verify that the user-facing message is mapped correctly based on the root cause
     assert "Connection lost" in str(exc_info.value)
     assert exc_info.value.__cause__ is http_error
+
+
+def test_connection_error_redacts_url_derived_server_name() -> None:
+    server = MCPServerStreamableHttp(
+        params={
+            "url": (
+                "http://client:URL_CREDENTIAL_9x@127.0.0.1:1/mcp?api_key=URL_QUERY_TOKEN_9x"
+                "#fragment"
+            )
+        }
+    )
+
+    with pytest.raises(UserError) as exc_info:
+        server._raise_user_error_for_http_error(httpx.ConnectError("Network unreachable"))
+
+    message = str(exc_info.value)
+    assert "streamable_http: http://127.0.0.1:1/mcp" in message
+    assert "URL_CREDENTIAL_9x" not in message
+    assert "URL_QUERY_TOKEN_9x" not in message
+    assert "fragment" not in message
