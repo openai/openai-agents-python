@@ -17,6 +17,7 @@ import pytest
 from pydantic import ConfigDict, ValidationError, field_serializer, field_validator
 
 from agents.sandbox import Manifest, SandboxPathGrant
+from agents.sandbox.manifest import EnvEntry, Environment, EnvValue
 from agents.sandbox.session import (
     BaseSandboxClient,
     Dependencies,
@@ -78,6 +79,15 @@ class _RoundTripClient(BaseSandboxClient[None]):
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
         return self._deserialize_session_state_payload(payload, _SimpleSessionState)
+
+
+class _SecretRefEnvValue(EnvValue):
+    __test__ = False
+    type: Literal["secret-ref-roundtrip"] = "secret-ref-roundtrip"
+    secret_name: str
+
+    async def resolve(self) -> str:
+        return f"resolved-{self.secret_name}"
 
 
 class _NonCopyable:
@@ -175,6 +185,35 @@ class TestSandboxSessionStateRoundTrip:
 
         assert "type" in dumped
         assert dumped["type"] == "stub-roundtrip"
+
+    @pytest.mark.asyncio
+    async def test_parse_restores_manifest_env_value_subclasses(self) -> None:
+        """Custom EnvValue subclasses must survive the persisted session state round trip."""
+        original = _StubSessionState(
+            session_id=uuid.UUID("cccccccc-cccc-cccc-cccc-cccccccccccc"),
+            snapshot=LocalSnapshot(id="snap-1", base_path=Path("/tmp/snapshots")),
+            manifest=Manifest(
+                environment=Environment(
+                    value={
+                        "DIRECT": _SecretRefEnvValue(secret_name="direct"),
+                        "ENTRY": EnvEntry(value=_SecretRefEnvValue(secret_name="entry")),
+                    }
+                )
+            ),
+            custom_field="my-value",
+        )
+
+        restored = SandboxSessionState.parse(original.model_dump(mode="json"))
+        restored_environment = restored.manifest.environment.value
+
+        assert type(restored_environment["DIRECT"]) is _SecretRefEnvValue
+        restored_entry = restored_environment["ENTRY"]
+        assert isinstance(restored_entry, EnvEntry)
+        assert type(restored_entry.value) is _SecretRefEnvValue
+        assert await restored.manifest.environment.resolve() == {
+            "DIRECT": "resolved-direct",
+            "ENTRY": "resolved-entry",
+        }
 
     def test_model_dump_preserves_snapshot_subclass_fields(self) -> None:
         """model_dump() must preserve snapshot subclass fields (e.g. LocalSnapshot.base_path).

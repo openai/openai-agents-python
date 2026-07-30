@@ -40,6 +40,7 @@ from agents.sandbox.entries.mounts.patterns import (
     RcloneMountPattern,
     S3FilesMountPattern,
 )
+from agents.sandbox.manifest import EnvValue, StrEnvValue
 from agents.sandbox.session.sandbox_client import BaseSandboxClientOptions
 from agents.sandbox.session.sandbox_session_state import SandboxSessionState
 from agents.sandbox.snapshot import LocalSnapshot, NoopSnapshot, RemoteSnapshot, SnapshotBase
@@ -891,6 +892,7 @@ def test_core_discriminator_type_strings_are_stable() -> None:
         S3FilesMountPattern: "s3files",
         InContainerMountStrategy: "in_container",
         DockerVolumeMountStrategy: "docker_volume",
+        StrEnvValue: "str",
     }
 
     for cls, expected_type in expected_types.items():
@@ -1001,6 +1003,7 @@ def test_core_discriminator_registries_parse_released_payload_shapes() -> None:
         MountStrategyBase.parse({"type": "docker_volume", "driver": "rclone"}),
         DockerVolumeMountStrategy,
     )
+    assert isinstance(EnvValue.parse({"type": "str", "value": "env-value"}), StrEnvValue)
 
 
 @pytest.mark.asyncio
