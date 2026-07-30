@@ -20,7 +20,6 @@ from ..models._retry_runtime import (
     provider_managed_retries_disabled,
     websocket_pre_event_retries_disabled,
 )
-from .items import is_stale_response_item_not_found_error
 from ..retry import (
     ModelRetryAdvice,
     ModelRetryAdviceRequest,
@@ -34,6 +33,7 @@ from ..retry import (
     retry_policy_retries_safe_transport_errors,
 )
 from ..usage import RequestUsage, Usage
+from .items import is_stale_response_item_not_found_error
 
 GetResponseCallable = Callable[[], Awaitable[ModelResponse]]
 GetStreamCallable = Callable[[], AsyncIterator[TResponseStreamEvent]]

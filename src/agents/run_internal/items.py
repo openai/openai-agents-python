@@ -758,7 +758,9 @@ def strip_stale_response_item_ids(
         # Always strip reasoning ids; also strip other server-ref ids when present
         should_strip = item_type == "reasoning" or (
             isinstance(item_id, str)
-            and (item_id.startswith("rs_") or item_id.startswith("fc_") or item_id.startswith("msg_"))
+            and (
+                item_id.startswith("rs_") or item_id.startswith("fc_") or item_id.startswith("msg_")
+            )
         )
         if should_strip:
             cleaned = dict(item)
