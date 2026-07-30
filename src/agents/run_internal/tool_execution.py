@@ -1690,7 +1690,7 @@ class _FunctionToolBatchExecutor:
                     )
                 )
                 if isinstance(e, AgentsException):
-                    raise e
+                    raise
                 raise UserError(f"Error running tool {func_tool.name}: {e}") from e
 
             if self.config.trace_include_sensitive_data:
