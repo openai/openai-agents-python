@@ -85,6 +85,7 @@ class RedisSession(SessionABC):
         self._ttl = ttl
         self._lock = asyncio.Lock()
         self._owns_client = False  # Track if we own the Redis client
+        self._closed = False
 
         # Redis key patterns
         self._session_key = f"{self._key_prefix}:{self.session_id}"
@@ -153,6 +154,11 @@ class RedisSession(SessionABC):
     # Session protocol implementation
     # ------------------------------------------------------------------
 
+    def _check_not_closed(self) -> None:
+        """Raise if the session has already been closed."""
+        if self._closed:
+            raise RuntimeError("RedisSession is closed")
+
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
@@ -182,6 +188,7 @@ class RedisSession(SessionABC):
             return items
 
         async with self._lock:
+            self._check_not_closed()
             if session_limit is None:
                 # Get all messages in chronological order
                 raw_messages = await self._redis.lrange(self._messages_key, 0, -1)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
@@ -210,10 +217,12 @@ class RedisSession(SessionABC):
         Args:
             items: List of input items to add to the history
         """
+        self._check_not_closed()
         if not items:
             return
 
         async with self._lock:
+            self._check_not_closed()
             pipe = self._redis.pipeline()
             now = str(int(time.time()))
 
@@ -248,6 +257,7 @@ class RedisSession(SessionABC):
             The most recent item if it exists, None if the session is empty
         """
         async with self._lock:
+            self._check_not_closed()
             while True:
                 # Use RPOP to atomically remove and return the rightmost (most recent) item
                 raw_msg = await self._redis.rpop(self._messages_key)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
@@ -269,6 +279,7 @@ class RedisSession(SessionABC):
     async def clear_session(self) -> None:
         """Clear all items for this session."""
         async with self._lock:
+            self._check_not_closed()
             # Delete all keys associated with this session
             await self._redis.delete(
                 self._session_key,
@@ -280,20 +291,34 @@ class RedisSession(SessionABC):
         """Close the Redis connection.
 
         Only closes the connection if this session owns the Redis client
-        (i.e., created via from_url). If the client was injected externally,
-        the caller is responsible for managing its lifecycle.
+        (i.e., created via from_url). In that case the session becomes terminal
+        and subsequent operations raise RuntimeError. If the client was injected
+        externally, the caller is responsible for managing its lifecycle and
+        this is a no-op.
+
+        Repeated and concurrent calls are safe no-ops.
         """
-        if self._owns_client:
-            await self._redis.aclose()
+        async with self._lock:
+            if self._closed:
+                return
+            if self._owns_client:
+                self._closed = True
+                await self._redis.aclose()
 
     async def ping(self) -> bool:
         """Test Redis connectivity.
 
         Returns:
             True if Redis is reachable, False otherwise.
+
+        Raises:
+            RuntimeError: If the session owns its client and has been closed.
         """
-        try:
-            await self._redis.ping()  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
-            return True
-        except Exception:
-            return False
+        async with self._lock:
+            # Checked outside the try block; the except clause below would swallow it.
+            self._check_not_closed()
+            try:
+                await self._redis.ping()  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
+                return True
+            except Exception:
+                return False

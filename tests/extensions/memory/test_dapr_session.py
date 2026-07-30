@@ -1072,3 +1072,173 @@ async def test_runner_with_session_settings_override(fake_dapr_client: FakeDaprC
         assert len(history_items) == 2
     finally:
         await session.close()
+
+
+def _create_owned_dapr_session(session_id: str) -> DaprSession:
+    """Create a session that owns its client, mirroring the from_address path."""
+    import unittest.mock
+
+    with unittest.mock.patch(
+        "agents.extensions.memory.dapr_session.DaprClient",
+        return_value=FakeDaprClient(),
+    ):
+        return DaprSession.from_address(session_id, state_store_name="statestore")
+
+
+async def test_dapr_session_closed_operations_raise_runtime_error():
+    """Operations on a closed owned-client session must fail instead of using a closed client."""
+    session = _create_owned_dapr_session("closed_state_test")
+    assert session._owns_client is True
+    await session.add_items([{"role": "user", "content": "before close"}])
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="DaprSession is closed"):
+        await session.get_items()
+
+    with pytest.raises(RuntimeError, match="DaprSession is closed"):
+        await session.add_items([{"role": "user", "content": "after close"}])
+
+    with pytest.raises(RuntimeError, match="DaprSession is closed"):
+        await session.pop_item()
+
+    with pytest.raises(RuntimeError, match="DaprSession is closed"):
+        await session.clear_session()
+
+
+async def test_dapr_session_closed_rejects_empty_add_items():
+    """add_items([]) must not bypass the closed check through the empty-list fast path."""
+    session = _create_owned_dapr_session("closed_empty_add_test")
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="DaprSession is closed"):
+        await session.add_items([])
+
+
+async def test_dapr_session_closed_after_context_manager_exit():
+    """Leaving the async context manager closes an owned session, so later use must fail."""
+    session = _create_owned_dapr_session("closed_context_manager_test")
+
+    async with session:
+        await session.add_items([{"role": "user", "content": "inside context"}])
+
+    with pytest.raises(RuntimeError, match="DaprSession is closed"):
+        await session.get_items()
+
+
+async def test_dapr_session_close_is_idempotent():
+    """Repeated and concurrent close() calls must remain safe no-ops."""
+    import asyncio
+
+    session = _create_owned_dapr_session("close_idempotent_test")
+
+    await asyncio.gather(session.close(), session.close())
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="DaprSession is closed"):
+        await session.get_items()
+
+
+async def test_dapr_session_ping_raises_after_close():
+    """ping() must not read or write through a client this session already closed."""
+    session = _create_owned_dapr_session("ping_after_close_test")
+    assert await session.ping() is True
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="DaprSession is closed"):
+        await session.ping()
+
+
+async def test_dapr_session_close_is_noop_for_injected_client():
+    """With an injected client, close() stays a no-op and the session remains usable."""
+    client = FakeDaprClient()
+    session = DaprSession(
+        session_id="injected_client_noop_test",
+        state_store_name="statestore",
+        dapr_client=client,  # type: ignore[arg-type]
+    )
+    assert session._owns_client is False
+
+    await session.add_items([{"role": "user", "content": "before close"}])
+    await session.close()
+
+    assert client._closed is False
+    await session.add_items([{"role": "user", "content": "after close"}])
+    items = await session.get_items()
+    assert [item.get("content") for item in items] == ["before close", "after close"]
+
+    assert await session.ping() is True
+
+    other = DaprSession(
+        session_id="injected_client_noop_test",
+        state_store_name="statestore",
+        dapr_client=client,  # type: ignore[arg-type]
+    )
+    assert len(await other.get_items()) == 2
+
+
+async def test_dapr_session_operation_waiting_behind_close_raises():
+    """An operation queued behind close() must fail rather than run after shutdown completes."""
+    import asyncio
+    import unittest.mock
+    from contextlib import suppress
+
+    from agents.memory.session_settings import resolve_session_limit
+
+    timeout = 5.0
+    blocked_probe = 0.1
+    fake_client = FakeDaprClient()
+    close_holds_lock = asyncio.Event()  # Set once close() is inside the session lock.
+    release_close = asyncio.Event()  # Test-owned gate that lets the paused close() finish.
+    op_entered = asyncio.Event()  # Set once the operation is past method entry.
+    real_close = fake_client.close
+    real_resolve = resolve_session_limit
+
+    async def paused_close(*args: Any, **kwargs: Any) -> Any:
+        close_holds_lock.set()
+        await asyncio.wait_for(release_close.wait(), timeout)
+        return await real_close(*args, **kwargs)
+
+    def entry_signalling_resolve(*args: Any, **kwargs: Any) -> Any:
+        # This runs immediately before the operation reaches the session lock.
+        op_entered.set()
+        return real_resolve(*args, **kwargs)
+
+    with unittest.mock.patch(
+        "agents.extensions.memory.dapr_session.DaprClient", return_value=fake_client
+    ):
+        session = DaprSession.from_address("close_interleave_test", state_store_name="statestore")
+    assert session._owns_client is True
+
+    close_task: asyncio.Task[None] | None = None
+    op_task: asyncio.Task[list[TResponseInputItem]] | None = None
+    try:
+        with unittest.mock.patch.object(fake_client, "close", paused_close):
+            close_task = asyncio.create_task(session.close())
+            await asyncio.wait_for(close_holds_lock.wait(), timeout)
+
+            # Start the operation while close() still holds the lock so it must queue behind it.
+            with unittest.mock.patch(
+                "agents.extensions.memory.dapr_session.resolve_session_limit",
+                entry_signalling_resolve,
+            ):
+                op_task = asyncio.create_task(session.get_items())
+                await asyncio.wait_for(op_entered.wait(), timeout)
+
+            # The operation is past method entry, so it can only be blocked on the session lock.
+            _, still_blocked = await asyncio.wait({op_task}, timeout=blocked_probe)
+            assert op_task in still_blocked
+
+            release_close.set()
+            await asyncio.wait_for(close_task, timeout)
+            close_task = None
+
+            with pytest.raises(RuntimeError, match="DaprSession is closed"):
+                await asyncio.wait_for(op_task, timeout)
+            op_task = None
+    finally:
+        release_close.set()
+        for task in (close_task, op_task):
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError, RuntimeError):
+                    await task

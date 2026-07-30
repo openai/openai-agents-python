@@ -105,6 +105,7 @@ class DaprSession(SessionABC):
         self._consistency = consistency
         self._lock = asyncio.Lock()
         self._owns_client = False  # Track if we own the Dapr client
+        self._closed = False
 
         # State keys
         self._messages_key = f"{self.session_id}:messages"
@@ -258,6 +259,11 @@ class DaprSession(SessionABC):
     # Session protocol implementation
     # ------------------------------------------------------------------
 
+    def _check_not_closed(self) -> None:
+        """Raise if the session has already been closed."""
+        if self._closed:
+            raise RuntimeError("DaprSession is closed")
+
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
@@ -271,6 +277,7 @@ class DaprSession(SessionABC):
         session_limit = resolve_session_limit(limit, self.session_settings)
 
         async with self._lock:
+            self._check_not_closed()
             # Get messages from state store with consistency level
             response = await self._dapr_client.get_state(
                 store_name=self._state_store_name,
@@ -319,10 +326,12 @@ class DaprSession(SessionABC):
         Args:
             items: List of input items to add to the history
         """
+        self._check_not_closed()
         if not items:
             return
 
         async with self._lock:
+            self._check_not_closed()
             serialized_items: list[str] = [await self._serialize_item(item) for item in items]
             attempt = 0
             while True:
@@ -373,6 +382,7 @@ class DaprSession(SessionABC):
             The most recent item if it exists, None if the session is empty
         """
         async with self._lock:
+            self._check_not_closed()
             while True:
                 attempt = 0
                 while True:
@@ -413,6 +423,7 @@ class DaprSession(SessionABC):
     async def clear_session(self) -> None:
         """Clear all items for this session."""
         async with self._lock:
+            self._check_not_closed()
             # Delete messages and metadata keys
             await self._dapr_client.delete_state(
                 store_name=self._state_store_name,
@@ -430,11 +441,19 @@ class DaprSession(SessionABC):
         """Close the Dapr client connection.
 
         Only closes the connection if this session owns the Dapr client
-        (i.e., created via from_address). If the client was injected externally,
-        the caller is responsible for managing its lifecycle.
+        (i.e., created via from_address). In that case the session becomes
+        terminal and subsequent operations raise RuntimeError. If the client was
+        injected externally, the caller is responsible for managing its lifecycle
+        and this is a no-op.
+
+        Repeated and concurrent calls are safe no-ops.
         """
-        if self._owns_client:
-            await self._dapr_client.close()
+        async with self._lock:
+            if self._closed:
+                return
+            if self._owns_client:
+                self._closed = True
+                await self._dapr_client.close()
 
     async def __aenter__(self) -> DaprSession:
         """Enter async context manager."""
@@ -449,33 +468,39 @@ class DaprSession(SessionABC):
 
         Returns:
             True if Dapr is reachable, False otherwise.
+
+        Raises:
+            RuntimeError: If the session owns its client and has been closed.
         """
-        try:
-            # First attempt a read; some stores may not be initialized yet.
-            await self._dapr_client.get_state(
-                store_name=self._state_store_name,
-                key="__ping__",
-                state_metadata=self._get_read_metadata(),
-            )
-            return True
-        except Exception as initial_error:
-            # If relation/table is missing or store isn't initialized,
-            # attempt a write to initialize it, then read again.
+        async with self._lock:
+            # Checked outside the try block; the except clause below would swallow it.
+            self._check_not_closed()
             try:
-                await self._dapr_client.save_state(
-                    store_name=self._state_store_name,
-                    key="__ping__",
-                    value="ok",
-                    state_metadata=self._get_metadata(),
-                    options=self._get_state_options(),
-                )
-                # Read again after write.
+                # First attempt a read; some stores may not be initialized yet.
                 await self._dapr_client.get_state(
                     store_name=self._state_store_name,
                     key="__ping__",
                     state_metadata=self._get_read_metadata(),
                 )
                 return True
-            except Exception:
-                log_model_and_tool_action_error(logger, "Dapr connection failed", initial_error)
-                return False
+            except Exception as initial_error:
+                # If relation/table is missing or store isn't initialized,
+                # attempt a write to initialize it, then read again.
+                try:
+                    await self._dapr_client.save_state(
+                        store_name=self._state_store_name,
+                        key="__ping__",
+                        value="ok",
+                        state_metadata=self._get_metadata(),
+                        options=self._get_state_options(),
+                    )
+                    # Read again after write.
+                    await self._dapr_client.get_state(
+                        store_name=self._state_store_name,
+                        key="__ping__",
+                        state_metadata=self._get_read_metadata(),
+                    )
+                    return True
+                except Exception:
+                    log_model_and_tool_action_error(logger, "Dapr connection failed", initial_error)
+                    return False
