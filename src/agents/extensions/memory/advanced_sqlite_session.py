@@ -206,49 +206,15 @@ class AdvancedSQLiteSession(SQLiteSession):
         if branch_id is None:
             branch_id = self._current_branch_id
 
-            # Get all items for this branch
-            def _get_all_items_sync():
-                """Synchronous helper to get all items for a branch."""
-                with self._locked_connection() as conn:
-                    with closing(conn.cursor()) as cursor:
-                        if session_limit is None:
-                            cursor.execute(
-                                f"""
-                                SELECT m.message_data
-                                FROM {self.messages_table} m
-                                JOIN message_structure s ON m.id = s.message_id
-                                WHERE m.session_id = ? AND s.branch_id = ?
-                                ORDER BY s.sequence_number ASC
-                            """,
-                                (self.session_id, branch_id),
-                            )
-                        else:
-                            cursor.execute(
-                                f"""
-                                SELECT m.message_data
-                                FROM {self.messages_table} m
-                                JOIN message_structure s ON m.id = s.message_id
-                                WHERE m.session_id = ? AND s.branch_id = ?
-                                ORDER BY s.sequence_number DESC
-                                LIMIT ?
-                            """,
-                                (self.session_id, branch_id, session_limit),
-                            )
-
-                        rows = cursor.fetchall()
-                        if session_limit is not None:
-                            rows = list(reversed(rows))
-
-                    items = []
-                    for (message_data,) in rows:
-                        try:
-                            item = json.loads(message_data)
-                            items.append(item)
-                        except json.JSONDecodeError:
-                            continue
-                    return items
-
-            return await asyncio.to_thread(_get_all_items_sync)
+        def _decode_rows(rows: list[Any]) -> list[TResponseInputItem]:
+            items: list[TResponseInputItem] = []
+            for (message_data,) in rows:
+                try:
+                    item = json.loads(message_data)
+                    items.append(item)
+                except json.JSONDecodeError:
+                    continue
+            return items
 
         def _get_items_sync():
             """Synchronous helper to get items for a specific branch."""
@@ -266,31 +232,47 @@ class AdvancedSQLiteSession(SQLiteSession):
                         """,
                             (self.session_id, branch_id),
                         )
-                    else:
-                        cursor.execute(
-                            f"""
-                            SELECT m.message_data
-                            FROM {self.messages_table} m
-                            JOIN message_structure s ON m.id = s.message_id
-                            WHERE m.session_id = ? AND s.branch_id = ?
-                            ORDER BY s.sequence_number DESC
-                            LIMIT ?
-                        """,
-                            (self.session_id, branch_id, session_limit),
-                        )
+                        return _decode_rows(cursor.fetchall())
 
-                    rows = cursor.fetchall()
-                    if session_limit is not None:
-                        rows = list(reversed(rows))
+                    if session_limit > 0:
+                        # Expand the fetch window when corrupt rows sit among the newest
+                        # entries so limit counts valid conversation items, matching
+                        # SQLiteSession.get_items and the inherited pop_item.
+                        window = session_limit
+                        while True:
+                            cursor.execute(
+                                f"""
+                                SELECT m.message_data
+                                FROM {self.messages_table} m
+                                JOIN message_structure s ON m.id = s.message_id
+                                WHERE m.session_id = ? AND s.branch_id = ?
+                                ORDER BY s.sequence_number DESC
+                                LIMIT ?
+                            """,
+                                (self.session_id, branch_id, window),
+                            )
+                            rows = cursor.fetchall()
+                            items = _decode_rows(list(reversed(rows)))
+                            if len(items) >= session_limit:
+                                return items[-session_limit:]
+                            if len(rows) < window:
+                                return items
+                            window *= 2
 
-                items = []
-                for (message_data,) in rows:
-                    try:
-                        item = json.loads(message_data)
-                        items.append(item)
-                    except json.JSONDecodeError:
-                        continue
-                return items
+                    # Preserve historical non-positive LIMIT semantics (including SQLite's
+                    # unlimited behavior for negative values).
+                    cursor.execute(
+                        f"""
+                        SELECT m.message_data
+                        FROM {self.messages_table} m
+                        JOIN message_structure s ON m.id = s.message_id
+                        WHERE m.session_id = ? AND s.branch_id = ?
+                        ORDER BY s.sequence_number DESC
+                        LIMIT ?
+                    """,
+                        (self.session_id, branch_id, session_limit),
+                    )
+                    return _decode_rows(list(reversed(cursor.fetchall())))
 
         return await asyncio.to_thread(_get_items_sync)
 

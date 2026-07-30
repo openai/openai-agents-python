@@ -1782,6 +1782,59 @@ async def test_get_items_explicit_limit_overrides_session_settings():
     session.close()
 
 
+async def test_get_items_limit_skips_corrupt_newest_rows():
+    """limit counts valid items, expanding past corrupt newest rows."""
+    session = AdvancedSQLiteSession(session_id="limit_corrupt_test", create_tables=True)
+
+    await session.add_items(
+        [
+            {"role": "user", "content": "valid 0"},
+            {"role": "assistant", "content": "valid 1"},
+            {"role": "user", "content": "valid 2"},
+        ]
+    )
+
+    # Append a corrupt newest row, with the branch structure the JOIN needs.
+    conn = session._get_connection()
+    cursor = conn.execute(
+        f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
+        (session.session_id, "not valid json {{{"),
+    )
+    next_sequence = conn.execute(
+        "SELECT COALESCE(MAX(sequence_number), 0) + 1 FROM message_structure "
+        "WHERE session_id = ? AND branch_id = ?",
+        (session.session_id, "main"),
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO message_structure "
+        "(session_id, message_id, branch_id, sequence_number, message_type, "
+        "user_turn_number, branch_turn_number) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (session.session_id, cursor.lastrowid, "main", next_sequence, "user", 1, 1),
+    )
+    conn.commit()
+
+    limited = await session.get_items(limit=2)
+    assert [item.get("content") for item in limited] == ["valid 1", "valid 2"]
+
+    # The explicit-branch call resolves to the same rows.
+    limited_explicit = await session.get_items(limit=2, branch_id="main")
+    assert [item.get("content") for item in limited_explicit] == ["valid 1", "valid 2"]
+
+    session.close()
+
+
+async def test_get_items_limit_returns_fewer_when_history_exhausted():
+    """Window expansion stops at the end of history instead of looping."""
+    session = AdvancedSQLiteSession(session_id="limit_exhausted_test", create_tables=True)
+
+    await session.add_items([{"role": "user", "content": "only valid"}])
+
+    retrieved = await session.get_items(limit=5)
+    assert [item.get("content") for item in retrieved] == ["only valid"]
+
+    session.close()
+
+
 async def test_session_settings_resolve():
     """Test SessionSettings.resolve() method."""
     from agents.memory import SessionSettings
