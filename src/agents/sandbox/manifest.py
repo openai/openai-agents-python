@@ -149,7 +149,8 @@ class EnvEntry(BaseModel):
 def _parse_environment_value(payload: object) -> "str | EnvValue | EnvEntry":
     """Route one environment member to the shape it represents.
 
-    `EnvEntry` has no `type` field, so a mapping carrying one came from an `EnvValue`.
+    `EnvEntry` has no `type` field and its `value` is never a bare string, so a mapping
+    with either came from an `EnvValue`.
     """
     if isinstance(payload, str | EnvValue | EnvEntry):
         return payload
@@ -157,7 +158,7 @@ def _parse_environment_value(payload: object) -> "str | EnvValue | EnvEntry":
         raise TypeError(
             f"environment value must be a str, EnvValue, or EnvEntry, got {type(payload).__name__}"
         )
-    if "type" in payload:
+    if "type" in payload or isinstance(payload.get("value"), str):
         return EnvValue.parse(payload)
     return EnvEntry.model_validate(dict(payload))
 

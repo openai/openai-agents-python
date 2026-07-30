@@ -415,6 +415,9 @@ def test_manifest_rejects_malformed_env_values() -> None:
     with pytest.raises(TypeError, match="env value must be an EnvValue or mapping"):
         Manifest.model_validate({"environment": {"value": {"TOKEN": {"value": 1}}}})
 
+    with pytest.raises(ValueError, match="must include a string `type` field"):
+        Manifest.model_validate({"environment": {"value": {"TOKEN": {"value": "untagged"}}}})
+
     with pytest.raises(ValidationError, match="Environment mapping must be a mapping"):
         Manifest.model_validate({"environment": {"value": None}})
 
