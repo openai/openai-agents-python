@@ -115,7 +115,7 @@ class VoicePipeline:
                 except Exception as e:
                     log_model_and_tool_action_error(logger, "Error processing single voice turn", e)
                     await output._add_error(e)
-                    raise e
+                    raise
 
         output._set_task(asyncio.create_task(stream_events()))
         return output
@@ -158,7 +158,7 @@ class VoicePipeline:
                 except Exception as e:
                     log_model_and_tool_action_error(logger, "Error processing voice turns", e)
                     await output._add_error(e)
-                    raise e
+                    raise
                 finally:
                     if transcription_session is not None:
                         await transcription_session.close()

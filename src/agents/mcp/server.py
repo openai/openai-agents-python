@@ -1679,7 +1679,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                     if self.max_retry_attempts != -1 and retries_used >= self.max_retry_attempts:
                         if exc.__cause__ is not None:
                             raise exc.__cause__ from exc
-                        raise exc
+                        raise
                     backoff = self.retry_backoff_seconds_base * (2 ** (retries_used - 1))
                     await asyncio.sleep(backoff)
                 except Exception:

@@ -196,7 +196,7 @@ class StreamedAudioResult:
 
                 # Signal completion for whole session because of error
                 await local_queue.put(VoiceStreamEventLifecycle(event="session_ended"))
-                raise e
+                raise
 
     async def _add_text(self, text: str):
         await self._start_turn()
