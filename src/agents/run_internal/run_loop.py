@@ -129,6 +129,7 @@ from .items import (
     prepare_model_input_items,
     reconcile_nested_history_owned_input_after_rewrite,
     run_items_to_input_items,
+    strip_stale_response_item_ids,
 )
 from .model_retry import (
     apply_retry_attempt_usage,
@@ -310,7 +311,9 @@ def _prepare_turn_input_items(
 ) -> list[TResponseInputItem]:
     caller_items = ItemHelpers.input_to_new_input_list(caller_input)
     continuation_items = run_items_to_input_items(generated_items, reasoning_item_id_policy)
-    return prepare_model_input_items(caller_items, continuation_items)
+    # Strip server item ids from caller history too (session / to_input_list replays) (#2020).
+    prepared = prepare_model_input_items(caller_items, continuation_items)
+    return strip_stale_response_item_ids(prepared)
 
 
 def _complete_stream_interruption(
@@ -1551,6 +1554,10 @@ async def run_single_turn_streamed(
         if server_conversation_tracker is not None:
             server_conversation_tracker.rewind_input(filtered.input)
 
+    async def sanitize_stale_response_item_ids() -> None:
+        if isinstance(filtered.input, list):
+            filtered.input = strip_stale_response_item_ids(filtered.input)
+
     stream_failed_retry_attempts: list[int] = [0]
 
     retry_stream = stream_response_with_retry(
@@ -1577,6 +1584,7 @@ async def run_single_turn_streamed(
         replay_unsafe_request=any(
             isinstance(tool, ProgrammaticToolCallingTool) for tool in all_tools
         ),
+        sanitize_stale_response_item_ids=sanitize_stale_response_item_ids,
     )
 
     async for event in model_run_context_stream(retry_stream, tool_use_tracker):
@@ -1976,6 +1984,11 @@ async def get_new_response(
             await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
             server_conversation_tracker.rewind_input(filtered.input)
 
+    async def sanitize_stale_response_item_ids() -> None:
+        # Rebuild model input without server item ids after a Responses 404 (#2020).
+        if isinstance(filtered.input, list):
+            filtered.input = strip_stale_response_item_ids(filtered.input)
+
     with model_run_context(tool_use_tracker):
         new_response = await get_response_with_retry(
             get_response=lambda: model.get_response(
@@ -2000,6 +2013,7 @@ async def get_new_response(
             replay_unsafe_request=any(
                 isinstance(tool, ProgrammaticToolCallingTool) for tool in all_tools
             ),
+            sanitize_stale_response_item_ids=sanitize_stale_response_item_ids,
         )
     if server_conversation_tracker is not None:
         # Retry helpers rewind sent-input tracking before replaying a failed request. Mark the

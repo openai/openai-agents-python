@@ -62,6 +62,8 @@ __all__ = [
     "prepare_model_input_items",
     "run_item_to_input_item",
     "run_items_to_input_items",
+    "is_stale_response_item_not_found_error",
+    "strip_stale_response_item_ids",
     "normalize_input_items_for_api",
     "normalize_resumed_input",
     "fingerprint_input_item",
@@ -153,13 +155,20 @@ def run_items_to_input_items(
     run_items: Sequence[RunItem],
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
 ) -> list[TResponseInputItem]:
-    """Convert run items to model input items while skipping approvals."""
+    """Convert run items to model input items while skipping approvals.
+
+    Always strips server-side Responses item ``id`` fields (``rs_``/``fc_``/``msg_``)
+    from the converted list so multi-turn replays do not 404 when the API no longer
+    stores those items (#2020). Content is preserved. Per-item reasoning omit policy
+    is still applied during conversion before the shared strip pass.
+    """
     converted: list[TResponseInputItem] = []
     for run_item in run_items:
         item = run_item_to_input_item(run_item, reasoning_item_id_policy)
         if item is not None:
             converted.append(item)
-    return converted
+    # Default and omit both strip server item ids — replaying dead IDs is the #2020 failure mode.
+    return strip_stale_response_item_ids(converted)
 
 
 def drop_orphan_function_calls(
@@ -707,6 +716,57 @@ def _without_reasoning_item_id(item: TResponseInputItem) -> TResponseInputItem:
     sanitized = dict(item)
     sanitized.pop("id", None)
     return cast(TResponseInputItem, sanitized)
+
+
+def is_stale_response_item_not_found_error(error: BaseException) -> bool:
+    """True when the API reports a missing Responses item id (``rs_``/``fc_``/etc.).
+
+    Used to decide whether to rebuild model input without server item IDs and retry.
+    See https://github.com/openai/openai-agents-python/issues/2020
+    """
+    text = str(error)
+    if "Item with id" not in text and "item with id" not in text.lower():
+        # Also match common SDK wrapping of the same message
+        if "not found" not in text.lower():
+            return False
+    lowered = text.lower()
+    if "not found" not in lowered:
+        return False
+    # Server item ids typically look like rs_… / fc_… / msg_…
+    return any(marker in text for marker in ("rs_", "fc_", "msg_")) or "Item with id" in text
+
+
+def strip_stale_response_item_ids(
+    items: Sequence[TResponseInputItem],
+) -> list[TResponseInputItem]:
+    """Strip server-side item ``id`` fields from next-turn model input.
+
+    Replaying ``rs_``/``fc_`` IDs that the Responses API no longer stores causes
+    HTTP 404 ``Item with id 'rs_…' not found`` on multi-turn runs (#2020).
+    Content is preserved; only the ``id`` key is removed from dict items.
+    """
+    sanitized: list[TResponseInputItem] = []
+    for item in items:
+        if not isinstance(item, dict):
+            sanitized.append(item)
+            continue
+        if "id" not in item:
+            sanitized.append(item)
+            continue
+        item_id = item.get("id")
+        item_type = item.get("type")
+        # Always strip reasoning ids; also strip other server-ref ids when present
+        should_strip = item_type == "reasoning" or (
+            isinstance(item_id, str)
+            and (item_id.startswith("rs_") or item_id.startswith("fc_") or item_id.startswith("msg_"))
+        )
+        if should_strip:
+            cleaned = dict(item)
+            cleaned.pop("id", None)
+            sanitized.append(cast(TResponseInputItem, cleaned))
+        else:
+            sanitized.append(item)
+    return sanitized
 
 
 def deduplicate_input_items(items: Sequence[TResponseInputItem]) -> list[TResponseInputItem]:

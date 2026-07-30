@@ -20,6 +20,7 @@ from ..models._retry_runtime import (
     provider_managed_retries_disabled,
     websocket_pre_event_retries_disabled,
 )
+from .items import is_stale_response_item_not_found_error
 from ..retry import (
     ModelRetryAdvice,
     ModelRetryAdviceRequest,
@@ -44,7 +45,11 @@ DEFAULT_MAX_DELAY_SECONDS = 2.0
 DEFAULT_BACKOFF_MULTIPLIER = 2.0
 DEFAULT_BACKOFF_JITTER = True
 COMPATIBILITY_CONVERSATION_LOCKED_RETRIES = 3
+# One rebuild after Responses "Item with id 'rs_/fc_/msg_…' not found" (#2020).
+COMPATIBILITY_STALE_RESPONSE_ITEM_RETRIES = 1
 _RETRY_SAFE_STREAM_EVENT_TYPES = frozenset({"response.created", "response.in_progress"})
+
+SanitizeStaleResponseItemIdsCallable = Callable[[], Awaitable[None] | None]
 
 
 def _is_conversation_locked_error(error: Exception) -> bool:
@@ -415,11 +420,13 @@ async def get_response_with_retry(
     previous_response_id: str | None,
     conversation_id: str | None,
     replay_unsafe_request: bool = False,
+    sanitize_stale_response_item_ids: SanitizeStaleResponseItemIdsCallable | None = None,
 ) -> ModelResponse:
     request_attempt = 1
     policy_attempt = 1
     failed_policy_attempts = 0
     compatibility_retries_taken = 0
+    stale_item_retries_taken = 0
     disable_websocket_pre_event_retry = replay_unsafe_request or (
         _should_disable_websocket_pre_event_retry(retry_settings)
     )
@@ -446,7 +453,7 @@ async def get_response_with_retry(
                 response = await get_response()
             response.usage = apply_retry_attempt_usage(
                 response.usage,
-                failed_policy_attempts + compatibility_retries_taken,
+                failed_policy_attempts + compatibility_retries_taken + stale_item_retries_taken,
             )
             return response
         except Exception as error:
@@ -472,6 +479,28 @@ async def get_response_with_retry(
                     await _sleep_for_retry(delay)
                     request_attempt += 1
                     continue
+
+            # Responses API 404: Item with id 'rs_/fc_/msg_…' not found — strip server ids once
+            # and rebuild the request (#2020). Does not require a user retry policy.
+            if (
+                not replay_unsafe_request
+                and sanitize_stale_response_item_ids is not None
+                and stale_item_retries_taken < COMPATIBILITY_STALE_RESPONSE_ITEM_RETRIES
+                and is_stale_response_item_not_found_error(error)
+            ):
+                stale_item_retries_taken += 1
+                logger.debug(
+                    "Stale Responses item id not found; stripping server item ids and "
+                    "retrying once (attempt %s/%s).",
+                    stale_item_retries_taken,
+                    COMPATIBILITY_STALE_RESPONSE_ITEM_RETRIES,
+                )
+                maybe_awaitable = sanitize_stale_response_item_ids()
+                if isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+                await rewind()
+                request_attempt += 1
+                continue
 
             provider_advice = get_retry_advice(
                 ModelRetryAdviceRequest(
@@ -521,11 +550,13 @@ async def stream_response_with_retry(
     conversation_id: str | None,
     failed_retry_attempts_out: list[int] | None = None,
     replay_unsafe_request: bool = False,
+    sanitize_stale_response_item_ids: SanitizeStaleResponseItemIdsCallable | None = None,
 ) -> AsyncIterator[TResponseStreamEvent]:
     request_attempt = 1
     policy_attempt = 1
     failed_policy_attempts = 0
     compatibility_retries_taken = 0
+    stale_item_retries_taken = 0
     disable_websocket_pre_event_retry = replay_unsafe_request or (
         _should_disable_websocket_pre_event_retry(retry_settings)
     )
@@ -565,7 +596,9 @@ async def stream_response_with_retry(
                     emitted_retry_unsafe_event = True
                 if failed_retry_attempts_out is not None:
                     failed_retry_attempts_out[:] = [
-                        failed_policy_attempts + compatibility_retries_taken
+                        failed_policy_attempts
+                        + compatibility_retries_taken
+                        + stale_item_retries_taken
                     ]
                 yield event
             return
@@ -596,6 +629,25 @@ async def stream_response_with_retry(
                     await _sleep_for_retry(delay)
                     request_attempt += 1
                     continue
+            if (
+                not replay_unsafe_request
+                and sanitize_stale_response_item_ids is not None
+                and stale_item_retries_taken < COMPATIBILITY_STALE_RESPONSE_ITEM_RETRIES
+                and is_stale_response_item_not_found_error(error)
+            ):
+                stale_item_retries_taken += 1
+                logger.debug(
+                    "Stale Responses item id not found during stream; stripping server "
+                    "item ids and retrying once (attempt %s/%s).",
+                    stale_item_retries_taken,
+                    COMPATIBILITY_STALE_RESPONSE_ITEM_RETRIES,
+                )
+                maybe_awaitable = sanitize_stale_response_item_ids()
+                if isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+                await rewind()
+                request_attempt += 1
+                continue
             provider_advice = get_retry_advice(
                 ModelRetryAdviceRequest(
                     error=error,
