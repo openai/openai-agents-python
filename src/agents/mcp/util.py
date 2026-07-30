@@ -342,7 +342,7 @@ class MCPUtil:
         run_context: RunContextWrapper[Any],
         agent: AgentBase,
     ) -> list[MCPTool]:
-        with mcp_tools_span(server=server.name) as span:
+        with mcp_tools_span(server=get_mcp_server_log_name(server.name)) as span:
             tools = await server.list_tools(run_context, agent)
             span.span_data.result = [tool.name for tool in tools]
             return tools
@@ -571,7 +571,7 @@ class MCPUtil:
             mcp_title=resolve_mcp_tool_title(tool),
             tool_origin=ToolOrigin(
                 type=ToolOriginType.MCP,
-                mcp_server_name=server.name,
+                mcp_server_name=get_mcp_server_log_name(server.name),
             ),
         )
         return function_tool
@@ -614,7 +614,7 @@ class MCPUtil:
 
         extractor_context = MCPToolCustomDataContext(
             run_context=context,
-            server_name=server.name,
+            server_name=get_mcp_server_log_name(server.name),
             tool_name=tool_name,
             tool_display_name=tool_display_name,
             arguments=MappingProxyType(copy.deepcopy(arguments)),
@@ -640,7 +640,7 @@ class MCPUtil:
         arguments_copy = copy.deepcopy(arguments) if arguments is not None else None
         resolver_context = MCPToolMetaContext(
             run_context=context,
-            server_name=server.name,
+            server_name=get_mcp_server_log_name(server.name),
             tool_name=tool_name,
             arguments=arguments_copy,
         )
@@ -705,7 +705,7 @@ class MCPUtil:
                 finished_task = done.pop()
                 if finished_task.cancelled():
                     raise MCPToolCancellationError(
-                        f"Failed to call tool '{tool.name}' on MCP server '{server.name}': "
+                        f"Failed to call tool '{tool.name}' on MCP server '{get_mcp_server_log_name(server.name)}': "
                         "tool execution was cancelled."
                     )
                 result = finished_task.result()
@@ -748,7 +748,7 @@ class MCPUtil:
                 )
             log_tool_action_error(logger, log_message, e)
             raise AgentsException(
-                f"Error invoking MCP tool {tool_name_for_display} on server '{server.name}': {e}"
+                f"Error invoking MCP tool {tool_name_for_display} on server '{get_mcp_server_log_name(server.name)}': {e}"
             ) from e
 
         if _debug.DONT_LOG_TOOL_DATA:
@@ -801,7 +801,7 @@ class MCPUtil:
                 ):
                     current_span.span_data.output = tool_output
                 current_span.span_data.mcp_data = {
-                    "server": server.name,
+                    "server": get_mcp_server_log_name(server.name),
                 }
             else:
                 if _debug.DONT_LOG_MODEL_DATA or _debug.DONT_LOG_TOOL_DATA:
