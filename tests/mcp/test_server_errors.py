@@ -238,7 +238,7 @@ async def test_prompt_and_resource_safe_request_errors_preserve_original_excepti
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("header_name", ["authorization", "cookie", "x-api-key"])
+@pytest.mark.parametrize("header_name", ["authorization", "cookie", "x-api-key", "x-token"])
 async def test_prompt_request_errors_hide_header_credentials(header_name: str):
     header_secret = "SECRET_HEADER_CREDENTIAL"
     server = MCPServerStreamableHttp(params={"url": _SAFE_URL})
@@ -295,7 +295,7 @@ async def test_resource_request_nested_group_replaces_ordinary_siblings_safely()
     )
 
     ordinary_error = ValueError("ordinary sibling failure", request_error)
-    ordinary_error.add_note(_CREDENTIALED_URL)
+    ordinary_error.__notes__ = [_CREDENTIALED_URL]
     ordinary_error.unsafe_request = request_error  # type: ignore[attr-defined]
     error_group = BaseExceptionGroup(
         "request failed",

@@ -101,16 +101,20 @@ else:
 
 T = TypeVar("T")
 
-_CREDENTIAL_HTTP_HEADER_NAMES = frozenset(
+_SAFE_HTTP_REQUEST_HEADER_NAMES = frozenset(
     {
-        "api-key",
-        "apikey",
-        "authorization",
-        "cookie",
-        "proxy-authorization",
-        "x-access-token",
-        "x-api-key",
-        "x-auth-token",
+        "accept",
+        "accept-encoding",
+        "cache-control",
+        "connection",
+        "content-length",
+        "content-type",
+        "host",
+        "last-event-id",
+        "mcp-protocol-version",
+        "mcp-session-id",
+        "transfer-encoding",
+        "user-agent",
     }
 )
 _SAFE_EXCEPTION_GROUP_MESSAGE = "MCP request failed with additional errors."
@@ -147,7 +151,7 @@ def _safe_transport_cause(http_error: Exception) -> Exception | None:
 
     for request in requests:
         request_urls.append(str(request.url))
-        if any(name.lower() in _CREDENTIAL_HTTP_HEADER_NAMES for name in request.headers):
+        if any(name.lower() not in _SAFE_HTTP_REQUEST_HEADER_NAMES for name in request.headers):
             return None
 
     return http_error if all(get_mcp_server_log_name(url) == url for url in request_urls) else None
