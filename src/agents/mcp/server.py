@@ -163,6 +163,11 @@ def _first_unsafe_transport_error(http_errors: list[Exception]) -> Exception | N
     )
 
 
+def _first_unretainable_transport_error(http_errors: list[Exception]) -> Exception | None:
+    """Return the first transport error that cannot be retained as an exception cause."""
+    return next((error for error in http_errors if _safe_transport_cause(error) is None), None)
+
+
 def _is_http_transport_error(error: BaseException) -> bool:
     """Return whether an exception is an HTTPX transport error."""
     return isinstance(error, httpx.HTTPStatusError | httpx.RequestError)
@@ -217,6 +222,11 @@ def _get_cleanup_transport_error_message(http_error: Exception) -> str:
     if isinstance(http_error, httpx.TimeoutException):
         return "Timeout error during cleanup of MCP server"
     return "Request error during cleanup of MCP server"
+
+
+def _log_cleanup_transport_warning(message: str) -> None:
+    """Log a fixed cleanup warning without retaining the transport exception."""
+    logger.warning("%s", message, stacklevel=3)
 
 
 def _create_default_streamable_http_client(
@@ -1004,6 +1014,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         connection_succeeded = False
         connection_error: UserError | None = None
         connection_cause: Exception | None = None
+        connection_exception: BaseException | None = None
+        cleanup_failure: BaseException | None = None
         try:
             transport = await self.exit_stack.enter_async_context(self.create_streams())
             # streamablehttp_client returns (read, write, get_session_id)
@@ -1027,56 +1039,69 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             self.server_initialize_result = server_result
             self.session = session
             connection_succeeded = True
-        except Exception as e:
-            http_errors = self._extract_http_errors_from_exception(e)
-            if not http_errors:
-                raise
-
-            unsafe_http_error = _first_unsafe_transport_error(http_errors)
-            http_error = unsafe_http_error or http_errors[0]
-            connection_cause = _safe_transport_cause(http_error)
-            maps_safe_error = isinstance(
-                http_error,
-                httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException,
-            )
-            if connection_cause is not None and not maps_safe_error:
-                raise
-
-            connection_error = self._user_error_for_http_error(http_error)
-            if connection_cause is None:
-                http_errors.clear()
-                del http_error
-                del unsafe_http_error
-        finally:
-            # Always attempt cleanup on error, but suppress cleanup errors that mask the original
-            if not connection_succeeded:
-                try:
-                    await self.cleanup()
-                except UserError:
-                    # Re-raise UserError from cleanup (contains the real HTTP error)
-                    raise
-                except Exception as cleanup_error:
-                    # Suppress RuntimeError about cancel scopes during cleanup - this is a known
-                    # issue with the MCP library's async generator cleanup and shouldn't mask the
-                    # original error
-                    if isinstance(cleanup_error, RuntimeError) and "cancel scope" in str(
-                        cleanup_error
-                    ):
-                        log_tool_action_debug(
-                            logger,
-                            get_mcp_server_log_message(
-                                "Ignoring cancel scope error during cleanup of MCP server", self
-                            ),
-                            cleanup_error,
-                        )
+        except BaseException as e:
+            if not isinstance(e, Exception):
+                connection_exception = e
+            else:
+                http_errors = self._extract_http_errors_from_exception(e)
+                if not http_errors:
+                    connection_exception = e
+                else:
+                    unsafe_http_error = _first_unretainable_transport_error(http_errors)
+                    http_error = unsafe_http_error or http_errors[0]
+                    connection_cause = _safe_transport_cause(http_error)
+                    maps_safe_error = isinstance(
+                        http_error,
+                        httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException,
+                    )
+                    if connection_cause is not None and not maps_safe_error:
+                        connection_exception = e
+                        connection_cause = None
                     else:
-                        # Log other cleanup errors but don't raise - original error is more
-                        # important
-                        log_tool_action_warning(
-                            logger,
-                            get_mcp_server_log_message("Error during cleanup of MCP server", self),
-                            cleanup_error,
-                        )
+                        connection_error = self._user_error_for_http_error(http_error)
+                    http_errors.clear()
+                    del http_error
+                    del unsafe_http_error
+
+        # Run cleanup after leaving the connection exception handler so a cleanup UserError does
+        # not retain the pending connection failure as its implicit context.
+        if not connection_succeeded:
+            try:
+                await self.cleanup()
+            except UserError as e:
+                cleanup_failure = e
+            except Exception as cleanup_error:
+                # Suppress RuntimeError about cancel scopes during cleanup - this is a known
+                # issue with the MCP library's async generator cleanup and shouldn't mask the
+                # original error.
+                if isinstance(cleanup_error, RuntimeError) and "cancel scope" in str(cleanup_error):
+                    logger.debug(
+                        "%s",
+                        get_mcp_server_log_message(
+                            "Ignoring cancel scope error during cleanup of MCP server", self
+                        ),
+                        stacklevel=2,
+                    )
+                else:
+                    # Log other cleanup errors but don't raise - original error is more important.
+                    logger.warning(
+                        "%s",
+                        get_mcp_server_log_message("Error during cleanup of MCP server", self),
+                        stacklevel=2,
+                    )
+            except BaseException as e:
+                cleanup_failure = e
+
+        if cleanup_failure is not None:
+            connection_exception = None
+            connection_error = None
+            connection_cause = None
+            if isinstance(cleanup_failure, UserError):
+                self._raise_mapped_transport_error(cleanup_failure, None)
+            raise cleanup_failure
+
+        if connection_exception is not None:
+            raise connection_exception
 
         if connection_error is not None:
             self._raise_mapped_transport_error(connection_error, connection_cause)
@@ -1328,33 +1353,23 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                         )
                         del selected_http_error
                     else:
-                        _log_transport_warning(
+                        _log_cleanup_transport_warning(
                             get_mcp_server_log_message(
                                 _get_cleanup_transport_error_message(selected_http_error), self
-                            ),
-                            selected_http_error,
+                            )
                         )
                 elif isinstance(e, httpx.RequestError):
-                    _log_transport_warning(
-                        get_mcp_server_log_message(_get_cleanup_transport_error_message(e), self),
-                        e,
+                    _log_cleanup_transport_warning(
+                        get_mcp_server_log_message(_get_cleanup_transport_error_message(e), self)
                     )
                 elif isinstance(e, BaseExceptionGroup):
                     http_errors = self._extract_http_errors_from_exception(e)
-                    unsafe_http_error = next(
-                        (
-                            http_error
-                            for http_error in http_errors
-                            if _safe_transport_cause(http_error) is None
-                        ),
-                        None,
-                    )
-                    if unsafe_http_error is not None:
-                        _log_transport_warning(
-                            get_mcp_server_log_message(
-                                _get_cleanup_transport_error_message(unsafe_http_error), self
-                            ),
-                            unsafe_http_error,
+                    if http_errors:
+                        safe_error_group = _credential_safe_exception_group(e)
+                        log_tool_action_error(
+                            logger,
+                            get_mcp_server_log_message("Error cleaning up MCP server", self),
+                            safe_error_group,
                         )
                     else:
                         # No HTTP error found, suppress RuntimeError about cancel scopes.
@@ -1999,7 +2014,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             if not http_errors:
                 raise
 
-            unsafe_http_error = _first_unsafe_transport_error(http_errors)
+            unsafe_http_error = _first_unretainable_transport_error(http_errors)
             http_error = unsafe_http_error or http_errors[0]
             transport_cause = _safe_transport_cause(http_error)
             if isinstance(http_error, httpx.HTTPStatusError):

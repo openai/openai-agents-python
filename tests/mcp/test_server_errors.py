@@ -126,7 +126,17 @@ def _assert_not_retained_in_log_record(
             continue
         seen.add(id(value))
 
-        if isinstance(value, dict):
+        if isinstance(value, BaseException):
+            pending.extend(value.args)
+            if value.__cause__ is not None:
+                pending.append(value.__cause__)
+            if value.__context__ is not None:
+                pending.append(value.__context__)
+            pending.extend(getattr(value, "__notes__", ()))
+            pending.append(value.__dict__)
+            if isinstance(value, BaseExceptionGroup):
+                pending.extend(value.exceptions)
+        elif isinstance(value, dict):
             pending.extend(value.keys())
             pending.extend(value.values())
         elif isinstance(value, list | tuple | set | frozenset):
@@ -590,6 +600,50 @@ async def test_call_tool_group_hides_sensitive_transport_error_context():
 
 
 @pytest.mark.asyncio
+async def test_connect_group_checks_every_transport_error_attachment():
+    server = MCPServerSse(params={"url": _SAFE_URL})
+    error_group, _, later_error = _mixed_request_error_group(_SAFE_URL)
+    sensitive_value = ValueError(_CREDENTIALED_URL)
+    later_error.__context__ = sensitive_value
+
+    with patch.object(server, "create_streams", side_effect=error_group):
+        with pytest.raises(UserError) as exc_info:
+            await server.connect()
+
+    assert "Could not reach the server" in str(exc_info.value)
+    _assert_url_credentials_hidden(exc_info.value)
+    _assert_not_retained_in_exception_graph(exc_info.value, error_group)
+    _assert_not_retained_in_exception_graph(exc_info.value, later_error)
+    _assert_not_retained_in_exception_graph(exc_info.value, sensitive_value)
+    _assert_not_retained_in_traceback_locals(exc_info.value, error_group)
+    _assert_not_retained_in_traceback_locals(exc_info.value, later_error)
+    _assert_not_retained_in_traceback_locals(exc_info.value, sensitive_value)
+
+
+@pytest.mark.asyncio
+async def test_call_tool_group_checks_every_transport_error_attachment():
+    server = MCPServerStreamableHttp(params={"url": _SAFE_URL})
+    server.session = MagicMock()
+    server.max_retry_attempts = 0
+    error_group, _, later_error = _mixed_request_error_group(_SAFE_URL)
+    sensitive_value = ValueError(_CREDENTIALED_URL)
+    later_error.__context__ = sensitive_value
+
+    with patch.object(server, "_call_tool_with_isolated_retry", side_effect=error_group):
+        with pytest.raises(UserError) as exc_info:
+            await server.call_tool("test_tool", {})
+
+    assert "Connection lost" in str(exc_info.value)
+    _assert_url_credentials_hidden(exc_info.value)
+    _assert_not_retained_in_exception_graph(exc_info.value, error_group)
+    _assert_not_retained_in_exception_graph(exc_info.value, later_error)
+    _assert_not_retained_in_exception_graph(exc_info.value, sensitive_value)
+    _assert_not_retained_in_traceback_locals(exc_info.value, error_group)
+    _assert_not_retained_in_traceback_locals(exc_info.value, later_error)
+    _assert_not_retained_in_traceback_locals(exc_info.value, sensitive_value)
+
+
+@pytest.mark.asyncio
 async def test_connect_preserves_exception_group_when_every_request_error_is_safe():
     server = MCPServerSse(params={"url": _SAFE_URL})
     error_group, _, _ = _mixed_request_error_group(_SAFE_URL)
@@ -936,6 +990,32 @@ async def test_connect_preserves_original_error_when_cleanup_has_safe_generic_re
 
 
 @pytest.mark.asyncio
+async def test_connect_cleanup_mapped_error_omits_pending_connection_failure():
+    server = MCPServerSse(params={"url": _SAFE_URL})
+    connection_error = ValueError(_CREDENTIALED_URL)
+    cleanup_error = httpx.ReadTimeout(
+        "cleanup timed out",
+        request=httpx.Request("GET", _SAFE_URL),
+    )
+
+    with (
+        patch.object(server, "create_streams", side_effect=connection_error),
+        patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_error)),
+    ):
+        with pytest.raises(UserError) as exc_info:
+            await server.connect()
+
+    assert "Connection timeout" in str(exc_info.value)
+    _assert_url_credentials_hidden(exc_info.value)
+    _assert_not_retained_in_exception_graph(exc_info.value, connection_error)
+    _assert_not_retained_in_exception_graph(exc_info.value, cleanup_error)
+    _assert_not_retained_in_traceback_locals(exc_info.value, connection_error)
+    _assert_not_retained_in_traceback_locals(exc_info.value, cleanup_error)
+    assert server.session is None
+    assert server._get_session_id is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("grouped", [False, True])
 async def test_normal_cleanup_hides_generic_request_error_context_from_log_record(
     monkeypatch,
@@ -962,11 +1042,54 @@ async def test_normal_cleanup_hides_generic_request_error_context_from_log_recor
         await server.cleanup()
 
     record = caplog.records[-1]
-    assert record.exc_info is None
-    assert record.exc_text is None
+    if grouped:
+        assert record.exc_info is not None
+        assert record.exc_info[1] is not cleanup_error
+    else:
+        assert record.exc_info is None
+        assert record.exc_text is None
     _assert_not_retained_in_log_record(record, cleanup_error)
     _assert_not_retained_in_log_record(record, request_error)
     _assert_not_retained_in_log_record(record, sensitive_value)
+    _assert_url_credentials_hidden_from_log_record(record)
+    assert server.session is None
+    assert server._get_session_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", ["message", "reason_phrase"])
+async def test_normal_cleanup_hides_transport_exception_payload_from_log_record(
+    monkeypatch,
+    caplog,
+    payload: str,
+):
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    server = MCPServerSse(params={"url": _SAFE_URL})
+    server.session = MagicMock()
+    request = httpx.Request("GET", _SAFE_URL)
+    if payload == "message":
+        cleanup_error: Exception = httpx.ReadTimeout(_CREDENTIALED_URL, request=request)
+    else:
+        cleanup_error = httpx.HTTPStatusError(
+            "cleanup failed",
+            request=request,
+            response=httpx.Response(
+                502,
+                request=request,
+                extensions={"reason_phrase": _CREDENTIALED_URL.encode()},
+            ),
+        )
+
+    with (
+        patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_error)),
+        caplog.at_level(logging.WARNING, logger="openai.agents"),
+    ):
+        await server.cleanup()
+
+    record = caplog.records[-1]
+    assert record.exc_info is None
+    assert record.exc_text is None
+    _assert_not_retained_in_log_record(record, cleanup_error)
     _assert_url_credentials_hidden_from_log_record(record)
     assert server.session is None
     assert server._get_session_id is None
@@ -1102,19 +1225,16 @@ async def test_normal_cleanup_only_logs_safe_transport_exceptions(
         await server.cleanup()
 
     record = caplog.records[-1]
-    if not redacted and safe_to_attach:
+    if not redacted and safe_to_attach and exception_shape == "nested_group":
         assert record.exc_info is not None
-        if exception_shape == "nested_group":
-            assert record.levelno == logging.ERROR
-            assert record.exc_info[1] is cleanup_error
-        else:
-            assert record.levelno == logging.WARNING
-            assert record.exc_info[1] is timeout_error
+        assert record.levelno == logging.ERROR
+        assert record.exc_info[1] is not cleanup_error
     else:
         assert record.exc_info is None
         assert record.exc_text is None
-        _assert_not_retained_in_log_record(record, cleanup_error)
-        _assert_not_retained_in_log_record(record, timeout_error)
+
+    _assert_not_retained_in_log_record(record, cleanup_error)
+    _assert_not_retained_in_log_record(record, timeout_error)
 
     if not safe_to_attach:
         _assert_url_credentials_hidden_from_log_record(record)
@@ -1154,7 +1274,7 @@ async def test_normal_cleanup_hides_sensitive_exception_attachments_from_log_rec
 
 
 @pytest.mark.asyncio
-async def test_normal_cleanup_preserves_safe_nested_group_diagnostics(monkeypatch, caplog):
+async def test_normal_cleanup_sanitizes_safe_nested_group_diagnostics(monkeypatch, caplog):
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
     server = MCPServerSse(params={"url": _SAFE_URL})
     server.session = MagicMock()
@@ -1162,10 +1282,11 @@ async def test_normal_cleanup_preserves_safe_nested_group_diagnostics(monkeypatc
         "timed out",
         request=httpx.Request("GET", _SAFE_URL),
     )
+    ordinary_error = ValueError("ordinary sibling failure")
     cleanup_group = BaseExceptionGroup(
         "cleanup failed",
         [
-            ValueError("ordinary sibling failure"),
+            ordinary_error,
             BaseExceptionGroup("nested cleanup failed", [timeout_error]),
         ],
     )
@@ -1179,8 +1300,13 @@ async def test_normal_cleanup_preserves_safe_nested_group_diagnostics(monkeypatc
     record = caplog.records[-1]
     assert record.levelno == logging.ERROR
     assert record.exc_info is not None
-    assert record.exc_info[1] is cleanup_group
-    assert "ordinary sibling failure" in logging.Formatter().format(record)
+    assert record.exc_info[1] is not cleanup_group
+    rendered = logging.Formatter().format(record)
+    assert "An additional error occurred during the MCP request." in rendered
+    assert "ordinary sibling failure" not in rendered
+    _assert_not_retained_in_log_record(record, cleanup_group)
+    _assert_not_retained_in_log_record(record, ordinary_error)
+    _assert_not_retained_in_log_record(record, timeout_error)
     assert server.session is None
     assert server._get_session_id is None
 
