@@ -487,6 +487,19 @@ def _mixed_request_error_group(
     return BaseExceptionGroup("mixed failures", [safe_error, nested_group]), safe_error, later_error
 
 
+def _chained_request_errors() -> tuple[httpx.ReadTimeout, httpx.ReadError]:
+    unsafe_error = httpx.ReadError(
+        "inner read failed",
+        request=httpx.Request("GET", _CREDENTIALED_URL),
+    )
+    safe_outer_error = httpx.ReadTimeout(
+        "outer timeout",
+        request=httpx.Request("GET", _SAFE_URL),
+    )
+    safe_outer_error.__context__ = unsafe_error
+    return safe_outer_error, unsafe_error
+
+
 @pytest.mark.asyncio
 async def test_connect_checks_every_request_error_before_preserving_exception_group():
     server = MCPServerSse(params={"url": _SAFE_URL})
@@ -836,6 +849,54 @@ async def test_failed_connection_cleanup_hides_url_credentials_from_exception_gr
 
 
 @pytest.mark.asyncio
+async def test_connect_preserves_original_error_when_cleanup_has_safe_generic_request_error(
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    server = MCPServerSse(params={"url": _SAFE_URL})
+    connection_error = ValueError("original connection failure")
+    cleanup_error = httpx.ReadError(
+        "cleanup read failed",
+        request=httpx.Request("GET", _SAFE_URL),
+    )
+
+    with (
+        patch.object(server, "create_streams", side_effect=connection_error),
+        patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_error)),
+        caplog.at_level(logging.ERROR, logger="openai.agents"),
+    ):
+        with pytest.raises(ValueError) as exc_info:
+            await server.connect()
+
+    assert exc_info.value is connection_error
+    record = caplog.records[-1]
+    assert record.exc_info is not None
+    assert record.exc_info[1] is cleanup_error
+    assert server.session is None
+    assert server._get_session_id is None
+
+
+@pytest.mark.asyncio
+async def test_failed_connection_cleanup_hides_chained_url_credentials():
+    server = MCPServerSse(params={"url": _SAFE_URL})
+    cleanup_error, unsafe_error = _chained_request_errors()
+
+    with patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_error)):
+        with pytest.raises(UserError) as exc_info:
+            await server.cleanup()
+
+    assert "Connection timeout" in str(exc_info.value)
+    _assert_url_credentials_hidden(exc_info.value)
+    _assert_not_retained_in_exception_graph(exc_info.value, cleanup_error)
+    _assert_not_retained_in_exception_graph(exc_info.value, unsafe_error)
+    _assert_not_retained_in_traceback_locals(exc_info.value, cleanup_error)
+    _assert_not_retained_in_traceback_locals(exc_info.value, unsafe_error)
+    assert server.session is None
+    assert server._get_session_id is None
+
+
+@pytest.mark.asyncio
 async def test_failed_connection_cleanup_checks_every_nested_transport_error():
     server = MCPServerSse(params={"url": _SAFE_URL})
     cleanup_group, _, unsafe_error = _mixed_request_error_group(_CREDENTIALED_URL)
@@ -908,6 +969,34 @@ async def test_normal_cleanup_only_logs_safe_transport_exceptions(
     if not safe_to_attach:
         _assert_url_credentials_hidden_from_log_record(record)
 
+    assert server.session is None
+    assert server._get_session_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redacted", [True, False])
+async def test_normal_cleanup_hides_chained_url_credentials_from_log_record(
+    monkeypatch,
+    caplog,
+    redacted: bool,
+):
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+    server = MCPServerSse(params={"url": _SAFE_URL})
+    server.session = MagicMock()
+    cleanup_error, unsafe_error = _chained_request_errors()
+
+    with (
+        patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_error)),
+        caplog.at_level(logging.WARNING, logger="openai.agents"),
+    ):
+        await server.cleanup()
+
+    record = caplog.records[-1]
+    assert record.exc_info is None
+    assert record.exc_text is None
+    _assert_not_retained_in_log_record(record, cleanup_error)
+    _assert_not_retained_in_log_record(record, unsafe_error)
+    _assert_url_credentials_hidden_from_log_record(record)
     assert server.session is None
     assert server._get_session_id is None
 

@@ -105,11 +105,10 @@ _SAFE_EXCEPTION_GROUP_MESSAGE = "MCP request failed with additional errors."
 _SAFE_EXCEPTION_MESSAGE = "An additional error occurred during the MCP request."
 
 
-def _safe_transport_cause(http_error: Exception) -> Exception | None:
-    """Keep a transport exception only when its HTTPX URLs need no sanitization."""
-    if not isinstance(http_error, httpx.HTTPStatusError | httpx.RequestError):
-        return http_error
-
+def _transport_error_urls_are_safe(
+    http_error: httpx.HTTPStatusError | httpx.RequestError,
+) -> bool:
+    """Return whether one HTTPX exception contains only credential-safe URLs."""
     request_urls: list[str] = []
     try:
         request_urls.append(str(http_error.request.url))
@@ -121,7 +120,7 @@ def _safe_transport_cause(http_error: Exception) -> Exception | None:
             try:
                 response_url = response.request.url
             except RuntimeError:
-                return None
+                return False
 
             request_urls.append(str(response_url))
             redirect_location = response.headers.get("location")
@@ -129,9 +128,38 @@ def _safe_transport_cause(http_error: Exception) -> Exception | None:
                 try:
                     request_urls.append(str(response_url.join(redirect_location)))
                 except (httpx.InvalidURL, ValueError):
-                    return None
+                    return False
 
-    return http_error if all(get_mcp_server_log_name(url) == url for url in request_urls) else None
+    return all(get_mcp_server_log_name(url) == url for url in request_urls)
+
+
+def _safe_transport_cause(http_error: Exception) -> Exception | None:
+    """Keep a transport exception only when its full graph has credential-safe HTTPX URLs."""
+    if not isinstance(http_error, httpx.HTTPStatusError | httpx.RequestError):
+        return http_error
+
+    pending: list[BaseException] = [http_error]
+    seen: set[int] = set()
+    while pending:
+        error = pending.pop()
+        if id(error) in seen:
+            continue
+        seen.add(id(error))
+
+        if isinstance(error, httpx.HTTPStatusError | httpx.RequestError):
+            if not _transport_error_urls_are_safe(error):
+                return None
+
+        cause = BaseException.__getattribute__(error, "__cause__")
+        if cause is not None:
+            pending.append(cause)
+        context = BaseException.__getattribute__(error, "__context__")
+        if context is not None:
+            pending.append(context)
+        if isinstance(error, BaseExceptionGroup):
+            pending.extend(error.exceptions)
+
+    return http_error
 
 
 def _first_unsafe_transport_error(http_errors: list[Exception]) -> Exception | None:
@@ -847,6 +875,33 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         return []
 
+    def _select_cleanup_transport_error(self, error: BaseException) -> Exception | None:
+        """Select a cleanup transport error for specialized handling."""
+        unsafe_http_error = _first_unsafe_transport_error(
+            self._extract_http_errors_from_exception(error)
+        )
+        if unsafe_http_error is not None:
+            return unsafe_http_error
+
+        candidates = error.exceptions if isinstance(error, BaseExceptionGroup) else (error,)
+        for error_type in (
+            httpx.HTTPStatusError,
+            httpx.ConnectError,
+            httpx.TimeoutException,
+        ):
+            selected_http_error = next(
+                (
+                    candidate
+                    for candidate in reversed(candidates)
+                    if isinstance(candidate, Exception) and isinstance(candidate, error_type)
+                ),
+                None,
+            )
+            if selected_http_error is not None:
+                return selected_http_error
+
+        return None
+
     def _user_error_for_http_error(self, http_error: Exception) -> UserError:
         """Build a UserError from safe HTTP diagnostics."""
         error_message = f"Failed to connect to MCP server '{self._error_name}': "
@@ -1261,37 +1316,14 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     e,
                 )
                 raise
-            except BaseExceptionGroup as eg:
-                http_errors = self._extract_http_errors_from_exception(eg)
-                unsafe_http_error = _first_unsafe_transport_error(http_errors)
-                selected_http_error = unsafe_http_error
-
-                if selected_http_error is None:
-                    # Preserve legacy group diagnostics when HTTP errors are nested but safe.
-                    for error_type in (
-                        httpx.HTTPStatusError,
-                        httpx.ConnectError,
-                        httpx.TimeoutException,
-                    ):
-                        selected_http_error = next(
-                            (
-                                error
-                                for error in reversed(eg.exceptions)
-                                if isinstance(error, Exception) and isinstance(error, error_type)
-                            ),
-                            None,
-                        )
-                        if selected_http_error is not None:
-                            break
-
+            except (BaseExceptionGroup, httpx.HTTPStatusError, httpx.RequestError) as e:
+                selected_http_error = self._select_cleanup_transport_error(e)
                 if selected_http_error is not None:
                     if is_failed_connection_cleanup:
                         cleanup_error = self._user_error_for_http_error(selected_http_error)
                         cleanup_cause = _safe_transport_cause(selected_http_error)
                         if cleanup_cause is None:
-                            http_errors.clear()
                             del selected_http_error
-                            del unsafe_http_error
                     else:
                         _log_transport_warning(
                             get_mcp_server_log_message(
@@ -1299,11 +1331,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                             ),
                             selected_http_error,
                         )
-                else:
+                elif isinstance(e, BaseExceptionGroup):
                     # No HTTP error found, suppress RuntimeError about cancel scopes
                     has_cancel_scope_error = any(
                         isinstance(exc, RuntimeError) and "cancel scope" in str(exc)
-                        for exc in eg.exceptions
+                        for exc in e.exceptions
                     )
                     if has_cancel_scope_error:
                         log_tool_action_debug(
@@ -1311,21 +1343,18 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                             get_mcp_server_log_message(
                                 "Ignoring cancel scope error during cleanup of MCP server", self
                             ),
-                            eg,
+                            e,
                         )
                     else:
                         log_tool_action_error(
                             logger,
                             get_mcp_server_log_message("Error cleaning up MCP server", self),
-                            eg,
+                            e,
                         )
-            except (httpx.HTTPStatusError, httpx.RequestError) as e:
-                if is_failed_connection_cleanup:
-                    cleanup_error = self._user_error_for_http_error(e)
-                    cleanup_cause = _safe_transport_cause(e)
                 else:
-                    _log_transport_warning(
-                        get_mcp_server_log_message(_get_cleanup_transport_error_message(e), self),
+                    log_tool_action_error(
+                        logger,
+                        get_mcp_server_log_message("Error cleaning up MCP server", self),
                         e,
                     )
             except Exception as e:
