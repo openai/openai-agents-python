@@ -14,6 +14,7 @@ from .retry import (
 )
 from .tar_utils import (
     UnsafeTarMemberError,
+    raise_if_unsafe_tar_member_name,
     safe_extract_tarfile,
     safe_tar_member_rel_path,
     should_skip_tar_member,
@@ -53,6 +54,7 @@ __all__ = [
     "ensure_git_available",
     "parse_ls_la",
     "UnsafeTarMemberError",
+    "raise_if_unsafe_tar_member_name",
     "safe_extract_tarfile",
     "safe_tar_member_rel_path",
     "should_skip_tar_member",

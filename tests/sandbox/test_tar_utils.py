@@ -10,12 +10,18 @@ import pytest
 
 from agents.sandbox.util.tar_utils import (
     UnsafeTarMemberError,
+    raise_if_unsafe_tar_member_name,
     safe_extract_tarfile,
     safe_tar_member_rel_path,
     should_skip_tar_member,
     strip_tar_member_prefix,
     validate_tar_bytes,
+    validate_tarfile,
 )
+
+# A literal backslash, named so the Windows-separator cases below read as paths
+# rather than as escapes.
+_BACKSLASH = "\\"
 
 
 @dataclass(frozen=True)
@@ -397,24 +403,47 @@ def test_validate_tar_bytes_ignores_skipped_unsafe_member() -> None:
 
 
 @pytest.mark.parametrize(
-    "member_name",
+    ("member_name", "reason"),
     [
-        ".runtime/../../etc/passwd",
-        ".runtime/../.ssh/authorized_keys",
-        ".runtime/../../../etc/cron.d/job",
-        ".runtime/nested/../../../escape",
-        "workspace/.runtime/../../escape",
+        # Parent traversal.
+        (".runtime/../../etc/passwd", "parent traversal"),
+        (".runtime/../.ssh/authorized_keys", "parent traversal"),
+        (".runtime/../../../etc/cron.d/job", "parent traversal"),
+        (".runtime/nested/../../../escape", "parent traversal"),
+        ("workspace/.runtime/../../escape", "parent traversal"),
+        # Absolute. `_tar_member_rel_variants` drops the leading separator, so
+        # these normalize onto the prefix and would otherwise be skipped. The
+        # Windows check runs first, so a name that is both reports as Windows.
+        ("/.runtime/state.json", "absolute path"),
+        ("/.runtime/../../etc/passwd", "absolute path"),
+        # `//host/share` is a UNC root, which `PureWindowsPath` reads as a drive.
+        ("//.runtime/state.json", "windows drive path"),
+        # Windows-style. The drive letter is a path part on a Windows host, so
+        # `C:/.runtime/...` normalizes onto the prefix there but not on POSIX;
+        # a backslash name is one part on POSIX and several on Windows. Which of
+        # these two reaches the skip decision therefore depends on the host,
+        # which is why the name check has to precede it on both.
+        ("C:/.runtime/state.json", "windows drive path"),
+        ("C:.runtime/state.json", "windows drive path"),
+        (".runtime" + _BACKSLASH + "state.json", "windows path separator"),
+        (
+            ".runtime" + _BACKSLASH + ".." + _BACKSLASH + ".." + _BACKSLASH + "escape",
+            "windows path separator",
+        ),
     ],
 )
-def test_validate_tar_bytes_rejects_parent_traversal_under_skipped_prefix(
-    member_name: str,
+def test_validate_tar_bytes_rejects_an_unsafe_name_under_a_skipped_prefix(
+    member_name: str, reason: str
 ) -> None:
-    """A skip prefix must not become a way past the parent-traversal check.
+    """A skip prefix must not become a way past the member-name checks.
 
-    `validate_tarfile` consults `should_skip_tar_member` before
-    `safe_tar_member_rel_path`, so a member that is skipped is never checked for
-    `..` at all. Prefixing a traversal path with a skipped directory name is
-    enough to reach an extractor that the caller believed had been validated.
+    `validate_tarfile` consults `should_skip_tar_member` to decide which members
+    the caller asked to leave out, and `_is_within` answers that on a *normalized*
+    path — so `..`, a leading separator, and a Windows separator all fold into a
+    match against the prefix. Skipping such a member would `continue` past the
+    rejections in `safe_tar_member_rel_path`, reaching an extractor the caller
+    believed had been validated. `raise_if_unsafe_tar_member_name` runs first for
+    that reason.
     """
     with pytest.raises(UnsafeTarMemberError) as excinfo:
         validate_tar_bytes(
@@ -422,10 +451,10 @@ def test_validate_tar_bytes_rejects_parent_traversal_under_skipped_prefix(
             skip_rel_paths=[Path(".runtime")],
             root_name="workspace",
         )
-    assert excinfo.value.reason == "parent traversal"
+    assert excinfo.value.reason == reason
 
 
-def test_validate_tar_bytes_rejects_traversal_beside_a_genuinely_skipped_member() -> None:
+def test_validate_tar_bytes_rejects_an_unsafe_name_beside_a_genuinely_skipped_member() -> None:
     """The skip still applies to the members that really are under the prefix."""
     with pytest.raises(UnsafeTarMemberError) as excinfo:
         validate_tar_bytes(
@@ -438,25 +467,100 @@ def test_validate_tar_bytes_rejects_traversal_beside_a_genuinely_skipped_member(
     assert excinfo.value.reason == "parent traversal"
 
 
+def _validate(raw: bytes, **kwargs: object) -> None:
+    """`validate_tarfile` on raw bytes, for the arguments `validate_tar_bytes` omits."""
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tar:
+        validate_tarfile(tar, **kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        _fifo(".runtime/pipe"),
+        _hardlink(".runtime/link", "src/main.py"),
+        _symlink(".runtime/link", "/etc/passwd"),
+    ],
+)
+def test_validate_tarfile_still_skips_member_types_under_a_skipped_prefix(
+    member: _Member,
+) -> None:
+    """Only the *name* check moves ahead of the skip; type and link checks stay after it.
+
+    A skipped prefix is a statement about which files the caller wants, so a member
+    type it never asked about — a fifo or a device node inside `.venv` — is still
+    none of its business. Running the type check before the skip would turn those
+    into hard failures, which is the behavior this ordering deliberately keeps.
+    """
+    _validate(
+        _tar_bytes(member),
+        skip_rel_paths=[Path(".runtime")],
+        allow_symlinks=False,
+        allow_external_symlink_targets=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("member", "reason"),
+    [
+        (_fifo("src/pipe"), "unsupported member type"),
+        (_hardlink("src/link", "src/main.py"), "hardlink member not allowed"),
+        (_symlink("src/link", "/etc/passwd"), "symlink member not allowed"),
+    ],
+)
+def test_validate_tarfile_rejects_those_member_types_outside_the_prefix(
+    member: _Member, reason: str
+) -> None:
+    """The control for the test above: the skip is what excuses them, not the reorder."""
+    with pytest.raises(UnsafeTarMemberError) as excinfo:
+        _validate(
+            _tar_bytes(member),
+            skip_rel_paths=[Path(".runtime")],
+            allow_symlinks=False,
+            allow_external_symlink_targets=False,
+        )
+    assert excinfo.value.reason == reason
+
+
 @pytest.mark.parametrize(
     "member_name",
     [
-        ".runtime/../escape",
         "..",
         "../escape",
-        "workspace/.runtime/../../escape",
-        "./.runtime/../escape",
+        ".runtime/../escape",
+        "/.runtime/state.json",
+        "C:/.runtime/state.json",
+        ".runtime" + _BACKSLASH + "state.json",
     ],
 )
-def test_should_skip_tar_member_never_skips_a_parent_traversal(member_name: str) -> None:
-    assert (
-        should_skip_tar_member(
-            member_name,
-            skip_rel_paths=[Path(".runtime")],
-            root_name="workspace",
-        )
-        is False
-    )
+def test_raise_if_unsafe_tar_member_name_rejects_what_the_prefix_would_swallow(
+    member_name: str,
+) -> None:
+    with pytest.raises(UnsafeTarMemberError):
+        raise_if_unsafe_tar_member_name(member_name)
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    [
+        "",
+        ".",
+        "./",
+        ".runtime/state.json",
+        "./.runtime/state.json",
+        "workspace/.runtime/state.json",
+        "src/main.py",
+        "a..b/c",
+        "...",
+    ],
+)
+def test_raise_if_unsafe_tar_member_name_accepts_safe_names(member_name: str) -> None:
+    """Including the root member names, which have no parts to be unsafe.
+
+    Whether a root member is *acceptable* is a question about its type, which
+    `safe_tar_member_rel_path` answers separately — and `a..b` / `...` are ordinary
+    names, not traversal, since the check is on path parts rather than substrings.
+    """
+    raise_if_unsafe_tar_member_name(member_name)
 
 
 @pytest.mark.parametrize(
@@ -473,9 +577,7 @@ def test_should_skip_tar_member_never_skips_a_parent_traversal(member_name: str)
         (".runtimely/state.json", False),
     ],
 )
-def test_should_skip_tar_member_matches_prefixes_without_traversal(
-    member_name: str, expected: bool
-) -> None:
+def test_should_skip_tar_member_matches_prefixes(member_name: str, expected: bool) -> None:
     assert (
         should_skip_tar_member(
             member_name,
