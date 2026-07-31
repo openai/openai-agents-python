@@ -18,6 +18,7 @@ from pydantic import Field, PrivateAttr
 from agents.sandbox import Manifest
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 from agents.sandbox.entries import (
+    Dir,
     File,
     GCSMount,
     InContainerMountStrategy,
@@ -31,6 +32,7 @@ from agents.sandbox.errors import (
     InvalidManifestPathError,
     MountConfigError,
     WorkspaceArchiveReadError,
+    WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
 )
 from agents.sandbox.files import EntryKind
@@ -2997,6 +2999,193 @@ async def test_modal_hydrate_tar_chunks_large_payload_before_draining(
     assert b"".join(sandbox.processes[0].stdin.chunks[:-1]) == tar_payload.getvalue()
     assert sandbox.processes[0].stdin.write_eof_calls == 1
     assert sandbox.processes[0].stdin.drain_calls >= 2
+
+
+def _hydration_tar_bytes(*members: tarfile.TarInfo) -> io.BytesIO:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for member in members:
+            if member.isreg():
+                tar.addfile(member, io.BytesIO(b"x" * member.size))
+            else:
+                tar.addfile(member)
+    buf.seek(0)
+    return buf
+
+
+def _hydration_member(name: str, kind: str = "file", linkname: str = "") -> tarfile.TarInfo:
+    member = tarfile.TarInfo(name)
+    if kind == "file":
+        member.size = 1
+    elif kind == "dir":
+        member.type = tarfile.DIRTYPE
+    elif kind == "symlink":
+        member.type = tarfile.SYMTYPE
+        member.linkname = linkname
+    elif kind == "hardlink":
+        member.type = tarfile.LNKTYPE
+        member.linkname = linkname
+    elif kind == "fifo":
+        member.type = tarfile.FIFOTYPE
+    elif kind == "chardev":
+        member.type = tarfile.CHRTYPE
+    else:  # pragma: no cover - guards against a typo in a parametrize entry
+        raise AssertionError(f"unknown kind: {kind}")
+    return member
+
+
+class _RecordingHydrationSandbox:
+    """A sandbox that records what it was asked to run, so a test can assert *nothing* ran."""
+
+    object_id = "sb-123"
+
+    def __init__(self) -> None:
+        self.commands: list[tuple[object, ...]] = []
+        self.payloads: list[bytes] = []
+        self.exec = _with_aio(self._exec)
+
+    def _exec(self, *command: object, **kwargs: object) -> object:
+        _ = kwargs
+        self.commands.append(command)
+        sandbox = self
+
+        class _Stdin:
+            def write(self, data: bytes | bytearray | memoryview) -> None:
+                sandbox.payloads.append(bytes(data))
+
+            def write_eof(self) -> None:
+                return None
+
+            def drain(self) -> None:
+                return None
+
+        stdin = _Stdin()
+        _set_aio_attr(stdin, "drain", stdin.drain)
+        return types.SimpleNamespace(
+            stdin=stdin,
+            stderr=types.SimpleNamespace(read=_with_aio(lambda: b"")),
+            wait=_with_aio(lambda: 0),
+        )
+
+
+def _hydration_session(
+    modal_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    sandbox: _RecordingHydrationSandbox,
+) -> Any:
+    # An ephemeral *directory*, so `ephemeral_persistence_paths()` yields the prefix
+    # `logs`; an ephemeral file would yield only its own exact path.
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(
+            root="/workspace",
+            entries={
+                "main.py": File(content=b"print('hi')\n"),
+                "logs": Dir(ephemeral=True),
+            },
+        ),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id=sandbox.object_id,
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=sandbox)
+
+    async def _fake_call_modal(
+        fn: Callable[..., object],
+        *args: object,
+        call_timeout: float | None = None,
+        **kwargs: object,
+    ) -> object:
+        _ = call_timeout
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(session, "_call_modal", _fake_call_modal)
+    return session
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("member", "reason"),
+    [
+        # A member claiming a path the manifest owns as ephemeral.
+        (
+            _hydration_member("logs/events.jsonl"),
+            "archive member overlaps protected path: logs",
+        ),
+        # Member types and links under the ephemeral prefix. Under `skip_rel_paths`
+        # these were never validated and `tar xf` created them anyway.
+        (_hydration_member("logs/pipe", "fifo"), "unsupported member type"),
+        (_hydration_member("logs/dev", "chardev"), "unsupported member type"),
+        (
+            _hydration_member("logs/escape", "symlink", "/etc/passwd"),
+            "archive member overlaps protected path: logs",
+        ),
+        (
+            _hydration_member("logs/link", "hardlink", "/etc/passwd"),
+            "hardlink member not allowed",
+        ),
+        # A traversal member normalizing under the protected prefix.
+        (
+            _hydration_member("logs/../../etc/passwd"),
+            "parent traversal",
+        ),
+    ],
+)
+async def test_modal_hydrate_tar_rejects_protected_members_before_extracting(
+    monkeypatch: pytest.MonkeyPatch, member: tarfile.TarInfo, reason: str
+) -> None:
+    """Hydration must reject before `tar xf`, because it extracts the bytes it validated.
+
+    `_hydrate_workspace_via_tar` validates the buffer it then pipes to `tar xf -`, so
+    there is no point after validation at which a member can be dropped. Hence
+    `reject_rel_paths` rather than `skip_rel_paths`: skipping suppresses member-type
+    and link validation while still handing those members to tar. The assertion that
+    no command ran is what distinguishes rejecting before extraction from failing
+    after it.
+    """
+
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    sandbox = _RecordingHydrationSandbox()
+    session = _hydration_session(modal_module, monkeypatch, sandbox)
+
+    payload = _hydration_tar_bytes(_hydration_member("main.py"), member)
+
+    with pytest.raises(WorkspaceArchiveWriteError) as excinfo:
+        await session.hydrate_workspace(payload)
+
+    assert excinfo.value.context["reason"] == reason
+    assert sandbox.commands == []
+    assert sandbox.payloads == []
+
+
+@pytest.mark.asyncio
+async def test_modal_hydrate_tar_accepts_an_archive_without_protected_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control: rejecting the ephemeral paths must not reject valid snapshots.
+
+    A snapshot from `persist_workspace` excludes the ephemeral paths, and symlinks
+    staying inside the archive are still accepted so virtualenvs remain restorable.
+    """
+
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    sandbox = _RecordingHydrationSandbox()
+    session = _hydration_session(modal_module, monkeypatch, sandbox)
+
+    payload = _hydration_tar_bytes(
+        _hydration_member(".", "dir"),
+        _hydration_member("./main.py"),
+        _hydration_member("./.venv", "dir"),
+        _hydration_member("./.venv/lib64", "symlink", "lib"),
+    )
+    raw = payload.getvalue()
+
+    await session.hydrate_workspace(payload)
+
+    assert sandbox.commands == [
+        ("mkdir", "-p", "--", "/workspace"),
+        ("tar", "xf", "-", "-C", "/workspace"),
+    ]
+    assert b"".join(sandbox.payloads) == raw
 
 
 @pytest.mark.asyncio

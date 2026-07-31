@@ -283,34 +283,65 @@ def test_batch_trace_processor_survives_exporter_exception():
     assert exporter.call_count >= 3
 
 
-def test_batch_trace_processor_scheduled_export(mocked_exporter):
-    """
-    Tests that items are automatically exported when the schedule_delay expires.
-    We mock time.time() so we can trigger the condition without waiting in real time.
-    """
-    with patch("time.time") as mock_time:
-        base_time = 1000.0
-        mock_time.return_value = base_time
+@pytest.mark.parametrize(
+    ("adjusted_wall_time", "adjusted_monotonic_time", "expected_scheduled_exports"),
+    [
+        (2000.0, 100.5, 0),
+        (0.0, 101.5, 1),
+    ],
+)
+def test_batch_trace_processor_schedule_uses_monotonic_clock(
+    mocked_exporter,
+    monkeypatch,
+    adjusted_wall_time: float,
+    adjusted_monotonic_time: float,
+    expected_scheduled_exports: int,
+) -> None:
+    class ControlledTime:
+        def __init__(self) -> None:
+            self.wall_time = 1000.0
+            self.monotonic_time = 100.0
+            self.sleep_calls = 0
 
-        processor = BatchTraceProcessor(exporter=mocked_exporter, schedule_delay=1.0)
+        def time(self) -> float:
+            return self.wall_time
 
-        processor.on_span_end(get_span(processor))  # queue size = 1
+        def monotonic(self) -> float:
+            return self.monotonic_time
 
-        # Now artificially advance time beyond the next export time
-        mock_time.return_value = base_time + 2.0  # > base_time + schedule_delay
-        # Let the background thread run a bit
-        time.sleep(0.3)
+        def sleep(self, _seconds: float) -> None:
+            self.sleep_calls += 1
+            if self.sleep_calls == 1:
+                self.wall_time = adjusted_wall_time
+                self.monotonic_time = adjusted_monotonic_time
+            else:
+                processor._shutdown_event.set()
 
-        # Check that exporter.export was eventually called
-        # Because the background thread runs, we might need a small sleep
-        processor.shutdown()
+    controlled_time = ControlledTime()
+    monkeypatch.setattr("agents.tracing.processors.time", controlled_time)
+    processor = BatchTraceProcessor(
+        exporter=mocked_exporter,
+        max_queue_size=100,
+        schedule_delay=1.0,
+        export_trigger_ratio=1.0,
+    )
+    processor._queue.put_nowait(get_span(processor))
+    scheduled_export = object()
+    export_deadlines: list[float | None | object] = []
 
-    total_exported = 0
-    for call_args in mocked_exporter.export.call_args_list:
-        batch = call_args[0][0]
-        total_exported += len(batch)
+    def record_export(deadline: float | None | object = scheduled_export) -> None:
+        export_deadlines.append(deadline)
+        if sum(item is scheduled_export for item in export_deadlines) > 1:
+            processor._shutdown_event.set()
 
-    assert total_exported == 1, "Item should be exported after scheduled delay"
+    monkeypatch.setattr(processor, "_export_batches", record_export)
+
+    processor._run()
+
+    assert sum(deadline is scheduled_export for deadline in export_deadlines) == (
+        expected_scheduled_exports
+    )
+    assert export_deadlines[-1] is None
 
 
 def test_flush_traces_delegates_to_default_trace_provider():

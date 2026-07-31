@@ -1858,9 +1858,15 @@ class ModalSandboxSession(BaseSandboxSession):
             raise WorkspaceArchiveWriteError(path=root, context={"reason": "non_bytes_tar_payload"})
 
         try:
+            # `raw` is handed to `tar xf -` unchanged below, so validation cannot drop
+            # a member: whatever it waves through, the extractor writes. Skipping the
+            # ephemeral paths would therefore let a member under one of them past
+            # member-type and link validation and still create it, so reject them
+            # instead. The producing side already excludes these paths via
+            # `_persist_workspace_skip_relpaths()`.
             validate_tar_bytes(
                 bytes(raw),
-                skip_rel_paths=self.state.manifest.ephemeral_persistence_paths(),
+                reject_rel_paths=self.state.manifest.ephemeral_persistence_paths(),
                 allow_external_symlink_targets=False,
             )
         except UnsafeTarMemberError as e:

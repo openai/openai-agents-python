@@ -573,7 +573,7 @@ class BatchTraceProcessor(TracingProcessor):
         self._export_trigger_size = max(1, int(max_queue_size * export_trigger_ratio))
 
         # Track when we next *must* perform a scheduled export
-        self._next_export_time = time.time() + self._schedule_delay
+        self._next_export_time = time.monotonic() + self._schedule_delay
 
         # We lazily start the background worker thread the first time a span/trace is queued.
         self._worker_thread: threading.Thread | None = None
@@ -652,14 +652,14 @@ class BatchTraceProcessor(TracingProcessor):
 
     def _run(self):
         while not self._shutdown_event.is_set():
-            current_time = time.time()
+            current_time = time.monotonic()
             queue_size = self._queue.qsize()
 
             # If it's time for a scheduled flush or queue is above the trigger threshold
             if current_time >= self._next_export_time or queue_size >= self._export_trigger_size:
                 self._export_batches()
                 # Reset the next scheduled flush time
-                self._next_export_time = time.time() + self._schedule_delay
+                self._next_export_time = time.monotonic() + self._schedule_delay
             else:
                 # Sleep a short interval so we don't busy-wait.
                 time.sleep(0.2)
