@@ -17,6 +17,7 @@ from agents.realtime.model import RealtimeModelConfig
 from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
     RealtimeModelErrorEvent,
+    RealtimeModelRawServerEvent,
     RealtimeModelToolCallEvent,
     RealtimeModelUsageEvent,
 )
@@ -418,6 +419,35 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
 
 class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
     """Test event parsing, validation, and error handling robustness."""
+
+    @pytest.mark.asyncio
+    async def test_raw_event_preserves_null_previous_item_id(self, model):
+        """Validation compatibility must not mutate the retained raw server payload."""
+        mock_listener = AsyncMock()
+        model.add_listener(mock_listener)
+        server_event = {
+            "type": "conversation.item.created",
+            "event_id": "event_1",
+            "previous_item_id": None,
+            "item": {
+                "id": "item_1",
+                "type": "message",
+                "status": "completed",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}],
+            },
+        }
+
+        await model._handle_ws_event(server_event)
+
+        assert mock_listener.on_event.call_count == 2
+        raw_event = mock_listener.on_event.call_args_list[0][0][0]
+        assert isinstance(raw_event, RealtimeModelRawServerEvent)
+        assert raw_event.data is server_event
+        assert raw_event.data["previous_item_id"] is None
+
+        item_updated_event = mock_listener.on_event.call_args_list[1][0][0]
+        assert item_updated_event.item.previous_item_id == ""
 
     @pytest.mark.asyncio
     async def test_handle_malformed_json_logs_error_continues(self, model):
