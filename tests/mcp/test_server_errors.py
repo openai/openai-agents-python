@@ -342,8 +342,13 @@ async def test_resource_request_nested_group_replaces_ordinary_siblings_safely()
         await server.read_resource("file:///safe.txt")
 
     propagated_group = error_group_info.value
-    assert len(propagated_group.exceptions) == 1
-    propagated_error = propagated_group.exceptions[0]
+    assert len(propagated_group.exceptions) == 2
+    propagated_transport_error, propagated_error = propagated_group.exceptions
+    assert isinstance(propagated_transport_error, UserError)
+    assert "Failed to read resource" in str(propagated_transport_error)
+    assert "Connection lost" in str(propagated_transport_error)
+    assert propagated_transport_error.__cause__ is None
+    assert propagated_transport_error.__context__ is None
     assert isinstance(propagated_error, RuntimeError)
     assert str(propagated_error) == "An additional error occurred during the MCP request."
     assert id(propagated_error) != id(ordinary_error)
@@ -382,8 +387,13 @@ async def test_resource_request_mixed_group_preserves_cancellation():
         await server.read_resource("file:///safe.txt")
 
     propagated_group = error_group_info.value
-    assert len(propagated_group.exceptions) == 1
-    propagated_cancellation = propagated_group.exceptions[0]
+    assert len(propagated_group.exceptions) == 2
+    propagated_transport_error, propagated_cancellation = propagated_group.exceptions
+    assert isinstance(propagated_transport_error, UserError)
+    assert "Failed to read resource" in str(propagated_transport_error)
+    assert "Connection lost" in str(propagated_transport_error)
+    assert propagated_transport_error.__cause__ is None
+    assert propagated_transport_error.__context__ is None
     assert isinstance(propagated_cancellation, asyncio.CancelledError)
     assert propagated_cancellation is not cancellation
     _assert_url_credentials_hidden(propagated_group)

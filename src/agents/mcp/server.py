@@ -896,13 +896,18 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             selected_http_error = http_errors[0]
             http_group, remaining_group = error_group.split(_is_http_transport_error)
             assert http_group is not None
+            mapped_transport_error = self._user_error_for_request_operation(
+                operation,
+                selected_http_error,
+            )
             if remaining_group is None:
-                transport_error = self._user_error_for_request_operation(
-                    operation,
-                    selected_http_error,
-                )
+                transport_error = mapped_transport_error
             else:
-                base_error_group = _credential_safe_exception_group(remaining_group)
+                safe_remaining_group = _credential_safe_exception_group(remaining_group)
+                base_error_group = BaseExceptionGroup(
+                    _SAFE_EXCEPTION_GROUP_MESSAGE,
+                    [mapped_transport_error, *safe_remaining_group.exceptions],
+                )
             http_errors.clear()
             del selected_http_error
             del http_group
