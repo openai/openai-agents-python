@@ -322,3 +322,25 @@ def test_tool_not_found_behavior_is_public_from_agents_package() -> None:
     config = RunConfig(tool_not_found_behavior=behavior)
 
     assert config.tool_not_found_behavior == "return_error_to_model"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_message"),
+    [
+        (
+            "reasoning_item_id_policy",
+            "preserve_ids",
+            r"run_config.reasoning_item_id_policy must be one of \('preserve', 'omit'\)",
+        ),
+        (
+            "tool_not_found_behavior",
+            "return_error",
+            r"run_config.tool_not_found_behavior must be one of \('raise_error', 'return_error_to_model'\)",
+        ),
+    ],
+)
+def test_run_config_rejects_invalid_literal_values(
+    field: str, value: str, expected_message: str
+) -> None:
+    with pytest.raises(ValueError, match=expected_message):
+        RunConfig(**{field: value})  # type: ignore[arg-type]

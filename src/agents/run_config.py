@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, Literal
+from typing import TYPE_CHECKING, Any, Generic, Literal, get_args
 
 from pydantic import TypeAdapter
 from typing_extensions import NotRequired, TypedDict
@@ -52,6 +52,25 @@ def _default_trace_include_sensitive_data() -> bool:
     """Return the default for trace_include_sensitive_data based on environment."""
     val = os.getenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "true")
     return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _validate_literal_setting(
+    *,
+    value: str | None,
+    setting_name: str,
+    allowed_values: tuple[str, ...],
+    allow_none: bool = False,
+) -> None:
+    if value is None:
+        if allow_none:
+            return
+        raise ValueError(
+            f"run_config.{setting_name} must be one of {allowed_values}; got None"
+        )
+    if value not in allowed_values:
+        raise ValueError(
+            f"run_config.{setting_name} must be one of {allowed_values}; got {value!r}"
+        )
 
 
 @dataclass
@@ -459,6 +478,17 @@ class RunConfig:
         ) -> None: ...
 
     def __post_init__(self) -> None:
+        _validate_literal_setting(
+            value=self.reasoning_item_id_policy,
+            setting_name="reasoning_item_id_policy",
+            allowed_values=get_args(ReasoningItemIdPolicy),
+            allow_none=True,
+        )
+        _validate_literal_setting(
+            value=self.tool_not_found_behavior,
+            setting_name="tool_not_found_behavior",
+            allowed_values=get_args(ToolNotFoundBehavior),
+        )
         if self.model_settings is not None:
             self.model_settings = _coerce_model_settings(
                 self.model_settings,
