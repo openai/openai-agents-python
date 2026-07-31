@@ -1886,6 +1886,88 @@ async def test_input_guardrail_tripwire_triggered_causes_exception():
         await Runner.run(agent, input="user_message")
 
 
+def _named_input_guardrail(
+    name: str, triggered: bool, run_in_parallel: bool, delay: float = 0.0
+) -> InputGuardrail[Any]:
+    async def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        if delay:
+            await asyncio.sleep(delay)
+        return GuardrailFunctionOutput(output_info=name, tripwire_triggered=triggered)
+
+    return InputGuardrail(
+        guardrail_function=guardrail_function, name=name, run_in_parallel=run_in_parallel
+    )
+
+
+def _tripping_agent(model: FakeModel, run_in_parallel: bool) -> Agent[Any]:
+    return Agent(
+        name="test",
+        model=model,
+        input_guardrails=[
+            _named_input_guardrail("passes", triggered=False, run_in_parallel=run_in_parallel),
+            # Delay the tripwire so the passing guardrail is guaranteed to complete first.
+            _named_input_guardrail(
+                "trips", triggered=True, run_in_parallel=run_in_parallel, delay=0.01
+            ),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run_in_parallel", [True, False])
+async def test_input_guardrail_tripwire_reports_completed_results(run_in_parallel: bool):
+    """A tripwire must still report every input guardrail that already completed.
+
+    The guardrail results are observable run state, so aborting the run must not discard the
+    results of the guardrails that finished before the tripwire fired.
+    """
+    model = FakeModel()
+    model.set_next_output([get_text_message("user_message")])
+
+    with pytest.raises(InputGuardrailTripwireTriggered) as exc_info:
+        await Runner.run(_tripping_agent(model, run_in_parallel), input="user_message")
+
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert [result.guardrail.get_name() for result in run_data.input_guardrail_results] == [
+        "passes",
+        "trips",
+    ]
+    assert [result.output.output_info for result in run_data.input_guardrail_results] == [
+        "passes",
+        "trips",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run_in_parallel", [True, False])
+async def test_input_guardrail_tripwire_results_match_streamed_run(run_in_parallel: bool):
+    """Runner.run() and Runner.run_streamed() must report the same guardrail results."""
+    non_streamed_model = FakeModel()
+    non_streamed_model.set_next_output([get_text_message("user_message")])
+    with pytest.raises(InputGuardrailTripwireTriggered) as non_streamed_exc:
+        await Runner.run(_tripping_agent(non_streamed_model, run_in_parallel), input="user_message")
+
+    streamed_model = FakeModel()
+    streamed_model.set_next_output([get_text_message("user_message")])
+    streamed = Runner.run_streamed(
+        _tripping_agent(streamed_model, run_in_parallel), input="user_message"
+    )
+    with pytest.raises(InputGuardrailTripwireTriggered) as streamed_exc:
+        async for _ in streamed.stream_events():
+            pass
+
+    non_streamed_data = non_streamed_exc.value.run_data
+    streamed_data = streamed_exc.value.run_data
+    assert non_streamed_data is not None
+    assert streamed_data is not None
+    assert [
+        result.guardrail.get_name() for result in non_streamed_data.input_guardrail_results
+    ] == [result.guardrail.get_name() for result in streamed_data.input_guardrail_results]
+
+
 @pytest.mark.asyncio
 async def test_input_guardrail_tripwire_does_not_save_assistant_message_to_session():
     async def guardrail_function(

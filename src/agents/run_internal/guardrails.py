@@ -121,21 +121,31 @@ async def run_input_guardrails(
     guardrails: list[InputGuardrail[TContext]],
     input: str | list[TResponseInputItem],
     context: RunContextWrapper[TContext],
+    results_out: list[InputGuardrailResult] | None = None,
 ) -> list[InputGuardrailResult]:
-    """Run input guardrails concurrently and raise on tripwires."""
+    """Run input guardrails concurrently and raise on tripwires.
+
+    A tripwire aborts the run before this function returns, so the return value is only
+    available on the success path. Callers that also need the results on the error path
+    pass ``results_out``, which records every result as its guardrail completes,
+    including the one that trips.
+    """
+    guardrail_results: list[InputGuardrailResult] = results_out if results_out is not None else []
+
     if not guardrails:
-        return []
+        return guardrail_results
 
     guardrail_tasks = [
         asyncio.create_task(run_single_input_guardrail(agent, guardrail, input, context))
         for guardrail in guardrails
     ]
 
-    guardrail_results: list[InputGuardrailResult] = []
-
     try:
         for done in asyncio.as_completed(guardrail_tasks):
             result = await done
+            # Record before the tripwire check so a trip still reports every guardrail that
+            # completed, matching what run_input_guardrails_with_queue exposes to streamed runs.
+            guardrail_results.append(result)
             if result.output.tripwire_triggered:
                 for t in guardrail_tasks:
                     t.cancel()
@@ -147,7 +157,6 @@ async def run_input_guardrails(
                     )
                 )
                 raise InputGuardrailTripwireTriggered(result)
-            guardrail_results.append(result)
     except BaseException:
         # On any error (including a guardrail raising or the caller being cancelled),
         # cancel and await siblings so they don't leak past this function's return.

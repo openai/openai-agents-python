@@ -807,8 +807,10 @@ class AgentRunner:
                                 sequential_guardrails,
                                 copy_input_items(original_input),
                                 context_wrapper,
+                                results_out=sequential_results,
                             )
                         except InputGuardrailTripwireTriggered:
+                            input_guardrail_results.extend(sequential_results)
                             session_input_items_for_persistence = (
                                 await persist_session_items_for_guardrail_trip(
                                     session,
@@ -1226,8 +1228,10 @@ class AgentRunner:
                                         sequential_guardrails,
                                         copy_input_items(original_input),
                                         context_wrapper,
+                                        results_out=sequential_results,
                                     )
                             except InputGuardrailTripwireTriggered:
+                                input_guardrail_results.extend(sequential_results)
                                 session_input_items_for_persistence = (
                                     await persist_session_items_for_guardrail_trip(
                                         session,
@@ -1272,6 +1276,7 @@ class AgentRunner:
                                         parallel_guardrails,
                                         copy_input_items(original_input),
                                         context_wrapper,
+                                        results_out=parallel_results,
                                     )
                                 )
                                 try:
@@ -1280,6 +1285,8 @@ class AgentRunner:
                                         model_task,
                                     )
                                 except InputGuardrailTripwireTriggered:
+                                    input_guardrail_results.extend(sequential_results)
+                                    input_guardrail_results.extend(parallel_results)
                                     if should_cancel_parallel_model_task_on_input_guardrail_trip():
                                         if not model_task.done():
                                             model_task.cancel()
