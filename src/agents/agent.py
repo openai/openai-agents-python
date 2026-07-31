@@ -855,6 +855,20 @@ class Agent(AgentBase, Generic[TContext]):
                             maybe_result = stream_handler(payload)
                             if inspect.isawaitable(maybe_result):
                                 await maybe_result
+                        except asyncio.CancelledError as exc:
+                            current_task = asyncio.current_task()
+                            if current_task is not None and current_task.cancelling():
+                                raise
+
+                            def diagnostic_extra() -> dict[str, object]:
+                                return {"agent_name": self.name}
+
+                            log_model_and_tool_action_error(
+                                logger,
+                                "Error while handling an agent tool on_stream event",
+                                exc,
+                                diagnostic_extra=diagnostic_extra,
+                            )
                         except Exception as exc:
 
                             def diagnostic_extra() -> dict[str, object]:

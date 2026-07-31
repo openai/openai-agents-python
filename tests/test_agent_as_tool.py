@@ -2251,6 +2251,59 @@ async def test_agent_as_tool_streaming_reraises_parent_cancellation_without_wait
 
 
 @pytest.mark.asyncio
+async def test_agent_as_tool_streaming_callback_cancelled_error_does_not_deadlock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="streamer")
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+            self.current_agent = agent
+
+        async def stream_events(self):
+            yield RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
+
+    monkeypatch.setattr(
+        Runner, "run_streamed", classmethod(lambda *args, **kwargs: DummyStreamingResult())
+    )
+    monkeypatch.setattr(
+        Runner,
+        "run",
+        classmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no run"))),
+    )
+
+    async def on_stream(_: AgentToolStreamEvent) -> None:
+        raise asyncio.CancelledError("synthetic callback cancellation")
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_callback_cancel",
+        arguments='{"input": "go"}',
+        call_id="call-callback-cancel",
+        name="stream_tool",
+        type="function_call",
+    )
+
+    tool = agent.as_tool(
+        tool_name="stream_tool",
+        tool_description="Streams events",
+        on_stream=on_stream,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+
+    output = await asyncio.wait_for(tool.on_invoke_tool(tool_context, '{"input": "go"}'), timeout=1.0)
+
+    assert output == "ok"
+
+
+@pytest.mark.asyncio
 async def test_agent_as_tool_streaming_extractor_can_access_agent_tool_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
