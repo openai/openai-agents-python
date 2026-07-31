@@ -346,7 +346,11 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             try:
                 turn = await self._output_queue.get()
             except asyncio.CancelledError:
-                break
+                if self._tracing_span:
+                    self._end_turn("")
+                if self._websocket:
+                    await self._websocket.close()
+                raise
 
             if (
                 turn is None

@@ -58,6 +58,44 @@ def fake_time(increment: int):
 
 # ===== Tests =====
 @pytest.mark.asyncio
+async def test_transcribe_turns_propagates_consumer_cancellation(monkeypatch) -> None:
+    session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="whisper-1",
+        settings=STTModelSettings(),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+    session._websocket = AsyncMock()
+    get_started = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def wait_for_turn() -> str:
+        get_started.set()
+        await never_finishes.wait()
+        raise AssertionError("Unreachable")
+
+    async def hold_connection_open() -> None:
+        await never_finishes.wait()
+
+    monkeypatch.setattr(session._output_queue, "get", wait_for_turn)
+    monkeypatch.setattr(session, "_process_websocket_connection", hold_connection_open)
+    consumer = asyncio.ensure_future(anext(session.transcribe_turns()))
+    await get_started.wait()
+    consumer.cancel()
+
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
+        session._websocket.close.assert_awaited_once()
+    finally:
+        await session.close()
+        if session._connection_task is not None:
+            await asyncio.gather(session._connection_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("trace_include_sensitive_data", "expected_error"),
     [

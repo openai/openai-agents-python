@@ -61,6 +61,43 @@ def test_streamed_audio_result_odd_length_buffer_int16() -> None:
     assert transformed.tolist() == [1]
 
 
+@pytest.mark.asyncio
+async def test_streamed_audio_result_propagates_consumer_cancellation(monkeypatch) -> None:
+    result = StreamedAudioResult(
+        FakeTTS(),
+        TTSModelSettings(),
+        VoicePipelineConfig(),
+    )
+    get_started = asyncio.Event()
+    never_finishes = asyncio.Event()
+    producer_started = asyncio.Event()
+    producer_stopped = asyncio.Event()
+
+    async def wait_for_event() -> VoiceStreamEvent:
+        get_started.set()
+        await never_finishes.wait()
+        raise AssertionError("Unreachable")
+
+    async def produce_events() -> None:
+        producer_started.set()
+        try:
+            await never_finishes.wait()
+        finally:
+            producer_stopped.set()
+
+    producer = asyncio.create_task(produce_events())
+    result._tasks.append(producer)
+    monkeypatch.setattr(result._queue, "get", wait_for_event)
+    consumer = asyncio.ensure_future(anext(result.stream()))
+    await asyncio.gather(get_started.wait(), producer_started.wait())
+    consumer.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+    await producer_stopped.wait()
+    assert producer.cancelled()
+
+
 def test_voice_pipeline_config_normalizes_dictionary_settings() -> None:
     config = VoicePipelineConfig(
         stt_settings={"language": "ja", "temperature": 0.0},

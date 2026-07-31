@@ -305,7 +305,8 @@ class StreamedAudioResult:
             try:
                 event = await self._queue.get()
             except asyncio.CancelledError:
-                break
+                self._cleanup_tasks()
+                raise
             if isinstance(event, VoiceStreamEventError):
                 self._stored_exception = event.error
                 log_model_and_tool_action_error(
