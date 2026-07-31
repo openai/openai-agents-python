@@ -1034,7 +1034,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
             unsafe_http_error = _first_unsafe_transport_error(http_errors)
             http_error = unsafe_http_error or http_errors[0]
-            connection_cause = None if unsafe_http_error is not None else http_error
+            connection_cause = _safe_transport_cause(http_error)
             maps_safe_error = isinstance(
                 http_error,
                 httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException,
@@ -1308,7 +1308,6 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             # masking the original exception.
             is_failed_connection_cleanup = self.session is None
             cleanup_error: UserError | None = None
-            cleanup_cause: Exception | None = None
 
             try:
                 await self.exit_stack.aclose()
@@ -1327,13 +1326,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                             selected_http_error,
                             include_http_reason_phrase=False,
                         )
-                        cleanup_cause = (
-                            None
-                            if isinstance(selected_http_error, httpx.HTTPStatusError)
-                            else _safe_transport_cause(selected_http_error)
-                        )
-                        if cleanup_cause is None:
-                            del selected_http_error
+                        del selected_http_error
                     else:
                         _log_transport_warning(
                             get_mcp_server_log_message(
@@ -1341,26 +1334,48 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                             ),
                             selected_http_error,
                         )
-                elif isinstance(e, BaseExceptionGroup):
-                    # No HTTP error found, suppress RuntimeError about cancel scopes
-                    has_cancel_scope_error = any(
-                        isinstance(exc, RuntimeError) and "cancel scope" in str(exc)
-                        for exc in e.exceptions
+                elif isinstance(e, httpx.RequestError):
+                    _log_transport_warning(
+                        get_mcp_server_log_message(_get_cleanup_transport_error_message(e), self),
+                        e,
                     )
-                    if has_cancel_scope_error:
-                        log_tool_action_debug(
-                            logger,
+                elif isinstance(e, BaseExceptionGroup):
+                    http_errors = self._extract_http_errors_from_exception(e)
+                    unsafe_http_error = next(
+                        (
+                            http_error
+                            for http_error in http_errors
+                            if _safe_transport_cause(http_error) is None
+                        ),
+                        None,
+                    )
+                    if unsafe_http_error is not None:
+                        _log_transport_warning(
                             get_mcp_server_log_message(
-                                "Ignoring cancel scope error during cleanup of MCP server", self
+                                _get_cleanup_transport_error_message(unsafe_http_error), self
                             ),
-                            e,
+                            unsafe_http_error,
                         )
                     else:
-                        log_tool_action_error(
-                            logger,
-                            get_mcp_server_log_message("Error cleaning up MCP server", self),
-                            e,
+                        # No HTTP error found, suppress RuntimeError about cancel scopes.
+                        has_cancel_scope_error = any(
+                            isinstance(exc, RuntimeError) and "cancel scope" in str(exc)
+                            for exc in e.exceptions
                         )
+                        if has_cancel_scope_error:
+                            log_tool_action_debug(
+                                logger,
+                                get_mcp_server_log_message(
+                                    "Ignoring cancel scope error during cleanup of MCP server", self
+                                ),
+                                e,
+                            )
+                        else:
+                            log_tool_action_error(
+                                logger,
+                                get_mcp_server_log_message("Error cleaning up MCP server", self),
+                                e,
+                            )
                 else:
                     log_tool_action_error(
                         logger,
@@ -1389,7 +1404,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 self._get_session_id = None
 
             if cleanup_error is not None:
-                self._raise_mapped_transport_error(cleanup_error, cleanup_cause)
+                self._raise_mapped_transport_error(cleanup_error, None)
 
 
 class MCPServerStdioParams(TypedDict):
@@ -1986,7 +2001,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
 
             unsafe_http_error = _first_unsafe_transport_error(http_errors)
             http_error = unsafe_http_error or http_errors[0]
-            transport_cause = None if unsafe_http_error is not None else http_error
+            transport_cause = _safe_transport_cause(http_error)
             if isinstance(http_error, httpx.HTTPStatusError):
                 status_code = http_error.response.status_code
                 transport_error = UserError(
