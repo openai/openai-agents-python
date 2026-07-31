@@ -134,37 +134,33 @@ def _transport_error_urls_are_safe(
 
 
 def _safe_transport_cause(http_error: Exception) -> Exception | None:
-    """Keep a transport exception only when its full graph has credential-safe HTTPX URLs."""
+    """Keep an unchained transport exception only when its HTTPX URLs are credential-safe."""
     if not isinstance(http_error, httpx.HTTPStatusError | httpx.RequestError):
         return http_error
 
-    pending: list[BaseException] = [http_error]
-    seen: set[int] = set()
-    while pending:
-        error = pending.pop()
-        if id(error) in seen:
-            continue
-        seen.add(id(error))
-
-        if isinstance(error, httpx.HTTPStatusError | httpx.RequestError):
-            if not _transport_error_urls_are_safe(error):
-                return None
-
-        cause = BaseException.__getattribute__(error, "__cause__")
-        if cause is not None:
-            pending.append(cause)
-        context = BaseException.__getattribute__(error, "__context__")
-        if context is not None:
-            pending.append(context)
-        if isinstance(error, BaseExceptionGroup):
-            pending.extend(error.exceptions)
+    if not _transport_error_urls_are_safe(http_error):
+        return None
+    if BaseException.__getattribute__(http_error, "__cause__") is not None:
+        return None
+    if BaseException.__getattribute__(http_error, "__context__") is not None:
+        return None
+    if BaseException.__getattribute__(http_error, "__dict__").get("__notes__"):
+        return None
 
     return http_error
 
 
 def _first_unsafe_transport_error(http_errors: list[Exception]) -> Exception | None:
     """Return the first transport error whose HTTPX URLs require sanitization."""
-    return next((error for error in http_errors if _safe_transport_cause(error) is None), None)
+    return next(
+        (
+            error
+            for error in http_errors
+            if isinstance(error, httpx.HTTPStatusError | httpx.RequestError)
+            and not _transport_error_urls_are_safe(error)
+        ),
+        None,
+    )
 
 
 def _is_http_transport_error(error: BaseException) -> bool:
@@ -902,11 +898,18 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         return None
 
-    def _user_error_for_http_error(self, http_error: Exception) -> UserError:
+    def _user_error_for_http_error(
+        self,
+        http_error: Exception,
+        *,
+        include_http_reason_phrase: bool = True,
+    ) -> UserError:
         """Build a UserError from safe HTTP diagnostics."""
         error_message = f"Failed to connect to MCP server '{self._error_name}': "
         if isinstance(http_error, httpx.HTTPStatusError):
-            error_message += f"HTTP error {http_error.response.status_code} ({http_error.response.reason_phrase})"  # noqa: E501
+            error_message += f"HTTP error {http_error.response.status_code}"
+            if include_http_reason_phrase:
+                error_message += f" ({http_error.response.reason_phrase})"
 
         elif isinstance(http_error, httpx.ConnectError):
             error_message += "Could not reach the server."
@@ -1320,8 +1323,15 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 selected_http_error = self._select_cleanup_transport_error(e)
                 if selected_http_error is not None:
                     if is_failed_connection_cleanup:
-                        cleanup_error = self._user_error_for_http_error(selected_http_error)
-                        cleanup_cause = _safe_transport_cause(selected_http_error)
+                        cleanup_error = self._user_error_for_http_error(
+                            selected_http_error,
+                            include_http_reason_phrase=False,
+                        )
+                        cleanup_cause = (
+                            None
+                            if isinstance(selected_http_error, httpx.HTTPStatusError)
+                            else _safe_transport_cause(selected_http_error)
+                        )
                         if cleanup_cause is None:
                             del selected_http_error
                     else:

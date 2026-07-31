@@ -487,17 +487,30 @@ def _mixed_request_error_group(
     return BaseExceptionGroup("mixed failures", [safe_error, nested_group]), safe_error, later_error
 
 
-def _chained_request_errors() -> tuple[httpx.ReadTimeout, httpx.ReadError]:
-    unsafe_error = httpx.ReadError(
-        "inner read failed",
-        request=httpx.Request("GET", _CREDENTIALED_URL),
-    )
+def _transport_error_with_sensitive_attachment(
+    attachment: str,
+) -> tuple[httpx.ReadTimeout, object]:
     safe_outer_error = httpx.ReadTimeout(
         "outer timeout",
         request=httpx.Request("GET", _SAFE_URL),
     )
-    safe_outer_error.__context__ = unsafe_error
-    return safe_outer_error, unsafe_error
+    if attachment == "http_context":
+        http_context = httpx.ReadError(
+            "inner read failed",
+            request=httpx.Request("GET", _CREDENTIALED_URL),
+        )
+        sensitive_value: object = http_context
+        safe_outer_error.__context__ = http_context
+    elif attachment == "non_http_context":
+        non_http_context = ValueError(_CREDENTIALED_URL)
+        sensitive_value = non_http_context
+        safe_outer_error.__context__ = non_http_context
+    elif attachment == "note":
+        sensitive_value = _CREDENTIALED_URL
+        safe_outer_error.add_note(sensitive_value)
+    else:
+        raise AssertionError(f"Unexpected attachment type: {attachment}")
+    return safe_outer_error, sensitive_value
 
 
 @pytest.mark.asyncio
@@ -878,9 +891,12 @@ async def test_connect_preserves_original_error_when_cleanup_has_safe_generic_re
 
 
 @pytest.mark.asyncio
-async def test_failed_connection_cleanup_hides_chained_url_credentials():
+@pytest.mark.parametrize("attachment", ["http_context", "non_http_context", "note"])
+async def test_failed_connection_cleanup_hides_sensitive_exception_attachments(
+    attachment: str,
+):
     server = MCPServerSse(params={"url": _SAFE_URL})
-    cleanup_error, unsafe_error = _chained_request_errors()
+    cleanup_error, sensitive_value = _transport_error_with_sensitive_attachment(attachment)
 
     with patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_error)):
         with pytest.raises(UserError) as exc_info:
@@ -889,9 +905,41 @@ async def test_failed_connection_cleanup_hides_chained_url_credentials():
     assert "Connection timeout" in str(exc_info.value)
     _assert_url_credentials_hidden(exc_info.value)
     _assert_not_retained_in_exception_graph(exc_info.value, cleanup_error)
-    _assert_not_retained_in_exception_graph(exc_info.value, unsafe_error)
+    _assert_not_retained_in_exception_graph(exc_info.value, sensitive_value)
     _assert_not_retained_in_traceback_locals(exc_info.value, cleanup_error)
-    _assert_not_retained_in_traceback_locals(exc_info.value, unsafe_error)
+    _assert_not_retained_in_traceback_locals(exc_info.value, sensitive_value)
+    assert server.session is None
+    assert server._get_session_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("grouped", [False, True])
+async def test_failed_connection_cleanup_omits_untrusted_http_reason_phrase(grouped: bool):
+    server = MCPServerSse(params={"url": _SAFE_URL})
+    request = httpx.Request("GET", _SAFE_URL)
+    http_error = httpx.HTTPStatusError(
+        "boom",
+        request=request,
+        response=httpx.Response(
+            502,
+            request=request,
+            extensions={"reason_phrase": _CREDENTIALED_URL.encode()},
+        ),
+    )
+    cleanup_error: BaseException = http_error
+    if grouped:
+        cleanup_error = BaseExceptionGroup("cleanup failed", [http_error])
+
+    with patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_error)):
+        with pytest.raises(UserError) as exc_info:
+            await server.cleanup()
+
+    assert "HTTP error 502" in str(exc_info.value)
+    _assert_url_credentials_hidden(exc_info.value)
+    _assert_not_retained_in_exception_graph(exc_info.value, cleanup_error)
+    _assert_not_retained_in_exception_graph(exc_info.value, http_error)
+    _assert_not_retained_in_traceback_locals(exc_info.value, cleanup_error)
+    _assert_not_retained_in_traceback_locals(exc_info.value, http_error)
     assert server.session is None
     assert server._get_session_id is None
 
@@ -975,15 +1023,17 @@ async def test_normal_cleanup_only_logs_safe_transport_exceptions(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("redacted", [True, False])
-async def test_normal_cleanup_hides_chained_url_credentials_from_log_record(
+@pytest.mark.parametrize("attachment", ["http_context", "non_http_context", "note"])
+async def test_normal_cleanup_hides_sensitive_exception_attachments_from_log_record(
     monkeypatch,
     caplog,
     redacted: bool,
+    attachment: str,
 ):
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
     server = MCPServerSse(params={"url": _SAFE_URL})
     server.session = MagicMock()
-    cleanup_error, unsafe_error = _chained_request_errors()
+    cleanup_error, sensitive_value = _transport_error_with_sensitive_attachment(attachment)
 
     with (
         patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_error)),
@@ -995,7 +1045,7 @@ async def test_normal_cleanup_hides_chained_url_credentials_from_log_record(
     assert record.exc_info is None
     assert record.exc_text is None
     _assert_not_retained_in_log_record(record, cleanup_error)
-    _assert_not_retained_in_log_record(record, unsafe_error)
+    _assert_not_retained_in_log_record(record, sensitive_value)
     _assert_url_credentials_hidden_from_log_record(record)
     assert server.session is None
     assert server._get_session_id is None
