@@ -96,6 +96,31 @@ def raise_if_unsafe_tar_member_name(member_name: str) -> None:
         raise UnsafeTarMemberError(member=member_name, reason="parent traversal")
 
 
+def _raise_if_unsafe_skipped_link(
+    member: tarfile.TarInfo,
+    *,
+    allow_external_symlink_targets: bool,
+) -> None:
+    """Reject a skipped member whose link target would leave the archive root.
+
+    Only the two member types that carry a path of their own are checked. Their
+    names have already passed `raise_if_unsafe_tar_member_name`; what is validated
+    here is the `linkname`, which no name check looks at.
+    """
+
+    if member.islnk():
+        raise UnsafeTarMemberError(member=member.name, reason="hardlink member not allowed")
+    if not member.issym():
+        return
+
+    rel = Path(*PurePosixPath(member.name).parts)
+    _validate_symlink_target(
+        member,
+        rel_path=rel,
+        allow_external_symlink_targets=allow_external_symlink_targets,
+    )
+
+
 def safe_tar_member_rel_path(
     member: tarfile.TarInfo,
     *,
@@ -299,6 +324,18 @@ def validate_tarfile(
             skip_rel_paths=skip_rel_paths,
             root_name=root_name,
         ):
+            # A skipped member's *type* is still the caller's business when the type
+            # carries a path of its own. Callers that validate raw bytes and then
+            # hand those same bytes to an extractor -- as the modal backend does,
+            # `validate_tar_bytes(...)` then `tar xf -` on the same buffer -- have no
+            # way to drop a member after the fact, so a link the validator waved
+            # through is a link the extractor creates. A fifo or a device node is
+            # created in place and stays inside the root; a symlink or a hardlink
+            # names its own target and does not.
+            _raise_if_unsafe_skipped_link(
+                member,
+                allow_external_symlink_targets=allow_external_symlink_targets,
+            )
             continue
         rel_path = safe_tar_member_rel_path(member, allow_symlinks=allow_symlinks)
         if rel_path is None:

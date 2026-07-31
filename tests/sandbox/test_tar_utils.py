@@ -73,6 +73,12 @@ def _fifo(name: str) -> _Member:
     return _Member(member)
 
 
+def _chardev(name: str) -> _Member:
+    member = tarfile.TarInfo(name)
+    member.type = tarfile.CHRTYPE
+    return _Member(member)
+
+
 def _safe_extract(raw: bytes, root: Path) -> None:
     with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tar:
         safe_extract_tarfile(tar, root=root)
@@ -477,25 +483,84 @@ def _validate(raw: bytes, **kwargs: object) -> None:
     "member",
     [
         _fifo(".runtime/pipe"),
-        _hardlink(".runtime/link", "src/main.py"),
-        _symlink(".runtime/link", "/etc/passwd"),
+        _chardev(".runtime/device"),
+        _symlink(".runtime/link", "state.json"),
+        _symlink(".runtime/link", "nested/state.json"),
     ],
 )
-def test_validate_tarfile_still_skips_member_types_under_a_skipped_prefix(
+def test_validate_tarfile_still_skips_contained_member_types_under_a_prefix(
     member: _Member,
 ) -> None:
-    """Only the *name* check moves ahead of the skip; type and link checks stay after it.
+    """A skipped member whose type stays inside the root is still the caller's to ignore.
 
     A skipped prefix is a statement about which files the caller wants, so a member
     type it never asked about — a fifo or a device node inside `.venv` — is still
-    none of its business. Running the type check before the skip would turn those
-    into hard failures, which is the behavior this ordering deliberately keeps.
+    none of its business. Those are created in place and cannot name anything
+    outside the root, which is what separates them from the link types below.
     """
     _validate(
         _tar_bytes(member),
         skip_rel_paths=[Path(".runtime")],
         allow_symlinks=False,
         allow_external_symlink_targets=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("member", "reason"),
+    [
+        (
+            _symlink(".runtime/escape", "/etc/passwd"),
+            "absolute symlink target not allowed: /etc/passwd",
+        ),
+        (
+            _symlink(".runtime/escape", "../../../etc/passwd"),
+            "symlink target escapes archive root: ../../../etc/passwd",
+        ),
+        (_hardlink(".runtime/link", "/etc/passwd"), "hardlink member not allowed"),
+        (_hardlink(".runtime/link", "src/main.py"), "hardlink member not allowed"),
+    ],
+)
+def test_validate_tarfile_rejects_escaping_links_under_a_skipped_prefix(
+    member: _Member, reason: str
+) -> None:
+    """A skipped link is still created by an extractor that gets the same bytes.
+
+    `validate_tar_bytes` is called on a buffer that is then handed to `tar xf -`
+    unchanged (extensions/sandbox/modal/sandbox.py), so there is no point after
+    validation at which a member can be dropped. Waving a link through therefore
+    means the extractor creates it, and a link -- unlike a fifo or a device node --
+    names its own target.
+
+    Measured on Linux (busybox tar 1.36.1) with the pre-fix validator: the archive
+    passed `validate_tar_bytes(..., allow_external_symlink_targets=False)`, `tar xf`
+    exited 0, `.runtime/escape` landed pointing at `/etc/passwd` and read back its
+    contents, and `.runtime/link` shared an inode with `/etc/passwd` -- appending to
+    it appended to `/etc/passwd`.
+
+    Hardlinks are rejected in both strictness modes because there is no opt-in for
+    them: `safe_tar_member_rel_path` rejects them unconditionally for every member
+    that is not skipped, so accepting them only when skipped was the anomaly.
+    """
+    with pytest.raises(UnsafeTarMemberError) as excinfo:
+        _validate(
+            _tar_bytes(member),
+            skip_rel_paths=[Path(".runtime")],
+            allow_symlinks=False,
+            allow_external_symlink_targets=False,
+        )
+    assert excinfo.value.reason == reason
+
+
+def test_validate_tarfile_skipped_symlink_still_honours_the_lenient_flag() -> None:
+    """The fix must not tighten the default. `allow_external_symlink_targets=True`
+    is what the flag is for, and a caller that passes it has said external targets
+    are acceptable -- so a skipped one stays acceptable too."""
+    _validate(
+        _tar_bytes(_symlink(".runtime/escape", "/tmp/outside")),
+        skip_rel_paths=[Path(".runtime")],
+        allow_symlinks=False,
+        allow_external_symlink_targets=True,
     )
 
 
