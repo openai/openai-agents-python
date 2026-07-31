@@ -226,10 +226,11 @@ async def test_streamed_audio_dispatcher_handles_stream_failure() -> None:
     with pytest.raises(RuntimeError, match="tts-failure"):
         await result._turn_done()
 
-    # The multi-turn pipeline always calls _done() (in a finally block) after an error.
-    # _done() sets _completed_session and then propagates the failed task's exception.
-    # The dispatcher must still be able to exit once the session is marked complete,
-    # instead of remaining blocked on the failed task's queue forever.
+    # The single-turn pipeline queues the error and re-raises without ever calling
+    # _done(), so _completed_session stays false. The dispatcher must terminate on the
+    # session_ended event from the failed task instead of blocking on its dead queue
+    # (or spinning in the outer wait loop waiting for a completion flag that never
+    # gets set).
     with pytest.raises(RuntimeError, match="tts-failure"):
         await result._done()
 
