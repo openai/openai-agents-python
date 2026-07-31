@@ -810,21 +810,28 @@ async def test_call_tool_request_error_only_maps_credentialed_urls(
 
 
 @pytest.mark.asyncio
-async def test_failed_connection_cleanup_hides_url_credentials_from_exception_graph():
+@pytest.mark.parametrize("grouped", [False, True])
+async def test_failed_connection_cleanup_hides_url_credentials_from_exception_graph(
+    grouped: bool,
+):
     server = MCPServerSse(params={"url": _CREDENTIALED_URL})
     request = httpx.Request("GET", _CREDENTIALED_URL)
     http_error = httpx.HTTPStatusError(
         "boom", request=request, response=httpx.Response(502, request=request)
     )
-    cleanup_group = BaseExceptionGroup("cleanup failed", [http_error])
+    cleanup_error: BaseException = http_error
+    if grouped:
+        cleanup_error = BaseExceptionGroup("cleanup failed", [http_error])
 
-    with patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_group)):
+    with patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_error)):
         with pytest.raises(UserError) as exc_info:
             await server.cleanup()
 
     assert "mcp.example.com/sse" in str(exc_info.value)
     assert "HTTP error 502" in str(exc_info.value)
     _assert_url_credentials_hidden(exc_info.value)
+    _assert_not_retained_in_exception_graph(exc_info.value, cleanup_error)
+    _assert_not_retained_in_exception_graph(exc_info.value, http_error)
     _assert_not_retained_in_traceback_locals(exc_info.value, http_error)
 
 
@@ -847,7 +854,7 @@ async def test_failed_connection_cleanup_checks_every_nested_transport_error():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("redacted", [True, False])
-@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("exception_shape", ["direct", "grouped", "nested_group"])
 @pytest.mark.parametrize(
     ("url", "safe_to_attach"),
     [
@@ -859,7 +866,7 @@ async def test_normal_cleanup_only_logs_safe_transport_exceptions(
     monkeypatch,
     caplog,
     redacted: bool,
-    nested: bool,
+    exception_shape: str,
     url: str,
     safe_to_attach: bool,
 ):
@@ -870,13 +877,15 @@ async def test_normal_cleanup_only_logs_safe_transport_exceptions(
         "timed out",
         request=httpx.Request("GET", url),
     )
-    inner_error: BaseException = timeout_error
-    if nested:
-        inner_error = BaseExceptionGroup("nested cleanup failed", [inner_error])
-    cleanup_group = BaseExceptionGroup("cleanup failed", [inner_error])
+    cleanup_error: BaseException = timeout_error
+    if exception_shape == "grouped":
+        cleanup_error = BaseExceptionGroup("cleanup failed", [timeout_error])
+    elif exception_shape == "nested_group":
+        inner_group = BaseExceptionGroup("nested cleanup failed", [timeout_error])
+        cleanup_error = BaseExceptionGroup("cleanup failed", [inner_group])
 
     with (
-        patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_group)),
+        patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_error)),
         caplog.at_level(logging.WARNING, logger="openai.agents"),
     ):
         await server.cleanup()
@@ -884,16 +893,16 @@ async def test_normal_cleanup_only_logs_safe_transport_exceptions(
     record = caplog.records[-1]
     if not redacted and safe_to_attach:
         assert record.exc_info is not None
-        if nested:
+        if exception_shape == "nested_group":
             assert record.levelno == logging.ERROR
-            assert record.exc_info[1] is cleanup_group
+            assert record.exc_info[1] is cleanup_error
         else:
             assert record.levelno == logging.WARNING
             assert record.exc_info[1] is timeout_error
     else:
         assert record.exc_info is None
         assert record.exc_text is None
-        _assert_not_retained_in_log_record(record, cleanup_group)
+        _assert_not_retained_in_log_record(record, cleanup_error)
         _assert_not_retained_in_log_record(record, timeout_error)
 
     if not safe_to_attach:
