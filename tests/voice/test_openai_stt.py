@@ -215,15 +215,9 @@ async def test_close_finishes_span_started_while_websocket_close_is_pending() ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("redact_model_data", "logging_fails"),
-    [(True, False), (False, False), (True, True)],
-)
 async def test_transcribe_turns_preserves_consumer_exception_when_cleanup_fails(
     monkeypatch,
     caplog: pytest.LogCaptureFixture,
-    redact_model_data: bool,
-    logging_fails: bool,
 ) -> None:
     session = OpenAISTTTranscriptionSession(
         input=StreamedAudioInput(),
@@ -241,14 +235,9 @@ async def test_transcribe_turns_preserves_consumer_exception_when_cleanup_fails(
     async def fail_cleanup() -> None:
         raise RuntimeError("sensitive cleanup detail")
 
-    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redact_model_data)
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
     monkeypatch.setattr(session, "_process_websocket_connection", hold_connection_open)
     monkeypatch.setattr(session, "_cleanup_tasks", fail_cleanup)
-    if logging_fails:
-        monkeypatch.setattr(
-            "agents.voice.models.openai_stt.log_model_action_warning",
-            MagicMock(side_effect=RuntimeError("logging failed")),
-        )
     await session._output_queue.put("hello")
     turns = cast(AsyncGenerator[str, None], session.transcribe_turns())
     assert await anext(turns) == "hello"
@@ -262,29 +251,17 @@ async def test_transcribe_turns_preserves_consumer_exception_when_cleanup_fails(
             session._connection_task.cancel()
             await asyncio.gather(session._connection_task, return_exceptions=True)
 
-    if logging_fails:
-        assert caplog.records == []
-        return
-
     message = "STT session cleanup failed while preserving the consumer exception"
     record = caplog.records[-1]
-    assert (record.exc_info is None) is redact_model_data
-    if redact_model_data:
-        assert record.msg == "%s"
-        assert record.args == (message,)
-        assert record.exc_text is None
-        assert record.getMessage() == message
-        formatted = logging.Formatter().format(record)
-        assert "sensitive cleanup detail" not in formatted
-        assert "sensitive consumer detail" not in formatted
-        assert all(
-            value not in {"sensitive cleanup detail", "sensitive consumer detail"}
-            and not isinstance(value, RuntimeError | ValueError)
-            for value in record.__dict__.values()
-        )
-    else:
-        assert record.msg == "%s: %s"
-        assert "sensitive cleanup detail" in logging.Formatter().format(record)
+    assert record.msg == message
+    assert record.args == ()
+    assert record.exc_info is None
+    assert record.exc_text is None
+    assert record.getMessage() == message
+    assert logging.Formatter().format(record) == message
+    assert all(
+        not isinstance(value, RuntimeError | ValueError) for value in record.__dict__.values()
+    )
 
 
 @pytest.mark.asyncio

@@ -12,7 +12,7 @@ from openai import AsyncOpenAI
 
 from ... import _debug
 from ...exceptions import AgentsException, UserError
-from ...logger import log_model_action_warning, logger
+from ...logger import logger
 from ...tracing import Span, SpanError, TranscriptionSpanData, transcription_span
 from ...util._error_tracing import get_trace_error
 from ..exceptions import STTWebsocketConnectionError
@@ -360,6 +360,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
     async def transcribe_turns(self) -> AsyncIterator[str]:
         self._connection_task = asyncio.create_task(self._process_websocket_connection())
 
+        primary_exception_active = False
         try:
             while True:
                 turn = await self._output_queue.get()
@@ -375,21 +376,21 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                 finally:
                     self._output_queue.task_done()
         except BaseException:
+            primary_exception_active = True
+            raise
+        finally:
             try:
                 await self.close()
-            except BaseException as cleanup_error:
+            except BaseException:
+                if not primary_exception_active:
+                    raise
                 try:
-                    log_model_action_warning(
-                        logger,
-                        "STT session cleanup failed while preserving the consumer exception",
-                        cleanup_error,
+                    logger.warning(
+                        "STT session cleanup failed while preserving the consumer exception"
                     )
                 except Exception:
                     # Logging must not replace the original consumer exception.
                     pass
-            raise
-        else:
-            await self.close()
 
         self._check_errors()
         if self._stored_exception:
