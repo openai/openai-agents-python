@@ -206,6 +206,40 @@ async def test_streamed_audio_error_respects_sensitive_data_setting(
 
 
 @pytest.mark.asyncio
+async def test_streamed_audio_dispatcher_handles_stream_failure() -> None:
+    """A failed _stream_audio task must not leave _dispatch_audio blocked forever."""
+
+    class FailingTTS(FakeTTS):
+        async def run(self, text: str, settings: TTSModelSettings):
+            del text, settings
+            raise RuntimeError("tts-failure")
+            yield b""  # pragma: no cover
+
+    result = StreamedAudioResult(
+        FailingTTS(),
+        TTSModelSettings(),
+        VoicePipelineConfig(trace_include_sensitive_data=False),
+    )
+
+    await result._add_text("This is the first sentence. This is the second one.")
+
+    with pytest.raises(RuntimeError, match="tts-failure"):
+        await result._turn_done()
+
+    # The multi-turn pipeline always calls _done() (in a finally block) after an error.
+    # _done() sets _completed_session and then propagates the failed task's exception.
+    # The dispatcher must still be able to exit once the session is marked complete,
+    # instead of remaining blocked on the failed task's queue forever.
+    with pytest.raises(RuntimeError, match="tts-failure"):
+        await result._done()
+
+    dispatcher_task = result._dispatcher_task
+    assert dispatcher_task is not None
+    await asyncio.wait_for(dispatcher_task, timeout=5.0)
+    assert dispatcher_task.done()
+
+
+@pytest.mark.asyncio
 async def test_streamed_audio_result_synthesizes_short_custom_splitter_chunk() -> None:
     texts: list[str] = []
 
