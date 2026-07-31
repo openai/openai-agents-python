@@ -3,10 +3,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from agents.sandbox.snapshot import LocalSnapshotSpec
 from agents.sandbox.snapshot_defaults import (
-    _DEFAULT_LOCAL_SNAPSHOT_TTL_SECONDS,
-    cleanup_stale_default_local_snapshots,
     default_local_snapshot_base_dir,
     resolve_default_local_snapshot_spec,
 )
@@ -22,6 +22,38 @@ def test_default_local_snapshot_base_dir_uses_xdg_state_home(tmp_path: Path) -> 
     )
 
     assert result == state_home / "openai-agents-python" / "sandbox" / "snapshots"
+
+
+def test_default_local_snapshot_base_dir_honors_explicit_empty_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "host-state"))
+
+    result = default_local_snapshot_base_dir(
+        home=home,
+        env={},
+        platform="linux",
+        os_name="posix",
+    )
+
+    assert result == home / ".local" / "state" / "openai-agents-python" / "sandbox" / "snapshots"
+
+
+def test_default_local_snapshot_base_dir_ignores_relative_xdg_state_home(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+
+    result = default_local_snapshot_base_dir(
+        home=home,
+        env={"XDG_STATE_HOME": "relative-state"},
+        platform="linux",
+        os_name="posix",
+    )
+
+    assert result == home / ".local" / "state" / "openai-agents-python" / "sandbox" / "snapshots"
 
 
 def test_default_local_snapshot_base_dir_uses_macos_application_support(tmp_path: Path) -> None:
@@ -98,29 +130,6 @@ def test_default_local_snapshot_base_dir_ignores_posix_absolute_localappdata_on_
     assert result == home / "AppData" / "Local" / "openai-agents-python" / "sandbox" / "snapshots"
 
 
-def test_cleanup_stale_default_local_snapshots_removes_only_old_tar_files(tmp_path: Path) -> None:
-    managed_dir = tmp_path / "snapshots"
-    managed_dir.mkdir()
-    stale = managed_dir / "stale.tar"
-    fresh = managed_dir / "fresh.tar"
-    keep = managed_dir / "keep.txt"
-    stale.write_bytes(b"stale")
-    fresh.write_bytes(b"fresh")
-    keep.write_text("keep")
-
-    now = 2_000_000_000.0
-    stale_mtime = now - (_DEFAULT_LOCAL_SNAPSHOT_TTL_SECONDS + 60)
-    fresh_mtime = now - 60
-    os.utime(stale, (stale_mtime, stale_mtime))
-    os.utime(fresh, (fresh_mtime, fresh_mtime))
-
-    cleanup_stale_default_local_snapshots(managed_dir, now=now)
-
-    assert not stale.exists()
-    assert fresh.exists()
-    assert keep.exists()
-
-
 def test_resolve_default_local_snapshot_spec_keeps_existing_stale_files(
     tmp_path: Path,
 ) -> None:
@@ -129,16 +138,13 @@ def test_resolve_default_local_snapshot_spec_keeps_existing_stale_files(
     managed_dir.mkdir(parents=True)
     stale = managed_dir / "stale.tar"
     stale.write_bytes(b"stale")
-    now = 2_000_000_000.0
-    stale_mtime = now - (_DEFAULT_LOCAL_SNAPSHOT_TTL_SECONDS + 60)
-    os.utime(stale, (stale_mtime, stale_mtime))
+    os.utime(stale, (0, 0))
 
     spec = resolve_default_local_snapshot_spec(
         home=tmp_path / "home",
         env={"XDG_STATE_HOME": str(state_home)},
         platform="linux",
         os_name="posix",
-        now=now,
     )
 
     assert isinstance(spec, LocalSnapshotSpec)
