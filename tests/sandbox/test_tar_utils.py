@@ -532,11 +532,20 @@ def test_validate_tarfile_rejects_escaping_links_under_a_skipped_prefix(
     means the extractor creates it, and a link -- unlike a fifo or a device node --
     names its own target.
 
-    Measured on Linux (busybox tar 1.36.1) with the pre-fix validator: the archive
-    passed `validate_tar_bytes(..., allow_external_symlink_targets=False)`, `tar xf`
-    exited 0, `.runtime/escape` landed pointing at `/etc/passwd` and read back its
-    contents, and `.runtime/link` shared an inode with `/etc/passwd` -- appending to
-    it appended to `/etc/passwd`.
+    Measured on Linux (busybox tar 1.36.1) with the pre-fix validator, against a
+    decoy target outside the extraction root rather than `/etc/passwd` itself. Every
+    archive passed `validate_tar_bytes(..., allow_external_symlink_targets=False)`,
+    and then:
+
+    - both symlinks: `tar xf` exited 0 with no stderr, and both landed as symlinks
+      whose `realpath` was outside the root -- the absolute one at the decoy, the
+      `../../` one at a file two levels above -- and both read back its contents.
+    - the absolute-target hardlink: exited 0, and the extracted member shared an
+      inode with the decoy at `nlink=2`; appending to the member appended to the
+      decoy.
+    - a hardlink with a *relative* escaping target is the one case the extractor
+      refuses on its own ("can't create hardlink", exit 1). It is still rejected
+      here, because the validator cannot depend on which tar the caller runs.
 
     Hardlinks are rejected in both strictness modes because there is no opt-in for
     them: `safe_tar_member_rel_path` rejects them unconditionally for every member
