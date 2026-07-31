@@ -73,6 +73,7 @@ from .run_internal.error_handlers import (
     create_message_output_item,
     format_final_output_text,
     resolve_run_error_handler_result,
+    should_attach_generic_agent_error,
     validate_handler_final_output,
 )
 from .run_internal.items import (
@@ -1587,6 +1588,29 @@ class AgentRunner:
                         turn_result.new_step_items.clear()
             except BaseException as exc:
                 run_exception = exc
+                if (
+                    current_span is not None
+                    and current_span.error is None
+                    and isinstance(exc, Exception)
+                    and should_attach_generic_agent_error(exc)
+                ):
+                    # Mirror the streamed run loop so both paths report the failing agent. A span
+                    # that already carries a more specific error keeps it, and cancellation is
+                    # excluded because it is not an agent failure.
+                    _error_tracing.attach_error_to_span(
+                        current_span,
+                        SpanError(
+                            message="Error in agent run",
+                            data={
+                                "error": _error_tracing.get_trace_error(
+                                    trace_include_sensitive_data=(
+                                        run_config.trace_include_sensitive_data
+                                    ),
+                                    error_message=str(exc),
+                                )
+                            },
+                        ),
+                    )
                 if isinstance(exc, AgentsException):
                     exc.run_data = RunErrorDetails(
                         input=original_input,

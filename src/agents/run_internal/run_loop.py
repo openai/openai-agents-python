@@ -110,6 +110,7 @@ from .error_handlers import (
     create_message_output_item,
     format_final_output_text,
     resolve_run_error_handler_result,
+    should_attach_generic_agent_error,
     validate_handler_final_output,
 )
 from .guardrails import (
@@ -282,13 +283,6 @@ async def cleanup_models_after_run(tool_use_tracker: AgentToolUseTracker) -> Non
 
 def _agent_diagnostic_extra(agent: Agent[Any]) -> dict[str, object]:
     return {"agent_name": agent.name}
-
-
-def _should_attach_generic_agent_error(exc: Exception) -> bool:
-    return not isinstance(
-        exc,
-        ModelBehaviorError | InputGuardrailTripwireTriggered | OutputGuardrailTripwireTriggered,
-    )
 
 
 async def _should_persist_stream_items(
@@ -1247,7 +1241,7 @@ async def start_streaming(
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                         break
             except Exception as e:
-                if current_span and _should_attach_generic_agent_error(e):
+                if current_span and should_attach_generic_agent_error(e):
                     _error_tracing.attach_error_to_span(
                         current_span,
                         SpanError(
@@ -1277,7 +1271,7 @@ async def start_streaming(
         )
         raise
     except Exception as e:
-        if current_span and _should_attach_generic_agent_error(e):
+        if current_span and should_attach_generic_agent_error(e):
             _error_tracing.attach_error_to_span(
                 current_span,
                 SpanError(

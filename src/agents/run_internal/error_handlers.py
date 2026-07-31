@@ -8,7 +8,14 @@ from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
 from ..agent import Agent
 from ..agent_output import _WRAPPER_DICT_KEY, AgentOutputSchema
-from ..exceptions import MaxTurnsExceeded, ModelBehaviorError, ModelRefusalError, UserError
+from ..exceptions import (
+    InputGuardrailTripwireTriggered,
+    MaxTurnsExceeded,
+    ModelBehaviorError,
+    ModelRefusalError,
+    OutputGuardrailTripwireTriggered,
+    UserError,
+)
 from ..items import (
     ItemHelpers,
     MessageOutputItem,
@@ -28,6 +35,18 @@ from .items import ReasoningItemIdPolicy, run_item_to_input_item
 from .turn_preparation import get_output_schema
 
 RunErrorHandlerKind = Literal["max_turns", "model_refusal", "invalid_final_output"]
+
+
+def should_attach_generic_agent_error(exc: Exception) -> bool:
+    """Return whether a failed run still needs the generic agent-span error.
+
+    Failures that already write their own agent-span error, or that a dedicated child span
+    reports, are excluded so the span keeps the more specific diagnosis.
+    """
+    return not isinstance(
+        exc,
+        ModelBehaviorError | InputGuardrailTripwireTriggered | OutputGuardrailTripwireTriggered,
+    )
 
 
 def build_run_error_data(

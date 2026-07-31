@@ -13,11 +13,17 @@ from agents import (
     InputGuardrail,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
+    ModelBehaviorError,
+    ModelRefusalError,
+    RunConfig,
     RunContextWrapper,
     Runner,
     TResponseInputItem,
+    UserError,
     _debug,
 )
+from agents.tracing.span_data import AgentSpanData
+from agents.tracing.spans import SpanImpl
 
 from .fake_model import FakeModel
 from .test_responses import (
@@ -27,7 +33,7 @@ from .test_responses import (
     get_handoff_tool_call,
     get_text_message,
 )
-from .testing_processor import fetch_normalized_spans
+from .testing_processor import SPAN_PROCESSOR_TESTING, fetch_normalized_spans, fetch_span_errors
 
 
 @pytest.mark.asyncio
@@ -49,6 +55,7 @@ async def test_single_turn_model_error():
                 "children": [
                     {
                         "type": "agent",
+                        "error": {"message": "Error in agent run", "data": {"error": "test error"}},
                         "data": {
                             "name": "test_agent",
                             "handoffs": [],
@@ -102,6 +109,7 @@ async def test_multi_turn_no_handoffs():
                 "children": [
                     {
                         "type": "agent",
+                        "error": {"message": "Error in agent run", "data": {"error": "test error"}},
                         "data": {
                             "name": "test_agent",
                             "handoffs": [],
@@ -558,3 +566,167 @@ async def test_guardrail_error():
             }
         ]
     )
+
+
+SENSITIVE_ERROR_MESSAGE = "sensitive-error-detail"
+
+
+@pytest.mark.asyncio
+async def test_run_marks_agent_span_with_generic_error():
+    """A generic run failure marks the agent span, matching the streamed path."""
+    model = FakeModel(tracing_enabled=True)
+    model.set_next_output(ValueError("test error"))
+
+    with pytest.raises(ValueError, match="test error"):
+        await Runner.run(Agent(name="test_agent", model=model), input="first_test")
+
+    assert fetch_span_errors("agent") == [
+        {"message": "Error in agent run", "data": {"error": "test error"}}
+    ]
+
+
+def test_run_sync_marks_agent_span_with_generic_error():
+    model = FakeModel(tracing_enabled=True)
+    model.set_next_output(ValueError("test error"))
+
+    with pytest.raises(ValueError, match="test error"):
+        Runner.run_sync(Agent(name="test_agent", model=model), input="first_test")
+
+    assert fetch_span_errors("agent") == [
+        {"message": "Error in agent run", "data": {"error": "test error"}}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_span_error_matches_streamed_path():
+    """The non-streamed and streamed paths record the same agent span error."""
+    non_streamed_model = FakeModel(tracing_enabled=True)
+    non_streamed_model.set_next_output(ValueError("test error"))
+    with pytest.raises(ValueError):
+        await Runner.run(Agent(name="test_agent", model=non_streamed_model), input="first_test")
+    non_streamed_errors = fetch_span_errors("agent")
+
+    SPAN_PROCESSOR_TESTING.clear()
+
+    streamed_model = FakeModel(tracing_enabled=True)
+    streamed_model.set_next_output(ValueError("test error"))
+    result = Runner.run_streamed(Agent(name="test_agent", model=streamed_model), input="first_test")
+    with pytest.raises(ValueError):
+        async for _ in result.stream_events():
+            pass
+
+    assert non_streamed_errors == fetch_span_errors("agent")
+
+
+@pytest.mark.asyncio
+async def test_run_agent_span_error_redacts_sensitive_data():
+    model = FakeModel(tracing_enabled=False)
+    model.set_next_output(ValueError(SENSITIVE_ERROR_MESSAGE))
+
+    with pytest.raises(ValueError):
+        await Runner.run(
+            Agent(name="test_agent", model=model),
+            input="first_test",
+            run_config=RunConfig(trace_include_sensitive_data=False),
+        )
+
+    assert fetch_span_errors("agent") == [
+        {
+            "message": "Error in agent run",
+            "data": {"error": "Error details are redacted."},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_mark_agent_span_for_model_behavior_error():
+    """ModelBehaviorError is reported by the generation span, so the agent span stays clean."""
+    model = FakeModel(tracing_enabled=True)
+    model.set_next_output(ModelBehaviorError("bad model output"))
+
+    with pytest.raises(ModelBehaviorError):
+        await Runner.run(Agent(name="test_agent", model=model), input="first_test")
+
+    assert fetch_span_errors("agent") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_detail"),
+    [
+        pytest.param(
+            ModelRefusalError("refused"),
+            "Model refused to produce output: refused",
+            id="model-refusal-error",
+        ),
+        pytest.param(UserError("user problem"), "user problem", id="user-error"),
+    ],
+)
+async def test_run_marks_agent_span_for_other_agents_exceptions(
+    error: Exception, expected_detail: str
+):
+    """Agents exceptions without a dedicated agent-span error match the streamed path."""
+    model = FakeModel(tracing_enabled=True)
+    model.set_next_output(error)
+
+    with pytest.raises(type(error)):
+        await Runner.run(Agent(name="test_agent", model=model), input="first_test")
+
+    assert fetch_span_errors("agent") == [
+        {"message": "Error in agent run", "data": {"error": expected_detail}}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_keeps_specific_max_turns_agent_span_error():
+    """A more specific span error already on the agent span is not overwritten."""
+    model = FakeModel(tracing_enabled=True)
+    agent = Agent(name="test_agent", model=model, tools=[get_function_tool("foo", "res")])
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("foo", json.dumps({"a": "b"}), call_id="c1")],
+            [get_function_tool_call("foo", json.dumps({"a": "b"}), call_id="c2")],
+            [get_function_tool_call("foo", json.dumps({"a": "b"}), call_id="c3")],
+        ]
+    )
+
+    with pytest.raises(MaxTurnsExceeded):
+        await Runner.run(agent, input="first_test", max_turns=2)
+
+    assert fetch_span_errors("agent") == [
+        {"message": "Max turns exceeded", "data": {"max_turns": 2}}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_attaches_agent_span_error_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The generic error is recorded once, not re-applied by nested handlers."""
+    recorded: list[Any] = []
+    original_set_error = SpanImpl.set_error
+
+    def counting_set_error(self: Any, error: Any) -> None:
+        if isinstance(self.span_data, AgentSpanData):
+            recorded.append(error)
+        original_set_error(self, error)
+
+    monkeypatch.setattr(SpanImpl, "set_error", counting_set_error)
+
+    model = FakeModel(tracing_enabled=True)
+    model.set_next_output(ValueError("test error"))
+    with pytest.raises(ValueError):
+        await Runner.run(Agent(name="test_agent", model=model), input="first_test")
+
+    assert recorded == [{"message": "Error in agent run", "data": {"error": "test error"}}]
+
+
+@pytest.mark.asyncio
+async def test_successful_run_leaves_agent_span_without_error():
+    model = FakeModel(tracing_enabled=True)
+    model.set_next_output([get_text_message("done")])
+
+    result = await Runner.run(Agent(name="test_agent", model=model), input="first_test")
+
+    assert result.final_output == "done"
+    assert fetch_span_errors("agent") == []
