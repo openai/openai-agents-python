@@ -57,6 +57,7 @@ class StreamedAudioResult:
         self._ordered_tasks: deque[asyncio.Queue[VoiceStreamEvent | None]] = (
             deque()
         )  # New: deque to hold local queues for each text segment
+        self._dispatcher_event = asyncio.Event()
         self._dispatcher_task: asyncio.Task[Any] | None = (
             None  # Task to dispatch audio chunks in order
         )
@@ -86,6 +87,10 @@ class StreamedAudioResult:
 
     async def _add_error(self, error: Exception):
         await self._queue.put(VoiceStreamEventError(error))
+
+    def _enqueue_audio_segment(self, local_queue: asyncio.Queue[VoiceStreamEvent | None]) -> None:
+        self._ordered_tasks.append(local_queue)
+        self._dispatcher_event.set()
 
     def _transform_audio_buffer(
         self, buffer: list[bytes], output_dtype: npt.DTypeLike
@@ -209,7 +214,7 @@ class StreamedAudioResult:
 
         if combined_sentences:
             local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
-            self._ordered_tasks.append(local_queue)
+            self._enqueue_audio_segment(local_queue)
             self._tasks.append(
                 asyncio.create_task(self._stream_audio(combined_sentences, local_queue))
             )
@@ -219,7 +224,7 @@ class StreamedAudioResult:
     async def _turn_done(self):
         if self._text_buffer:
             local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
-            self._ordered_tasks.append(local_queue)  # Append the local queue for the final segment
+            self._enqueue_audio_segment(local_queue)
             self._tasks.append(
                 asyncio.create_task(
                     self._stream_audio(self._text_buffer, local_queue, finish_turn=True)
@@ -228,7 +233,7 @@ class StreamedAudioResult:
             self._text_buffer = ""
         elif self._started_processing_turn:
             local_queue = asyncio.Queue()
-            self._ordered_tasks.append(local_queue)
+            self._enqueue_audio_segment(local_queue)
             await local_queue.put(VoiceStreamEventLifecycle(event="turn_ended"))
         self._done_processing = True
         if self._dispatcher_task is None:
@@ -249,6 +254,7 @@ class StreamedAudioResult:
 
     async def _done(self):
         self._completed_session = True
+        self._dispatcher_event.set()
         await self._wait_for_completion()
 
     async def _dispatch_audio(self):
@@ -257,7 +263,10 @@ class StreamedAudioResult:
             if len(self._ordered_tasks) == 0:
                 if self._completed_session:
                     break
-                await asyncio.sleep(0)
+                self._dispatcher_event.clear()
+                # Recheck state after clearing so a notification cannot be lost before waiting.
+                if len(self._ordered_tasks) == 0 and not self._completed_session:
+                    await self._dispatcher_event.wait()
                 continue
             local_queue = self._ordered_tasks.popleft()
             while True:

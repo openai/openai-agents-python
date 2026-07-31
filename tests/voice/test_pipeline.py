@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -286,6 +286,67 @@ async def test_streamed_audio_dispatcher_handles_stream_failure() -> None:
         if isinstance(event, VoiceStreamEventLifecycle) and event.event == "session_ended"
     ]
     assert len(terminal_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_streamed_audio_dispatcher_blocks_until_work_is_available() -> None:
+    """The dispatcher must block while idle without losing a pre-wait notification."""
+
+    class PausingEvent(asyncio.Event):
+        def __init__(self) -> None:
+            super().__init__()
+            self.wait_calls = 0
+            self.wait_started = asyncio.Event()
+            self.second_wait_started = asyncio.Event()
+            self.allow_wait = asyncio.Event()
+
+        async def wait(self) -> Literal[True]:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                self.wait_started.set()
+                await self.allow_wait.wait()
+            elif self.wait_calls == 2:
+                self.second_wait_started.set()
+            return await super().wait()
+
+    def split_immediately(text: str) -> tuple[str, str]:
+        return text, ""
+
+    fake_tts = FakeTTS()
+    result = StreamedAudioResult(
+        fake_tts,
+        TTSModelSettings(buffer_size=1, text_splitter=split_immediately),
+        VoicePipelineConfig(),
+    )
+    dispatcher_event = PausingEvent()
+    result._dispatcher_event = dispatcher_event
+    dispatcher_task = asyncio.create_task(result._dispatch_audio())
+    result._dispatcher_task = dispatcher_task
+
+    try:
+        await asyncio.wait_for(dispatcher_event.wait_started.wait(), timeout=1.0)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert dispatcher_event.wait_calls == 1
+        assert not dispatcher_task.done()
+
+        await result._add_text("ok")
+        assert dispatcher_event.is_set()
+        dispatcher_event.allow_wait.set()
+        await result._turn_done()
+        await asyncio.wait_for(dispatcher_event.second_wait_started.wait(), timeout=1.0)
+        await result._done()
+    finally:
+        dispatcher_event.allow_wait.set()
+        if not dispatcher_task.done():
+            dispatcher_task.cancel()
+        await asyncio.gather(dispatcher_task, return_exceptions=True)
+
+    events, audio_chunks = await extract_events(result)
+
+    assert events == ["turn_started", "audio", "turn_ended", "session_ended"]
+    assert len(audio_chunks) == 1
+    await fake_tts.verify_audio("ok", audio_chunks[0])
 
 
 @pytest.mark.asyncio
