@@ -84,6 +84,7 @@ from .run_internal.oai_conversation import OpenAIServerConversationTracker
 from .run_internal.prompt_cache_key import PromptCacheKeyResolver
 from .run_internal.run_grouping import resolve_run_grouping_id
 from .run_internal.run_loop import (
+    _should_attach_generic_agent_error,
     cleanup_models_after_run,
     get_all_tools,
     get_handoffs,
@@ -1587,6 +1588,26 @@ class AgentRunner:
                         turn_result.new_step_items.clear()
             except BaseException as exc:
                 run_exception = exc
+                if (
+                    current_span
+                    and isinstance(exc, Exception)
+                    and not isinstance(exc, MaxTurnsExceeded)
+                    and _should_attach_generic_agent_error(exc)
+                ):
+                    _error_tracing.attach_error_to_span(
+                        current_span,
+                        SpanError(
+                            message="Error in agent run",
+                            data={
+                                "error": _error_tracing.get_trace_error(
+                                    trace_include_sensitive_data=(
+                                        run_config.trace_include_sensitive_data
+                                    ),
+                                    error_message=str(exc),
+                                )
+                            },
+                        ),
+                    )
                 if isinstance(exc, AgentsException):
                     exc.run_data = RunErrorDetails(
                         input=original_input,

@@ -55,6 +55,47 @@ async def test_single_turn_model_error():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "error": {"message": "Error in agent run", "data": {"error": "test error"}},
+                        "children": [
+                            {
+                                "type": "generation",
+                                "error": {
+                                    "message": "Error",
+                                    "data": {"name": "ValueError", "message": "test error"},
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    )
+
+
+def test_run_sync_attaches_generic_error_to_agent_span():
+    model = FakeModel(tracing_enabled=True)
+    model.set_next_output(ValueError("test error"))
+
+    with pytest.raises(ValueError):
+        Runner.run_sync(Agent(name="test_agent", model=model), input="first_test")
+
+    assert fetch_normalized_spans() == snapshot(
+        [
+            {
+                "workflow_name": "Agent workflow",
+                "children": [
+                    {
+                        "type": "agent",
+                        "error": {
+                            "message": "Error in agent run",
+                            "data": {"error": "test error"},
+                        },
+                        "data": {
+                            "name": "test_agent",
+                            "handoffs": [],
+                            "tools": [],
+                            "output_type": "str",
+                        },
                         "children": [
                             {
                                 "type": "generation",
@@ -102,6 +143,10 @@ async def test_multi_turn_no_handoffs():
                 "children": [
                     {
                         "type": "agent",
+                        "error": {
+                            "message": "Error in agent run",
+                            "data": {"error": "test error"},
+                        },
                         "data": {
                             "name": "test_agent",
                             "handoffs": [],
