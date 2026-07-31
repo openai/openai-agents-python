@@ -753,6 +753,11 @@ class RunResultStreaming(RunResultBase):
         Note: After calling cancel(), you should continue consuming stream_events()
         to allow the cancellation to complete properly.
         """
+        if mode not in ("immediate", "after_turn"):
+            raise ValueError(
+                f"Invalid cancel mode: {mode!r}. Expected one of: 'immediate', 'after_turn'."
+            )
+
         # Store the cancel mode for the background task to check
         self._cancel_mode = mode
 

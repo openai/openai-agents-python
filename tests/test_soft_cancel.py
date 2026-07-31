@@ -1,6 +1,7 @@
 """Tests for soft cancel (after_turn mode) functionality."""
 
 import json
+from typing import cast
 
 import pytest
 
@@ -189,6 +190,20 @@ async def test_cancel_mode_backward_compatibility():
     assert result.is_complete
     assert result._event_queue.empty()
     assert result._cancel_mode == "immediate", "Should default to immediate mode"
+
+
+@pytest.mark.asyncio
+async def test_cancel_mode_invalid_value_raises():
+    """Verify invalid cancel mode is rejected and does not mutate state."""
+    model = FakeModel()
+    agent = Agent(name="Assistant", model=model)
+
+    result = Runner.run_streamed(agent, input="Hello")
+
+    with pytest.raises(ValueError, match="Invalid cancel mode"):
+        result.cancel(mode=cast(str, "later"))
+
+    assert result._cancel_mode == "none"
 
 
 @pytest.mark.asyncio
