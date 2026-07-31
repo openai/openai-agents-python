@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -96,6 +97,52 @@ async def test_streamed_audio_result_propagates_consumer_cancellation(monkeypatc
         await consumer
     await producer_stopped.wait()
     assert producer.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_streamed_audio_result_closes_owned_tasks_after_yield() -> None:
+    result = StreamedAudioResult(
+        FakeTTS(),
+        TTSModelSettings(),
+        VoicePipelineConfig(),
+    )
+    never_finishes = asyncio.Event()
+    started = [asyncio.Event() for _ in range(3)]
+    stopped = [asyncio.Event() for _ in range(3)]
+
+    async def hold_open(index: int) -> None:
+        started[index].set()
+        try:
+            await never_finishes.wait()
+        finally:
+            stopped[index].set()
+
+    synthesis_task = asyncio.create_task(hold_open(0))
+    dispatcher_task = asyncio.create_task(hold_open(1))
+    producer_task = asyncio.create_task(hold_open(2))
+    result._tasks.append(synthesis_task)
+    result._dispatcher_task = dispatcher_task
+    result._set_task(producer_task)
+    await asyncio.gather(*(event.wait() for event in started))
+    await result._queue.put(VoiceStreamEventLifecycle(event="turn_started"))
+
+    stream = cast(AsyncGenerator[VoiceStreamEvent, None], result.stream())
+    event = await anext(stream)
+    assert isinstance(event, VoiceStreamEventLifecycle)
+    assert event.event == "turn_started"
+
+    owned_tasks = (synthesis_task, dispatcher_task, producer_task)
+    try:
+        await stream.aclose()
+        await asyncio.wait_for(
+            asyncio.gather(*(event.wait() for event in stopped)),
+            timeout=1,
+        )
+        assert all(task.cancelled() for task in owned_tasks)
+    finally:
+        for task in owned_tasks:
+            task.cancel()
+        await asyncio.gather(*owned_tasks, return_exceptions=True)
 
 
 def test_voice_pipeline_config_normalizes_dictionary_settings() -> None:

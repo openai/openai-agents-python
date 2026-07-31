@@ -4,7 +4,9 @@ import asyncio
 import base64
 import json
 import time
-from unittest.mock import AsyncMock, patch
+from collections.abc import AsyncGenerator
+from typing import cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import numpy.typing as npt
@@ -93,6 +95,66 @@ async def test_transcribe_turns_propagates_consumer_cancellation(monkeypatch) ->
         await session.close()
         if session._connection_task is not None:
             await asyncio.gather(session._connection_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_transcribe_turns_closes_owned_tasks_after_yield(monkeypatch) -> None:
+    session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="whisper-1",
+        settings=STTModelSettings(),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+    session._websocket = AsyncMock()
+    tracing_span = MagicMock()
+    session._tracing_span = tracing_span
+    never_finishes = asyncio.Event()
+    started = [asyncio.Event() for _ in range(4)]
+    stopped = [asyncio.Event() for _ in range(4)]
+
+    async def hold_open(index: int) -> None:
+        started[index].set()
+        try:
+            await never_finishes.wait()
+        finally:
+            stopped[index].set()
+
+    async def hold_connection_open() -> None:
+        await hold_open(0)
+
+    monkeypatch.setattr(session, "_process_websocket_connection", hold_connection_open)
+    session._listener_task = asyncio.create_task(hold_open(1))
+    session._process_events_task = asyncio.create_task(hold_open(2))
+    session._stream_audio_task = asyncio.create_task(hold_open(3))
+    await session._output_queue.put("hello")
+
+    turns = cast(AsyncGenerator[str, None], session.transcribe_turns())
+    assert await anext(turns) == "hello"
+    await asyncio.gather(*(event.wait() for event in started))
+
+    owned_tasks = (
+        session._connection_task,
+        session._listener_task,
+        session._process_events_task,
+        session._stream_audio_task,
+    )
+    try:
+        await turns.aclose()
+        await asyncio.wait_for(
+            asyncio.gather(*(event.wait() for event in stopped)),
+            timeout=1,
+        )
+        assert all(task is not None and task.cancelled() for task in owned_tasks)
+        session._websocket.close.assert_awaited_once()
+        tracing_span.finish.assert_called_once_with()
+        assert session._tracing_span is None
+    finally:
+        tasks = [task for task in owned_tasks if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio

@@ -280,22 +280,29 @@ class StreamedAudioResult:
             tasks.append(self._dispatcher_task)
         await asyncio.gather(*tasks)
 
-    def _cleanup_tasks(self):
+    async def _cleanup_tasks(self) -> None:
         self._finish_turn()
 
-        for task in self._tasks:
+        owned_tasks = list(self._tasks)
+        if self._dispatcher_task is not None:
+            owned_tasks.append(self._dispatcher_task)
+        if self.text_generation_task is not None:
+            owned_tasks.append(self.text_generation_task)
+
+        current_task = asyncio.current_task()
+        tasks_to_drain = list(
+            dict.fromkeys(task for task in owned_tasks if task is not current_task)
+        )
+        for task in tasks_to_drain:
             if not task.done():
                 task.cancel()
 
-        if self._dispatcher_task and not self._dispatcher_task.done():
-            self._dispatcher_task.cancel()
-
-        if self.text_generation_task and not self.text_generation_task.done():
-            self.text_generation_task.cancel()
+        if tasks_to_drain:
+            await asyncio.gather(*tasks_to_drain, return_exceptions=True)
 
     def _check_errors(self):
         for task in self._tasks:
-            if task.done():
+            if task.done() and not task.cancelled():
                 if task.exception():
                     self._stored_exception = task.exception()
                     break
@@ -303,36 +310,33 @@ class StreamedAudioResult:
     async def stream(self) -> AsyncIterator[VoiceStreamEvent]:
         """Stream the events and audio data as they're generated."""
         saw_session_end = False
-        while True:
-            try:
+        try:
+            while True:
                 event = await self._queue.get()
-            except asyncio.CancelledError:
-                self._cleanup_tasks()
-                raise
-            if isinstance(event, VoiceStreamEventError):
-                self._stored_exception = event.error
-                log_model_and_tool_action_error(
-                    logger, "Error processing voice output", event.error
-                )
-                break
-            if event is None:
-                break
-            yield event
-            if event.type == "voice_stream_event_lifecycle" and event.event == "session_ended":
-                saw_session_end = True
-                break
+                if isinstance(event, VoiceStreamEventError):
+                    self._stored_exception = event.error
+                    log_model_and_tool_action_error(
+                        logger, "Error processing voice output", event.error
+                    )
+                    break
+                if event is None:
+                    break
+                yield event
+                if event.type == "voice_stream_event_lifecycle" and event.event == "session_ended":
+                    saw_session_end = True
+                    break
 
-        # On the normal completion path, let the producer task finish gracefully so any active
-        # trace context can emit `trace_end` before we run cleanup.
-        if (
-            saw_session_end
-            and self.text_generation_task is not None
-            and not self.text_generation_task.done()
-        ):
-            await asyncio.shield(self.text_generation_task)
+            # On the normal completion path, let the producer task finish gracefully so any active
+            # trace context can emit `trace_end` before we run cleanup.
+            if (
+                saw_session_end
+                and self.text_generation_task is not None
+                and not self.text_generation_task.done()
+            ):
+                await asyncio.shield(self.text_generation_task)
 
-        self._check_errors()
-        self._cleanup_tasks()
-
-        if self._stored_exception:
-            raise self._stored_exception
+            self._check_errors()
+            if self._stored_exception:
+                raise self._stored_exception
+        finally:
+            await self._cleanup_tasks()
