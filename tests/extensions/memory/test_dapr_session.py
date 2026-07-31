@@ -1138,6 +1138,91 @@ async def test_dapr_session_close_is_idempotent():
         await session.get_items()
 
 
+async def test_dapr_session_failed_cleanup_is_terminal_and_retried():
+    """A failed cleanup keeps the session terminal, and the next close() retries it."""
+    import unittest.mock
+
+    session = _create_owned_dapr_session("failed_cleanup_test")
+    attempts = 0
+    real_close = session._dapr_client.close
+
+    async def failing_then_succeeding_close(*args: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        # Mirror a real client, which tears the channel down before surfacing the error.
+        await real_close(*args, **kwargs)
+        if attempts == 1:
+            raise OSError("channel shutdown error surfaced after teardown")
+
+    with unittest.mock.patch.object(session._dapr_client, "close", failing_then_succeeding_close):
+        with pytest.raises(OSError, match="channel shutdown error surfaced after teardown"):
+            await session.close()
+
+        assert session._closed is True
+        for operation in (
+            session.get_items(),
+            session.add_items([{"role": "user", "content": "after failed cleanup"}]),
+            session.pop_item(),
+            session.clear_session(),
+            session.ping(),
+        ):
+            with pytest.raises(RuntimeError, match="DaprSession is closed"):
+                await operation
+
+        await session.close()
+        assert attempts == 2
+        assert session._client_released is True
+
+        await session.close()
+        assert attempts == 2
+
+
+async def test_dapr_session_cancelled_cleanup_is_terminal_and_retried():
+    """A cancelled cleanup keeps the session terminal, and the next close() retries it."""
+    import asyncio
+    import unittest.mock
+    from contextlib import suppress
+
+    timeout = 5.0
+    session = _create_owned_dapr_session("cancelled_cleanup_test")
+    attempts = 0
+    entered_cleanup = asyncio.Event()
+    real_close = session._dapr_client.close
+
+    async def hanging_then_succeeding_close(*args: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            entered_cleanup.set()
+            await asyncio.Event().wait()  # Hang until cancelled.
+        return await real_close(*args, **kwargs)
+
+    close_task: asyncio.Task[None] | None = None
+    try:
+        with unittest.mock.patch.object(
+            session._dapr_client, "close", hanging_then_succeeding_close
+        ):
+            close_task = asyncio.create_task(session.close())
+            await asyncio.wait_for(entered_cleanup.wait(), timeout)
+            close_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await close_task
+            close_task = None
+
+            assert session._closed is True
+            with pytest.raises(RuntimeError, match="DaprSession is closed"):
+                await session.get_items()
+
+            await asyncio.wait_for(session.close(), timeout)
+            assert attempts == 2
+            assert session._client_released is True
+    finally:
+        if close_task is not None:
+            close_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await close_task
+
+
 async def test_dapr_session_ping_raises_after_close():
     """ping() must not read or write through a client this session already closed."""
     session = _create_owned_dapr_session("ping_after_close_test")

@@ -106,6 +106,7 @@ class DaprSession(SessionABC):
         self._lock = asyncio.Lock()
         self._owns_client = False  # Track if we own the Dapr client
         self._closed = False
+        self._client_released = False
 
         # State keys
         self._messages_key = f"{self.session_id}:messages"
@@ -446,14 +447,18 @@ class DaprSession(SessionABC):
         injected externally, the caller is responsible for managing its lifecycle
         and this is a no-op.
 
-        Repeated and concurrent calls are safe no-ops.
+        The session is terminal from the first close attempt. If releasing the
+        client fails or is cancelled, operations still raise and a later close()
+        retries the unfinished cleanup. Once the client is released, repeated and
+        concurrent calls are safe no-ops.
         """
         async with self._lock:
-            if self._closed:
+            if not self._owns_client:
                 return
-            if self._owns_client:
-                self._closed = True
+            self._closed = True
+            if not self._client_released:
                 await self._dapr_client.close()
+                self._client_released = True
 
     async def __aenter__(self) -> DaprSession:
         """Enter async context manager."""

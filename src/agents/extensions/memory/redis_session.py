@@ -86,6 +86,7 @@ class RedisSession(SessionABC):
         self._lock = asyncio.Lock()
         self._owns_client = False  # Track if we own the Redis client
         self._closed = False
+        self._client_released = False
 
         # Redis key patterns
         self._session_key = f"{self._key_prefix}:{self.session_id}"
@@ -296,14 +297,18 @@ class RedisSession(SessionABC):
         externally, the caller is responsible for managing its lifecycle and
         this is a no-op.
 
-        Repeated and concurrent calls are safe no-ops.
+        The session is terminal from the first close attempt. If releasing the
+        client fails or is cancelled, operations still raise and a later close()
+        retries the unfinished cleanup. Once the client is released, repeated and
+        concurrent calls are safe no-ops.
         """
         async with self._lock:
-            if self._closed:
+            if not self._owns_client:
                 return
-            if self._owns_client:
-                self._closed = True
+            self._closed = True
+            if not self._client_released:
                 await self._redis.aclose()
+                self._client_released = True
 
     async def ping(self) -> bool:
         """Test Redis connectivity.
