@@ -1144,62 +1144,48 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 )
                 raise
             except BaseExceptionGroup as eg:
-                # Extract HTTP errors from ExceptionGroup raised during cleanup
-                # This happens when background tasks fail (e.g., HTTP errors)
-                http_error = None
-                connect_error = None
-                timeout_error = None
+                http_errors = self._extract_http_errors_from_exception(eg)
+                unsafe_http_error = _first_unsafe_transport_error(http_errors)
+                selected_http_error = unsafe_http_error
 
-                for exc in eg.exceptions:
-                    if isinstance(exc, httpx.HTTPStatusError):
-                        http_error = exc
-                    elif isinstance(exc, httpx.ConnectError):
-                        connect_error = exc
-                    elif isinstance(exc, httpx.TimeoutException):
-                        timeout_error = exc
-                del exc
+                if selected_http_error is None:
+                    # Preserve legacy group diagnostics when HTTP errors are nested but safe.
+                    for error_type in (
+                        httpx.HTTPStatusError,
+                        httpx.ConnectError,
+                        httpx.TimeoutException,
+                    ):
+                        selected_http_error = next(
+                            (
+                                error
+                                for error in reversed(eg.exceptions)
+                                if isinstance(error, Exception) and isinstance(error, error_type)
+                            ),
+                            None,
+                        )
+                        if selected_http_error is not None:
+                            break
 
-                # Only raise HTTP errors if we're cleaning up after a failed connection.
-                # During normal teardown, log them instead.
-                if http_error:
+                if selected_http_error is not None:
                     if is_failed_connection_cleanup:
-                        cleanup_error = self._user_error_for_http_error(http_error)
-                        cleanup_cause = _safe_transport_cause(http_error)
+                        cleanup_error = self._user_error_for_http_error(selected_http_error)
+                        cleanup_cause = _safe_transport_cause(selected_http_error)
                         if cleanup_cause is None:
-                            http_error = None
+                            http_errors.clear()
+                            del selected_http_error
+                            del unsafe_http_error
                     else:
-                        # Normal teardown - log but don't raise
+                        if isinstance(selected_http_error, httpx.HTTPStatusError):
+                            cleanup_message = "HTTP error during cleanup of MCP server"
+                        elif isinstance(selected_http_error, httpx.ConnectError):
+                            cleanup_message = "Connection error during cleanup of MCP server"
+                        elif isinstance(selected_http_error, httpx.TimeoutException):
+                            cleanup_message = "Timeout error during cleanup of MCP server"
+                        else:
+                            cleanup_message = "Request error during cleanup of MCP server"
                         _log_transport_warning(
-                            get_mcp_server_log_message(
-                                "HTTP error during cleanup of MCP server", self
-                            ),
-                            http_error,
-                        )
-                elif connect_error:
-                    if is_failed_connection_cleanup:
-                        cleanup_error = self._user_error_for_http_error(connect_error)
-                        cleanup_cause = _safe_transport_cause(connect_error)
-                        if cleanup_cause is None:
-                            connect_error = None
-                    else:
-                        _log_transport_warning(
-                            get_mcp_server_log_message(
-                                "Connection error during cleanup of MCP server", self
-                            ),
-                            connect_error,
-                        )
-                elif timeout_error:
-                    if is_failed_connection_cleanup:
-                        cleanup_error = self._user_error_for_http_error(timeout_error)
-                        cleanup_cause = _safe_transport_cause(timeout_error)
-                        if cleanup_cause is None:
-                            timeout_error = None
-                    else:
-                        _log_transport_warning(
-                            get_mcp_server_log_message(
-                                "Timeout error during cleanup of MCP server", self
-                            ),
-                            timeout_error,
+                            get_mcp_server_log_message(cleanup_message, self),
+                            selected_http_error,
                         )
                 else:
                     # No HTTP error found, suppress RuntimeError about cancel scopes
