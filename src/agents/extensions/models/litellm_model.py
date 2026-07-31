@@ -401,21 +401,33 @@ class LitellmModel(Model):
 
             final_response: Response | None = None
             close_stream_in_background = False
+            yielded_terminal_event = False
             try:
                 async for chunk in ChatCmplStreamHandler.handle_stream(
                     response, stream, model=self.model
                 ):
-                    yield chunk
-
                     if chunk.type == "response.completed":
                         final_response = chunk.response
+                        yielded_terminal_event = True
+
+                    yield chunk
             except asyncio.CancelledError:
                 close_stream_in_background = True
                 self._schedule_async_iterator_close(stream)
                 raise
             finally:
                 if not close_stream_in_background:
-                    await self._maybe_aclose(stream)
+                    try:
+                        await self._maybe_aclose(stream)
+                    except Exception as exc:
+                        if yielded_terminal_event:
+                            log_model_action_debug(
+                                logger,
+                                "Ignoring stream cleanup error after terminal event",
+                                exc,
+                            )
+                        else:
+                            raise
 
             if tracing.include_data() and final_response:
                 span_generation.span_data.output = [final_response.model_dump()]

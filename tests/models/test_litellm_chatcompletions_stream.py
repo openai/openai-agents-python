@@ -764,6 +764,14 @@ class _SlowCloseChatStream(_ClosableChatStream):
         self.aclose_completed += 1
 
 
+class _FailingCloseChatStream(_ClosableChatStream):
+    """Raises from `aclose` after recording the cleanup attempt."""
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+        raise RuntimeError("close-failure")
+
+
 def _text_chunk(text: str) -> ChatCompletionChunk:
     return ChatCompletionChunk(
         id="chunk-id",
@@ -832,6 +840,57 @@ async def test_stream_response_closes_provider_stream_on_normal_exhaustion(monke
 
     async for _event in _stream_response(model):
         pass
+
+    assert provider_stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_ignores_close_failure_after_terminal_event(monkeypatch) -> None:
+    """A completed response must remain successful when provider cleanup fails."""
+    provider_stream = _FailingCloseChatStream([_text_chunk("Hello")])
+    _patch_fetch_response(monkeypatch, provider_stream)
+    model = LitellmProvider().get_model("gpt-4")
+
+    output_events = [event async for event in _stream_response(model)]
+
+    assert output_events[-1].type == "response.completed"
+    assert provider_stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_ignores_close_failure_when_closed_at_terminal_event(
+    monkeypatch,
+) -> None:
+    """Terminal state must be recorded before yielding the completed event."""
+    provider_stream = _FailingCloseChatStream([_text_chunk("Hello")])
+    _patch_fetch_response(monkeypatch, provider_stream)
+    model = LitellmProvider().get_model("gpt-4")
+    stream_agen = cast(Any, _stream_response(model))
+
+    async for event in stream_agen:
+        if event.type == "response.completed":
+            break
+    await stream_agen.aclose()
+
+    assert provider_stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_propagates_close_failure_before_terminal_event(monkeypatch) -> None:
+    """Cleanup failures before completion remain observable by the caller."""
+    provider_stream = _FailingCloseChatStream([_text_chunk("Hello")])
+    _patch_fetch_response(monkeypatch, provider_stream)
+    model = LitellmProvider().get_model("gpt-4")
+    stream_agen = cast(Any, _stream_response(model))
+
+    first_event = await anext(stream_agen)
+    assert first_event.type == "response.created"
+
+    with pytest.raises(RuntimeError, match="close-failure"):
+        await stream_agen.aclose()
 
     assert provider_stream.aclose_calls == 1
 
