@@ -289,18 +289,25 @@ class StreamedAudioResult:
             tasks.append(self._dispatcher_task)
         await asyncio.gather(*tasks)
 
-    def _cleanup_tasks(self):
-        self._finish_turn()
+    async def _cleanup_tasks(self):
+        current_task = asyncio.current_task()
+        tasks: list[asyncio.Task[Any]] = []
+        seen: set[asyncio.Task[Any]] = set()
+        for task in [*self._tasks, self._dispatcher_task, self.text_generation_task]:
+            if task is None or task is current_task or task in seen:
+                continue
+            seen.add(task)
+            tasks.append(task)
 
-        for task in self._tasks:
+        for task in tasks:
             if not task.done():
                 task.cancel()
 
-        if self._dispatcher_task and not self._dispatcher_task.done():
-            self._dispatcher_task.cancel()
-
-        if self.text_generation_task and not self.text_generation_task.done():
-            self.text_generation_task.cancel()
+        try:
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            self._finish_turn()
 
     def _check_errors(self):
         for task in self._tasks:
@@ -316,7 +323,7 @@ class StreamedAudioResult:
             try:
                 event = await self._queue.get()
             except asyncio.CancelledError:
-                self._cleanup_tasks()
+                await self._cleanup_tasks()
                 raise
             if isinstance(event, VoiceStreamEventError):
                 self._stored_exception = event.error
@@ -333,15 +340,17 @@ class StreamedAudioResult:
 
         # On the normal completion path, let the producer task finish gracefully so any active
         # trace context can emit `trace_end` before we run cleanup.
-        if (
-            saw_session_end
-            and self.text_generation_task is not None
-            and not self.text_generation_task.done()
-        ):
-            await asyncio.shield(self.text_generation_task)
+        try:
+            if (
+                saw_session_end
+                and self.text_generation_task is not None
+                and not self.text_generation_task.done()
+            ):
+                await asyncio.shield(self.text_generation_task)
 
-        self._check_errors()
-        self._cleanup_tasks()
+            self._check_errors()
+        finally:
+            await self._cleanup_tasks()
 
         if self._stored_exception:
             raise self._stored_exception

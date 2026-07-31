@@ -289,6 +289,51 @@ async def test_streamed_audio_dispatcher_handles_stream_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_voice_pipeline_awaits_task_cleanup_after_tts_failure() -> None:
+    """A public pipeline stream must await sibling task cleanup when TTS fails."""
+
+    second_segment_started = asyncio.Event()
+    second_segment_stopped = asyncio.Event()
+
+    class FailingTTS(FakeTTS):
+        async def run(self, text: str, settings: TTSModelSettings):
+            del settings
+            if text == "first":
+                await second_segment_started.wait()
+                raise RuntimeError("tts-failure")
+                yield b""  # pragma: no cover
+
+            second_segment_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                second_segment_stopped.set()
+
+    def split_immediately(text: str) -> tuple[str, str]:
+        return text, ""
+
+    pipeline = VoicePipeline(
+        workflow=FakeWorkflow([["first", "second"]]),
+        stt_model=FakeSTT(["user input"]),
+        tts_model=FailingTTS(),
+        config=VoicePipelineConfig(tts_settings=TTSModelSettings(text_splitter=split_immediately)),
+    )
+    result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
+
+    with pytest.raises(RuntimeError, match="tts-failure"):
+        async for _event in result.stream():
+            pass
+
+    assert second_segment_stopped.is_set()
+    assert all(task.done() for task in result._tasks)
+    assert result._dispatcher_task is not None
+    assert result._dispatcher_task.done()
+    assert result._tracing_span is None
+    assert result.text_generation_task is not None
+    assert result.text_generation_task.done()
+
+
+@pytest.mark.asyncio
 async def test_streamed_audio_dispatcher_blocks_until_work_is_available() -> None:
     """The dispatcher must block while idle without losing a pre-wait notification."""
 
