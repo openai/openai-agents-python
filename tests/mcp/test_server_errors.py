@@ -1,3 +1,4 @@
+import asyncio
 import builtins
 import logging
 import sys
@@ -61,6 +62,27 @@ def _assert_url_credentials_hidden_from_log_record(record: logging.LogRecord) ->
     for secret in _URL_SECRETS:
         assert secret not in rendered
         assert secret not in attached_values
+
+
+def _assert_not_retained_in_log_record(
+    record: logging.LogRecord,
+    sensitive_value: object,
+) -> None:
+    pending: list[object] = [record.__dict__]
+    seen: set[int] = set()
+
+    while pending:
+        value = pending.pop()
+        assert value is not sensitive_value
+        if id(value) in seen:
+            continue
+        seen.add(id(value))
+
+        if isinstance(value, dict):
+            pending.extend(value.keys())
+            pending.extend(value.values())
+        elif isinstance(value, list | tuple | set | frozenset):
+            pending.extend(value)
 
 
 class CrashingClientSessionServer(_MCPServerWithClientSession):
@@ -501,7 +523,25 @@ async def test_failed_connection_cleanup_hides_url_credentials_from_exception_gr
 
 
 @pytest.mark.asyncio
+async def test_failed_connection_cleanup_checks_every_nested_transport_error():
+    server = MCPServerSse(params={"url": _SAFE_URL})
+    cleanup_group, _, unsafe_error = _mixed_request_error_group(_CREDENTIALED_URL)
+
+    with patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_group)):
+        with pytest.raises(UserError) as exc_info:
+            await server.cleanup()
+
+    assert "Could not reach the server" in str(exc_info.value)
+    _assert_url_credentials_hidden(exc_info.value)
+    _assert_not_retained_in_traceback_locals(exc_info.value, cleanup_group)
+    _assert_not_retained_in_traceback_locals(exc_info.value, unsafe_error)
+    assert server.session is None
+    assert server._get_session_id is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("redacted", [True, False])
+@pytest.mark.parametrize("nested", [False, True])
 @pytest.mark.parametrize(
     ("url", "safe_to_attach"),
     [
@@ -513,6 +553,7 @@ async def test_normal_cleanup_only_logs_safe_transport_exceptions(
     monkeypatch,
     caplog,
     redacted: bool,
+    nested: bool,
     url: str,
     safe_to_attach: bool,
 ):
@@ -523,7 +564,10 @@ async def test_normal_cleanup_only_logs_safe_transport_exceptions(
         "timed out",
         request=httpx.Request("GET", url),
     )
-    cleanup_group = BaseExceptionGroup("cleanup failed", [timeout_error])
+    inner_error: BaseException = timeout_error
+    if nested:
+        inner_error = BaseExceptionGroup("nested cleanup failed", [inner_error])
+    cleanup_group = BaseExceptionGroup("cleanup failed", [inner_error])
 
     with (
         patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_group)),
@@ -534,9 +578,139 @@ async def test_normal_cleanup_only_logs_safe_transport_exceptions(
     record = caplog.records[-1]
     if not redacted and safe_to_attach:
         assert record.exc_info is not None
-        assert record.exc_info[1] is timeout_error
+        if nested:
+            assert record.levelno == logging.ERROR
+            assert record.exc_info[1] is cleanup_group
+        else:
+            assert record.levelno == logging.WARNING
+            assert record.exc_info[1] is timeout_error
     else:
         assert record.exc_info is None
+        assert record.exc_text is None
+        _assert_not_retained_in_log_record(record, cleanup_group)
+        _assert_not_retained_in_log_record(record, timeout_error)
 
     if not safe_to_attach:
         _assert_url_credentials_hidden_from_log_record(record)
+
+    assert server.session is None
+    assert server._get_session_id is None
+
+
+@pytest.mark.asyncio
+async def test_normal_cleanup_preserves_safe_nested_group_diagnostics(monkeypatch, caplog):
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    server = MCPServerSse(params={"url": _SAFE_URL})
+    server.session = MagicMock()
+    timeout_error = httpx.ReadTimeout(
+        "timed out",
+        request=httpx.Request("GET", _SAFE_URL),
+    )
+    cleanup_group = BaseExceptionGroup(
+        "cleanup failed",
+        [
+            ValueError("ordinary sibling failure"),
+            BaseExceptionGroup("nested cleanup failed", [timeout_error]),
+        ],
+    )
+
+    with (
+        patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_group)),
+        caplog.at_level(logging.ERROR, logger="openai.agents"),
+    ):
+        await server.cleanup()
+
+    record = caplog.records[-1]
+    assert record.levelno == logging.ERROR
+    assert record.exc_info is not None
+    assert record.exc_info[1] is cleanup_group
+    assert "ordinary sibling failure" in logging.Formatter().format(record)
+    assert server.session is None
+    assert server._get_session_id is None
+
+
+@pytest.mark.asyncio
+async def test_normal_cleanup_checks_every_nested_transport_error_before_logging(
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    server = MCPServerSse(params={"url": _SAFE_URL})
+    server.session = MagicMock()
+    cleanup_group, _, unsafe_error = _mixed_request_error_group(_CREDENTIALED_URL)
+
+    with (
+        patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_group)),
+        caplog.at_level(logging.WARNING, logger="openai.agents"),
+    ):
+        await server.cleanup()
+
+    record = caplog.records[-1]
+    assert record.exc_info is None
+    assert record.exc_text is None
+    _assert_not_retained_in_log_record(record, cleanup_group)
+    _assert_not_retained_in_log_record(record, unsafe_error)
+    _assert_url_credentials_hidden_from_log_record(record)
+    assert server.session is None
+    assert server._get_session_id is None
+
+
+@pytest.mark.asyncio
+async def test_normal_cleanup_preserves_non_http_exception_group_logging(monkeypatch, caplog):
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    server = MCPServerSse(params={"url": _SAFE_URL})
+    server.session = MagicMock()
+    cleanup_group = BaseExceptionGroup("cleanup failed", [ValueError("ordinary failure")])
+
+    with (
+        patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_group)),
+        caplog.at_level(logging.ERROR, logger="openai.agents"),
+    ):
+        await server.cleanup()
+
+    record = caplog.records[-1]
+    assert record.exc_info is not None
+    assert record.exc_info[1] is cleanup_group
+    assert server.session is None
+    assert server._get_session_id is None
+
+
+@pytest.mark.asyncio
+async def test_normal_cleanup_preserves_cancel_scope_suppression(monkeypatch, caplog):
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    server = MCPServerSse(params={"url": _SAFE_URL})
+    server.session = MagicMock()
+    cleanup_group = BaseExceptionGroup(
+        "cleanup failed",
+        [RuntimeError("Attempted to exit cancel scope in a different task")],
+    )
+
+    with (
+        patch.object(server.exit_stack, "aclose", AsyncMock(side_effect=cleanup_group)),
+        caplog.at_level(logging.DEBUG, logger="openai.agents"),
+    ):
+        await server.cleanup()
+
+    record = caplog.records[-1]
+    assert record.levelno == logging.DEBUG
+    assert record.exc_info is not None
+    assert record.exc_info[1] is cleanup_group
+    assert server.session is None
+    assert server._get_session_id is None
+
+
+@pytest.mark.asyncio
+async def test_cleanup_propagates_cancellation_and_clears_session_state():
+    server = MCPServerSse(params={"url": _SAFE_URL})
+    server.session = MagicMock()
+
+    with patch.object(
+        server.exit_stack,
+        "aclose",
+        AsyncMock(side_effect=asyncio.CancelledError()),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await server.cleanup()
+
+    assert server.session is None
+    assert server._get_session_id is None
