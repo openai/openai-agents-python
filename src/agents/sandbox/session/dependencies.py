@@ -76,7 +76,6 @@ class Dependencies:
         self._cache: dict[DependencyKey, object] = {}
         self._pending: dict[DependencyKey, asyncio.Task[object]] = {}
         self._active_tasks: set[asyncio.Task[object]] = set()
-        self._cleanup_tasks: set[asyncio.Task[None]] = set()
         self._owned_results: list[object] = []
         self._close_task: asyncio.Task[None] | None = None
         self._closed = False
@@ -215,12 +214,12 @@ class Dependencies:
 
             if self._closed:
                 if binding.owns_result:
-                    await self._discard_factory_result(value)
+                    self._owned_results.append(value)
                 raise DependenciesError(f"Dependencies container closed while resolving `{key}`")
 
             if self._bindings.get(key) is not binding:
                 if binding.owns_result:
-                    await self._discard_factory_result(value)
+                    self._owned_results.append(value)
                 raise DependenciesBindingError(
                     f"Dependency `{key}` was rebound while its factory was resolving"
                 )
@@ -247,12 +246,6 @@ class Dependencies:
                 if self._pending.get(key) is task:
                     self._pending.pop(key, None)
 
-    async def _discard_factory_result(self, value: object) -> None:
-        task = asyncio.create_task(_close_best_effort(value))
-        self._cleanup_tasks.add(task)
-        task.add_done_callback(self._cleanup_tasks.discard)
-        await asyncio.shield(task)
-
     async def aclose(self) -> None:
         task = self._close_task
         if task is None:
@@ -267,10 +260,6 @@ class Dependencies:
             task.cancel()
         if active_tasks:
             await asyncio.gather(*active_tasks, return_exceptions=True)
-
-        while self._cleanup_tasks:
-            cleanup_tasks = tuple(self._cleanup_tasks)
-            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
 
         seen_ids: set[int] = set()
         for value in reversed(self._owned_results):

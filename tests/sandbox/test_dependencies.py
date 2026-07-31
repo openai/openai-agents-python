@@ -242,7 +242,37 @@ async def test_dependencies_aclose_discards_owned_in_flight_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dependencies_rebind_discards_stale_owned_in_flight_result() -> None:
+async def test_dependencies_aclose_deduplicates_aliased_in_flight_result() -> None:
+    dependencies = Dependencies()
+    current_key = "tests.close_aliased_current"
+    in_flight_key = "tests.close_aliased_in_flight"
+    started = asyncio.Event()
+    value = _AsyncClosable()
+
+    async def _factory(_dependencies: Dependencies) -> _AsyncClosable:
+        started.set()
+        try:
+            await asyncio.Future()
+            raise AssertionError("Unreachable")
+        except asyncio.CancelledError:
+            return value
+
+    dependencies.bind_factory(current_key, lambda _dependencies: value, owns_result=True)
+    assert await dependencies.require(current_key) is value
+    dependencies.bind_factory(in_flight_key, _factory, owns_result=True)
+    in_flight_resolve = asyncio.create_task(dependencies.require(in_flight_key))
+
+    await started.wait()
+    assert value.calls == 0
+    await dependencies.aclose()
+
+    with pytest.raises(DependenciesError, match="closed"):
+        await in_flight_resolve
+    assert value.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_dependencies_rebind_defers_stale_owned_in_flight_result_until_close() -> None:
     dependencies = Dependencies()
     key = "tests.rebind_in_flight"
     started = asyncio.Event()
@@ -268,7 +298,40 @@ async def test_dependencies_rebind_discards_stale_owned_in_flight_result() -> No
         await stale_resolve
     assert await dependencies.require(key) == "replacement"
     assert len(produced) == 1
+    assert produced[0].calls == 0
+
+    await dependencies.aclose()
     assert produced[0].calls == 1
+
+
+@pytest.mark.asyncio
+async def test_dependencies_rebind_preserves_aliased_stale_result_until_close() -> None:
+    dependencies = Dependencies()
+    key = "tests.rebind_aliased_result"
+    started = asyncio.Event()
+    value = _AsyncClosable()
+
+    async def _factory(_dependencies: Dependencies) -> _AsyncClosable:
+        started.set()
+        try:
+            await asyncio.Future()
+            raise AssertionError("Unreachable")
+        except asyncio.CancelledError:
+            return value
+
+    dependencies.bind_factory(key, _factory, owns_result=True)
+    stale_resolve = asyncio.create_task(dependencies.require(key))
+
+    await started.wait()
+    dependencies.bind_factory(key, lambda _dependencies: value, overwrite=True, owns_result=True)
+
+    with pytest.raises(DependenciesBindingError, match="rebound"):
+        await stale_resolve
+    assert await dependencies.require(key) is value
+    assert value.calls == 0
+
+    await dependencies.aclose()
+    assert value.calls == 1
 
 
 @pytest.mark.asyncio
@@ -294,7 +357,7 @@ async def test_dependencies_rebind_reports_binding_error_to_waiters() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dependencies_aclose_waits_for_stale_owned_result_cleanup() -> None:
+async def test_dependencies_aclose_waits_for_deferred_stale_owned_result_cleanup() -> None:
     dependencies = Dependencies()
     key = "tests.close_during_stale_cleanup"
     started = asyncio.Event()
@@ -319,15 +382,17 @@ async def test_dependencies_aclose_waits_for_stale_owned_result_cleanup() -> Non
     dependencies.bind_factory(key, lambda _dependencies: "replacement", overwrite=True)
     await produced.wait()
     value = values[0]
-    await value.started.wait()
+
+    with pytest.raises(DependenciesBindingError, match="rebound"):
+        await stale_resolve
+    assert value.calls == 0
 
     close_waiter = asyncio.create_task(dependencies.aclose())
-    await asyncio.sleep(0)
+    await value.started.wait()
+    assert not close_waiter.done()
     value.release.set()
     await close_waiter
 
-    with pytest.raises(DependenciesError, match="closed"):
-        await stale_resolve
     assert value.calls == 1
     assert value.completed
 
