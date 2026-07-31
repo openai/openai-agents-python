@@ -7,7 +7,12 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ..exceptions import UserError
-from ..logger import log_model_action_error, log_model_and_tool_action_error, logger
+from ..logger import (
+    log_model_action_error,
+    log_model_action_warning,
+    log_model_and_tool_action_error,
+    logger,
+)
 from ..tracing import Span, SpeechGroupSpanData, speech_group_span, speech_span
 from ..tracing.util import time_iso
 from ..util._error_tracing import get_trace_error
@@ -338,5 +343,19 @@ class StreamedAudioResult:
             self._check_errors()
             if self._stored_exception:
                 raise self._stored_exception
-        finally:
+        except BaseException:
+            try:
+                await self._cleanup_tasks()
+            except BaseException as cleanup_error:
+                try:
+                    log_model_action_warning(
+                        logger,
+                        "Voice stream cleanup failed while preserving the consumer exception",
+                        cleanup_error,
+                    )
+                except Exception:
+                    # Logging must not replace the original consumer exception.
+                    pass
+            raise
+        else:
             await self._cleanup_tasks()

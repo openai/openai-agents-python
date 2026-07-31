@@ -5,6 +5,7 @@ import logging
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import numpy as np
 import numpy.typing as npt
@@ -97,6 +98,71 @@ async def test_streamed_audio_result_propagates_consumer_cancellation(monkeypatc
         await consumer
     await producer_stopped.wait()
     assert producer.cancelled()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("redact_model_data", "logging_fails"),
+    [(True, False), (False, False), (True, True)],
+)
+async def test_streamed_audio_result_preserves_cancellation_when_cleanup_fails(
+    monkeypatch,
+    caplog: pytest.LogCaptureFixture,
+    redact_model_data: bool,
+    logging_fails: bool,
+) -> None:
+    result = StreamedAudioResult(
+        FakeTTS(),
+        TTSModelSettings(),
+        VoicePipelineConfig(),
+    )
+    get_started = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def wait_for_event() -> VoiceStreamEvent:
+        get_started.set()
+        await never_finishes.wait()
+        raise AssertionError("Unreachable")
+
+    async def fail_cleanup() -> None:
+        raise RuntimeError("sensitive cleanup detail")
+
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redact_model_data)
+    monkeypatch.setattr(result._queue, "get", wait_for_event)
+    monkeypatch.setattr(result, "_cleanup_tasks", fail_cleanup)
+    if logging_fails:
+        monkeypatch.setattr(
+            "agents.voice.result.log_model_action_warning",
+            MagicMock(side_effect=RuntimeError("logging failed")),
+        )
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        consumer = asyncio.ensure_future(anext(result.stream()))
+        await get_started.wait()
+        consumer.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
+
+    if logging_fails:
+        assert caplog.records == []
+        return
+
+    message = "Voice stream cleanup failed while preserving the consumer exception"
+    record = caplog.records[-1]
+    assert (record.exc_info is None) is redact_model_data
+    if redact_model_data:
+        assert record.msg == "%s"
+        assert record.args == (message,)
+        assert record.exc_text is None
+        assert record.getMessage() == message
+        assert "sensitive cleanup detail" not in logging.Formatter().format(record)
+        assert all(
+            value != "sensitive cleanup detail" and not isinstance(value, RuntimeError)
+            for value in record.__dict__.values()
+        )
+    else:
+        assert record.msg == "%s: %s"
+        assert "sensitive cleanup detail" in logging.Formatter().format(record)
 
 
 @pytest.mark.asyncio
