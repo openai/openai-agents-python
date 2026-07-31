@@ -1997,3 +1997,140 @@ async def test_output_guardrail_raise_cancels_siblings():
 
     assert sibling_cancelled.is_set(), "Sibling task should have been cancelled"
     assert not sibling_completed.is_set(), "Sibling task should not have completed"
+
+
+def _ordered_input_guardrails(
+    *, second_triggers: bool, second_raises: bool = False, run_in_parallel: bool = False
+) -> list[InputGuardrail[Any]]:
+    """Build two guardrails whose completion order is fixed by an explicit barrier."""
+    first_done = asyncio.Event()
+
+    async def first_fn(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        first_done.set()
+        return GuardrailFunctionOutput(output_info="passes", tripwire_triggered=False)
+
+    async def second_fn(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await first_done.wait()
+        if second_raises:
+            raise RuntimeError("guardrail exploded")
+        return GuardrailFunctionOutput(output_info="second", tripwire_triggered=second_triggers)
+
+    return [
+        InputGuardrail(guardrail_function=first_fn, name="passes", run_in_parallel=run_in_parallel),
+        InputGuardrail(
+            guardrail_function=second_fn,
+            name="raises" if second_raises else "trips",
+            run_in_parallel=run_in_parallel,
+        ),
+    ]
+
+
+def _tripwire_agent(model: FakeModel, *, run_in_parallel: bool) -> Agent[Any]:
+    return Agent(
+        name="guardrail_results_agent",
+        model=model,
+        input_guardrails=_ordered_input_guardrails(
+            second_triggers=True, run_in_parallel=run_in_parallel
+        ),
+    )
+
+
+def _result_names(results: list[Any]) -> list[str]:
+    return [result.guardrail.get_name() for result in results]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run_in_parallel", [False, True])
+async def test_input_guardrail_tripwire_reports_results(run_in_parallel: bool):
+    """Runner.run() reports every completed guardrail result on the raised tripwire."""
+    model = FakeModel()
+    model.set_next_output([get_text_message("hello")])
+
+    with pytest.raises(InputGuardrailTripwireTriggered) as exc_info:
+        await Runner.run(_tripwire_agent(model, run_in_parallel=run_in_parallel), "test input")
+
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _result_names(run_data.input_guardrail_results) == ["passes", "trips"]
+    assert exc_info.value.guardrail_result.guardrail.get_name() == "trips"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run_in_parallel", [False, True])
+async def test_input_guardrail_tripwire_reports_results_streamed(run_in_parallel: bool):
+    """The streamed path reports the same results, including on the streamed result object."""
+    model = FakeModel()
+    model.set_next_output([get_text_message("hello")])
+
+    result = Runner.run_streamed(
+        _tripwire_agent(model, run_in_parallel=run_in_parallel), "test input"
+    )
+    with pytest.raises(InputGuardrailTripwireTriggered) as exc_info:
+        async for _ in result.stream_events():
+            pass
+
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _result_names(run_data.input_guardrail_results) == ["passes", "trips"]
+    assert _result_names(result.input_guardrail_results) == ["passes", "trips"]
+
+
+def test_input_guardrail_tripwire_reports_results_sync():
+    """Runner.run_sync() matches the async entry points."""
+    model = FakeModel()
+    model.set_next_output([get_text_message("hello")])
+
+    with pytest.raises(InputGuardrailTripwireTriggered) as exc_info:
+        Runner.run_sync(_tripwire_agent(model, run_in_parallel=False), "test input")
+
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _result_names(run_data.input_guardrail_results) == ["passes", "trips"]
+
+
+@pytest.mark.asyncio
+async def test_input_guardrail_results_reported_on_success():
+    """Passing guardrails still land on the successful result exactly once."""
+    model = FakeModel()
+    model.set_next_output([get_text_message("hello")])
+    agent = Agent(
+        name="guardrail_results_agent",
+        model=model,
+        input_guardrails=[
+            InputGuardrail(
+                guardrail_function=get_sync_guardrail(triggers=False),
+                name="blocking",
+                run_in_parallel=False,
+            ),
+            InputGuardrail(
+                guardrail_function=get_sync_guardrail(triggers=False),
+                name="parallel",
+                run_in_parallel=True,
+            ),
+        ],
+    )
+
+    result = await Runner.run(agent, "test input")
+
+    assert _result_names(result.input_guardrail_results) == ["blocking", "parallel"]
+
+
+@pytest.mark.asyncio
+async def test_input_guardrail_exception_reports_completed_results():
+    """A guardrail raising a non-tripwire error still preserves earlier results."""
+
+    collected: list[Any] = []
+    with pytest.raises(RuntimeError, match="guardrail exploded"):
+        await run_input_guardrails(
+            Agent(name="t"),
+            _ordered_input_guardrails(second_triggers=False, second_raises=True),
+            "test input",
+            RunContextWrapper(context=None),
+            collected,
+        )
+
+    assert _result_names(collected) == ["passes"]

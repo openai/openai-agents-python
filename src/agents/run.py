@@ -797,16 +797,16 @@ class AgentRunner:
                         g for g in all_input_guardrails if not g.run_in_parallel
                     ]
                     parallel_guardrails = [g for g in all_input_guardrails if g.run_in_parallel]
-                    sequential_results: list[InputGuardrailResult] = []
                     if sandbox_runtime.enabled and sequential_guardrails:
                         # Blocking first-turn guardrails must run before sandbox prep so a tripwire
                         # can prevent session creation, startup, or live-session mutation.
                         try:
-                            sequential_results = await run_input_guardrails(
+                            await run_input_guardrails(
                                 starting_agent,
                                 sequential_guardrails,
                                 copy_input_items(original_input),
                                 context_wrapper,
+                                input_guardrail_results,
                             )
                         except InputGuardrailTripwireTriggered:
                             session_input_items_for_persistence = (
@@ -1221,11 +1221,12 @@ class AgentRunner:
                         if current_turn <= 1:
                             try:
                                 if sequential_guardrails:
-                                    sequential_results = await run_input_guardrails(
+                                    await run_input_guardrails(
                                         starting_agent,
                                         sequential_guardrails,
                                         copy_input_items(original_input),
                                         context_wrapper,
+                                        input_guardrail_results,
                                     )
                             except InputGuardrailTripwireTriggered:
                                 session_input_items_for_persistence = (
@@ -1240,7 +1241,6 @@ class AgentRunner:
                                 )
                                 raise
 
-                            parallel_results: list[InputGuardrailResult] = []
                             model_task = asyncio.create_task(
                                 run_single_turn(
                                     bindings=current_bindings,
@@ -1272,10 +1272,11 @@ class AgentRunner:
                                         parallel_guardrails,
                                         copy_input_items(original_input),
                                         context_wrapper,
+                                        input_guardrail_results,
                                     )
                                 )
                                 try:
-                                    parallel_results, turn_result = await asyncio.gather(
+                                    _, turn_result = await asyncio.gather(
                                         guardrail_task,
                                         model_task,
                                     )
@@ -1310,9 +1311,6 @@ class AgentRunner:
                                     raise
                             else:
                                 turn_result = await model_task
-
-                            input_guardrail_results.extend(sequential_results)
-                            input_guardrail_results.extend(parallel_results)
                         else:
                             turn_result = await run_single_turn(
                                 bindings=current_bindings,
