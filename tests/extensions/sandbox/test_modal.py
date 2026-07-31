@@ -3073,10 +3073,8 @@ def _hydration_session(
     monkeypatch: pytest.MonkeyPatch,
     sandbox: _RecordingHydrationSandbox,
 ) -> Any:
-    # An ephemeral *directory*, not an ephemeral file: `ephemeral_persistence_paths()`
-    # then yields the prefix `logs`, which is what a crafted member can hide under.
-    # An ephemeral file yields only its own exact path, so it cannot demonstrate the
-    # bypass this test is about.
+    # An ephemeral *directory*, so `ephemeral_persistence_paths()` yields the prefix
+    # `logs`; an ephemeral file would yield only its own exact path.
     state = modal_module.ModalSandboxSessionState(
         manifest=Manifest(
             root="/workspace",
@@ -3108,19 +3106,13 @@ def _hydration_session(
 @pytest.mark.parametrize(
     ("member", "reason"),
     [
-        # An overlapping member: the archive claims a path the manifest owns as
-        # ephemeral. Nothing that this path is meant to accept produces one, because
-        # `_persist_workspace_skip_relpaths()` excludes it on the producing side.
+        # A member claiming a path the manifest owns as ephemeral.
         (
             _hydration_member("logs/events.jsonl"),
             "archive member overlaps protected path: logs",
         ),
-        # These four are why the fix belongs on this side rather than in the shared
-        # tar utility. Under `skip_rel_paths` they were never validated at all and
-        # `tar xf` created them anyway. Under `reject_rel_paths` each is rejected --
-        # some by the member-type check, which runs first, and some by the overlap
-        # rule. Which one fires is not the point; that none of them is waved through
-        # is.
+        # Member types and links under the ephemeral prefix. Under `skip_rel_paths`
+        # these were never validated and `tar xf` created them anyway.
         (_hydration_member("logs/pipe", "fifo"), "unsupported member type"),
         (_hydration_member("logs/dev", "chardev"), "unsupported member type"),
         (
@@ -3131,7 +3123,7 @@ def _hydration_session(
             _hydration_member("logs/link", "hardlink", "/etc/passwd"),
             "hardlink member not allowed",
         ),
-        # A traversal member, which normalizes under the protected prefix.
+        # A traversal member normalizing under the protected prefix.
         (
             _hydration_member("logs/../../etc/passwd"),
             "parent traversal",
@@ -3143,15 +3135,12 @@ async def test_modal_hydrate_tar_rejects_protected_members_before_extracting(
 ) -> None:
     """Hydration must reject before `tar xf`, because it extracts the bytes it validated.
 
-    `_hydrate_workspace_via_tar` reads the archive into a buffer, validates that
-    buffer, and then pipes the *same* buffer to `tar xf -`. There is no point after
-    validation at which a member can be dropped, so anything validation tolerates the
-    extractor writes. That is why the ephemeral paths are passed as `reject_rel_paths`
-    rather than `skip_rel_paths`: skipping suppresses member-type and link validation
-    for those members while still handing them to tar.
-
-    The assertion that no command ran is the part that matters -- it is what
-    distinguishes rejecting *before* extraction from failing afterwards.
+    `_hydrate_workspace_via_tar` validates the buffer it then pipes to `tar xf -`, so
+    there is no point after validation at which a member can be dropped. Hence
+    `reject_rel_paths` rather than `skip_rel_paths`: skipping suppresses member-type
+    and link validation while still handing those members to tar. The assertion that
+    no command ran is what distinguishes rejecting before extraction from failing
+    after it.
     """
 
     modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
@@ -3174,11 +3163,8 @@ async def test_modal_hydrate_tar_accepts_an_archive_without_protected_paths(
 ) -> None:
     """The control: rejecting the ephemeral paths must not reject valid snapshots.
 
-    A snapshot produced by `persist_workspace` excludes the ephemeral paths, so it
-    carries neither `logs/events.jsonl` nor anything under it -- including the
-    `logs/` directory when that directory exists only to hold the ephemeral file.
-    Symlinks that stay inside the archive are still accepted, which is what keeps
-    virtualenv-style workspaces restorable.
+    A snapshot from `persist_workspace` excludes the ephemeral paths, and symlinks
+    staying inside the archive are still accepted so virtualenvs remain restorable.
     """
 
     modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)

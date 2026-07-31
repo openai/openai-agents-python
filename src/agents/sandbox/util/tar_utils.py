@@ -74,28 +74,6 @@ def _validate_symlink_target(
         )
 
 
-def raise_if_unsafe_tar_member_name(member_name: str) -> None:
-    """Reject a tar member name that is unsafe to interpret as a workspace-relative path.
-
-    Lexical only: it looks at the name and nothing else, so it is safe to run on
-    every member of an archive before deciding what to do with any of them. Member
-    type and link validation is deliberately not part of this — see
-    `safe_tar_member_rel_path`, which runs both, and `validate_tarfile`, which runs
-    this one first so that a skipped member is still name-checked.
-
-    The root member names (`""`, `"."`, `"./"`) pass: they have no parts to be
-    absolute or traversing. Whether a root member is *acceptable* depends on its
-    type, which `_validate_archive_root_member` decides.
-    """
-
-    _raise_if_windows_member_path(member_name)
-    rel = PurePosixPath(member_name)
-    if rel.is_absolute():
-        raise UnsafeTarMemberError(member=member_name, reason="absolute path")
-    if ".." in rel.parts:
-        raise UnsafeTarMemberError(member=member_name, reason="parent traversal")
-
-
 def safe_tar_member_rel_path(
     member: tarfile.TarInfo,
     *,
@@ -106,8 +84,12 @@ def safe_tar_member_rel_path(
     if member.name in ("", ".", "./"):
         _validate_archive_root_member(member)
         return None
-    raise_if_unsafe_tar_member_name(member.name)
+    _raise_if_windows_member_path(member.name)
     rel = PurePosixPath(member.name)
+    if rel.is_absolute():
+        raise UnsafeTarMemberError(member=member.name, reason="absolute path")
+    if ".." in rel.parts:
+        raise UnsafeTarMemberError(member=member.name, reason="parent traversal")
     if member.issym() and not allow_symlinks:
         raise UnsafeTarMemberError(member=member.name, reason="symlink member not allowed")
     if member.islnk():
@@ -223,11 +205,6 @@ def should_skip_tar_member(
 
     `member_name` is the raw name from the tar, which may include `.` or the workspace root
     directory name depending on how the tar was produced.
-
-    This answers only "is this member under a skipped prefix"; it does not decide whether
-    the name is safe. Callers that validate must run `raise_if_unsafe_tar_member_name`
-    first, as `validate_tarfile` does — otherwise an unsafe name that normalizes under a
-    skipped prefix is `continue`d past the checks in `safe_tar_member_rel_path`.
     """
 
     rel_variants = _tar_member_rel_variants(member_name, root_name)
@@ -285,15 +262,6 @@ def validate_tarfile(
     members: list[tuple[tarfile.TarInfo, Path]] = []
 
     for member in tar.getmembers():
-        # Name validation runs before the skip decision, and member/link validation
-        # after it. A skipped prefix is a statement about which files the caller
-        # wants, so it can carry member types it does not want to hear about (a
-        # socket or a device node inside `.venv` is not the caller's problem) — but
-        # it cannot make an unsafe *name* unexamined, because `_is_within` compares
-        # a normalized path and so folds `..`, a leading `/`, and a Windows
-        # separator into a match against the prefix. Skipping such a member would
-        # `continue` past the rejections below.
-        raise_if_unsafe_tar_member_name(member.name)
         if should_skip_tar_member(
             member.name,
             skip_rel_paths=skip_rel_paths,
