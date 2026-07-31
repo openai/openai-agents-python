@@ -319,28 +319,31 @@ class StreamedAudioResult:
     async def stream(self) -> AsyncIterator[VoiceStreamEvent]:
         """Stream the events and audio data as they're generated."""
         saw_session_end = False
-        while True:
-            try:
-                event = await self._queue.get()
-            except asyncio.CancelledError:
-                await self._cleanup_tasks()
-                raise
-            if isinstance(event, VoiceStreamEventError):
-                self._stored_exception = event.error
-                log_model_and_tool_action_error(
-                    logger, "Error processing voice output", event.error
-                )
-                break
-            if event is None:
-                break
-            yield event
-            if event.type == "voice_stream_event_lifecycle" and event.event == "session_ended":
-                saw_session_end = True
-                break
-
-        # On the normal completion path, let the producer task finish gracefully so any active
-        # trace context can emit `trace_end` before we run cleanup.
+        # The whole body sits under `finally` so a consumer that stops early -- `break` out of
+        # the `async for`, or an explicit `aclose()` -- still gets the producer tasks
+        # cancelled. Without it `GeneratorExit` arrives at the `yield` below and unwinds past
+        # the cleanup, leaving those tasks running.
         try:
+            while True:
+                try:
+                    event = await self._queue.get()
+                except asyncio.CancelledError:
+                    raise
+                if isinstance(event, VoiceStreamEventError):
+                    self._stored_exception = event.error
+                    log_model_and_tool_action_error(
+                        logger, "Error processing voice output", event.error
+                    )
+                    break
+                if event is None:
+                    break
+                yield event
+                if event.type == "voice_stream_event_lifecycle" and event.event == "session_ended":
+                    saw_session_end = True
+                    break
+
+            # On the normal completion path, let the producer task finish gracefully so any
+            # active trace context can emit `trace_end` before we run cleanup.
             if (
                 saw_session_end
                 and self.text_generation_task is not None
