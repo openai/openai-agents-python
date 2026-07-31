@@ -205,7 +205,14 @@ def should_skip_tar_member(
 
     `member_name` is the raw name from the tar, which may include `.` or the workspace root
     directory name depending on how the tar was produced.
+
+    A member containing `..` is never skipped. `validate_tarfile` consults this function
+    before `safe_tar_member_rel_path`, so skipping such a member would `continue` past the
+    parent-traversal rejection instead of letting it raise.
     """
+
+    if ".." in Path(member_name).parts:
+        return False
 
     rel_variants = _tar_member_rel_variants(member_name, root_name)
     prefixes = [_normalize_rel(p) for p in skip_rel_paths]

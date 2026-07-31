@@ -12,6 +12,7 @@ from agents.sandbox.util.tar_utils import (
     UnsafeTarMemberError,
     safe_extract_tarfile,
     safe_tar_member_rel_path,
+    should_skip_tar_member,
     strip_tar_member_prefix,
     validate_tar_bytes,
 )
@@ -392,4 +393,94 @@ def test_validate_tar_bytes_ignores_skipped_unsafe_member() -> None:
     validate_tar_bytes(
         _tar_bytes(_symlink(".runtime/escape", "/tmp/outside")),
         skip_rel_paths=[Path(".runtime")],
+    )
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    [
+        ".runtime/../../etc/passwd",
+        ".runtime/../.ssh/authorized_keys",
+        ".runtime/../../../etc/cron.d/job",
+        ".runtime/nested/../../../escape",
+        "workspace/.runtime/../../escape",
+    ],
+)
+def test_validate_tar_bytes_rejects_parent_traversal_under_skipped_prefix(
+    member_name: str,
+) -> None:
+    """A skip prefix must not become a way past the parent-traversal check.
+
+    `validate_tarfile` consults `should_skip_tar_member` before
+    `safe_tar_member_rel_path`, so a member that is skipped is never checked for
+    `..` at all. Prefixing a traversal path with a skipped directory name is
+    enough to reach an extractor that the caller believed had been validated.
+    """
+    with pytest.raises(UnsafeTarMemberError) as excinfo:
+        validate_tar_bytes(
+            _tar_bytes(_file(member_name)),
+            skip_rel_paths=[Path(".runtime")],
+            root_name="workspace",
+        )
+    assert excinfo.value.reason == "parent traversal"
+
+
+def test_validate_tar_bytes_rejects_traversal_beside_a_genuinely_skipped_member() -> None:
+    """The skip still applies to the members that really are under the prefix."""
+    with pytest.raises(UnsafeTarMemberError) as excinfo:
+        validate_tar_bytes(
+            _tar_bytes(
+                _file(".runtime/state.json"),
+                _file(".runtime/../../etc/passwd"),
+            ),
+            skip_rel_paths=[Path(".runtime")],
+        )
+    assert excinfo.value.reason == "parent traversal"
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    [
+        ".runtime/../escape",
+        "..",
+        "../escape",
+        "workspace/.runtime/../../escape",
+        "./.runtime/../escape",
+    ],
+)
+def test_should_skip_tar_member_never_skips_a_parent_traversal(member_name: str) -> None:
+    assert (
+        should_skip_tar_member(
+            member_name,
+            skip_rel_paths=[Path(".runtime")],
+            root_name="workspace",
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("member_name", "expected"),
+    [
+        (".runtime/state.json", True),
+        ("./.runtime/state.json", True),
+        ("workspace/.runtime/state.json", True),
+        ("workspace/./.runtime/state.json", True),
+        (".runtime", True),
+        ("src/main.py", False),
+        ("./src/main.py", False),
+        ("workspace/src/main.py", False),
+        (".runtimely/state.json", False),
+    ],
+)
+def test_should_skip_tar_member_matches_prefixes_without_traversal(
+    member_name: str, expected: bool
+) -> None:
+    assert (
+        should_skip_tar_member(
+            member_name,
+            skip_rel_paths=[Path(".runtime")],
+            root_name="workspace",
+        )
+        is expected
     )
