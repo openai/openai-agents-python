@@ -271,9 +271,7 @@ class StreamedAudioResult:
                         self._finish_turn()
                         break
                     if chunk.event == "session_ended":
-                        break
-            if isinstance(chunk, VoiceStreamEventLifecycle) and chunk.event == "session_ended":
-                break
+                        return
         await self._queue.put(VoiceStreamEventLifecycle(event="session_ended"))
 
     async def _wait_for_completion(self):

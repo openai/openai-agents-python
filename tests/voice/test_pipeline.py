@@ -226,18 +226,29 @@ async def test_streamed_audio_dispatcher_handles_stream_failure() -> None:
     with pytest.raises(RuntimeError, match="tts-failure"):
         await result._turn_done()
 
-    # The single-turn pipeline queues the error and re-raises without ever calling
-    # _done(), so _completed_session stays false. The dispatcher must terminate on the
-    # session_ended event from the failed task instead of blocking on its dead queue
-    # (or spinning in the outer wait loop waiting for a completion flag that never
-    # gets set).
-    with pytest.raises(RuntimeError, match="tts-failure"):
-        await result._done()
-
+    # The single-turn pipeline queues the error and re-raises without calling _done(),
+    # so _completed_session stays false. The dispatcher must return as soon as it
+    # forwards the session_ended sentinel from the failed segment instead of blocking
+    # on the dead queue (or spinning in the outer wait loop).
     dispatcher_task = result._dispatcher_task
     assert dispatcher_task is not None
     await asyncio.wait_for(dispatcher_task, timeout=5.0)
     assert dispatcher_task.done()
+
+    # The failed segment's session_ended is forwarded once; the dispatcher's normal
+    # epilogue must not queue a second terminal event.
+    events: list[VoiceStreamEvent] = []
+    while True:
+        try:
+            events.append(result._queue.get_nowait())
+        except asyncio.QueueEmpty:
+            break
+    terminal_events = [
+        event
+        for event in events
+        if isinstance(event, VoiceStreamEventLifecycle) and event.event == "session_ended"
+    ]
+    assert len(terminal_events) == 1
 
 
 @pytest.mark.asyncio
