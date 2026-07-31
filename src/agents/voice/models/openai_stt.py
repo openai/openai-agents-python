@@ -381,8 +381,13 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         finally:
             try:
                 await self.close()
-            except BaseException:
-                if not primary_exception_active:
+            except BaseException as cleanup_exception:
+                # Cancellation must always propagate, even while preserving a primary consumer
+                # exception, so callers that cancel or time out STT cleanup observe the
+                # cancellation instead of a successful close.
+                if isinstance(cleanup_exception, asyncio.CancelledError) or (
+                    not primary_exception_active
+                ):
                     raise
                 try:
                     logger.warning(

@@ -363,8 +363,13 @@ class StreamedAudioResult:
                         await asyncio.shield(self.text_generation_task)
                 finally:
                     await self._cleanup_tasks()
-            except BaseException:
-                if not primary_exception_active:
+            except BaseException as cleanup_exception:
+                # Cancellation must always propagate, even while preserving a primary consumer
+                # exception, so callers that cancel or time out stream cleanup observe the
+                # cancellation instead of a successful close.
+                if isinstance(cleanup_exception, asyncio.CancelledError) or (
+                    not primary_exception_active
+                ):
                     raise
                 try:
                     logger.warning(

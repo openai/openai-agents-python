@@ -265,6 +265,41 @@ async def test_transcribe_turns_preserves_consumer_exception_when_cleanup_fails(
 
 
 @pytest.mark.asyncio
+async def test_transcribe_turns_propagates_cancellation_during_cleanup(monkeypatch) -> None:
+    session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="whisper-1",
+        settings=STTModelSettings(),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+    never_finishes = asyncio.Event()
+
+    async def hold_connection_open() -> None:
+        await never_finishes.wait()
+
+    async def cancelled_cleanup() -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(session, "_process_websocket_connection", hold_connection_open)
+    monkeypatch.setattr(session, "_cleanup_tasks", cancelled_cleanup)
+    await session._output_queue.put("hello")
+    turns = cast(AsyncGenerator[str, None], session.transcribe_turns())
+    assert await anext(turns) == "hello"
+
+    try:
+        # A primary consumer exception is active, but a cancellation raised while the STT
+        # session is closing must still propagate rather than be swallowed as secondary.
+        with pytest.raises(asyncio.CancelledError):
+            await turns.athrow(ValueError("consumer detail"))
+    finally:
+        if session._connection_task is not None:
+            session._connection_task.cancel()
+            await asyncio.gather(session._connection_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("trace_include_sensitive_data", "expected_error"),
     [

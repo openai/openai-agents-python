@@ -242,6 +242,47 @@ async def test_streamed_audio_result_closes_gracefully_after_session_end_yield()
         await asyncio.gather(close_task, producer_task, return_exceptions=True)
 
 
+@pytest.mark.asyncio
+async def test_streamed_audio_result_propagates_cancellation_during_session_end_cleanup() -> None:
+    result = StreamedAudioResult(
+        FakeTTS(),
+        TTSModelSettings(),
+        VoicePipelineConfig(),
+    )
+    producer_started = asyncio.Event()
+    producer_release = asyncio.Event()
+
+    async def produce_session() -> None:
+        producer_started.set()
+        await producer_release.wait()
+
+    producer_task = asyncio.create_task(produce_session())
+    result._set_task(producer_task)
+    await producer_started.wait()
+    await result._queue.put(VoiceStreamEventLifecycle(event="session_ended"))
+
+    stream = cast(AsyncGenerator[VoiceStreamEvent, None], result.stream())
+    event = await anext(stream)
+    assert isinstance(event, VoiceStreamEventLifecycle)
+    assert event.event == "session_ended"
+
+    # aclose() blocks in the finally awaiting asyncio.shield(text_generation_task). Cancelling
+    # that cleanup (as asyncio.wait_for would on timeout) must surface the cancellation instead
+    # of reporting a successful close.
+    close_task = asyncio.create_task(stream.aclose())
+    try:
+        await asyncio.sleep(0)
+        assert not close_task.done()
+        close_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+    finally:
+        producer_release.set()
+        if not producer_task.done():
+            producer_task.cancel()
+        await asyncio.gather(producer_task, return_exceptions=True)
+
+
 def test_voice_pipeline_config_normalizes_dictionary_settings() -> None:
     config = VoicePipelineConfig(
         stt_settings={"language": "ja", "temperature": 0.0},
