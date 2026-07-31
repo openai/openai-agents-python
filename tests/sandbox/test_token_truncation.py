@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import builtins
+
+import pytest
+
+from agents.sandbox.util import token_truncation
 from agents.sandbox.util.token_truncation import (
     TruncationPolicy,
     approx_bytes_for_tokens,
     approx_token_count,
     approx_tokens_from_byte_count,
+    conservative_token_count,
     format_truncation_marker,
     formatted_truncate_text,
     formatted_truncate_text_with_token_count,
+    openai_token_count,
     removed_units_for_source,
     split_budget,
     split_string,
@@ -94,3 +101,56 @@ def test_formatting_and_estimate_helpers() -> None:
     assert approx_bytes_for_tokens(-1) == 0
     assert approx_tokens_from_byte_count(0) == 0
     assert approx_tokens_from_byte_count(5) == 2
+
+
+def test_conservative_token_count_returns_utf8_byte_length() -> None:
+    assert conservative_token_count("") == 0
+    assert conservative_token_count("abc") == 3
+    # Multi-byte characters contribute their full UTF-8 byte length.
+    assert conservative_token_count("é") == 2
+    assert conservative_token_count("日本") == 6
+
+
+def test_openai_token_count_never_undercounts_dense_content() -> None:
+    tiktoken = pytest.importorskip("tiktoken")
+    encoding = tiktoken.get_encoding("o200k_base")
+    dense = "{" + ",".join(f'"k{i}":[{i},{i}]' for i in range(500)) + "}"
+
+    # The exact tokenizer count is returned, and it exceeds the average ceil(bytes / 4) estimate
+    # for token-dense JSON, which is the undercount the budget check must not rely on.
+    assert openai_token_count(dense) == len(encoding.encode(dense))
+    assert openai_token_count(dense) > approx_token_count(dense)
+
+
+def test_openai_token_count_uses_model_specific_encoding() -> None:
+    tiktoken = pytest.importorskip("tiktoken")
+    text = "{}[]<>()!@#$%^&*_+=-|/:;" * 40
+
+    # gpt-4 maps to cl100k_base; the count matches that encoding exactly.
+    assert openai_token_count(text, model="gpt-4") == len(
+        tiktoken.encoding_for_model("gpt-4").encode(text)
+    )
+    # Unrecognized model names fall back to the current default o200k_base encoding.
+    assert openai_token_count(text, model="totally-unknown-model") == len(
+        tiktoken.get_encoding("o200k_base").encode(text)
+    )
+
+
+def test_openai_token_count_falls_back_to_conservative_without_tiktoken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "tiktoken":
+            raise ImportError("tiktoken is not installed")
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    token_truncation._tiktoken_encoding_for_model.cache_clear()
+    try:
+        assert token_truncation._tiktoken_encoding_for_model("gpt-4o") is None
+        text = 'dense {"json": [1, 2, 3]} content'
+        assert openai_token_count(text) == conservative_token_count(text)
+    finally:
+        token_truncation._tiktoken_encoding_for_model.cache_clear()

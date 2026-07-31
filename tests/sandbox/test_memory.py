@@ -72,7 +72,7 @@ from agents.sandbox.memory.storage import (
 )
 from agents.sandbox.runtime import _stream_memory_input_override
 from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
-from agents.sandbox.util.token_truncation import approx_token_count
+from agents.sandbox.util.token_truncation import openai_token_count
 from tests.fake_model import FakeModel
 from tests.test_responses import get_final_output_message, get_text_message
 from tests.utils.hitl import make_shell_call
@@ -343,10 +343,46 @@ def test_render_phase_one_prompt_respects_complete_input_budget() -> None:
         input_overhead_tokens=input_overhead_tokens,
     )
 
-    assert approx_token_count(prompt) + input_overhead_tokens <= 2_000
+    # The implementation enforces this budget with the same non-undercounting accounting.
+    assert openai_token_count(prompt) + input_overhead_tokens <= 2_000
     assert "start" in prompt
     assert "end" in prompt
     assert "middle" not in prompt
+
+
+def test_render_phase_one_prompt_bounds_token_dense_input_by_real_tokens() -> None:
+    # Independent oracle: count the real OpenAI tokens of the rendered request with tiktoken
+    # directly instead of reusing the implementation's helper.
+    tiktoken = pytest.importorskip("tiktoken")
+    encoding = tiktoken.get_encoding("o200k_base")
+
+    # Token-dense JSON tokenizes to far more tokens than ceil(UTF-8 bytes / 4) predicts, so an
+    # average-based budget check would let the real request exceed the limit.
+    dense_content = json.dumps(
+        [
+            {"k" + str(i): {"a": i, "b": [i, i * 2, i * 3], "c": "x_" + str(i)}}
+            for i in range(4_000)
+        ],
+        separators=(",", ":"),
+    )
+    payload = {
+        "input": [{"role": "user", "content": dense_content}],
+        "generated_items": [],
+        "terminal_metadata": {"terminal_state": "completed", "has_final_output": False},
+    }
+    input_token_limit = 4_000
+
+    prompt = render_phase_one_prompt(
+        rollout_contents=dump_rollout_json(payload),
+        input_token_limit=input_token_limit,
+        input_overhead_tokens=0,
+    )
+
+    # The dense content is large enough to require truncation.
+    assert "rollout content omitted" in prompt
+    # The real token count of the rendered request must stay within budget. Under the previous
+    # ceil(UTF-8 bytes / 4) accounting this assertion fails because the estimate undercounts.
+    assert len(encoding.encode(prompt)) <= input_token_limit
 
 
 def test_render_phase_one_prompt_rejects_budget_below_fixed_overhead() -> None:
@@ -622,7 +658,18 @@ async def test_runner_memory_generation_sanitizes_and_truncates_phase_one_prompt
             [
                 {"role": "developer", "content": "developer debug"},
                 {"role": "system", "content": "system note"},
-                {"role": "user", "content": f"start{'a' * 20_000}middle{'z' * 20_000}end"},
+                {
+                    "role": "user",
+                    # Varied filler so the payload is large in real tokens (repeated single
+                    # characters compress heavily under BPE and would not force truncation).
+                    "content": (
+                        "start "
+                        + ("lorem ipsum dolor sit amet " * 2_000)
+                        + " middle "
+                        + ("consectetur adipiscing elit sed " * 2_000)
+                        + " end"
+                    ),
+                },
                 cast(TResponseInputItem, {"type": "reasoning", "summary": []}),
                 cast(
                     TResponseInputItem,
@@ -654,9 +701,16 @@ async def test_runner_memory_generation_sanitizes_and_truncates_phase_one_prompt
             sort_keys=True,
             separators=(",", ":"),
         )
-        assert approx_token_count(system_instructions) + approx_token_count(
-            prompt
-        ) + approx_token_count(schema_json) <= int(context_window_tokens * 0.7)
+        # Verify the actual request with an independent tokenizer rather than the estimator the
+        # implementation relies on, so the assertion catches token-dense undercounting.
+        tiktoken = pytest.importorskip("tiktoken")
+        encoding = tiktoken.get_encoding("o200k_base")
+        real_input_tokens = (
+            len(encoding.encode(system_instructions))
+            + len(encoding.encode(prompt))
+            + len(encoding.encode(schema_json))
+        )
+        assert real_input_tokens <= int(context_window_tokens * 0.7)
         assert "developer debug" not in prompt
         assert "system note" not in prompt
         assert "reasoning" not in prompt
@@ -666,7 +720,7 @@ async def test_runner_memory_generation_sanitizes_and_truncates_phase_one_prompt
         assert "start" in prompt
         assert "middle" not in prompt
         assert "end" in prompt
-        assert "tokens truncated" in prompt
+        assert "chars truncated" in prompt
         assert "rollout content omitted" in prompt
     finally:
         await _cleanup_session(client, session, close=not closed)
