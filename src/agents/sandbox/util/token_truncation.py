@@ -1,11 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
-from typing import TYPE_CHECKING, Literal
-
-if TYPE_CHECKING:
-    import tiktoken
+from typing import Literal
 
 APPROX_BYTES_PER_TOKEN = 4
 
@@ -180,59 +176,6 @@ def approx_token_count(text: str) -> int:
     return (byte_len + (APPROX_BYTES_PER_TOKEN - 1)) // APPROX_BYTES_PER_TOKEN
 
 
-def conservative_token_count(text: str) -> int:
-    """Return an upper bound on the OpenAI token count for ``text``.
-
-    OpenAI tokenizers (for example ``cl100k_base`` and ``o200k_base``) are byte-level BPE
-    encoders: the text is split into its UTF-8 bytes and merges only ever combine adjacent
-    tokens, so the token count can never exceed the number of UTF-8 bytes. The byte length is
-    therefore a safe upper bound that never undercounts token-dense JSON or code, unlike the
-    average-case :func:`approx_token_count` heuristic. Use this when a budget check must not
-    allow a request to exceed the model's context window and ``tiktoken`` is not available.
-    """
-    return _byte_len(text)
-
-
-@lru_cache(maxsize=32)
-def _tiktoken_encoding_for_model(model: str | None) -> tiktoken.Encoding | None:
-    """Return the ``tiktoken`` encoding for ``model``, or ``None`` if ``tiktoken`` is missing.
-
-    Falls back to the current default ``o200k_base`` encoding for model names ``tiktoken``
-    does not recognize. Cached because loading BPE ranks is comparatively expensive.
-    """
-    try:
-        import tiktoken
-    except ImportError:
-        return None
-    if model:
-        try:
-            return tiktoken.encoding_for_model(model)
-        except KeyError:
-            pass
-    try:
-        return tiktoken.get_encoding("o200k_base")
-    except Exception:
-        return None
-
-
-def openai_token_count(text: str, *, model: str | None = None) -> int:
-    """Count tokens for OpenAI input using accounting that never undercounts.
-
-    When ``tiktoken`` is installed this returns the exact count from the model's own encoding
-    (falling back to ``o200k_base`` for unrecognized model names), which cannot undercount
-    supported OpenAI input. When ``tiktoken`` is unavailable it returns the conservative
-    UTF-8 byte-length upper bound from :func:`conservative_token_count`. Either way the result
-    never undercounts the way the average-case :func:`approx_token_count` heuristic can, so it
-    is safe for budget checks that must keep a request within a model's context window.
-    """
-    encoding = _tiktoken_encoding_for_model(model)
-    if encoding is None:
-        return conservative_token_count(text)
-    # ``disallowed_special=()`` treats special-token strings (for example ``<|endoftext|>``)
-    # as ordinary text instead of raising, which also cannot undercount their token cost.
-    return len(encoding.encode(text, disallowed_special=()))
-
-
 def approx_bytes_for_tokens(tokens: int) -> int:
     return max(0, tokens) * APPROX_BYTES_PER_TOKEN
 
@@ -251,11 +194,9 @@ __all__ = [
     "approx_token_count",
     "approx_tokens_from_byte_count",
     "assemble_truncated_output",
-    "conservative_token_count",
     "format_truncation_marker",
     "formatted_truncate_text",
     "formatted_truncate_text_with_token_count",
-    "openai_token_count",
     "removed_units_for_source",
     "split_budget",
     "split_string",

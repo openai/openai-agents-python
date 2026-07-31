@@ -86,12 +86,13 @@ class MemoryGenerateConfig:
     Known model names use SDK metadata when this is ``None``. Set this for custom or unknown
     models so phase-one prompt generation can reserve context for instructions, schema, and output.
 
-    Phase one keeps the whole estimated request within 70% of this window. Token accounting uses
-    the model's own tokenizer when ``tiktoken`` is installed and a conservative byte-length upper
-    bound otherwise, so it never undercounts token-dense JSON or code and the request cannot
-    exceed the model's context window even when content tokenizes densely. The remaining 30% is
-    reserved for model output and provider-specific framing, so set this to the effective usable
-    window rather than a larger advertised maximum.
+    Phase one keeps the whole estimated request within 70% of this window using a deterministic
+    UTF-8 byte-length upper bound on the token count. Because a byte-level BPE tokenizer never
+    emits more tokens than UTF-8 bytes, this provider-neutral bound never undercounts token-dense
+    JSON or code, so the request cannot exceed the model's context window even when content
+    tokenizes densely. The remaining 30% is reserved for model output and provider-specific
+    framing. The bound is intentionally conservative, so set this to the effective usable window
+    rather than a larger advertised maximum.
     """
 
     if TYPE_CHECKING:

@@ -9,12 +9,7 @@ from ...agent_output import AgentOutputSchema
 from ...run_config import RunConfig
 from ..capabilities.compaction import CompactionModelInfo
 from ..config import MemoryGenerateConfig
-from ..util.token_truncation import (
-    TruncationPolicy,
-    approx_bytes_for_tokens,
-    openai_token_count,
-    truncate_text,
-)
+from ..util.token_truncation import TruncationPolicy, truncate_text
 from .interface import RolloutExtractionArtifacts
 from .prompts import (
     render_rollout_extraction_prompt,
@@ -32,6 +27,18 @@ _PHASE_ONE_ROLLOUT_OMISSION_MARKER_TEMPLATE = (
     "Do not assume the rendered rollout below is complete.]"
     "\n\n"
 )
+
+
+def _conservative_token_count(text: str) -> int:
+    """Return a deterministic upper bound on the token count for ``text``.
+
+    Byte-level BPE tokenizers (OpenAI's and other providers') split text into its UTF-8 bytes
+    and only ever merge adjacent tokens, so the token count can never exceed the number of UTF-8
+    bytes. The byte length is therefore a provider-neutral upper bound that never undercounts
+    token-dense JSON or code and needs no tokenizer download or model-specific lookup. Phase one
+    uses it to keep the estimated request within the configured model context window.
+    """
+    return len(text.encode("utf-8"))
 
 
 def normalize_rollout_slug(value: str) -> str:
@@ -55,7 +62,6 @@ def render_phase_one_prompt(
     rollout_contents: str,
     input_token_limit: int | None = None,
     input_overhead_tokens: int = 0,
-    model: str | None = None,
 ) -> str:
     payloads = [json.loads(line) for line in rollout_contents.splitlines() if line.strip()]
     if not payloads:
@@ -100,21 +106,22 @@ def render_phase_one_prompt(
     if input_overhead_tokens < 0:
         raise ValueError("input_overhead_tokens must be greater than or equal to 0")
 
-    # Keep the whole estimated phase-one request within the caller's token budget using token
-    # accounting that never undercounts (see ``openai_token_count``: the model's own tokenizer
-    # when ``tiktoken`` is available, otherwise a conservative byte-length upper bound). An
-    # average bytes-per-token heuristic would let token-dense JSON or code slip past the budget
-    # and overflow the model context. Rollout content is truncated by bytes, and each iteration
-    # re-measures the rendered prompt so the marker and wrapper overhead are counted too. The
-    # released 150,000-token rollout ceiling stays as an upper bound on rollout content.
+    # Keep the whole estimated phase-one request within the caller's token budget using a
+    # deterministic UTF-8 byte-length upper bound (see ``_conservative_token_count``). Because a
+    # byte-level BPE tokenizer never emits more tokens than UTF-8 bytes, counting bytes cannot
+    # undercount token-dense JSON or code the way an average bytes-per-token heuristic can, and it
+    # holds for any provider without a tokenizer download or model-specific lookup. Rollout
+    # content is both capped at the released 150,000-token ceiling and truncated by bytes to fit
+    # the remaining budget; each iteration re-measures the rendered prompt so the marker and
+    # wrapper overhead are counted too. Both limits are byte counts, so the cap also bounds the
+    # measured rollout tokens rather than only the total request.
     rollout_byte_limit = min(
-        approx_bytes_for_tokens(_PHASE_ONE_ROLLOUT_TOKEN_LIMIT),
-        max(0, approx_bytes_for_tokens(input_token_limit - input_overhead_tokens)),
+        _PHASE_ONE_ROLLOUT_TOKEN_LIMIT,
+        max(0, input_token_limit - input_overhead_tokens),
     )
     while True:
         prompt = render_with_rollout_policy(TruncationPolicy.bytes(rollout_byte_limit))
-        prompt_tokens = openai_token_count(prompt, model=model)
-        estimated_input_tokens = input_overhead_tokens + prompt_tokens
+        estimated_input_tokens = input_overhead_tokens + _conservative_token_count(prompt)
         if estimated_input_tokens <= input_token_limit:
             return prompt
         if rollout_byte_limit == 0:
@@ -122,13 +129,10 @@ def render_phase_one_prompt(
                 "The phase-one model context window is too small for the fixed phase-one "
                 "prompt overhead."
             )
-        # Shrink the rollout byte budget by the token overflow scaled to the rendered prompt's
-        # measured byte-per-token density. This converges in a few iterations without
-        # discarding the whole rollout for token-dense content or crawling for compressible
-        # content, both of which a fixed bytes-per-token guess would cause.
-        overflow_tokens = estimated_input_tokens - input_token_limit
-        bytes_per_token = max(1, len(prompt.encode("utf-8")) // max(1, prompt_tokens))
-        rollout_byte_limit = max(0, rollout_byte_limit - overflow_tokens * bytes_per_token)
+        # Byte-for-byte accounting: reducing the rollout byte budget by the overflow shrinks the
+        # measured prompt by the same amount, so the loop converges in a few iterations.
+        overflow = estimated_input_tokens - input_token_limit
+        rollout_byte_limit = max(0, rollout_byte_limit - overflow)
 
 
 def render_phase_one_prompt_for_config(
@@ -140,7 +144,6 @@ def render_phase_one_prompt_for_config(
     if input_token_limit is None:
         return render_phase_one_prompt(rollout_contents=rollout_contents)
 
-    model = config.phase_one_model if isinstance(config.phase_one_model, str) else None
     instructions = render_rollout_extraction_prompt(extra_prompt=config.extra_prompt)
     output_schema = AgentOutputSchema(RolloutExtractionArtifacts)
     schema_json = json.dumps(
@@ -148,14 +151,13 @@ def render_phase_one_prompt_for_config(
         sort_keys=True,
         separators=(",", ":"),
     )
-    input_overhead_tokens = openai_token_count(instructions, model=model) + openai_token_count(
-        schema_json, model=model
+    input_overhead_tokens = _conservative_token_count(instructions) + _conservative_token_count(
+        schema_json
     )
     return render_phase_one_prompt(
         rollout_contents=rollout_contents,
         input_token_limit=input_token_limit,
         input_overhead_tokens=input_overhead_tokens,
-        model=model,
     )
 
 

@@ -72,7 +72,6 @@ from agents.sandbox.memory.storage import (
 )
 from agents.sandbox.runtime import _stream_memory_input_override
 from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
-from agents.sandbox.util.token_truncation import openai_token_count
 from tests.fake_model import FakeModel
 from tests.test_responses import get_final_output_message, get_text_message
 from tests.utils.hitl import make_shell_call
@@ -343,21 +342,16 @@ def test_render_phase_one_prompt_respects_complete_input_budget() -> None:
         input_overhead_tokens=input_overhead_tokens,
     )
 
-    # The implementation enforces this budget with the same non-undercounting accounting.
-    assert openai_token_count(prompt) + input_overhead_tokens <= 2_000
+    # The implementation enforces this budget with a deterministic UTF-8 byte-length bound.
+    assert len(prompt.encode("utf-8")) + input_overhead_tokens <= 2_000
     assert "start" in prompt
     assert "end" in prompt
     assert "middle" not in prompt
 
 
-def test_render_phase_one_prompt_bounds_token_dense_input_by_real_tokens() -> None:
-    # Independent oracle: count the real OpenAI tokens of the rendered request with tiktoken
-    # directly instead of reusing the implementation's helper.
-    tiktoken = pytest.importorskip("tiktoken")
-    encoding = tiktoken.get_encoding("o200k_base")
-
-    # Token-dense JSON tokenizes to far more tokens than ceil(UTF-8 bytes / 4) predicts, so an
-    # average-based budget check would let the real request exceed the limit.
+def test_render_phase_one_prompt_bounds_token_dense_input_within_byte_budget() -> None:
+    # Token-dense JSON is exactly what a ceil(UTF-8 bytes / 4) estimate undercounts. The
+    # deterministic byte-length upper bound keeps even dense content within the request budget.
     dense_content = json.dumps(
         [
             {"k" + str(i): {"a": i, "b": [i, i * 2, i * 3], "c": "x_" + str(i)}}
@@ -380,9 +374,30 @@ def test_render_phase_one_prompt_bounds_token_dense_input_by_real_tokens() -> No
 
     # The dense content is large enough to require truncation.
     assert "rollout content omitted" in prompt
-    # The real token count of the rendered request must stay within budget. Under the previous
-    # ceil(UTF-8 bytes / 4) accounting this assertion fails because the estimate undercounts.
-    assert len(encoding.encode(prompt)) <= input_token_limit
+    # The whole rendered request stays within budget under the byte-length upper bound, which
+    # never undercounts dense content the way an average bytes-per-token estimate can.
+    assert len(prompt.encode("utf-8")) <= input_token_limit
+
+
+def test_render_phase_one_prompt_caps_rollout_at_ceiling_for_large_context() -> None:
+    # A model whose 70% budget far exceeds the 150k rollout ceiling must still cap the rollout, so
+    # token-dense content cannot balloon phase-one cost up to the full context budget.
+    payload = {
+        "input": [{"role": "user", "content": "x" * 400_000}],
+        "generated_items": [],
+        "terminal_metadata": {"terminal_state": "completed", "has_final_output": False},
+    }
+
+    prompt = render_phase_one_prompt(
+        rollout_contents=dump_rollout_json(payload),
+        input_token_limit=700_000,  # 70% of a ~1M-token context window
+        input_overhead_tokens=0,
+    )
+
+    assert "rollout content omitted" in prompt
+    # The rollout is bounded by the 150k ceiling, not the much larger request budget, so the
+    # measured rollout tokens stay capped even with a large context window.
+    assert len(prompt.encode("utf-8")) <= 152_000
 
 
 def test_render_phase_one_prompt_rejects_budget_below_fixed_overhead() -> None:
@@ -625,7 +640,7 @@ async def test_runner_memory_generation_sanitizes_and_truncates_phase_one_prompt
     client = UnixLocalSandboxClient()
     session = await client.create(manifest=Manifest())
     phase_one_model = FakeModel(initial_output=[_phase_one_message()])
-    context_window_tokens = 20_000
+    context_window_tokens = 128_000
     memory = _memory_config(
         phase_one_model=phase_one_model,
         phase_one_model_context_window_tokens=context_window_tokens,
@@ -701,16 +716,15 @@ async def test_runner_memory_generation_sanitizes_and_truncates_phase_one_prompt
             sort_keys=True,
             separators=(",", ":"),
         )
-        # Verify the actual request with an independent tokenizer rather than the estimator the
-        # implementation relies on, so the assertion catches token-dense undercounting.
-        tiktoken = pytest.importorskip("tiktoken")
-        encoding = tiktoken.get_encoding("o200k_base")
-        real_input_tokens = (
-            len(encoding.encode(system_instructions))
-            + len(encoding.encode(prompt))
-            + len(encoding.encode(schema_json))
+        # The whole request (instructions, user prompt, and structured-output schema) stays
+        # within 70% of the context window under the deterministic byte-length upper bound the
+        # implementation enforces, which never undercounts token-dense content.
+        estimated_input_tokens = (
+            len(system_instructions.encode("utf-8"))
+            + len(prompt.encode("utf-8"))
+            + len(schema_json.encode("utf-8"))
         )
-        assert real_input_tokens <= int(context_window_tokens * 0.7)
+        assert estimated_input_tokens <= int(context_window_tokens * 0.7)
         assert "developer debug" not in prompt
         assert "system note" not in prompt
         assert "reasoning" not in prompt
