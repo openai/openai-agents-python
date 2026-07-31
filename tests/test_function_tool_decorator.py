@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import dataclasses
 import functools
 import inspect
 import json
@@ -15,7 +17,8 @@ from inline_snapshot import snapshot
 from pydantic import BaseModel
 from typing_extensions import Self
 
-from agents import UserError, function_tool
+from agents import Agent, FunctionTool, UserError, function_tool
+from agents.decorators import tool
 from agents.run_context import RunContextWrapper
 from agents.tool_context import ToolContext
 
@@ -168,6 +171,142 @@ def deferred_lookup(customer_id: str) -> str:
 
 def test_function_tool_defer_loading():
     assert deferred_lookup.defer_loading is True
+
+
+def test_tool_exposes_original_callable_without_mutating_it() -> None:
+    def original(value: int) -> int:
+        """Increment a value."""
+        return value + 1
+
+    original.__dict__["extra_metadata"] = "preserved"
+    original_dict = original.__dict__.copy()
+    original_name = original.__name__
+    original_doc = original.__doc__
+    original_signature = inspect.signature(original)
+
+    wrapped_tool = tool(original)
+
+    assert wrapped_tool.__wrapped__ is original
+    direct_callable = cast(Callable[[int], int], wrapped_tool.__wrapped__)
+    assert direct_callable(1) == 2
+    assert not callable(wrapped_tool)
+    assert original.__dict__ == original_dict
+    assert original.__name__ == original_name
+    assert original.__doc__ == original_doc
+    assert inspect.signature(wrapped_tool.__wrapped__) == original_signature
+
+    with pytest.raises(AttributeError):
+        cast(Any, wrapped_tool).__wrapped__ = original
+
+
+def test_configured_tool_exposes_original_callable() -> None:
+    def original(value: int) -> int:
+        return value + 1
+
+    configured_tool = tool(name_override="increment")
+    wrapped_tool = configured_tool(original)
+
+    assert wrapped_tool.__wrapped__ is original
+    assert wrapped_tool.name == "increment"
+
+
+def test_wrapped_callable_identity_for_supported_function_shapes() -> None:
+    def sync_function(value: int) -> int:
+        return value
+
+    async def async_function(value: int) -> int:
+        return value
+
+    def context_function(ctx: ToolContext[Any], value: int) -> int:
+        return value
+
+    class Handler:
+        def method(self, value: int) -> int:
+            return value
+
+    bound_method = Handler().method
+
+    for original in (sync_function, async_function, context_function, bound_method):
+        assert function_tool(original).__wrapped__ is original
+
+
+@pytest.mark.asyncio
+async def test_callable_instance_identity_survives_tool_clone_paths() -> None:
+    class Counter:
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        async def __call__(self, value: int) -> int:
+            self.calls.append(value)
+            return value
+
+    counter = Counter()
+    wrapped_tool = function_tool(counter)
+    copied_tool = copy.copy(wrapped_tool)
+    deep_copied_tool = copy.deepcopy(wrapped_tool)
+    replaced_tool = dataclasses.replace(wrapped_tool, name="renamed")
+
+    for cloned_tool in (wrapped_tool, copied_tool, deep_copied_tool, replaced_tool):
+        assert cloned_tool.__wrapped__ is counter
+
+    direct_callable = cast(Callable[[int], Any], wrapped_tool.__wrapped__)
+    assert await direct_callable(1) == 1
+    assert await copied_tool.on_invoke_tool(ctx_wrapper(), '{"value": 2}') == 2
+    assert await deep_copied_tool.on_invoke_tool(ctx_wrapper(), '{"value": 3}') == 3
+    assert await replaced_tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 4
+    assert counter.calls == [1, 2, 3, 4]
+
+
+def test_wrapped_callable_follows_standard_unwrap_chain() -> None:
+    def original(value: int) -> int:
+        return value
+
+    @functools.wraps(original)
+    def intermediate(value: int) -> int:
+        return original(value)
+
+    wrapped_tool = function_tool(intermediate)
+
+    assert wrapped_tool.__wrapped__ is intermediate
+    assert inspect.unwrap(wrapped_tool.__wrapped__) is original
+    assert inspect.unwrap(cast(Callable[..., Any], wrapped_tool)) is original
+
+
+def test_non_decorator_function_tools_have_no_wrapped_callable() -> None:
+    async def manual_invoker(ctx: ToolContext[Any], input_json: str) -> str:
+        return input_json
+
+    manual_tool = FunctionTool(
+        name="manual",
+        description="",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=manual_invoker,
+    )
+    agent_tool = Agent(name="Nested").as_tool(
+        tool_name="nested",
+        tool_description="Run the nested agent.",
+    )
+
+    for non_decorator_tool in (manual_tool, agent_tool):
+        assert not hasattr(non_decorator_tool, "__wrapped__")
+        with pytest.raises(AttributeError):
+            _ = non_decorator_tool.__wrapped__
+        assert inspect.unwrap(cast(Callable[..., Any], non_decorator_tool)) is non_decorator_tool
+
+
+def test_replacing_invoker_removes_wrapped_callable() -> None:
+    def original(value: int) -> int:
+        return value
+
+    async def replacement(ctx: ToolContext[Any], input_json: str) -> str:
+        return input_json
+
+    wrapped_tool = function_tool(original)
+    assert wrapped_tool.__wrapped__ is original
+
+    wrapped_tool.on_invoke_tool = replacement
+
+    assert not hasattr(wrapped_tool, "__wrapped__")
 
 
 @function_tool(strict_mode=False)

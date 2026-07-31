@@ -198,6 +198,8 @@ ToolErrorFunction = Callable[[RunContextWrapper[Any], Exception], MaybeAwaitable
 CustomToolExecutor = Callable[[ToolContext[Any], str], MaybeAwaitable[Any]]
 CustomToolApprovalFunction = Callable[[RunContextWrapper[Any], str, str], MaybeAwaitable[bool]]
 _SYNC_FUNCTION_TOOL_MARKER = "__agents_sync_function_tool__"
+_FUNCTION_TOOL_WRAPPED_CALLABLE_MARKER = "__agents_function_tool_wrapped_callable__"
+_MISSING_FUNCTION_TOOL_WRAPPED_CALLABLE = object()
 _UNSET_FAILURE_ERROR_FUNCTION = object()
 
 
@@ -527,6 +529,24 @@ class FunctionTool:
             tool_qualified_name(self.name, get_explicit_function_tool_namespace(self)) or self.name
         )
 
+    @property
+    def __wrapped__(self) -> ToolFunction[...]:
+        """Return the callable passed to `function_tool`.
+
+        Calling this callable directly bypasses the function-tool runtime pipeline, including JSON
+        schema validation, context injection, guardrails, timeouts, failure handling, and tracing.
+
+        Raises:
+            AttributeError: If this tool was not created by `function_tool`, or its invoker was
+                replaced.
+        """
+        if not isinstance(self.on_invoke_tool, _FailureHandlingFunctionToolInvoker):
+            raise AttributeError("FunctionTool has no wrapped Python callable")
+        wrapped_callable = self.on_invoke_tool._get_wrapped_callable()
+        if wrapped_callable is _MISSING_FUNCTION_TOOL_WRAPPED_CALLABLE:
+            raise AttributeError("FunctionTool has no wrapped Python callable")
+        return cast("ToolFunction[...]", wrapped_callable)
+
     def __post_init__(self):
         self.allowed_callers = _normalize_tool_allowed_callers(
             self.allowed_callers,
@@ -571,6 +591,14 @@ class _FailureHandlingFunctionToolInvoker:
         self._invoke_tool_impl = invoke_tool_impl
         self._on_handled_error = on_handled_error
         self._function_tool = function_tool
+
+    def _get_wrapped_callable(self) -> object:
+        """Return wrapped-callable metadata from the invocation implementation, if present."""
+        return getattr(
+            self._invoke_tool_impl,
+            _FUNCTION_TOOL_WRAPPED_CALLABLE_MARKER,
+            _MISSING_FUNCTION_TOOL_WRAPPED_CALLABLE,
+        )
 
     def __agents_bind_function_tool__(
         self, function_tool: FunctionTool
@@ -2507,6 +2535,7 @@ def function_tool(
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
+        original_callable = the_func
         the_func, callable_description = _normalize_function_tool_callable(
             the_func,
             docstring_style,
@@ -2573,6 +2602,11 @@ def function_tool(
 
             return result
 
+        setattr(
+            _on_invoke_tool_impl,
+            _FUNCTION_TOOL_WRAPPED_CALLABLE_MARKER,
+            original_callable,
+        )
         function_tool = _build_wrapped_function_tool(
             name=schema.name,
             description=schema.description or "",
