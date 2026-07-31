@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
@@ -41,7 +43,7 @@ class OpenAIVoiceModelProvider(VoiceModelProvider):
         openai_client: AsyncOpenAI | None = None,
         organization: str | None = None,
         project: str | None = None,
-        agent_registration: OpenAIAgentRegistrationConfig | None = None,
+        agent_registration: OpenAIAgentRegistrationConfig | dict[str, Any] | None = None,
     ) -> None:
         """Create a new OpenAI voice model provider.
 

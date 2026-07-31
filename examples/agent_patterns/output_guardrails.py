@@ -11,8 +11,8 @@ from agents import (
     OutputGuardrailTripwireTriggered,
     RunContextWrapper,
     Runner,
-    output_guardrail,
 )
+from agents.decorators import output_guardrail
 
 """
 This example shows how to use output guardrails.

@@ -1,5 +1,8 @@
 import logging
 
+import pytest
+
+import agents._debug as _debug
 from agents.tracing.provider import DefaultTraceProvider
 from agents.tracing.scope import Scope
 from agents.tracing.span_data import AgentSpanData
@@ -15,6 +18,25 @@ def test_env_read_on_first_use(monkeypatch):
     trace = provider.create_trace("demo")
 
     assert isinstance(trace, NoOpTrace)
+
+
+@pytest.mark.parametrize("redacted", [True, False])
+def test_disabled_span_logging_respects_data_policy(monkeypatch, caplog, redacted: bool):
+    class SensitiveAgentSpanData(AgentSpanData):
+        def __repr__(self) -> str:
+            return "SECRET_SPAN_NAME"
+
+    monkeypatch.setenv("OPENAI_AGENTS_DISABLE_TRACING", "1")
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+    provider = DefaultTraceProvider()
+
+    with caplog.at_level(logging.DEBUG, logger="openai.agents"):
+        span = provider.create_span(SensitiveAgentSpanData(name="agent"))
+
+    assert isinstance(span, NoOpSpan)
+    assert ("SECRET_SPAN_NAME" not in caplog.text) is redacted
+    assert "Tracing is disabled. Not creating span" in caplog.text
 
 
 def test_env_cached_after_first_use(monkeypatch):

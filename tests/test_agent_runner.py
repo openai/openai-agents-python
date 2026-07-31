@@ -17,6 +17,7 @@ from openai.types.responses.response_output_text import AnnotationFileCitation, 
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from typing_extensions import TypedDict
 
+import agents._debug as _debug
 from agents import (
     Agent,
     GuardrailFunctionOutput,
@@ -516,6 +517,21 @@ def _as_message(item: Any) -> dict[str, Any]:
     assert isinstance(role, str)
     assert role in {"assistant", "user", "system", "developer"}
     return cast(dict[str, Any], item)
+
+
+def _input_message_text(item: Any) -> str:
+    message = _as_message(item)
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    assert isinstance(content, list)
+    texts: list[str] = []
+    for part in content:
+        assert isinstance(part, dict)
+        text = part.get("text")
+        if isinstance(text, str):
+            texts.append(text)
+    return "".join(texts)
 
 
 def _find_reasoning_input_item(
@@ -1331,13 +1347,13 @@ async def test_structured_output():
 
     assert result.final_output == Foo(bar="baz")
     assert len(result.raw_responses) == 4, "should have four model responses"
-    assert len(result.to_input_list()) == 10, (
-        "should have input: conversation summary, function call, function call result, message, "
-        "handoff, handoff output, preamble message, tool call, tool call result, final output"
+    assert len(result.to_input_list()) == 11, (
+        "should preserve ordered history segments plus function calls, messages, handoff items, "
+        "and the final output without replaying the carried-forward message twice"
     )
-    assert len(result.to_input_list(mode="normalized")) == 6, (
+    assert len(result.to_input_list(mode="normalized")) == 7, (
         "should have normalized replay input: conversation summary, carried-forward message, "
-        "preamble message, tool call, tool call result, final output"
+        "handoff summary, preamble message, tool call, tool call result, final output"
     )
 
     assert result.last_agent == agent_1, "should have handed off to agent_1"
@@ -1414,14 +1430,21 @@ async def test_opt_in_handoff_history_nested_and_filters_respected():
     )
 
     assert isinstance(result.input, list)
-    assert len(result.input) == 1
+    assert len(result.input) == 3
     summary = _as_message(result.input[0])
     assert summary["role"] == "assistant"
     summary_content = summary["content"]
     assert isinstance(summary_content, str)
     assert "<CONVERSATION HISTORY>" in summary_content
-    assert "triage summary" in summary_content
+    assert "triage summary" not in summary_content
     assert "user_message" in summary_content
+    assert _input_message_text(result.input[1]) == "triage summary"
+    handoff_summary = _input_message_text(result.input[2])
+    assert "transfer_to_delegate" in handoff_summary
+    delegate_input = model.last_turn_args["input"]
+    assert isinstance(delegate_input, list)
+    assert len(delegate_input) == 3
+    assert _input_message_text(delegate_input[1]) == "triage summary"
 
     passthrough_model = FakeModel()
     delegate = Agent(name="delegate", model=passthrough_model)
@@ -1486,8 +1509,12 @@ async def test_opt_in_handoff_history_accumulates_across_multiple_handoffs():
     assert isinstance(summary_content, str)
     assert summary_content.count("<CONVERSATION HISTORY>") == 1
     assert "triage summary" in summary_content
-    assert "delegate update" in summary_content
+    assert "delegate update" not in summary_content
     assert "user_question" in summary_content
+    assert len(closer_input) == 3
+    assert _input_message_text(closer_input[1]) == "delegate update"
+    handoff_summary = _input_message_text(closer_input[2])
+    assert "transfer_to_closer" in handoff_summary
 
 
 @pytest.mark.asyncio
@@ -2583,6 +2610,52 @@ async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("session_backend", ["memory", "sqlite"])
+async def test_non_streamed_model_retry_does_not_rewind_committed_session_input(
+    tmp_path: Path, session_backend: str
+) -> None:
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+    session: CountingSession | SQLiteSession
+    if session_backend == "sqlite":
+        session = SQLiteSession("retry-session", tmp_path / "retry.sqlite3")
+        await session.add_items([get_text_input_item("previous")])
+    else:
+        session = CountingSession(history=[get_text_input_item("previous")])
+
+    try:
+        result = await Runner.run(agent, input="test", session=session)
+        saved_items = await session.get_items()
+    finally:
+        if isinstance(session, SQLiteSession):
+            session.close()
+
+    assert result.final_output == "done"
+    assert [item.get("role") for item in saved_items] == ["user", "user", "assistant"]
+    assert [item.get("content") for item in saved_items[:2]] == ["previous", "test"]
+    if isinstance(session, CountingSession):
+        assert session.pop_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_get_new_response_uses_agent_retry_settings() -> None:
     model = FakeModel()
     model.set_hardcoded_usage(Usage(requests=1))
@@ -2705,6 +2778,45 @@ async def test_rewind_handles_id_stripped_sessions() -> None:
 
     assert session.pop_calls == 1
     assert session.saved_items == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redacted", [True, False])
+async def test_rewind_debug_logging_respects_model_and_tool_policies(
+    monkeypatch, redacted: bool
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+    secret = "SECRET_REWIND_SESSION_CONTENT"
+    session = IdStrippingSession()
+    item = cast(
+        TResponseInputItem,
+        {"id": "message-1", "type": "message", "role": "user", "content": secret},
+    )
+    await session.add_items([item])
+
+    with patch("agents.run_internal.session_persistence.logger") as mock_logger:
+        await rewind_session_items(session, [item])
+
+    logged = str(mock_logger.debug.call_args_list)
+    assert (secret not in logged) is redacted
+
+
+@pytest.mark.asyncio
+async def test_rewind_failure_uses_placeholder_free_shared_logger_message() -> None:
+    class FailingTailSession(SimpleListSession):
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            raise RuntimeError("tail failure")
+
+    item = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "hi"})
+    session = FailingTailSession(history=[item])
+
+    with patch(
+        "agents.run_internal.session_persistence.log_model_and_tool_action_warning"
+    ) as mock_warning:
+        await rewind_session_items(session, [item])
+
+    assert mock_warning.call_args.args[1] == "Failed to rewind session item"
 
 
 @pytest.mark.asyncio
@@ -3261,8 +3373,10 @@ async def test_session_persists_only_new_step_items(monkeypatch: pytest.MonkeyPa
     async def fake_run_output_guardrails(*_: Any, **__: Any) -> list[Any]:
         return []
 
-    async def noop_initialize_computer_tools(*_: Any, **__: Any) -> None:
-        return None
+    async def noop_initialize_computer_tools(
+        *args: Any, tools: list[Any], **kwargs: Any
+    ) -> list[Any]:
+        return tools
 
     monkeypatch.setattr("agents.run.save_result_to_session", save_wrapper)
     monkeypatch.setattr(

@@ -23,7 +23,7 @@ try:
     from mcp.shared.exceptions import McpError as _McpError
 except ImportError:  # pragma: no cover – mcp is optional on Python < 3.10
     _McpError = None  # type: ignore[assignment, misc]
-from ..logger import logger
+from ..logger import log_tool_action_error, logger
 from ..run_context import RunContextWrapper
 from ..strict_schema import ensure_strict_json_schema
 from ..tool import (
@@ -42,6 +42,7 @@ from ..tool_context import ToolContext
 from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
 from ..util._custom_data import maybe_extract_custom_data
 from ..util._types import MaybeAwaitable
+from ._logging import get_mcp_server_log_message, get_mcp_server_log_name
 
 if TYPE_CHECKING:
     ToolOutputItem = ToolOutputTextDict | ToolOutputImageDict
@@ -341,7 +342,7 @@ class MCPUtil:
         run_context: RunContextWrapper[Any],
         agent: AgentBase,
     ) -> list[MCPTool]:
-        with mcp_tools_span(server=server.name) as span:
+        with mcp_tools_span(server=get_mcp_server_log_name(server.name)) as span:
             tools = await server.list_tools(run_context, agent)
             span.span_data.result = [tool.name for tool in tools]
             return tools
@@ -450,7 +451,7 @@ class MCPUtil:
         not depend on object identity or cross any serialization boundary.
         """
         base_names = [
-            cls._build_prefixed_tool_base_name(server.name, tool.name)
+            cls._build_prefixed_tool_base_name(get_mcp_server_log_name(server.name), tool.name)
             for _, server, tools in server_tool_batches
             for tool in tools
         ]
@@ -458,9 +459,10 @@ class MCPUtil:
 
         candidates: list[_PrefixedToolNameCandidate] = []
         for server_index, server, tools in server_tool_batches:
+            server_name = get_mcp_server_log_name(server.name)
             for tool_index, tool in enumerate(tools):
-                base_name = cls._build_prefixed_tool_base_name(server.name, tool.name)
-                seed = f"{server.name}\0{tool.name}"
+                base_name = cls._build_prefixed_tool_base_name(server_name, tool.name)
+                seed = f"{server_name}\0{tool.name}"
                 force_hash = base_name_counts[base_name] > 1 or base_name in reserved_names
                 initial_name = cls._shorten_tool_name(base_name, seed, force_hash=force_hash)
                 candidates.append(
@@ -546,7 +548,10 @@ class MCPUtil:
                 schema = ensure_strict_json_schema(copy.deepcopy(schema))
                 is_strict = True
             except Exception as e:
-                logger.info("Error converting MCP schema to strict mode: %s", e)
+                if _debug.DONT_LOG_TOOL_DATA:
+                    logger.info("Error converting MCP schema to strict mode")
+                else:
+                    logger.info("Error converting MCP schema to strict mode: %s", e)
 
         needs_approval: (
             bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
@@ -567,7 +572,7 @@ class MCPUtil:
             mcp_title=resolve_mcp_tool_title(tool),
             tool_origin=ToolOrigin(
                 type=ToolOriginType.MCP,
-                mcp_server_name=server.name,
+                mcp_server_name=get_mcp_server_log_name(server.name),
             ),
         )
         return function_tool
@@ -671,7 +676,7 @@ class MCPUtil:
         if json_decode_error is not None:
             error_message = f"Invalid JSON input for tool {tool_name_for_display}"
             if _debug.DONT_LOG_TOOL_DATA:
-                logger.debug(error_message)
+                logger.debug("Invalid JSON input for MCP tool")
                 raise ModelBehaviorError(error_message)
             else:
                 error_message = f"{error_message}: {input_json}"
@@ -684,7 +689,7 @@ class MCPUtil:
             )
 
         if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug("Invoking MCP tool %s", tool_name_for_display)
+            logger.debug("Invoking MCP tool")
         else:
             logger.debug("Invoking MCP tool %s with input %s", tool_name_for_display, input_json)
 
@@ -701,7 +706,8 @@ class MCPUtil:
                 finished_task = done.pop()
                 if finished_task.cancelled():
                     raise MCPToolCancellationError(
-                        f"Failed to call tool '{tool.name}' on MCP server '{server.name}': "
+                        f"Failed to call tool '{tool.name}' on MCP server "
+                        f"'{get_mcp_server_log_name(server.name)}': "
                         "tool execution was cancelled."
                     )
                 result = finished_task.result()
@@ -724,27 +730,32 @@ class MCPUtil:
                 # pipeline (failure_error_function) can handle it.  The default handler
                 # will surface the message as a structured error result; callers who set
                 # failure_error_function=None will have the error raised as documented.
-                error_text = e.error.message if hasattr(e, "error") and e.error else str(e)
-                logger.warning(
-                    "MCP tool %s on server '%s' returned an error: %s",
-                    tool_name_for_display,
-                    server.name,
-                    error_text,
-                )
+                if _debug.DONT_LOG_TOOL_DATA:
+                    logger.warning("MCP tool returned an error.")
+                else:
+                    server_log_name = get_mcp_server_log_name(server.name)
+                    error_text = e.error.message if hasattr(e, "error") and e.error else str(e)
+                    logger.warning(
+                        "MCP tool %s on server '%s' returned an error: %s",
+                        tool_name_for_display,
+                        server_log_name,
+                        error_text,
+                    )
                 raise
 
-            logger.error(
-                "Error invoking MCP tool %s on server '%s': %s",
-                tool_name_for_display,
-                server.name,
-                e,
-            )
+            log_message = "Error invoking MCP tool"
+            if not _debug.DONT_LOG_TOOL_DATA:
+                log_message = get_mcp_server_log_message(
+                    f"Error invoking MCP tool {tool_name_for_display} on server", server
+                )
+            log_tool_action_error(logger, log_message, e)
             raise AgentsException(
-                f"Error invoking MCP tool {tool_name_for_display} on server '{server.name}': {e}"
+                f"Error invoking MCP tool {tool_name_for_display} on server "
+                f"'{get_mcp_server_log_name(server.name)}': {e}"
             ) from e
 
         if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug("MCP tool %s completed.", tool_name_for_display)
+            logger.debug("MCP tool completed.")
         else:
             logger.debug("MCP tool %s returned %s", tool_name_for_display, result)
 
@@ -793,11 +804,15 @@ class MCPUtil:
                 ):
                     current_span.span_data.output = tool_output
                 current_span.span_data.mcp_data = {
-                    "server": server.name,
+                    "server": get_mcp_server_log_name(server.name),
                 }
             else:
-                logger.warning(
-                    "Current span is not a FunctionSpanData, skipping tool output: %s", current_span
-                )
+                if _debug.DONT_LOG_MODEL_DATA or _debug.DONT_LOG_TOOL_DATA:
+                    logger.warning("Current span is not a FunctionSpanData; skipping tool output")
+                else:
+                    logger.warning(
+                        "Current span is not a FunctionSpanData, skipping tool output: %s",
+                        current_span,
+                    )
 
         return tool_output

@@ -11,7 +11,11 @@ import asyncio
 import json
 from typing import Any
 
-from agents import Agent, Runner, function_tool
+from agents import (
+    Agent,
+    Runner,
+)
+from agents.decorators import tool
 from agents.run_context import RunContextWrapper
 from agents.run_state import RunState
 from examples.auto_mode import confirm_with_fallback, input_with_fallback, is_auto_mode
@@ -121,7 +125,7 @@ def create_lookup_customer_profile_tool(
     directory: dict[str, str],
     missing_customer_message: str = "No customer found for that id.",
 ):
-    @function_tool(
+    @tool(
         name_override="lookup_customer_profile",
         description_override="Look up stored profile details for a customer by their internal id.",
         needs_approval=True,

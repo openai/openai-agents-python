@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import posixpath
+import re
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Literal, cast
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .errors import InvalidManifestPathError, WorkspaceArchiveWriteError
 
@@ -70,11 +72,16 @@ def _native_path_from_windows_absolute(path: PureWindowsPath) -> Path | None:
 
 
 class SandboxPathGrant(BaseModel):
-    """Extra absolute path access outside the sandbox workspace."""
+    """Extra absolute path access outside the sandbox workspace.
+
+    ``path`` is the POSIX path visible inside the sandbox. ``host_path`` is an optional
+    native host source used for local materialization and Docker bind mounts.
+    """
 
     path: str
     read_only: bool = False
     description: str | None = None
+    host_path: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @field_validator("path", mode="before")
     @classmethod
@@ -100,7 +107,75 @@ class SandboxPathGrant(BaseModel):
             _raise_if_filesystem_root(path)
             return path.as_posix()
 
-        raise ValueError("sandbox path grant path must be absolute")
+        raise ValueError("sandbox path grant path must be POSIX absolute")
+
+    @field_validator("host_path", mode="before")
+    @classmethod
+    def _coerce_host_path(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, PurePath):
+            return str(value)
+        if isinstance(value, str):
+            return value
+        raise ValueError("sandbox path grant host_path must be a string or Path")
+
+    @field_validator("host_path")
+    @classmethod
+    def _validate_host_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value.startswith(("\\\\", "//")):
+            raise ValueError("sandbox path grant host_path does not support UNC or device paths")
+        if any(part == ".." for part in re.split(r"[\\/]", value)):
+            raise ValueError("sandbox path grant host_path must not contain parent segments")
+
+        windows_path = PureWindowsPath(value)
+        if windows_path.is_absolute():
+            if not re.fullmatch(r"[A-Za-z]:", windows_path.drive):
+                raise ValueError(
+                    "sandbox path grant host_path does not support UNC or device paths"
+                )
+            _raise_if_filesystem_root(windows_path)
+            return str(windows_path)
+
+        posix_path = PurePosixPath(posixpath.normpath(value))
+        if posix_path.is_absolute():
+            _raise_if_filesystem_root(posix_path)
+            return posix_path.as_posix()
+
+        raise ValueError("sandbox path grant host_path must be an absolute host path")
+
+    @model_validator(mode="after")
+    def _validate_split_path_grant(self) -> SandboxPathGrant:
+        if self.host_path is not None and windows_absolute_path(self.path) is not None:
+            raise ValueError(
+                "sandbox path grant path must be POSIX absolute when host_path is configured"
+            )
+        return self
+
+
+def sandbox_path_grant_host_path(grant: SandboxPathGrant) -> Path:
+    """Return and validate the native host path used by a sandbox path grant."""
+
+    raw_path = grant.host_path if grant.host_path is not None else grant.path
+    native_path = Path(raw_path)
+    if grant.host_path is not None and not native_path.is_absolute():
+        raise ValueError(
+            f"sandbox path grant host_path must be absolute on the current host: {raw_path}"
+        )
+    if (
+        grant.host_path is not None
+        and os.name == "nt"
+        and not re.fullmatch(r"[A-Za-z]:", PureWindowsPath(raw_path).drive)
+    ):
+        raise ValueError(
+            f"sandbox path grant host_path must be drive-qualified on Windows: {raw_path}"
+        )
+    _raise_if_filesystem_root(native_path)
+    resolved_path = native_path.resolve(strict=False)
+    _raise_if_filesystem_root(resolved_path, resolved=True)
+    return resolved_path
 
 
 class WorkspacePathPolicy:
@@ -319,7 +394,7 @@ class WorkspacePathPolicy:
         matches: list[tuple[SandboxPathGrant, PurePath]] = []
         for grant in self._extra_path_grants:
             grant_root: PurePath = (
-                Path(grant.path).resolve(strict=False)
+                sandbox_path_grant_host_path(grant).resolve(strict=False)
                 if resolve_roots
                 else coerce_posix_path(grant.path)
             )

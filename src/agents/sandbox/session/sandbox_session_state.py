@@ -4,12 +4,21 @@ import uuid
 from collections.abc import Iterable
 from typing import Any, ClassVar, Literal, get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, field_validator, model_serializer
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SerializeAsAny,
+    field_validator,
+    model_serializer,
+)
 
 from ..manifest import Manifest
 from ..snapshot import SnapshotBase
 
 SessionStateClass = type["SandboxSessionState"]
+REDACTED_HOST_PATH_GRANT_PATHS_KEY = "__openai_agents_redacted_host_path_grant_paths"
 
 
 class SandboxSessionState(BaseModel):
@@ -24,6 +33,11 @@ class SandboxSessionState(BaseModel):
     workspace_root_ready: bool = False
 
     _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}
+    _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())
+
+    @property
+    def path_grants_require_rebind(self) -> tuple[str, ...]:
+        return self._path_grants_require_rebind
 
     @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
@@ -70,9 +84,95 @@ class SandboxSessionState(BaseModel):
             if subclass is None:
                 raise ValueError(f"unknown sandbox session state type `{state_type}`")
 
-            return subclass.model_validate(payload)
+            return cls._mark_persisted_path_grants(
+                subclass.model_validate(payload),
+                payload=payload,
+            )
 
         raise TypeError("session state payload must be a SandboxSessionState or dict")
+
+    @classmethod
+    def _mark_persisted_path_grants(
+        cls,
+        state: SandboxSessionState,
+        *,
+        payload: dict[str, object],
+    ) -> SandboxSessionState:
+        redacted_value = payload.get(REDACTED_HOST_PATH_GRANT_PATHS_KEY)
+        marker_paths = (
+            tuple(path for path in redacted_value if isinstance(path, str))
+            if isinstance(redacted_value, list | tuple)
+            else ()
+        )
+        serialized_host_path_grant_paths = tuple(
+            grant.path for grant in state.manifest.extra_path_grants if grant.host_path is not None
+        )
+        persistent_grants = tuple(
+            grant for grant in state.manifest.extra_path_grants if grant.host_path is None
+        )
+        sanitized_manifest = state.manifest.model_copy(
+            update={"extra_path_grants": persistent_grants},
+        )
+        marked = state.model_copy(update={"manifest": sanitized_manifest})
+        marked._path_grants_require_rebind = tuple(
+            dict.fromkeys(
+                (
+                    *state.path_grants_require_rebind,
+                    *marker_paths,
+                    *serialized_host_path_grant_paths,
+                )
+            )
+        )
+        return marked
+
+    def rebind_persisted_path_grants(
+        self,
+        trusted_manifest: Manifest | None,
+    ) -> SandboxSessionState:
+        """Replace persisted path grants with grants from current trusted configuration."""
+
+        if not self.path_grants_require_rebind:
+            return self
+        if trusted_manifest is None:
+            raise ValueError(
+                "Sandbox session state contains path grants that require a current trusted "
+                "manifest before resume"
+            )
+
+        trusted_host_path_grant_paths = {
+            grant.path
+            for grant in trusted_manifest.extra_path_grants
+            if grant.host_path is not None
+        }
+        missing_host_paths = [
+            path
+            for path in self.path_grants_require_rebind
+            if path not in trusted_host_path_grant_paths
+        ]
+        if missing_host_paths:
+            raise ValueError(
+                "Sandbox session state requires current trusted host_path values for these "
+                f"path grants: {', '.join(missing_host_paths)}"
+            )
+
+        rebound_manifest = self.manifest.model_copy(
+            update={
+                "extra_path_grants": tuple(
+                    grant.model_copy() for grant in trusted_manifest.extra_path_grants
+                )
+            },
+        )
+        rebound = self.model_copy(update={"manifest": rebound_manifest})
+        rebound._path_grants_require_rebind = ()
+        return rebound
+
+    def assert_path_grants_rebound(self) -> None:
+        if not self.path_grants_require_rebind:
+            return
+        raise ValueError(
+            "Sandbox session state path grants must be rebound from a current trusted manifest "
+            "before resume; resume through Runner with SandboxRunConfig.manifest"
+        )
 
     @model_serializer(mode="wrap")
     def _serialize_always_include_defaults(self, handler: Any) -> dict[str, Any]:

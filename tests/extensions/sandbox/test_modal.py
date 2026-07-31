@@ -31,6 +31,7 @@ from agents.sandbox.errors import (
     InvalidManifestPathError,
     MountConfigError,
     WorkspaceArchiveReadError,
+    WorkspaceReadNotFoundError,
 )
 from agents.sandbox.files import EntryKind
 from agents.sandbox.manifest import Environment
@@ -543,6 +544,57 @@ def test_modal_deserialize_session_state_defaults_missing_idle_timeout(
     )
 
     assert restored.idle_timeout is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("probe_exit_code", "expected_error"),
+    [
+        (0, WorkspaceArchiveReadError),
+        (1, WorkspaceReadNotFoundError),
+    ],
+)
+async def test_modal_read_classifies_nonzero_cat_with_path_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    probe_exit_code: int,
+    expected_error: type[Exception],
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state)
+    results = [
+        ExecResult(stdout=b"", stderr=b"cat failed", exit_code=1),
+        ExecResult(stdout=b"", stderr=b"", exit_code=probe_exit_code),
+    ]
+    commands: list[tuple[str, ...]] = []
+
+    async def validate_path(path: Path, *, for_write: bool = False) -> Path:
+        _ = (path, for_write)
+        return Path("/workspace/target.txt")
+
+    async def fake_exec(
+        *command: str | Path,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: object | None = None,
+    ) -> ExecResult:
+        _ = (timeout, shell, user)
+        commands.append(tuple(str(part) for part in command))
+        return results.pop(0)
+
+    monkeypatch.setattr(session, "_validate_path_access", validate_path)
+    monkeypatch.setattr(session, "exec", fake_exec)
+
+    with pytest.raises(expected_error):
+        await session.read(Path("target.txt"))
+
+    assert len(commands) == 2
+    assert commands[0][0:2] == ("sh", "-lc")
+    assert "READ_PATH_PROBE_V3" in commands[1][2]
 
 
 @pytest.mark.asyncio
@@ -1493,6 +1545,53 @@ async def test_modal_tar_persist_respects_runtime_skip_paths(
             "-",
             "--exclude",
             "./logs/events.jsonl",
+            "-C",
+            "/workspace",
+            ".",
+        ]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_modal_tar_persist_preserves_dot_prefixed_skip_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id="sb-123",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state)
+    # A dot-prefixed skip path must keep its leading dot in the exclude pattern.
+    session.register_persist_workspace_skip_path(Path(".venv"))
+
+    commands: list[list[str]] = []
+
+    async def _fake_exec(
+        *command: object,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: object | None = None,
+    ) -> ExecResult:
+        _ = (timeout, shell, user)
+        rendered = [str(part) for part in command]
+        commands.append(rendered)
+        return ExecResult(stdout=b"fake-tar-bytes", stderr=b"", exit_code=0)
+
+    monkeypatch.setattr(session, "exec", _fake_exec)
+
+    archive = await session.persist_workspace()
+
+    assert archive.read() == b"fake-tar-bytes"
+    assert commands == [
+        [
+            "tar",
+            "cf",
+            "-",
+            "--exclude",
+            "./.venv",
             "-C",
             "/workspace",
             ".",

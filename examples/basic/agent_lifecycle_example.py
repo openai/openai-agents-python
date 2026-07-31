@@ -11,8 +11,8 @@ from agents import (
     RunContextWrapper,
     Runner,
     Tool,
-    function_tool,
 )
+from agents.decorators import tool
 from examples.auto_mode import input_with_fallback, is_auto_mode
 
 
@@ -62,7 +62,7 @@ class CustomAgentHooks(AgentHooks):
 ###
 
 
-@function_tool
+@tool
 def random_number(max: int) -> int:
     """
     Generate a random number from 0 to max (inclusive).
@@ -79,7 +79,7 @@ def random_number(max: int) -> int:
     return random.randint(0, max)
 
 
-@function_tool
+@tool
 def multiply_by_two(x: int) -> int:
     """Simple multiplication by two."""
     return x * 2

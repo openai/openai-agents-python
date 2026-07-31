@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from .._config_coercion import _declared_dataclass_type, coerce_dataclass_config
 from ..tracing import TracingConfig
 from ..tracing.util import gen_group_id
 from .model import STTModelSettings, TTSModelSettings, VoiceModelProvider
@@ -48,3 +49,31 @@ class VoicePipelineConfig:
 
     tts_settings: TTSModelSettings = field(default_factory=TTSModelSettings)
     """The settings to use for the TTS model."""
+
+    if TYPE_CHECKING:
+
+        def __init__(
+            self,
+            model_provider: VoiceModelProvider = ...,
+            tracing_disabled: bool = False,
+            tracing: TracingConfig | None = None,
+            trace_include_sensitive_data: bool = True,
+            trace_include_sensitive_audio_data: bool = True,
+            workflow_name: str = "Voice Agent",
+            group_id: str = ...,
+            trace_metadata: dict[str, Any] | None = None,
+            stt_settings: STTModelSettings | dict[str, Any] = ...,
+            tts_settings: TTSModelSettings | dict[str, Any] = ...,
+        ) -> None: ...
+
+    def __post_init__(self) -> None:
+        self.stt_settings = coerce_dataclass_config(
+            self.stt_settings,
+            _declared_dataclass_type(type(self), "stt_settings", STTModelSettings),
+            parameter_name="voice.stt",
+        )
+        self.tts_settings = coerce_dataclass_config(
+            self.tts_settings,
+            _declared_dataclass_type(type(self), "tts_settings", TTSModelSettings),
+            parameter_name="voice.tts",
+        )

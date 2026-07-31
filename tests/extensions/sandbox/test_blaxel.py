@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import tarfile
 import time
 import uuid
@@ -14,6 +15,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
+import agents._debug as _debug
+from agents.run_config import SandboxRunConfig
 from agents.sandbox import Manifest, SandboxPathGrant
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 from agents.sandbox.errors import (
@@ -765,6 +768,26 @@ class TestBlaxelSandboxClient:
         options = mod.BlaxelSandboxClientOptions(name="my-sandbox")
         session = await client.create(options=options)
         assert session is not None
+
+    @pytest.mark.asyncio
+    async def test_create_with_dictionary_run_config_options(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agents.extensions.sandbox.blaxel import sandbox as mod
+
+        monkeypatch.setattr(mod, "_import_blaxel_sdk", lambda: _FakeSandboxInstance)
+
+        client = mod.BlaxelSandboxClient(token="test-token")
+        config = SandboxRunConfig(
+            client=client,
+            options={"name": "dict-options", "timeouts": {"exec_timeout_s": 120}},
+        )
+
+        assert isinstance(config.options, mod.BlaxelSandboxClientOptions)
+        session = await client.create(options=config.options)
+
+        assert isinstance(session.state, mod.BlaxelSandboxSessionState)
+        assert session.state.timeouts.exec_timeout_s == 120
 
     @pytest.mark.asyncio
     async def test_create_with_image(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3518,13 +3541,45 @@ class TestDriveMounts:
         assert sandbox.drives.unmount_calls == ["/mnt/data"]
 
     @pytest.mark.asyncio
-    async def test_detach_drive_error_logged_not_raised(self) -> None:
+    @pytest.mark.parametrize("redacted", [True, False], ids=["redacted", "diagnostic"])
+    async def test_detach_drive_error_logged_not_raised(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        redacted: bool,
+    ) -> None:
         from agents.extensions.sandbox.blaxel.mounts import _detach_drive
 
+        mount_path = "/mnt/SECRET_DRIVE_PATH"
+        error = RuntimeError("SECRET_UNMOUNT_ERROR")
         sandbox = _FakeSandboxInstance()
-        sandbox.drives.unmount_error = RuntimeError("unmount failed")
+        sandbox.drives.unmount_error = error
+        monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+        caplog.set_level(logging.WARNING)
+
         # Should not raise; error is logged.
-        await _detach_drive(sandbox, "/mnt/data")
+        await _detach_drive(sandbox, mount_path)
+
+        record = next(
+            record
+            for record in caplog.records
+            if "Drive detach failed" in logging.Formatter().format(record)
+        )
+        if redacted:
+            assert record.msg == "%s"
+            assert record.args == ("Drive detach failed (non-fatal)",)
+            assert record.exc_info is None
+            assert record.exc_text is None
+            assert "openai_agents_diagnostic_context" not in record.__dict__
+            assert error not in record.__dict__.values()
+            rendered = logging.Formatter().format(record)
+            assert mount_path not in rendered
+            assert "SECRET_UNMOUNT_ERROR" not in rendered
+        else:
+            assert record.__dict__["openai_agents_diagnostic_context"] == {"mount_path": mount_path}
+            assert record.exc_info is not None
+            assert record.exc_info[1] is error
+            assert "SECRET_UNMOUNT_ERROR" in logging.Formatter().format(record)
 
     @pytest.mark.asyncio
     async def test_detach_drive_no_drives_api(self) -> None:
@@ -3573,18 +3628,59 @@ class TestDriveMounts:
 
 class TestUnmountBucketLogging:
     @pytest.mark.asyncio
-    async def test_unmount_all_attempts_fail_logs_warning(self) -> None:
+    @pytest.mark.parametrize(
+        ("model_redacted", "tool_redacted"),
+        [(False, True), (True, True), (False, False), (True, False)],
+    )
+    async def test_unmount_all_attempts_follow_tool_data_policy(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        model_redacted: bool,
+        tool_redacted: bool,
+    ) -> None:
         from agents.extensions.sandbox.blaxel.mounts import _unmount_bucket
 
+        mount_path = "/mnt/SECRET_BUCKET_PATH"
         session = _FakeMountSession()
         session._next_results = [
             _FakeExecResultForMount(exit_code=1),  # fusermount fails
             _FakeExecResultForMount(exit_code=1),  # umount fails
             _FakeExecResultForMount(exit_code=1),  # umount -l fails
         ]
+        monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", model_redacted)
+        monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
+        caplog.set_level(logging.DEBUG, logger="agents.extensions.sandbox.blaxel.mounts")
+
         # Should not raise, just log warning.
-        await _unmount_bucket(session, "/mnt/test")  # type: ignore[arg-type]
+        await _unmount_bucket(session, mount_path)  # type: ignore[arg-type]
+
         assert len(session.exec_calls) == 3
+        records = [
+            record
+            for record in caplog.records
+            if record.name == "agents.extensions.sandbox.blaxel.mounts"
+        ]
+        assert len(records) == 3
+        assert [record.levelno for record in records] == [
+            logging.DEBUG,
+            logging.DEBUG,
+            logging.WARNING,
+        ]
+        for record in records:
+            assert record.exc_info is None
+            assert record.exc_text is None
+            assert all(value is not mount_path for value in record.__dict__.values())
+
+        rendered = [logging.Formatter().format(record) for record in records]
+        if tool_redacted:
+            assert all(mount_path not in message for message in rendered)
+            assert [record.args for record in records] == [(1,), (1,), (1,)]
+        else:
+            assert all(mount_path in message for message in rendered)
+            for record in records:
+                assert isinstance(record.args, tuple)
+                assert mount_path in record.args
 
 
 # ---------------------------------------------------------------------------

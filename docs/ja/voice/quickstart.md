@@ -51,18 +51,15 @@ graph LR
 まず、いくつかのエージェントをセットアップします。この SDK でエージェントを構築した経験があれば、馴染みのある作業でしょう。ここでは、2 つのエージェント、1 つのハンドオフ、1 つのツールを用意します。
 
 ```python
-import asyncio
 import random
 
-from agents import (
-    Agent,
-    function_tool,
-)
+from agents import Agent
+from agents.decorators import tool
 from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 
 
 
-@function_tool
+@tool
 def get_weather(city: str) -> str:
     """Get the weather for a given city."""
     print(f"[debug] get_weather called with city: {city}")
@@ -133,11 +130,8 @@ import random
 import numpy as np
 import sounddevice as sd
 
-from agents import (
-    Agent,
-    function_tool,
-    set_tracing_disabled,
-)
+from agents import Agent
+from agents.decorators import tool
 from agents.voice import (
     AudioInput,
     SingleAgentVoiceWorkflow,
@@ -146,7 +140,7 @@ from agents.voice import (
 from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 
 
-@function_tool
+@tool
 def get_weather(city: str) -> str:
     """Get the weather for a given city."""
     print(f"[debug] get_weather called with city: {city}")

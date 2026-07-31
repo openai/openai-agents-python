@@ -134,12 +134,14 @@ def test_runloop_session_guard_accepts_correct_type() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runloop_ensure_rclone_installs_with_root_apt() -> None:
-    from agents.extensions.sandbox._rclone import ensure_rclone
+async def test_runloop_ensure_rclone_installs_verified_release() -> None:
+    from agents.extensions.sandbox._rclone import _RCLONE_VERSION, ensure_rclone
 
     session = _FakeRunloopMountSession(
         [
             _exec_fail(),
+            _exec_ok(),
+            _exec_ok(stdout=b"aarch64\n"),
             _exec_ok(),
             _exec_ok(),
             _exec_ok(),
@@ -153,20 +155,20 @@ async def test_runloop_ensure_rclone_installs_with_root_apt() -> None:
         "sh -lc command -v rclone >/dev/null 2>&1 || test -x /usr/local/bin/rclone",
         "sh -lc command -v apt-get >/dev/null 2>&1",
     ]
-    assert session.exec_calls[2] == (
+    assert session.exec_calls[2] == "uname -m"
+    assert session.exec_calls[3] == (
         "sudo -u root -- sh -lc DEBIAN_FRONTEND=noninteractive "
         "DEBCONF_NOWARNINGS=yes apt-get -o Dpkg::Use-Pty=0 update -qq"
     )
-    assert session.exec_calls[3] == (
+    assert session.exec_calls[4] == (
         "sudo -u root -- sh -lc DEBIAN_FRONTEND=noninteractive "
         "DEBCONF_NOWARNINGS=yes apt-get -o Dpkg::Use-Pty=0 install -y -qq "
-        "curl unzip ca-certificates"
+        "ca-certificates coreutils curl unzip"
     )
-    assert (
-        session.exec_calls[4]
-        == "sudo -u root -- sh -lc curl -fsSL https://rclone.org/install.sh | bash"
-    )
-    assert session.exec_calls[5] == (
+    assert session.exec_calls[5].startswith("sudo -u root -- sh -lc set -eu\n")
+    assert f"rclone-v{_RCLONE_VERSION}-linux-arm64.zip" in session.exec_calls[5]
+    assert "sha256sum --check --strict -" in session.exec_calls[5]
+    assert session.exec_calls[6] == (
         "sh -lc command -v rclone >/dev/null 2>&1 || test -x /usr/local/bin/rclone"
     )
 

@@ -214,7 +214,13 @@ hash_stdin() {
     exit 127
 }
 
-tar_cmd="tar"
+if tar --help 2>&1 | grep -q -- '--no-wildcards'; then
+    tar_cmd="tar --no-wildcards"
+    escape_tar_patterns=0
+else
+    tar_cmd="tar"
+    escape_tar_patterns=1
+fi
 for rel in "$@"; do
     case "$rel" in
         ""|"."|"/"|*"/.."|*"/../"*|".."|../*|*/../*|/*)
@@ -222,6 +228,9 @@ for rel in "$@"; do
             exit 65
             ;;
     esac
+    if [ "$escape_tar_patterns" -eq 1 ]; then
+        rel=$(printf '%s\\n' "$rel" | sed 's/[][\\\\*?]/\\\\&/g')
+    fi
     quoted_rel=$(quote_sh "$rel")
     quoted_dot_rel=$(quote_sh "./$rel")
     tar_cmd="$tar_cmd --exclude=$quoted_rel --exclude=$quoted_dot_rel"

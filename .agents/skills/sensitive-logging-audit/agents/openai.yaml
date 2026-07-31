@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sensitive Logging Audit"
+  short_description: "Audit and fix sensitive Python logging paths"
+  default_prompt: "Use $sensitive-logging-audit to inventory, verify, and fix sensitive logging leaks in this repository."

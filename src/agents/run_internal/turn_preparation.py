@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import inspect
 from typing import Any
 
@@ -18,6 +17,7 @@ from ..run_context import RunContextWrapper, TContext
 from ..tool import Tool
 from ..tracing import SpanError
 from ..util import _error_tracing
+from ..util._asyncio_tasks import gather_with_cancel
 
 __all__ = [
     "validate_run_hooks",
@@ -80,7 +80,15 @@ async def maybe_filter_model_input(
         return updated
     except Exception as e:
         _error_tracing.attach_error_to_current_span(
-            SpanError(message="Error in call_model_input_filter", data={"error": str(e)})
+            SpanError(
+                message="Error in call_model_input_filter",
+                data={
+                    "error": _error_tracing.get_trace_error(
+                        trace_include_sensitive_data=run_config.trace_include_sensitive_data,
+                        error_message=str(e),
+                    )
+                },
+            )
         )
         raise
 
@@ -103,7 +111,7 @@ async def get_handoffs(agent: Agent[Any], context_wrapper: RunContextWrapper[Any
             return bool(await res)
         return bool(res)
 
-    results = await asyncio.gather(*(check_handoff_enabled(h) for h in handoffs))
+    results = await gather_with_cancel(*(check_handoff_enabled(h) for h in handoffs))
     enabled: list[Handoff] = [h for h, ok in zip(handoffs, results, strict=False) if ok]
     return enabled
 

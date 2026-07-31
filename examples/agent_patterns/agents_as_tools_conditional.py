@@ -3,7 +3,7 @@ import asyncio
 from pydantic import BaseModel
 
 from agents import Agent, AgentBase, ModelSettings, RunContextWrapper, Runner, trace
-from agents.tool import function_tool
+from agents.decorators import tool
 from examples.auto_mode import confirm_with_fallback, input_with_fallback, is_auto_mode
 
 """
@@ -27,7 +27,7 @@ def european_enabled(ctx: RunContextWrapper[AppContext], agent: AgentBase) -> bo
     return ctx.context.language_preference == "european"
 
 
-@function_tool(needs_approval=True)
+@tool(needs_approval=True)
 async def get_user_name() -> str:
     print("Getting the user's name...")
     return "Kaz"

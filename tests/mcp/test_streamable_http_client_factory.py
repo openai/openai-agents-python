@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -11,6 +12,7 @@ from anyio import create_memory_object_stream
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage, JSONRPCNotification, JSONRPCRequest
 
+from agents import _debug
 from agents.mcp import MCPServerStreamableHttp
 from agents.mcp.server import (
     _create_default_streamable_http_client,
@@ -311,6 +313,52 @@ async def test_initialized_notification_transport_exception_returns_synthetic_su
     finally:
         await client.aclose()
         await read_stream_writer.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redacted", [True, False])
+async def test_initialized_notification_transport_exception_hides_url_credentials_in_log(
+    monkeypatch,
+    caplog,
+    redacted: bool,
+):
+    url = "https://user:s3cr3t_pw@example.test/mcp?api_key=SECRET_QS_KEY#SECRET_FRAGMENT"
+    secrets = ("user", "s3cr3t_pw", "SECRET_QS_KEY", "SECRET_FRAGMENT")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom", request=request)
+
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+    transport = _InitializedNotificationTolerantStreamableHTTPTransport(url)
+    read_stream_writer, _ = create_memory_object_stream[SessionMessage | Exception](0)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        ctx = MagicMock()
+        ctx.client = client
+        ctx.read_stream_writer = read_stream_writer
+        ctx.session_message = SessionMessage(
+            JSONRPCMessage(
+                JSONRPCNotification(
+                    jsonrpc="2.0",
+                    method="notifications/initialized",
+                    params={},
+                )
+            )
+        )
+
+        with caplog.at_level(logging.WARNING, logger="openai.agents"):
+            await transport._handle_post_request(ctx)
+    finally:
+        await client.aclose()
+        await read_stream_writer.aclose()
+
+    record = caplog.records[-1]
+    rendered = logging.Formatter("%(levelname)s %(message)s").format(record)
+    attached_values = repr(record.__dict__)
+    assert record.exc_info is None
+    for secret in secrets:
+        assert secret not in rendered
+        assert secret not in attached_values
 
 
 @pytest.mark.asyncio

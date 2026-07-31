@@ -1,56 +1,119 @@
 ---
 name: implementation-strategy
-description: Decide how to implement runtime and API changes in openai-agents-python before editing code. Use when a task changes exported APIs, runtime behavior, serialized state, tests, or docs and you need to choose the compatibility boundary, whether shims or migrations are warranted, and when unreleased interfaces can be rewritten directly.
+description: Choose compatibility-aware scope for runtime and API changes in openai-agents-python. Use before initial implementation and each review-feedback batch to decide whether to patch, reset the design, preserve compatibility, or reject unsupported cases.
 ---
 
 # Implementation Strategy
 
-## Overview
+## Workflow
 
-Use this skill before editing code when the task changes runtime behavior or anything that might look like a compatibility concern. The goal is to keep implementations simple while protecting real released contracts.
-
-## Quick start
-
-1. Identify the surface you are changing: released public API, unreleased branch-local API, internal helper, persisted schema, wire protocol, CLI/config/env surface, or docs/examples only.
-2. Determine the latest release boundary from `origin` first, and only fall back to local tags when remote tags are unavailable:
+1. Identify the surface you are changing or reviewing: released public API, unreleased branch-local API, internal helper, persisted schema, wire protocol, CLI/config/env surface, or docs/examples only.
+2. Determine the latest release tag to use as the compatibility baseline from `origin` first, and only fall back to local tags when remote tags are unavailable:
    ```bash
    BASE_TAG="$(.agents/skills/final-release-review/scripts/find_latest_release_tag.sh origin 'v*' 2>/dev/null || git tag -l 'v*' --sort=-v:refname | head -n1)"
    echo "$BASE_TAG"
    ```
-3. Judge breaking-change risk against that latest release tag, not against unreleased branch churn or post-tag changes already on `main`. If the command fell back to local tags, treat the result as potentially stale and say so.
-4. Prefer the simplest implementation that satisfies the current task. Update callers, tests, docs, and examples directly instead of preserving superseded unreleased interfaces.
-5. Add a compatibility layer only when there is a concrete released consumer, an otherwise supported durable external state boundary that requires it, or when the user explicitly asks for a migration path.
+   Report a local-tag fallback as potentially stale.
+3. Record the implementation scope contract below before coding.
+4. Identify the nearest existing implementation pipeline and the functions, types, or modules that are the source of truth for each affected concern. Prefer adapting the required input into that pipeline over creating parallel schema, metadata, validation, naming, or execution machinery.
+5. Choose the smallest coherent change using the core decision rules. Add compatibility machinery only for a required supported boundary.
+6. Before editing each review-feedback batch, run the review gate against the complete branch diff, not only the latest revision.
+7. Before handoff, run the effectiveness check. If any answer is no, revise the design.
 
-## Compatibility boundary rules
+## Implementation scope contract
 
-- Released public API or documented external behavior: preserve compatibility or provide an explicit migration path.
-- Persisted schema, serialized state, wire protocol, CLI flags, environment variables, and externally consumed config: treat as compatibility-sensitive when they are part of the latest release or when the repo explicitly intends to preserve them across commits, processes, or machines.
-- Python-specific durable surfaces such as `RunState`, session persistence, exported dataclass constructor order, and documented model/provider configuration should be treated as compatibility-sensitive when they were part of the latest release tag or are explicitly supported as a shared durability boundary.
-- Interface changes introduced only on the current branch: not a compatibility target. Rewrite them directly.
-- Interface changes present on `main` but added after the latest release tag: not a semver breaking change by themselves. Rewrite them directly unless they already define a released or explicitly supported durable external state boundary.
-- Internal helpers, private types, same-branch tests, fixtures, and examples: update them directly instead of adding adapters.
-- Unreleased persisted schema versions on `main` may be renumbered or squashed before release when intermediate snapshots are intentionally unsupported. When you do that, update the support set and tests together so the boundary is explicit.
+Record these four items in the plan or working notes, and update them before widening or narrowing the implementation:
 
-## Default implementation stance
+1. **Required behavior:** The smallest user-visible scenario that must work.
+2. **Compatibility requirements:** Supported released behavior or a durable boundary that must remain usable.
+3. **Intentionally unsupported cases:** Nearby inputs or shapes to reject, including when and how rejection occurs.
+4. **Supported alternative:** An existing wrapper, override, adapter, configuration, or lower-level API; state `none` when absent.
 
-- Prefer deletion or replacement over aliases, overloads, shims, feature flags, and dual-write logic when the old shape is unreleased.
-- Do not preserve a confusing abstraction just because it exists in the current branch diff.
-- If review feedback claims a change is breaking, verify it against the latest release tag and actual external impact before accepting the feedback.
-- If a change truly crosses the latest released contract boundary, call that out explicitly in the ExecPlan, release notes context, and user-facing summary.
+If the intentionally unsupported cases cannot be stated clearly, do not start by adding a general resolver. First define a narrower behavior contract. If no adequate supported alternative exists, add one only when the task requires it; do not invent one speculatively.
+
+A released-version reproducer proves reachability, not support. Treat the exact shape as a compatibility requirement only when intentionally covered by public documentation, examples, tests, or typing; required by a durable boundary; or backed by concrete user reliance or maintainer intent. Otherwise record the risk and prefer early rejection with an existing supported alternative.
+
+## Review-feedback gate
+
+Repeat this gate before editing each new feedback batch:
+
+```text
+Review checkpoint:
+- Root cause and required behavior:
+- Compatibility evidence and unsupported cases:
+- Source of truth:
+- Behavior-space change: narrows / unchanged / widens
+- Action: focused patch / complexity reset / reject as unsupported
+```
+
+Classify each finding as a required-behavior defect, supported compatibility requirement, another combination of the same implementation dimensions, or unrelated issue. Widening the behavior space requires new contract evidence.
+
+If a second related finding would add another condition, protocol hop, compatibility case, or test permutation to the same abstraction, stop patching and run the complexity reset. Continue only when concrete evidence puts the exact case in the required or supported contract.
+
+Example: if successive findings require traversing a direct wrapper, partial, nested wrapper, descriptor, and bound method, do not add another hop. Unless arbitrary wrapper graphs are supported, retain the required plain callable behavior and reject ambiguous wrappers before invocation.
+
+## Core decision rules
+
+- Preserve released public APIs, documented behavior, and supported durable boundaries, or provide an explicit migration path.
+- Rewrite branch-local interfaces, internal helpers, same-branch tests, and post-release additions on `main` directly unless they already define a supported durable boundary.
+- Unreleased persisted schema versions may be renumbered or squashed when intermediate snapshots are intentionally unsupported; update the support set and tests together.
+- Do not equate a broad Python or third-party protocol with support for every representable shape.
+- Prefer the nearest existing pipeline and one source of truth for schema, documentation, validation, identity, and invocation.
+- Add abstractions, state, classifications, branches, configuration, dependencies, or parallel paths only for a stated requirement, supported contract, or verified risk.
+- Prefer deletion or direct replacement for unreleased code. Treat branch-local implementation and tests as disposable.
+- Prefer an actionable construction- or validation-time error plus an existing alternative over partial protocol emulation.
+- Keep unrelated refactors and pre-existing failures out of the patch.
+- Test the required behavior, the nearest supported path, and one representative case per unsupported category rather than every constructible permutation.
+- Call out changes to supported released behavior or durable formats in the plan and handoff.
+
+## Complexity reset
+
+Stop extending the current design when:
+
+- Related findings keep combining the same dimensions, such as wrappers, descriptors, generics, binding, context injection, sync/async classification, or provider variants.
+- The patch interprets a host-language or third-party protocol, or separately infers representations that can drift.
+- A narrow requirement needs recursive resolution, cached modes, new state, or unrelated subsystem changes.
+- Tests enumerate mechanics or the full diff keeps growing while the required scenario remains small.
+
+When a trigger fires:
+
+1. Stop addressing comments one by one.
+2. Group findings by root cause and re-read the original requirement and scope contract.
+3. Compare the complete diff with the intended merge base or latest release tag.
+4. Delete unnecessary branch-local machinery, narrow the contract, and reject unsupported cases before side effects.
+5. Rebuild tests around required behavior and representative unsupported categories.
+
+Do not wait for the user or reviewer to request this reset when the signals are already present.
+
+## Effectiveness check
+
+Before declaring the design complete, answer all of these with concrete evidence:
+
+- Can the required behavior be described without naming internal helper types or reflection mechanics?
+- Does the implementation reuse the nearest existing pipeline rather than maintain a parallel interpretation?
+- Does every new abstraction and branch map to the scope contract or a verified risk?
+- Are unsupported neighboring cases rejected before side effects with an existing alternative identified?
+- Do the complete diff and tests cover the contract without making every constructible permutation supported?
+- Does the latest review revision shrink or preserve the behavior space rather than widen it without evidence?
 
 ## SDK-specific decision rules
 
+- Treat released `RunState`, session persistence, and other explicitly durable serialized state as compatibility-sensitive across commits, processes, and machines.
 - When unsupported OpenAI API or provider-adapter behavior already has a released default path, avoid turning it into a default hard error unless the latest release boundary justifies that break. Prefer an opt-in strict mode such as `strict_feature_validation=True`, while keeping the default path compatible through warning, ignoring unsupported data, or a clearly non-empty placeholder.
 - For OpenAI API feature gaps, evaluate streaming and non-streaming paths together. Custom tool calls, multi-choice Chat Completions chunks, non-text tool outputs, and similar provider payload differences must not be strict in one path and permissive or malformed in the other.
 - When a change creates new public SDK behavior, do not expose it only through hard-coded module globals. Prefer an explicit public configuration object or parameter, preserve the existing default behavior when compatibility-sensitive, and make opt-in SDK defaults explicit.
+- For SDK-owned public configuration, accept existing typed objects and equivalent dictionaries at the public input boundary while preserving the internal typed representation. Respect the owning model's validation and extra-field policy instead of recreating arbitrary third-party schema semantics.
+- Keep model-specific settings inside the existing `model_settings` parameter. Preserve released constructor arguments, typed-object behavior, and provider request payloads when adding dictionary support.
 - Append new optional fields or constructor parameters to public dataclasses and constructors. Do not insert them before existing public fields unless you also provide a compatibility layer and regression coverage for the old positional call shape.
 - Treat threshold and quota values as part of the API design when they affect runtime behavior. Distinguish OpenAI platform quota-derived values from defensive SDK defaults; if the value is not anchored in a documented platform limit, avoid making it an unconditional default-on behavior.
 - Define `None` semantics deliberately for public configuration. For example, use separate meanings for "feature disabled or no SDK limit", "use SDK default limits", and "disable only this specific limit" rather than relying on implicit truthiness checks.
 
 ## When to stop and confirm
 
-- The change would alter behavior shipped in the latest release tag.
+- The change would alter supported behavior shipped in the latest release tag, or concrete evidence shows material reliance on behavior that the release incidentally accepted.
 - The change would modify durable external data, protocol formats, or serialized state.
+- The correct solution would materially expand beyond the requested outcome or require unrelated architectural work.
+- A complexity reset trigger fires and the narrower replacement would change an already released supported contract rather than branch-local code.
 - The user explicitly asked for backward compatibility, deprecation, or migration support.
 
 ## Output expectations
@@ -58,4 +121,5 @@ Use this skill before editing code when the task changes runtime behavior or any
 When this skill materially affects the implementation approach, state the decision briefly in your reasoning or handoff, for example:
 
 - `Compatibility boundary: latest release tag v0.x.y; branch-local interface rewrite, no shim needed.`
-- `Compatibility boundary: released RunState schema; preserve compatibility and add migration coverage.`
+- `Implementation scope contract: support X; preserve Y; reject Z before side effects; use supported alternative W, or none exists.`
+- `Complexity reset: repeated edge-case combinations show the approach is too broad; redesign from the original requirement instead of adding another branch.`

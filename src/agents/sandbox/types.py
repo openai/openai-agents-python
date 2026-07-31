@@ -56,7 +56,10 @@ class Permissions(BaseModel):
 
     @classmethod
     def from_str(cls, perms: str) -> "Permissions":
-        if len(perms) == 11 and perms[-1] in {"@", "+"}:
+        # coreutils/BSD ls append a single trailing marker to the mode field to flag
+        # alternate access methods: "+" (ACL), "@" (macOS extended attributes), and
+        # "." (SELinux security context). Strip it before parsing the 10 mode chars.
+        if len(perms) == 11 and perms[-1] in {"@", "+", "."}:
             perms = perms[:-1]
         if len(perms) != 10:
             raise ValueError(f"invalid permissions string length: {perms!r}")

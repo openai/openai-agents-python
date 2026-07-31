@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from pathlib import Path
 
 import pytest
 
+import agents._debug as _debug
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
 from agents.sandbox.sandboxes.unix_local import (
@@ -191,6 +193,54 @@ async def test_async_sink_raise_propagates_to_emit() -> None:
 
     with pytest.raises(RuntimeError, match="boom"):
         await instrumentation.emit(event)
+
+
+@pytest.mark.parametrize("redacted", [True, False], ids=["redacted", "diagnostic"])
+@pytest.mark.asyncio
+async def test_logged_sink_failure_conditionally_includes_sink_type(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    redacted: bool,
+) -> None:
+    class _FailingLogSink(_EventSink):
+        async def handle(self, event: SandboxSessionEvent) -> None:
+            _ = event
+            raise RuntimeError("SECRET_SINK_ERROR")
+
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+    caplog.set_level(logging.ERROR)
+    instrumentation = Instrumentation(sinks=[_FailingLogSink(mode="sync", on_error="log")])
+    event = SandboxSessionFinishEvent(
+        session_id=uuid.uuid4(),
+        seq=1,
+        op="running",
+        span_id="span_running",
+        ok=True,
+        duration_ms=0.0,
+    )
+
+    await instrumentation.emit(event)
+
+    record = next(
+        record
+        for record in caplog.records
+        if "Sandbox event sink failed" in logging.Formatter().format(record)
+    )
+    if redacted:
+        assert record.msg == "%s"
+        assert record.args == ("Sandbox event sink failed (ignored)",)
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert "openai_agents_diagnostic_context" not in record.__dict__
+        assert "_FailingLogSink" not in logging.Formatter().format(record)
+        assert "SECRET_SINK_ERROR" not in logging.Formatter().format(record)
+    else:
+        assert record.__dict__["openai_agents_diagnostic_context"] == {
+            "sink_type": "_FailingLogSink"
+        }
+        assert record.exc_info is not None
+        assert record.exc_info[1] is not None
+        assert "SECRET_SINK_ERROR" in logging.Formatter().format(record)
 
 
 def test_session_manager_uses_custom_snapshot_spec_without_resolving_default(

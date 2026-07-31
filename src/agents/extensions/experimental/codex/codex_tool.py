@@ -17,7 +17,7 @@ from typing_extensions import NotRequired, TypedDict
 
 from agents import _debug
 from agents.exceptions import ModelBehaviorError, UserError
-from agents.logger import logger
+from agents.logger import log_model_and_tool_action_error, log_tool_action_error, logger
 from agents.models import _openai_shared
 from agents.run_context import RunContextWrapper
 from agents.strict_schema import ensure_strict_json_schema
@@ -952,8 +952,12 @@ def _try_store_thread_id_in_run_context_after_error(
 
     try:
         _store_thread_id_in_run_context(ctx, key, thread_id)
-    except Exception:
-        logger.exception("Failed to store Codex thread id in run context after error.")
+    except Exception as exc:
+        log_tool_action_error(
+            logger,
+            "Failed to store Codex thread id in run context after error",
+            exc,
+        )
 
 
 def _set_pydantic_context_value(context: BaseModel, key: str, value: str) -> bool:
@@ -1047,8 +1051,12 @@ async def _consume_events(
                 maybe_result = on_stream(payload)
                 if inspect.isawaitable(maybe_result):
                     await maybe_result
-            except Exception:
-                logger.exception("Error while handling Codex on_stream event.")
+            except Exception as exc:
+                log_model_and_tool_action_error(
+                    logger,
+                    "Error while handling Codex on_stream event",
+                    exc,
+                )
 
         async def _dispatch() -> None:
             assert event_queue is not None

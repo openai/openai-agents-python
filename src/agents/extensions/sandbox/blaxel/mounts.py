@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from .... import _debug
+from ....logger import log_tool_action_warning
 from ....sandbox.entries import GCSMount, Mount, R2Mount, S3Mount
 from ....sandbox.entries.mounts.base import MountStrategyBase
 from ....sandbox.errors import MountConfigError
@@ -322,7 +324,7 @@ async def _mount_s3(session: BaseSandboxSession, config: BlaxelCloudBucketMountC
         opts.append("ro")
 
     opts_str = ",".join(opts)
-    cmd = f"s3fs {shlex.quote(bucket)} {mount_path} -o {opts_str}"
+    cmd = f"s3fs {shlex.quote(bucket)} {mount_path} -o {shlex.quote(opts_str)}"
 
     try:
         await _exec(session, f"mkdir -p {mount_path}")
@@ -367,7 +369,7 @@ async def _mount_gcs(session: BaseSandboxSession, config: BlaxelCloudBucketMount
         opts.append("-o ro")
 
     if config.prefix:
-        opts.append(f"--only-dir={config.prefix.strip('/')}")
+        opts.append(f"--only-dir={shlex.quote(config.prefix.strip('/'))}")
 
     opts_str = " ".join(opts)
     cmd = f"gcsfuse {opts_str} {bucket} {mount_path}"
@@ -406,18 +408,37 @@ async def _unmount_bucket(session: BaseSandboxSession, mount_path: str) -> None:
     result = await _exec(session, f"fusermount -u {path}")
     if result.exit_code == 0:
         return
-    logger.debug("fusermount failed for %s (exit %d), trying umount", mount_path, result.exit_code)
+    if _debug.DONT_LOG_TOOL_DATA:
+        logger.debug("fusermount failed (exit %d), trying umount", result.exit_code)
+    else:
+        logger.debug(
+            "fusermount failed for %s (exit %d), trying umount",
+            mount_path,
+            result.exit_code,
+        )
     # Fallback to regular umount.
     result = await _exec(session, f"umount {path}")
     if result.exit_code == 0:
         return
-    logger.debug("umount failed for %s (exit %d), trying lazy umount", mount_path, result.exit_code)
+    if _debug.DONT_LOG_TOOL_DATA:
+        logger.debug("umount failed (exit %d), trying lazy umount", result.exit_code)
+    else:
+        logger.debug(
+            "umount failed for %s (exit %d), trying lazy umount",
+            mount_path,
+            result.exit_code,
+        )
     # Last resort: lazy unmount.
     result = await _exec(session, f"umount -l {path}")
     if result.exit_code != 0:
-        logger.warning(
-            "all unmount attempts failed for %s (last exit %d)", mount_path, result.exit_code
-        )
+        if _debug.DONT_LOG_TOOL_DATA:
+            logger.warning("all unmount attempts failed (last exit %d)", result.exit_code)
+        else:
+            logger.warning(
+                "all unmount attempts failed for %s (last exit %d)",
+                mount_path,
+                result.exit_code,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -668,7 +689,12 @@ async def _detach_drive(sandbox: Any, mount_path: str) -> None:
         try:
             await drives.unmount(mount_path)
         except Exception as e:
-            logger.warning("drive detach failed for %s (non-fatal): %s", mount_path, e)
+            log_tool_action_warning(
+                logger,
+                "Drive detach failed (non-fatal)",
+                e,
+                diagnostic_extra=lambda: {"mount_path": mount_path},
+            )
 
 
 __all__ = [

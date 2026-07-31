@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+from typing import Any
+
 from openai import AsyncOpenAI
 
 from agents.models._openai_shared import get_default_openai_client
 
 from ..items import TResponseInputItem
 from .session import SessionABC
-from .session_settings import SessionSettings, resolve_session_limit
+from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
 
 
 async def start_openai_conversations_session(openai_client: AsyncOpenAI | None = None) -> str:
@@ -28,10 +31,15 @@ class OpenAIConversationsSession(SessionABC):
         *,
         conversation_id: str | None = None,
         openai_client: AsyncOpenAI | None = None,
-        session_settings: SessionSettings | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
     ):
         self._session_id: str | None = conversation_id
-        self.session_settings = session_settings or SessionSettings()
+        self._session_id_lock = asyncio.Lock()
+        self.session_settings = (
+            coerce_session_settings(session_settings)
+            if session_settings is not None
+            else SessionSettings()
+        )
         _openai_client = openai_client
         if _openai_client is None:
             _openai_client = get_default_openai_client() or AsyncOpenAI()
@@ -64,7 +72,9 @@ class OpenAIConversationsSession(SessionABC):
 
     async def _get_session_id(self) -> str:
         if self._session_id is None:
-            self._session_id = await start_openai_conversations_session(self._openai_client)
+            async with self._session_id_lock:
+                if self._session_id is None:
+                    self._session_id = await start_openai_conversations_session(self._openai_client)
         return self._session_id
 
     async def _clear_session_id(self) -> None:

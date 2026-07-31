@@ -289,6 +289,14 @@ class ToolOutputTrimmer:
         """Remove verbose prose from a JSON schema while preserving its structure."""
         trimmed_schema: dict[str, Any] = {}
         for key, value in schema.items():
+            # Keys of a "properties" mapping are parameter names, not schema keywords, so
+            # they must survive even when they collide with the prose keywords below.
+            if key == "properties" and isinstance(value, dict):
+                trimmed_schema[key] = {
+                    name: self._trim_json_schema(sub) if isinstance(sub, dict) else sub
+                    for name, sub in value.items()
+                }
+                continue
             if key in {"description", "title", "$comment", "examples"}:
                 continue
             if isinstance(value, dict):

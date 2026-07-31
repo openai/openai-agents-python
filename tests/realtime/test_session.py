@@ -1,6 +1,7 @@
 import asyncio
 import dataclasses
 import json
+import logging
 import threading
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
@@ -8,6 +9,8 @@ from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+import agents._debug as _debug
+from agents.agent import AgentBase
 from agents.exceptions import ToolTimeoutError, UserError
 from agents.guardrail import GuardrailFunctionOutput, InputGuardrail, OutputGuardrail
 from agents.handoffs import Handoff
@@ -53,6 +56,7 @@ from agents.realtime.model_events import (
     RealtimeModelTranscriptDeltaEvent,
     RealtimeModelTurnEndedEvent,
     RealtimeModelTurnStartedEvent,
+    RealtimeModelUsageEvent,
 )
 from agents.realtime.model_inputs import (
     RealtimeModelSendAudio,
@@ -76,6 +80,7 @@ from agents.tool_guardrails import (
     ToolInputGuardrailData,
     tool_input_guardrail,
 )
+from agents.usage import Usage
 
 
 class _DummyModel(RealtimeModel):
@@ -146,6 +151,47 @@ def _disabled_billing_tool(*, is_enabled: Any = False) -> FunctionTool:
         lambda: "ok",
         name_override="transfer_to_billing",
         is_enabled=is_enabled,
+    )
+
+
+def _agent_with_cross_group_enablement_failure() -> tuple[
+    RealtimeAgent[Any], asyncio.Event, asyncio.Event
+]:
+    handoff_started = asyncio.Event()
+    handoff_cancelled = asyncio.Event()
+    handoff_finished = asyncio.Event()
+
+    async def failing_tool_enabled(_ctx: RunContextWrapper[Any], _agent: AgentBase[Any]) -> bool:
+        await handoff_started.wait()
+        raise RuntimeError("tool enablement failed")
+
+    async def blocking_handoff_enabled(
+        _ctx: RunContextWrapper[Any], _agent: RealtimeAgent[Any]
+    ) -> bool:
+        handoff_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            handoff_cancelled.set()
+            raise
+        finally:
+            handoff_finished.set()
+        return True
+
+    return (
+        RealtimeAgent(
+            name="parent",
+            tools=[
+                function_tool(
+                    lambda: "failing",
+                    name_override="failing_tool",
+                    is_enabled=failing_tool_enabled,
+                )
+            ],
+            handoffs=[_disabled_billing_handoff(is_enabled=blocking_handoff_enabled)],
+        ),
+        handoff_cancelled,
+        handoff_finished,
     )
 
 
@@ -576,6 +622,7 @@ class _FakeAudio:
 
 @pytest.mark.asyncio
 async def test_item_updated_merge_exception_path_logs_error(monkeypatch):
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
     model = _DummyModel()
     agent = RealtimeAgent(name="agent")
     session = RealtimeSession(model, agent, None)
@@ -594,8 +641,7 @@ async def test_item_updated_merge_exception_path_logs_error(monkeypatch):
 
     with patch("agents.realtime.session.logger") as mock_logger:
         await session.on_event(RealtimeModelItemUpdatedEvent(item=incoming))
-        # error branch should be hit
-        assert mock_logger.error.called
+        mock_logger.error.assert_called_once_with("%s", "Error merging transcripts", stacklevel=3)
 
 
 @pytest.mark.asyncio
@@ -740,6 +786,38 @@ async def test_get_handoffs_async_is_enabled(monkeypatch):
     enabled = await RealtimeSession._get_handoffs(a, session._context_wrapper)
     # Both should be enabled
     assert len(enabled) == 2
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "resolve_dispatch_snapshot",
+        "filter_enabled_dispatch_snapshot",
+        "get_updated_model_settings",
+    ],
+)
+@pytest.mark.asyncio
+async def test_realtime_session_boundaries_cancel_cross_group_enablement_on_error(
+    boundary: str,
+) -> None:
+    agent, handoff_cancelled, handoff_finished = _agent_with_cross_group_enablement_failure()
+    session = RealtimeSession(_DummyModel(), agent, None)
+
+    with pytest.raises(RuntimeError, match="tool enablement failed"):
+        if boundary == "resolve_dispatch_snapshot":
+            await session._resolve_dispatch_snapshot(agent, None)
+        elif boundary == "filter_enabled_dispatch_snapshot":
+            settings = cast(
+                RealtimeSessionModelSettings,
+                {"tools": agent.tools, "handoffs": agent.handoffs},
+            )
+            snapshot = session._dispatch_snapshot_from_settings(agent, settings)
+            await session._filter_enabled_dispatch_snapshot(snapshot)
+        else:
+            await session._get_updated_model_settings_from_agent(None, agent)
+
+    assert handoff_cancelled.is_set()
+    assert handoff_finished.is_set()
 
 
 @pytest.mark.asyncio
@@ -1174,6 +1252,35 @@ class TestEventHandling:
         end_session_event = await session._event_queue.get()
         assert isinstance(end_session_event, RealtimeAgentEndEvent)
         assert end_session_event.agent == mock_agent
+
+    @pytest.mark.asyncio
+    async def test_usage_events_accumulate_in_session_context(self, mock_model, mock_agent):
+        session = RealtimeSession(
+            mock_model, mock_agent, None, run_config={"async_tool_calls": False}
+        )
+
+        first = RealtimeModelUsageEvent(
+            usage=Usage(requests=1, input_tokens=10, output_tokens=4, total_tokens=14)
+        )
+        second = RealtimeModelUsageEvent(
+            usage=Usage(requests=1, input_tokens=7, output_tokens=3, total_tokens=10)
+        )
+
+        await session.on_event(first)
+        await session.on_event(second)
+
+        assert session._event_queue.qsize() == 2
+        first_raw = await session._event_queue.get()
+        second_raw = await session._event_queue.get()
+        assert isinstance(first_raw, RealtimeRawModelEvent)
+        assert isinstance(second_raw, RealtimeRawModelEvent)
+        assert first_raw.data is first
+        assert second_raw.data is second
+        assert first_raw.info.context.usage.requests == 2
+        assert first_raw.info.context.usage.input_tokens == 17
+        assert first_raw.info.context.usage.output_tokens == 7
+        assert first_raw.info.context.usage.total_tokens == 24
+        assert len(first_raw.info.context.usage.request_usage_entries) == 2
 
     @pytest.mark.asyncio
     async def test_transcription_completed_event_updates_history(self, mock_model, mock_agent):
@@ -2540,6 +2647,92 @@ class TestToolCallExecution:
         assert approval_event.call_id == tool_call_event.call_id
         assert approval_event.tool == mock_function_tool
 
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            '{"subject": "refund"',
+            "null",
+            "[]",
+            '{"amount": NaN}',
+            '{"amount": Infinity}',
+            '{"amount": -Infinity}',
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_callable_function_approval_fails_closed_for_invalid_arguments(
+        self, mock_model, arguments: str
+    ) -> None:
+        approval_inputs: list[dict[str, Any]] = []
+        tool_inputs: list[str] = []
+
+        async def needs_approval(_ctx: Any, params: dict[str, Any], _call_id: str) -> bool:
+            approval_inputs.append(params)
+            return False
+
+        async def invoke_tool(_ctx: ToolContext[Any], raw_arguments: str) -> str:
+            tool_inputs.append(raw_arguments)
+            return "sent"
+
+        tool = FunctionTool(
+            name="send_email",
+            description="Send an email.",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=invoke_tool,
+            needs_approval=needs_approval,
+        )
+        agent = RealtimeAgent(name="agent", tools=[tool])
+        session = RealtimeSession(mock_model, agent, None, run_config={"async_tool_calls": False})
+        tool_call_event = RealtimeModelToolCallEvent(
+            name=tool.name,
+            call_id="call-invalid",
+            arguments=arguments,
+        )
+
+        await session._handle_tool_call(tool_call_event)
+
+        assert tool_call_event.call_id in session._pending_tool_calls
+        assert approval_inputs == []
+        assert tool_inputs == []
+        approval_event = await session._event_queue.get()
+        assert isinstance(approval_event, RealtimeToolApprovalRequired)
+
+    @pytest.mark.asyncio
+    async def test_callable_function_approval_receives_valid_object_arguments(
+        self, mock_model
+    ) -> None:
+        approval_inputs: list[dict[str, Any]] = []
+        tool_inputs: list[str] = []
+
+        async def needs_approval(_ctx: Any, params: dict[str, Any], _call_id: str) -> bool:
+            approval_inputs.append(params)
+            return False
+
+        async def invoke_tool(_ctx: ToolContext[Any], raw_arguments: str) -> str:
+            tool_inputs.append(raw_arguments)
+            return "sent"
+
+        tool = FunctionTool(
+            name="send_email",
+            description="Send an email.",
+            params_json_schema={"type": "object", "properties": {"subject": {"type": "string"}}},
+            on_invoke_tool=invoke_tool,
+            needs_approval=needs_approval,
+        )
+        agent = RealtimeAgent(name="agent", tools=[tool])
+        session = RealtimeSession(mock_model, agent, None, run_config={"async_tool_calls": False})
+        arguments = '{"subject": "status update"}'
+        tool_call_event = RealtimeModelToolCallEvent(
+            name=tool.name,
+            call_id="call-valid",
+            arguments=arguments,
+        )
+
+        await session._handle_tool_call(tool_call_event)
+
+        assert approval_inputs == [{"subject": "status update"}]
+        assert tool_inputs == [arguments]
+        assert tool_call_event.call_id not in session._pending_tool_calls
+
     @pytest.mark.asyncio
     async def test_tool_input_guardrail_rejects_before_realtime_function_execution(
         self, mock_model
@@ -3006,6 +3199,31 @@ class TestToolCallExecution:
         )
 
     @pytest.mark.asyncio
+    async def test_rejection_formatter_error_is_redacted(
+        self, monkeypatch, mock_model, mock_agent, mock_function_tool
+    ):
+        monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+
+        def fail_formatter(_args):
+            raise ValueError("SECRET_REALTIME_TOOL_FORMATTER")
+
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={"tool_error_formatter": fail_formatter},
+        )
+
+        with patch("agents.realtime.session.logger") as mock_logger:
+            message = await session._resolve_approval_rejection_message(
+                tool=mock_function_tool,
+                call_id="call_reject_error",
+            )
+
+        assert message
+        mock_logger.error.assert_called_once_with("%s", "Tool error formatter failed", stacklevel=3)
+
+    @pytest.mark.asyncio
     async def test_reject_pending_tool_call_prefers_explicit_message(
         self, mock_model, mock_agent, mock_function_tool
     ):
@@ -3376,6 +3594,96 @@ class TestGuardrailFunctionality:
             )
 
         return OutputGuardrail(guardrail_function=guardrail_func, name="safe_guardrail")
+
+    @pytest.mark.parametrize(
+        ("model_redacted", "tool_redacted"),
+        [(True, False), (False, True), (False, False)],
+        ids=["model_redacted", "tool_redacted", "diagnostic"],
+    )
+    @pytest.mark.asyncio
+    async def test_output_guardrail_failure_follows_both_data_policies(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        mock_model: RealtimeModel,
+        model_redacted: bool,
+        tool_redacted: bool,
+    ) -> None:
+        error = RuntimeError("SECRET_REALTIME_GUARDRAIL_ERROR")
+
+        async def failing_guardrail(context, agent, output):
+            _ = context, agent, output
+            raise error
+
+        guardrail = OutputGuardrail(
+            guardrail_function=failing_guardrail,
+            name="SECRET_REALTIME_GUARDRAIL_NAME",
+        )
+        agent = RealtimeAgent(name="agent", output_guardrails=[guardrail])
+        session = RealtimeSession(mock_model, agent, None)
+        monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", model_redacted)
+        monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
+
+        with caplog.at_level(logging.DEBUG, logger="openai.agents"):
+            triggered = await session._run_output_guardrails("model text", "response-id")
+
+        assert triggered is False
+        records = [
+            record
+            for record in caplog.records
+            if "Output guardrail raised an exception" in record.getMessage()
+        ]
+        assert len(records) == 1
+        record = records[0]
+        redacted = model_redacted or tool_redacted
+        if redacted:
+            assert record.msg == "%s"
+            assert record.args == ("Output guardrail raised an exception; skipping it",)
+            assert record.exc_info is None
+            assert record.exc_text is None
+            assert "openai_agents_diagnostic_context" not in record.__dict__
+            assert error not in record.__dict__.values()
+            rendered = logging.Formatter().format(record)
+            assert "SECRET_REALTIME_GUARDRAIL_ERROR" not in rendered
+            assert "SECRET_REALTIME_GUARDRAIL_NAME" not in rendered
+        else:
+            context = record.__dict__["openai_agents_diagnostic_context"]
+            assert context == {"guardrail_name": "SECRET_REALTIME_GUARDRAIL_NAME"}
+            assert record.exc_info is not None
+            assert record.exc_info[1] is error
+            assert "SECRET_REALTIME_GUARDRAIL_ERROR" in logging.Formatter().format(record)
+
+    @pytest.mark.asyncio
+    async def test_output_guardrail_failure_tolerates_missing_callable_name(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        mock_model: RealtimeModel,
+    ) -> None:
+        class _FailingGuardrailCallable:
+            async def __call__(self, context, agent, output):
+                _ = context, agent, output
+                raise RuntimeError("SECRET_UNNAMED_GUARDRAIL_ERROR")
+
+        guardrail = OutputGuardrail(guardrail_function=_FailingGuardrailCallable())
+        agent = RealtimeAgent(name="agent", output_guardrails=[guardrail])
+        session = RealtimeSession(mock_model, agent, None)
+        monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
+        monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
+        with caplog.at_level(logging.WARNING, logger="openai.agents"):
+            triggered = await session._run_output_guardrails("model text", "response-id")
+
+        assert triggered is False
+        records = [
+            record
+            for record in caplog.records
+            if "Output guardrail raised an exception" in record.getMessage()
+        ]
+        assert len(records) == 1
+        context = records[0].__dict__["openai_agents_diagnostic_context"]
+        assert context["guardrail_type"].endswith("._FailingGuardrailCallable")
+        assert records[0].exc_info is not None
 
     @pytest.mark.asyncio
     async def test_transcript_delta_triggers_guardrail_at_threshold(

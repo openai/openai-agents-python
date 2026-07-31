@@ -15,6 +15,7 @@ from agents.sandbox.workspace_paths import (
     WorkspacePathPolicy,
     coerce_posix_path,
     posix_path_as_path,
+    sandbox_path_grant_host_path,
 )
 
 PathInput = str | PurePath
@@ -403,7 +404,55 @@ def test_extra_path_grant_accepts_native_windows_drive_absolute_path(
 
     grant = SandboxPathGrant(path=str(tmp_path))
 
-    assert Path(grant.path).is_absolute()
+    assert grant.path == str(tmp_path)
+
+
+def test_split_path_grant_rejects_native_windows_sandbox_path(tmp_path: Path) -> None:
+    if not Path(PureWindowsPath("C:/tmp")).is_absolute():
+        pytest.skip("Windows drive paths are not native absolute paths on this host")
+
+    with pytest.raises(
+        ValidationError,
+        match="sandbox path grant path must be POSIX absolute when host_path is configured",
+    ):
+        SandboxPathGrant(path=str(tmp_path), host_path=str(tmp_path / "source"))
+
+
+def test_extra_path_grant_normalizes_distinct_host_path() -> None:
+    grant = SandboxPathGrant(
+        path="/mnt/shared-data",
+        host_path="C:/Users/example/shared-data",
+        read_only=True,
+    )
+
+    assert grant.path == "/mnt/shared-data"
+    assert grant.host_path == "C:\\Users\\example\\shared-data"
+    assert grant.read_only is True
+
+
+@pytest.mark.parametrize(
+    ("host_path", "message"),
+    [
+        ("relative/path", "must be an absolute host path"),
+        ("/", "must not be filesystem root"),
+        ("/srv/../secret", "must not contain parent segments"),
+        ("//server/share", "does not support UNC or device paths"),
+        ("\\\\server\\share", "does not support UNC or device paths"),
+        ("C:\\", "must not be filesystem root"),
+    ],
+)
+def test_extra_path_grant_rejects_unsupported_host_paths(
+    host_path: str,
+    message: str,
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        SandboxPathGrant(path="/mnt/shared-data", host_path=host_path)
+
+
+def test_extra_path_grant_preserves_host_path_whitespace() -> None:
+    grant = SandboxPathGrant(path="/mnt/shared-data", host_path="/srv/shared ")
+
+    assert grant.host_path == "/srv/shared "
 
 
 def test_extra_path_grant_rules_reject_windows_drive_absolute_path() -> None:
@@ -536,9 +585,9 @@ def test_extra_path_grant_rejects_relative_path() -> None:
     assert error == {
         "type": "value_error",
         "loc": ("path",),
-        "msg": "Value error, sandbox path grant path must be absolute",
+        "msg": "Value error, sandbox path grant path must be POSIX absolute",
         "input": "tmp",
-        "ctx": {"error": "sandbox path grant path must be absolute"},
+        "ctx": {"error": "sandbox path grant path must be POSIX absolute"},
     }
 
 
@@ -592,3 +641,29 @@ def test_host_io_rejects_extra_path_grant_symlink_to_root(tmp_path: Path) -> Non
         policy.normalize_path(root_alias / "etc" / "passwd", resolve_symlinks=True)
 
     assert str(exc_info.value) == "sandbox path grant path must not resolve to filesystem root"
+
+
+def test_host_path_grant_rejects_symlink_to_root(tmp_path: Path) -> None:
+    root_alias = tmp_path / "root-alias"
+    os.symlink(Path("/"), root_alias, target_is_directory=True)
+    grant = SandboxPathGrant(path="/mnt/shared-data", host_path=str(root_alias))
+
+    with pytest.raises(
+        ValueError,
+        match="sandbox path grant path must not resolve to filesystem root",
+    ):
+        sandbox_path_grant_host_path(grant)
+
+
+def test_host_path_grant_returns_validated_resolved_source(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    source_alias = tmp_path / "source-alias"
+    os.symlink(source, source_alias, target_is_directory=True)
+    grant = SandboxPathGrant(path="/mnt/shared-data", host_path=str(source_alias))
+
+    resolved_source = sandbox_path_grant_host_path(grant)
+    source_alias.unlink()
+    os.symlink(Path("/"), source_alias, target_is_directory=True)
+
+    assert resolved_source == source.resolve()

@@ -5,11 +5,13 @@ import dataclasses
 import inspect
 import json
 from collections.abc import AsyncIterator, Sequence
+from functools import partial
 from typing import Any, cast
 
 from pydantic import BaseModel
 from typing_extensions import assert_never
 
+from .. import _debug
 from .._tool_identity import (
     FunctionToolLookupKey,
     get_function_tool_lookup_key_for_tool,
@@ -20,13 +22,19 @@ from ..exceptions import ToolInputGuardrailTripwireTriggered, UserError
 from ..guardrail import InputGuardrail, InputGuardrailResult
 from ..handoffs import Handoff
 from ..items import ToolApprovalItem
-from ..logger import logger
+from ..logger import (
+    log_model_action_error,
+    log_model_and_tool_action_warning,
+    log_tool_action_error,
+    logger,
+)
 from ..run_config import ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper, TContext
 from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, Tool, invoke_function_tool
 from ..tool_context import ToolContext
 from ..tool_guardrails import ToolInputGuardrailData
-from ..util._approvals import evaluate_needs_approval_setting
+from ..util._approvals import evaluate_needs_approval_setting, parse_function_tool_arguments
+from ..util._asyncio_tasks import gather_with_cancel
 from ._tool_filtering import filter_enabled_tools
 from ._tool_validation import validate_realtime_tool_names
 from .agent import RealtimeAgent
@@ -67,6 +75,7 @@ from .model_events import (
     RealtimeModelEvent,
     RealtimeModelInputAudioTranscriptionCompletedEvent,
     RealtimeModelToolCallEvent,
+    RealtimeModelUsageEvent,
 )
 from .model_inputs import (
     RealtimeModelSendAudio,
@@ -86,6 +95,18 @@ class _RealtimeSessionClosedSentinel:
 
 _REALTIME_SESSION_CLOSED_SENTINEL = _RealtimeSessionClosedSentinel()
 _BACKGROUND_TASK_CANCEL_GRACE_SECONDS = 1.0
+
+
+def _guardrail_diagnostic_extra(guardrail: Any) -> dict[str, object]:
+    try:
+        return {"guardrail_name": guardrail.get_name()}
+    except Exception:
+        try:
+            guardrail_type = type(guardrail.guardrail_function)
+            type_name = f"{guardrail_type.__module__}.{guardrail_type.__qualname__}"
+        except Exception:
+            type_name = "unknown"
+        return {"guardrail_type": type_name}
 
 
 def _serialize_tool_output(output: Any) -> str:
@@ -517,8 +538,8 @@ class RealtimeSession(RealtimeModelListener):
 
                     if new_content:
                         incoming_item = incoming_item.model_copy(update={"content": new_content})
-                except Exception:
-                    logger.error("Error merging transcripts", exc_info=True)
+                except Exception as exc:
+                    log_model_action_error(logger, "Error merging transcripts", exc)
                     pass
 
             self._history = self._get_new_history(self._history, incoming_item)
@@ -546,6 +567,9 @@ class RealtimeSession(RealtimeModelListener):
                     info=self._event_info,
                 )
             )
+        elif event.type == "usage":
+            assert isinstance(event, RealtimeModelUsageEvent)
+            self._context_wrapper.usage.add(event.usage)
         elif event.type == "turn_ended":
             # Clear guardrail state for next turn
             self._item_transcripts.clear()
@@ -588,10 +612,10 @@ class RealtimeSession(RealtimeModelListener):
         needs_setting = getattr(function_tool, "needs_approval", False)
         parsed_args: dict[str, Any] = {}
         if callable(needs_setting):
-            try:
-                parsed_args = json.loads(tool_call.arguments or "{}")
-            except json.JSONDecodeError:
-                parsed_args = {}
+            parsed_args_result = parse_function_tool_arguments(tool_call.arguments)
+            if parsed_args_result is None:
+                return True
+            parsed_args = parsed_args_result
         return await evaluate_needs_approval_setting(
             needs_setting,
             self._context_wrapper,
@@ -848,18 +872,21 @@ class RealtimeSession(RealtimeModelListener):
             )
             message = await maybe_message if inspect.isawaitable(maybe_message) else maybe_message
         except Exception as exc:
-            logger.error("Tool error formatter failed for %s: %s", tool.name, exc)
+            log_tool_action_error(logger, "Tool error formatter failed", exc)
             return REJECTION_MESSAGE
 
         if message is None:
             return REJECTION_MESSAGE
 
         if not isinstance(message, str):
-            logger.error(
-                "Tool error formatter returned non-string for %s: %s",
-                tool.name,
-                type(message).__name__,
-            )
+            if _debug.DONT_LOG_TOOL_DATA:
+                logger.error("Tool error formatter returned a non-string value")
+            else:
+                logger.error(
+                    "Tool error formatter returned non-string for %s: %s",
+                    tool.name,
+                    type(message).__name__,
+                )
             return REJECTION_MESSAGE
 
         return message
@@ -1352,13 +1379,12 @@ class RealtimeSession(RealtimeModelListener):
                 if result.output.tripwire_triggered:
                     triggered_results.append(result)
             except Exception as exc:
-                logger.warning(
-                    "Output guardrail %r raised %s: %s; skipping it.",
-                    guardrail.get_name(),
-                    type(exc).__name__,
+                log_model_and_tool_action_warning(
+                    logger,
+                    "Output guardrail raised an exception; skipping it",
                     exc,
+                    diagnostic_extra=partial(_guardrail_diagnostic_extra, guardrail),
                 )
-                logger.debug("Output guardrail failure details.", exc_info=True)
                 continue
 
         if triggered_results:
@@ -1598,11 +1624,14 @@ class RealtimeSession(RealtimeModelListener):
             return
 
         if isinstance(exception, _PendingToolOutputSendError):
-            logger.warning(
-                "Realtime tool output send failed for call %s; cached output will be retried",
-                exception.call_id,
-                exc_info=exception,
-            )
+            if _debug.DONT_LOG_TOOL_DATA:
+                logger.warning("Realtime tool output send failed; cached output will be retried")
+            else:
+                logger.warning(
+                    "Realtime tool output send failed for call %s; cached output will be retried",
+                    exception.call_id,
+                    exc_info=exception,
+                )
             self._put_event_nowait(
                 RealtimeError(
                     info=self._event_info,
@@ -1615,7 +1644,7 @@ class RealtimeSession(RealtimeModelListener):
             )
             return
 
-        logger.exception("Realtime tool call task failed", exc_info=exception)
+        log_tool_action_error(logger, "Realtime tool call task failed", exception)
 
         if self._stored_exception is None:
             self._stored_exception = exception
@@ -1718,7 +1747,7 @@ class RealtimeSession(RealtimeModelListener):
         ):
             return self._current_dispatch_snapshot
 
-        tools, handoffs = await asyncio.gather(
+        tools, handoffs = await gather_with_cancel(
             agent.get_all_tools(self._context_wrapper),
             self._get_handoffs(agent, self._context_wrapper),
         )
@@ -1728,7 +1757,7 @@ class RealtimeSession(RealtimeModelListener):
         self,
         snapshot: _RealtimeDispatchSnapshot,
     ) -> _RealtimeDispatchSnapshot:
-        tools, handoffs = await asyncio.gather(
+        tools, handoffs = await gather_with_cancel(
             filter_enabled_tools(snapshot.tools, self._context_wrapper, snapshot.agent),
             filter_enabled_handoffs(snapshot.handoffs, self._context_wrapper, snapshot.agent),
         )
@@ -1749,7 +1778,7 @@ class RealtimeSession(RealtimeModelListener):
         if agent.prompt is not None:
             updated_settings["prompt"] = agent.prompt
 
-        instructions, tools, handoffs = await asyncio.gather(
+        instructions, tools, handoffs = await gather_with_cancel(
             agent.get_system_prompt(self._context_wrapper),
             agent.get_all_tools(self._context_wrapper),
             self._get_handoffs(agent, self._context_wrapper),

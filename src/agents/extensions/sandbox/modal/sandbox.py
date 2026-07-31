@@ -33,6 +33,7 @@ import modal
 from modal.config import config as modal_config
 from modal.container_process import ContainerProcess
 
+from ....logger import log_tool_action_warning
 from ....sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 from ....sandbox.entries import Mount
 from ....sandbox.errors import (
@@ -43,7 +44,6 @@ from ....sandbox.errors import (
     SandboxError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
-    WorkspaceReadNotFoundError,
     WorkspaceStartError,
     WorkspaceStopError,
     WorkspaceWriteTypeError,
@@ -1175,8 +1175,11 @@ class ModalSandboxSession(BaseSandboxSession):
             raise WorkspaceArchiveReadError(path=workspace_path, cause=e) from e
 
         if not out.ok():
-            raise WorkspaceReadNotFoundError(
-                path=path, context={"stderr": out.stderr.decode("utf-8", "replace")}
+            await self._raise_read_error_from_exec(
+                path=posix_path_as_path(coerce_posix_path(path)),
+                workspace_path=workspace_path,
+                command=cmd,
+                result=out,
             )
 
         return io.BytesIO(out.stdout)
@@ -1325,8 +1328,9 @@ class ModalSandboxSession(BaseSandboxSession):
             if not rm_out.ok():
                 cleanup_restore_error = await restore_ephemeral_paths()
                 if cleanup_restore_error is not None:
-                    logger.warning(
-                        "Failed to restore Modal ephemeral paths after cleanup failure: %s",
+                    log_tool_action_warning(
+                        logger,
+                        "Failed to restore Modal ephemeral paths after cleanup failure",
                         cleanup_restore_error,
                     )
                 raise WorkspaceArchiveReadError(
@@ -1350,8 +1354,9 @@ class ModalSandboxSession(BaseSandboxSession):
         except Exception as e:
             restore_error = await restore_ephemeral_paths()
             if restore_error is not None:
-                logger.warning(
-                    "Failed to restore Modal ephemeral paths after snapshot failure: %s",
+                log_tool_action_warning(
+                    logger,
+                    "Failed to restore Modal ephemeral paths after snapshot failure",
                     restore_error,
                 )
             raise WorkspaceArchiveReadError(
@@ -1650,7 +1655,11 @@ class ModalSandboxSession(BaseSandboxSession):
 
         excludes: list[str] = []
         for rel in sorted(skip, key=lambda p: p.as_posix()):
-            excludes.extend(["--exclude", f"./{rel.as_posix().lstrip('./')}"])
+            # Strip a leading "./" prefix only. `lstrip("./")` strips a *set* of
+            # characters, which would eat leading dots of dot-prefixed skip paths
+            # (e.g. ".venv" -> "venv"), producing a wrong exclude pattern. Match the
+            # Cloudflare backend, which uses removeprefix here.
+            excludes.extend(["--exclude", f"./{rel.as_posix().removeprefix('./')}"])
 
         cmd: list[str] = [
             "tar",
@@ -2162,6 +2171,7 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
     ) -> SandboxSession:
         if not isinstance(state, ModalSandboxSessionState):
             raise TypeError("ModalSandboxClient.resume expects a ModalSandboxSessionState")
+        state.assert_path_grants_rebound()
         inner = ModalSandboxSession.from_state(state)
         reconnected = await inner._ensure_sandbox()
         if reconnected:
@@ -2169,4 +2179,4 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
-        return ModalSandboxSessionState.model_validate(payload)
+        return self._deserialize_session_state_payload(payload, ModalSandboxSessionState)

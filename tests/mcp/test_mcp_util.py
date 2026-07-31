@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 import pytest
 from inline_snapshot import snapshot
-from mcp.types import CallToolResult, ImageContent, TextContent, Tool as MCPTool
+from mcp.shared.exceptions import McpError
+from mcp.types import CallToolResult, ErrorData, ImageContent, TextContent, Tool as MCPTool
 from pydantic import BaseModel, TypeAdapter
 
 import agents._debug as _debug
@@ -41,6 +42,13 @@ class Bar(BaseModel):
 
 
 Baz = TypeAdapter(dict[str, str])
+
+_URL_DERIVED_SECRET_SERVER_NAME = (
+    "streamable_http: https://user:s3cr3t_pw@mcp.example.test:8443/mcp"
+    "?api_key=SECRET_QS_KEY#SECRET_FRAGMENT"
+)
+_SANITIZED_SERVER_NAME = "streamable_http: https://mcp.example.test:8443/mcp"
+_SERVER_URL_SECRETS = ("user", "s3cr3t_pw", "SECRET_QS_KEY", "SECRET_FRAGMENT")
 
 
 def _convertible_schema() -> dict[str, Any]:
@@ -207,6 +215,31 @@ async def test_get_all_function_tools_can_prefix_server_tool_names():
     assert server1.tool_calls == []
     assert server2.tool_calls == ["search"]
     assert captured_meta_context == {"server_name": "calendar", "tool_name": "search"}
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_hides_url_credentials_from_public_name_and_origin():
+    server = FakeMCPServer(server_name=_URL_DERIVED_SECRET_SERVER_NAME)
+    server.add_tool("search", {})
+
+    tools = await MCPUtil.get_all_function_tools(
+        [server],
+        False,
+        RunContextWrapper(context=None),
+        Agent(name="test_agent", instructions="Test agent"),
+        include_server_in_tool_names=True,
+    )
+
+    assert len(tools) == 1
+    function_tool = tools[0]
+    assert isinstance(function_tool, FunctionTool)
+    assert function_tool.name == ("mcp_streamable_http__https___mcp_example_test_8443_mcp__search")
+    assert function_tool._tool_origin is not None
+    assert function_tool._tool_origin.mcp_server_name == _SANITIZED_SERVER_NAME
+    assert server.name == _URL_DERIVED_SECRET_SERVER_NAME
+    for secret in _SERVER_URL_SECRETS:
+        assert secret not in function_tool.name
+        assert secret not in repr(function_tool._tool_origin)
 
 
 @pytest.mark.asyncio
@@ -676,7 +709,7 @@ async def test_mcp_invoke_bad_json_errors(caplog: pytest.LogCaptureFixture):
     with pytest.raises(ModelBehaviorError):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "not_json")
 
-    assert "Invalid JSON input for tool test_tool_1" in caplog.text
+    assert "Invalid JSON input for MCP tool" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -773,6 +806,11 @@ class SlowFakeMCPServer(FakeMCPServer):
         return await super().call_tool(tool_name, arguments, meta=meta)
 
 
+_CREDENTIALED_SERVER_NAME = (
+    "sse: https://user:s3cr3t_pw@mcp.example.com/sse?api_key=SECRET_QS_KEY#SECRET_FRAGMENT"
+)
+
+
 class CleanupOnCancelFakeMCPServer(FakeMCPServer):
     def __init__(self, cleanup_finished: asyncio.Event):
         super().__init__()
@@ -806,7 +844,113 @@ async def test_mcp_invocation_crash_causes_error(caplog: pytest.LogCaptureFixtur
     with pytest.raises(AgentsException):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
 
-    assert "Error invoking MCP tool test_tool_1" in caplog.text
+    assert "Error invoking MCP tool" in caplog.text
+
+
+class SecretCrashingFakeMCPServer(FakeMCPServer):
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ):
+        raise Exception("crash with SECRET_CRASH_123")
+
+
+class McpErrorFakeMCPServer(FakeMCPServer):
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ):
+        raise McpError(ErrorData(code=-32000, message="upstream said SECRET_MCP_123"))
+
+
+@pytest.mark.asyncio
+async def test_mcp_invocation_crash_redacts_error_when_dont_log_tool_data(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+
+    server = SecretCrashingFakeMCPServer(server_name="SECRET_CUSTOM_MCP_SERVER")
+    server.add_tool("SECRET_MCP_TOOL_NAME", {})
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="SECRET_MCP_TOOL_NAME", inputSchema={})
+
+    with pytest.raises(AgentsException):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
+
+    assert "Error invoking MCP tool" in caplog.text
+    assert "SECRET_CUSTOM_MCP_SERVER" not in caplog.text
+    assert "SECRET_MCP_TOOL_NAME" not in caplog.text
+    assert "SECRET_CRASH_123" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_mcp_invocation_crash_includes_error_when_tool_logging_enabled(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
+    server = SecretCrashingFakeMCPServer(
+        server_name=(
+            "streamable_http: https://SECRET_CREDENTIAL@example.test/"
+            "SECRET_MCP_PATH?token=SECRET_MCP_QUERY"
+        )
+    )
+    server.add_tool("test_tool_1", {})
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+
+    with pytest.raises(AgentsException):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
+
+    assert "SECRET_CRASH_123" in caplog.text
+    assert "SECRET_MCP_PATH" in caplog.text
+    assert "SECRET_CREDENTIAL" not in caplog.text
+    assert "SECRET_MCP_QUERY" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_returned_error_redacts_message_when_dont_log_tool_data(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+
+    server = McpErrorFakeMCPServer(server_name="SECRET_CUSTOM_MCP_SERVER")
+    server.add_tool("SECRET_MCP_TOOL_NAME", {})
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="SECRET_MCP_TOOL_NAME", inputSchema={})
+
+    with pytest.raises(McpError):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
+
+    assert "MCP tool returned an error" in caplog.text
+    assert "SECRET_CUSTOM_MCP_SERVER" not in caplog.text
+    assert "SECRET_MCP_TOOL_NAME" not in caplog.text
+    assert "SECRET_MCP_123" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_returned_error_includes_message_when_tool_logging_enabled(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
+    server = McpErrorFakeMCPServer()
+    server.add_tool("test_tool_1", {})
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+
+    with pytest.raises(McpError):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
+
+    assert "SECRET_MCP_123" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -834,6 +978,45 @@ async def test_mcp_tool_inner_cancellation_becomes_tool_error():
     result = await function_tool.on_invoke_tool(tool_context, "{}")
     assert isinstance(result, str)
     assert "tool execution was cancelled" in result
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_inner_cancellation_sanitizes_url_derived_server_name():
+    server = CancelledFakeMCPServer(server_name=_CREDENTIALED_SERVER_NAME)
+    server.add_tool("cancel_tool", {})
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="cancel_tool", inputSchema={})
+
+    with pytest.raises(MCPToolCancellationError) as exc_info:
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+    message = str(exc_info.value)
+    assert "cancel_tool" in message
+    assert "mcp.example.com/sse" in message
+    assert "s3cr3t_pw" not in message
+    assert "SECRET_QS_KEY" not in message
+    assert "SECRET_FRAGMENT" not in message
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_generic_error_sanitizes_only_url_derived_server_name():
+    server = CrashingFakeMCPServer(server_name=_CREDENTIALED_SERVER_NAME)
+    server.add_tool("crashing_tool", {})
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="crashing_tool", inputSchema={})
+
+    with pytest.raises(AgentsException) as exc_info:
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+    message = str(exc_info.value)
+    assert "crashing_tool" in message
+    assert "mcp.example.com/sse" in message
+    assert "Crash!" in message
+    assert "s3cr3t_pw" not in message
+    assert "SECRET_QS_KEY" not in message
+    assert "SECRET_FRAGMENT" not in message
+    assert isinstance(exc_info.value.__cause__, Exception)
+    assert str(exc_info.value.__cause__) == "Crash!"
 
 
 @pytest.mark.asyncio
@@ -1065,6 +1248,30 @@ async def test_mcp_tool_graceful_error_handling(caplog: pytest.LogCaptureFixture
     assert (
         "MCP tool crashing_tool failed" in caplog.text or "Error invoking MCP tool" in caplog.text
     )
+
+
+@pytest.mark.asyncio
+async def test_mcp_default_tool_error_hides_url_credentials():
+    server = SecretCrashingFakeMCPServer(server_name=_URL_DERIVED_SECRET_SERVER_NAME)
+    function_tool = MCPUtil.to_function_tool(
+        MCPTool(name="crashing_tool", inputSchema={}),
+        server,
+        convert_schemas_to_strict=False,
+        agent=Agent(name="test-agent"),
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="crashing_tool",
+        tool_call_id="test_call_url_credentials",
+        tool_arguments="{}",
+    )
+
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+
+    assert isinstance(result, str)
+    assert _SANITIZED_SERVER_NAME in result
+    for secret in _SERVER_URL_SECRETS:
+        assert secret not in result
 
 
 @pytest.mark.asyncio

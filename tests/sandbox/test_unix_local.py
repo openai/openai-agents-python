@@ -8,6 +8,7 @@ from typing import cast
 
 import pytest
 
+from agents.sandbox import SandboxPathGrant
 from agents.sandbox.errors import PtySessionNotFoundError
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.sandboxes.unix_local import (
@@ -38,6 +39,38 @@ class _RecordingUnixLocalSession(UnixLocalSandboxSession):
         _ = timeout
         self.exec_commands.append(tuple(str(part) for part in command))
         return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+
+@pytest.mark.asyncio
+async def test_unix_local_rejects_host_path_before_creating_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _unexpected_mkdtemp(*args: object, **kwargs: object) -> str:
+        raise AssertionError(f"unexpected mkdtemp call: {args!r} {kwargs!r}")
+
+    monkeypatch.setattr(
+        "agents.sandbox.sandboxes.unix_local.tempfile.mkdtemp",
+        _unexpected_mkdtemp,
+    )
+    client = UnixLocalSandboxClient()
+
+    with pytest.raises(
+        ValueError,
+        match="UnixLocalSandboxClient does not support sandbox path grant host_path",
+    ):
+        await client.create(
+            manifest=Manifest(
+                extra_path_grants=(
+                    SandboxPathGrant(
+                        path="/mnt/shared-data",
+                        host_path=str(tmp_path),
+                    ),
+                )
+            ),
+            snapshot=None,
+            options=None,
+        )
 
 
 class TestUnixLocalPty:

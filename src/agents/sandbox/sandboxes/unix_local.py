@@ -24,9 +24,11 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Literal, cast
 
+from ...logger import log_tool_action_warning
 from ..errors import (
     ExecNonZeroError,
     ExecTimeoutError,
@@ -73,6 +75,10 @@ _PTY_CHILD_SIGNAL_DEFAULTS = (signal.SIGINT, signal.SIGQUIT)
 _PTY_FD_CLOSE_GRACE_SECONDS = 0.1
 
 logger = logging.getLogger(__name__)
+
+
+def _mount_path_diagnostic_extra(mount_path: Path) -> dict[str, object]:
+    return {"mount_path": str(mount_path)}
 
 
 def _close_fd_quietly(fd: int) -> None:
@@ -171,6 +177,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         only_ephemeral: bool = False,
         provision_accounts: bool = True,
     ) -> MaterializationResult:
+        _assert_unix_local_host_path_grants_unsupported(self.state.manifest)
         if self.state.manifest.users or self.state.manifest.groups:
             raise ValueError(
                 "UnixLocalSandboxSession does not support manifest users or groups because "
@@ -624,7 +631,12 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         return rewritten
 
     @staticmethod
-    def _darwin_allowable_read_roots(path: Path, *, host_home: Path) -> list[Path]:
+    def _darwin_allowable_read_roots(
+        path: Path,
+        *,
+        host_home: Path,
+        allow_virtual_environment_root: bool = False,
+    ) -> list[Path]:
         candidates: set[Path] = set()
         normalized = path.expanduser()
         try:
@@ -641,6 +653,14 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             candidates.add(resolved)
         else:
             candidates.add(resolved.parent)
+
+        if allow_virtual_environment_root:
+            for candidate in (normalized, resolved):
+                if candidate.name != "bin":
+                    continue
+                virtual_env_root = candidate.parent
+                if (virtual_env_root / "pyvenv.cfg").is_file():
+                    candidates.add(virtual_env_root)
 
         resolved_text = resolved.as_posix()
         if resolved_text == "/opt/homebrew" or resolved_text.startswith("/opt/homebrew/"):
@@ -680,13 +700,21 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         allowed: list[Path] = []
         seen: set[str] = set()
 
-        def _append(path: str | Path | None) -> None:
+        def _append(
+            path: str | Path | None,
+            *,
+            allow_virtual_environment_root: bool = False,
+        ) -> None:
             if path is None:
                 return
             candidate = Path(path).expanduser()
             if not candidate.is_absolute():
                 return
-            for root in self._darwin_allowable_read_roots(candidate, host_home=host_home):
+            for root in self._darwin_allowable_read_roots(
+                candidate,
+                host_home=host_home,
+                allow_virtual_environment_root=allow_virtual_environment_root,
+            ):
                 key = root.as_posix()
                 if key in seen:
                     continue
@@ -699,6 +727,12 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
         executable = shutil.which(command_parts[0], path=env.get("PATH"))
         _append(executable)
+
+        # Only host-controlled PATH entries may widen a bin grant to its virtual environment
+        # root. Manifest environment overrides must not authorize broader host filesystem reads.
+        for path_entry in os.environ.get("PATH", "").split(os.pathsep):
+            if path_entry:
+                _append(path_entry, allow_virtual_environment_root=True)
         return allowed
 
     def _darwin_extra_path_grant_roots(self) -> list[tuple[Path, bool]]:
@@ -1067,6 +1101,8 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         options: UnixLocalSandboxClientOptions | None = None,
     ) -> SandboxSession:
         resolved_options = options or UnixLocalSandboxClientOptions()
+        if manifest is not None:
+            _assert_unix_local_host_path_grants_unsupported(manifest)
         # For local execution, runner-created sessions should always get an isolated temp root
         # unless the caller explicitly chose a custom host path.
         workspace_root_owned = False
@@ -1102,12 +1138,13 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         for mount_entry, mount_path in inner.state.manifest.ephemeral_mount_targets():
             try:
                 await mount_entry.unmount(inner, mount_path, Path("/"))
-            except Exception:
+            except Exception as exc:
                 unmount_failed = True
-                logger.warning(
-                    "Failed to unmount UnixLocal workspace mount before deleting root: %s",
-                    mount_path,
-                    exc_info=True,
+                log_tool_action_warning(
+                    logger,
+                    "Failed to unmount UnixLocal workspace mount before deleting root",
+                    exc,
+                    diagnostic_extra=partial(_mount_path_diagnostic_extra, mount_path),
                 )
         if unmount_failed:
             return session
@@ -1125,8 +1162,24 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
     ) -> SandboxSession:
         if not isinstance(state, UnixLocalSandboxSessionState):
             raise TypeError("UnixLocalSandboxClient.resume expects a UnixLocalSandboxSessionState")
+        state.assert_path_grants_rebound()
+        _assert_unix_local_host_path_grants_unsupported(state.manifest)
         inner = UnixLocalSandboxSession.from_state(state)
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
-        return UnixLocalSandboxSessionState.model_validate(payload)
+        return self._deserialize_session_state_payload(payload, UnixLocalSandboxSessionState)
+
+
+def _assert_unix_local_host_path_grants_unsupported(manifest: Manifest) -> None:
+    grant = next(
+        (grant for grant in manifest.extra_path_grants if grant.host_path is not None),
+        None,
+    )
+    if grant is None:
+        return
+    raise ValueError(
+        "UnixLocalSandboxClient does not support sandbox path grant host_path "
+        f"for {grant.path!r}; omit host_path when both paths are the same or use "
+        "DockerSandboxClient"
+    )

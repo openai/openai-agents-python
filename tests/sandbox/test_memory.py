@@ -2,20 +2,24 @@ from __future__ import annotations
 
 import io
 import json
+import logging
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, get_type_hints
 
 import pytest
 from openai.types.responses import ResponseCustomToolCall, ResponseFunctionToolCall
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
+import agents._debug as _debug
 import agents.sandbox.capabilities.memory as memory_module
 import agents.sandbox.memory.manager as memory_manager_module
 import agents.sandbox.memory.phase_one as phase_one_module
 from agents import (
     Agent,
+    ModelSettings,
     ReasoningItem,
     RunConfig,
     Runner,
@@ -30,7 +34,7 @@ from agents.items import (
     ToolApprovalItem,
     TResponseOutputItem,
 )
-from agents.result import RunResultStreaming
+from agents.result import RunResult, RunResultStreaming
 from agents.run import _sandbox_memory_input
 from agents.run_context import RunContextWrapper
 from agents.sandbox import (
@@ -68,6 +72,17 @@ from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 from tests.fake_model import FakeModel
 from tests.test_responses import get_final_output_message, get_text_message
 from tests.utils.hitl import make_shell_call
+
+
+@dataclass
+class _DeclaredProviderModelSettings(ModelSettings):
+    provider_field: str | None = None
+
+
+@dataclass
+class _DeclaredProviderMemoryGenerateConfig(MemoryGenerateConfig):
+    phase_one_model_settings: _DeclaredProviderModelSettings | None = None
+    phase_two_model_settings: _DeclaredProviderModelSettings | None = None
 
 
 class _DeleteTrackingUnixLocalSandboxClient(UnixLocalSandboxClient):
@@ -694,6 +709,93 @@ def test_memory_generate_config_accepts_renamed_limit_field() -> None:
     config = MemoryGenerateConfig(max_raw_memories_for_consolidation=123)
 
     assert config.max_raw_memories_for_consolidation == 123
+
+
+def test_memory_generate_config_normalizes_dictionary_model_settings() -> None:
+    config = MemoryGenerateConfig(
+        phase_one_model_settings={
+            "reasoning": {"effort": "low"},
+            "retry": {"max_retries": 0},
+        },
+        phase_two_model_settings={"temperature": 0.0, "store": False},
+    )
+
+    assert isinstance(config.phase_one_model_settings, ModelSettings)
+    assert config.phase_one_model_settings.reasoning is not None
+    assert config.phase_one_model_settings.reasoning.effort == "low"
+    assert config.phase_one_model_settings.retry is not None
+    assert config.phase_one_model_settings.retry.max_retries == 0
+    assert isinstance(config.phase_two_model_settings, ModelSettings)
+    assert config.phase_two_model_settings.temperature == 0.0
+    assert config.phase_two_model_settings.store is False
+
+
+def test_memory_generate_config_subclass_uses_declared_model_settings_types() -> None:
+    config = cast(Any, _DeclaredProviderMemoryGenerateConfig)(
+        phase_one_model_settings={"provider_field": "phase-one"},
+        phase_two_model_settings={"provider_field": "phase-two"},
+    )
+
+    assert isinstance(config.phase_one_model_settings, _DeclaredProviderModelSettings)
+    assert config.phase_one_model_settings.provider_field == "phase-one"
+    assert isinstance(config.phase_two_model_settings, _DeclaredProviderModelSettings)
+    assert config.phase_two_model_settings.provider_field == "phase-two"
+
+
+def test_memory_generate_config_model_settings_field_types_describe_normalized_values() -> None:
+    type_hints = get_type_hints(MemoryGenerateConfig)
+
+    assert type_hints["phase_one_model_settings"] == ModelSettings | None
+    assert type_hints["phase_two_model_settings"] == ModelSettings | None
+
+
+def test_memory_generate_config_preserves_typed_model_settings() -> None:
+    phase_one_settings = ModelSettings(reasoning={"effort": "low"})
+    phase_two_settings = ModelSettings(temperature=0.2)
+    config = MemoryGenerateConfig(
+        phase_one_model_settings=phase_one_settings,
+        phase_two_model_settings=phase_two_settings,
+    )
+
+    assert config.phase_one_model_settings is phase_one_settings
+    assert config.phase_two_model_settings is phase_two_settings
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["phase_one_model_settings", "phase_two_model_settings"],
+)
+def test_memory_generate_config_preserves_forward_compatible_reasoning_settings(
+    field_name: str,
+) -> None:
+    settings: dict[str, Any] = {field_name: {"reasoning": {"future_reasoning_option": "enabled"}}}
+
+    config = MemoryGenerateConfig(**settings)
+    model_settings = getattr(config, field_name)
+
+    assert model_settings is not None
+    assert model_settings.reasoning is not None
+    assert model_settings.reasoning.model_extra == {"future_reasoning_option": "enabled"}
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["phase_one_model_settings", "phase_two_model_settings"],
+)
+def test_memory_generate_config_rejects_invalid_model_settings(field_name: str) -> None:
+    settings: dict[str, Any] = {field_name: "invalid"}
+    with pytest.raises(
+        TypeError,
+        match=f"MemoryGenerateConfig.{field_name} must be a ModelSettings instance or a dict",
+    ):
+        MemoryGenerateConfig(**settings)
+
+
+def test_memory_generate_config_preserves_disabled_model_settings() -> None:
+    config = MemoryGenerateConfig(phase_one_model_settings=None, phase_two_model_settings=None)
+
+    assert config.phase_one_model_settings is None
+    assert config.phase_two_model_settings is None
 
 
 def test_memory_generate_config_rejects_too_many_raw_memories() -> None:
@@ -1395,15 +1497,31 @@ async def test_sandbox_memory_unregisters_manager_on_session_close() -> None:
         await client.delete(session)
 
 
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.parametrize(
+    ("model_redacted", "tool_redacted"),
+    [(True, False), (False, True), (False, False)],
+    ids=["model_redacted", "tool_redacted", "diagnostic"],
+)
 @pytest.mark.asyncio
-async def test_sandbox_memory_enqueue_failure_still_cleans_up_owned_session(
+async def test_sandbox_memory_enqueue_failure_follows_both_data_policies(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    streamed: bool,
+    model_redacted: bool,
+    tool_redacted: bool,
 ) -> None:
+    secret = "SECRET_SANDBOX_MEMORY_PAYLOAD"
+    error = RuntimeError(secret)
+
     async def _raise_write_rollout(*args: Any, **kwargs: Any) -> Path:
         _ = args, kwargs
-        raise RuntimeError("write_rollout failed")
+        raise error
 
     monkeypatch.setattr(memory_manager_module, "write_rollout", _raise_write_rollout)
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", model_redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
+    caplog.set_level(logging.WARNING)
 
     client = _DeleteTrackingUnixLocalSandboxClient()
     agent = SandboxAgent(
@@ -1413,15 +1531,39 @@ async def test_sandbox_memory_enqueue_failure_still_cleans_up_owned_session(
         capabilities=[_memory_config()],
     )
 
-    result = await Runner.run(
-        agent,
-        "hello",
-        run_config=RunConfig(sandbox=SandboxRunConfig(client=client)),
-    )
+    run_config = RunConfig(sandbox=SandboxRunConfig(client=client))
+    result: RunResult | RunResultStreaming
+    if streamed:
+        result = Runner.run_streamed(agent, "hello", run_config=run_config)
+        async for _ in result.stream_events():
+            pass
+        expected_message = "Failed to enqueue sandbox memory after streamed run"
+    else:
+        result = await Runner.run(agent, "hello", run_config=run_config)
+        expected_message = "Failed to enqueue sandbox memory after run"
 
     assert result.final_output == "done"
     assert len(client.deleted_roots) == 1
     assert not client.deleted_roots[0].exists()
+
+    record = next(
+        record
+        for record in caplog.records
+        if expected_message in logging.Formatter().format(record)
+    )
+    redacted = model_redacted or tool_redacted
+    if redacted:
+        assert record.msg == "%s"
+        assert record.args == (expected_message,)
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert error not in record.__dict__.values()
+        assert secret not in logging.Formatter().format(record)
+    else:
+        assert record.args == (expected_message, error)
+        assert record.exc_info is not None
+        assert record.exc_info[1] is error
+        assert secret in logging.Formatter().format(record)
 
 
 @pytest.mark.asyncio

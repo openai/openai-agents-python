@@ -6,7 +6,8 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Any
 
-from ..logger import logger
+from ..logger import log_tool_action_debug, log_tool_action_error, logger
+from ._logging import get_mcp_server_log_message
 from .server import MCPServer
 
 
@@ -233,7 +234,8 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
                 If False, cleanup and retry all servers.
         """
         if failed_only:
-            servers_to_retry = self._unique_servers(self.failed_servers)
+            failed_servers = self._unique_servers(self.failed_servers)
+            servers_to_retry = await self._cleanup_servers(failed_servers)
         else:
             await self.cleanup_all()
             servers_to_retry = list(self._all_servers)
@@ -260,10 +262,18 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
             except asyncio.CancelledError as exc:
                 if not self.suppress_cancelled_error:
                     raise
-                logger.debug("Cleanup cancelled for MCP server '%s': %s", server.name, exc)
+                log_tool_action_debug(
+                    logger,
+                    get_mcp_server_log_message("Cleanup cancelled for MCP server", server),
+                    exc,
+                )
                 self.errors[server] = exc
             except Exception as exc:
-                logger.exception("Failed to cleanup MCP server '%s': %s", server.name, exc)
+                log_tool_action_error(
+                    logger,
+                    get_mcp_server_log_message("Failed to cleanup MCP server", server),
+                    exc,
+                )
                 self.errors[server] = exc
 
     async def _run_with_timeout(
@@ -283,9 +293,12 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
                 self._remove_failed_server(server)
                 self.errors.pop(server, None)
         except asyncio.CancelledError as exc:
+            # Always record so connect_all()'s failure cleanup includes this server.
+            # Re-raising without recording left partially-opened servers uncleaned
+            # (especially under `async with`, where __aexit__ never runs).
+            self._record_failure(server, exc, phase="connect")
             if not self.suppress_cancelled_error:
                 raise
-            self._record_failure(server, exc, phase="connect")
         except Exception as exc:
             self._record_failure(server, exc, phase="connect")
             if raise_on_error:
@@ -302,7 +315,11 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
             self._active_servers = list(self._all_servers)
 
     def _record_failure(self, server: MCPServer, exc: BaseException, phase: str) -> None:
-        logger.exception("Failed to %s MCP server '%s': %s", phase, server.name, exc)
+        log_tool_action_error(
+            logger,
+            get_mcp_server_log_message(f"Failed to {phase} MCP server", server),
+            exc,
+        )
         if server not in self._failed_server_set:
             self.failed_servers.append(server)
             self._failed_server_set.add(server)
@@ -333,18 +350,31 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
         finally:
             self._connected_servers.discard(server)
 
-    async def _cleanup_servers(self, servers: Iterable[MCPServer]) -> None:
-        for server in reversed(list(servers)):
+    async def _cleanup_servers(self, servers: Iterable[MCPServer]) -> list[MCPServer]:
+        servers_list = list(servers)
+        cleaned_servers: set[MCPServer] = set()
+        for server in reversed(servers_list):
             try:
                 await self._cleanup_server(server)
             except asyncio.CancelledError as exc:
                 if not self.suppress_cancelled_error:
                     raise
-                logger.debug("Cleanup cancelled for MCP server '%s': %s", server.name, exc)
+                log_tool_action_debug(
+                    logger,
+                    get_mcp_server_log_message("Cleanup cancelled for MCP server", server),
+                    exc,
+                )
                 self.errors[server] = exc
             except Exception as exc:
-                logger.exception("Failed to cleanup MCP server '%s': %s", server.name, exc)
+                log_tool_action_error(
+                    logger,
+                    get_mcp_server_log_message("Failed to cleanup MCP server", server),
+                    exc,
+                )
                 self.errors[server] = exc
+            else:
+                cleaned_servers.add(server)
+        return [server for server in servers_list if server in cleaned_servers]
 
     async def _connect_all_parallel(self, servers: list[MCPServer]) -> None:
         tasks = [

@@ -9,6 +9,9 @@ from agents.run import CallModelData, ModelInputData
 
 from .fake_model import FakeModel
 from .test_responses import get_text_input_item, get_text_message
+from .testing_processor import fetch_span_errors
+
+SENSITIVE_ERROR_MESSAGE = "sensitive-filter-error"
 
 
 @pytest.mark.asyncio
@@ -77,6 +80,39 @@ async def test_call_model_input_filter_invalid_return_type_raises() -> None:
             input="start",
             run_config=RunConfig(call_model_input_filter=invalid_filter),
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("trace_include_sensitive_data", "expected_error"),
+    [
+        (False, "Error details are redacted."),
+        (True, SENSITIVE_ERROR_MESSAGE),
+    ],
+)
+async def test_call_model_input_filter_error_respects_sensitive_data_setting(
+    trace_include_sensitive_data: bool,
+    expected_error: str,
+) -> None:
+    def filter_fn(_data: CallModelData[Any]) -> ModelInputData:
+        raise ValueError(SENSITIVE_ERROR_MESSAGE)
+
+    with pytest.raises(ValueError, match=SENSITIVE_ERROR_MESSAGE):
+        await Runner.run(
+            Agent(name="test", model=FakeModel(tracing_enabled=False)),
+            input="start",
+            run_config=RunConfig(
+                call_model_input_filter=filter_fn,
+                trace_include_sensitive_data=trace_include_sensitive_data,
+            ),
+        )
+
+    assert fetch_span_errors("turn") == [
+        {
+            "message": "Error in call_model_input_filter",
+            "data": {"error": expected_error},
+        }
+    ]
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+import json
 from typing import Any, cast
 
 import pytest
@@ -8,6 +10,7 @@ from openai.types.responses import (
     ResponseToolSearchCall,
     ResponseToolSearchOutputItem,
 )
+from openai.types.responses.response_function_tool_call import CallerProgram
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 from agents import Agent
@@ -24,6 +27,51 @@ from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.result import RunResult
 from agents.run_context import RunContextWrapper
 from agents.run_internal import items as run_items
+
+
+@pytest.mark.parametrize("mapping_call", [False, True], ids=["typed-call", "mapping-call"])
+def test_programmatic_structured_tool_errors_are_encoded_as_json_objects(
+    mapping_call: bool,
+) -> None:
+    caller = {"type": "program", "caller_id": "program-42"}
+    tool_call: Any
+    if mapping_call:
+        tool_call = {"type": "function_call", "call_id": "call-42", "caller": caller}
+    else:
+        tool_call = ResponseFunctionToolCall(
+            type="function_call",
+            call_id="call-42",
+            name="lookup",
+            arguments="{}",
+            caller=CallerProgram(type="program", caller_id="program-42"),
+        )
+
+    output = run_items.function_tool_error_output(
+        tool_call,
+        'Rejected: "東京"',
+        output_json_schema={"type": "object"},
+    )
+
+    assert json.loads(output) == {"error": 'Rejected: "東京"'}
+
+
+@pytest.mark.parametrize("caller", [None, {"type": "direct"}], ids=["no-caller", "direct"])
+@pytest.mark.parametrize("has_schema", [False, True], ids=["untyped", "typed"])
+def test_direct_function_tool_errors_preserve_plain_text(
+    caller: dict[str, str] | None,
+    has_schema: bool,
+) -> None:
+    tool_call: dict[str, Any] = {"type": "function_call", "call_id": "call-42"}
+    if caller is not None:
+        tool_call["caller"] = caller
+
+    output = run_items.function_tool_error_output(
+        tool_call,
+        "Request rejected.",
+        output_json_schema={"type": "object"} if has_schema else None,
+    )
+
+    assert output == "Request rejected."
 
 
 def test_drop_orphan_function_calls_preserves_non_mapping_entries() -> None:
@@ -71,6 +119,100 @@ def test_drop_orphan_function_calls_preserves_non_mapping_entries() -> None:
         and entry.get("call_id") == "orphan_call"
         for entry in filtered
     )
+
+
+def test_replay_pruning_drops_orphan_program_call_chain() -> None:
+    generated_items = cast(
+        list[TResponseInputItem],
+        [
+            {
+                "type": "program",
+                "call_id": "program_orphan",
+                "code": "return await tools.lookup({});",
+                "fingerprint": "fingerprint:orphan",
+            },
+            {
+                "type": "function_call",
+                "call_id": "function_orphan",
+                "name": "lookup",
+                "arguments": "{}",
+                "caller": {"type": "program", "caller_id": "program_orphan"},
+            },
+        ],
+    )
+
+    prepared = run_items.prepare_model_input_items([], generated_items)
+    resumed = run_items.normalize_resumed_input(generated_items)
+
+    assert prepared == []
+    assert resumed == []
+
+
+def test_drop_orphan_function_calls_preserves_active_program_call_chain() -> None:
+    payload = cast(
+        list[TResponseInputItem],
+        [
+            {
+                "type": "program",
+                "call_id": "program_active",
+                "code": "return await tools.lookup({});",
+                "fingerprint": "fingerprint:active",
+            },
+            {
+                "type": "function_call",
+                "call_id": "function_completed",
+                "name": "lookup",
+                "arguments": "{}",
+                "caller": {"type": "program", "caller_id": "program_active"},
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "function_completed",
+                "output": "done",
+                "caller": {"type": "program", "caller_id": "program_active"},
+            },
+        ],
+    )
+
+    filtered = run_items.drop_orphan_function_calls(payload)
+
+    assert filtered == payload
+
+
+@pytest.mark.parametrize(
+    "hosted_item_type",
+    [
+        "file_search_call",
+        "web_search_call",
+        "code_interpreter_call",
+        "image_generation_call",
+        "mcp_list_tools",
+        "mcp_call",
+        "mcp_approval_request",
+        "mcp_approval_response",
+    ],
+)
+def test_replay_pruning_preserves_program_owned_hosted_items(hosted_item_type: str) -> None:
+    payload = cast(
+        list[TResponseInputItem],
+        [
+            {
+                "type": "program",
+                "call_id": "program_pending",
+                "code": "return await tools.lookup({});",
+                "fingerprint": "fingerprint:pending",
+            },
+            {
+                "type": hosted_item_type,
+                "id": "hosted_item",
+                "caller": {"type": "program", "caller_id": "program_pending"},
+            },
+        ],
+    )
+
+    assert run_items.drop_orphan_function_calls(payload) == payload
+    assert run_items.prepare_model_input_items([], payload) == payload
+    assert run_items.normalize_resumed_input(payload) == payload
 
 
 def test_drop_orphan_function_calls_drops_reasoning_preceding_dropped_tool_call() -> None:
@@ -362,6 +504,189 @@ def test_fingerprint_input_item_returns_none_when_serialization_fails(
     monkeypatch.setattr(cast(Any, run_items).json, "dumps", _raise_json_error)
 
     assert run_items.fingerprint_input_item({"type": "message", "role": "user"}) is None
+
+
+def test_digest_input_item_is_fixed_size_and_content_opaque() -> None:
+    item = cast(
+        TResponseInputItem,
+        {"type": "message", "role": "assistant", "content": "sensitive-history-content"},
+    )
+
+    digest = run_items.digest_input_item(item)
+
+    assert digest is not None
+    assert len(digest) == 64
+    assert "sensitive-history-content" not in digest
+
+
+def test_nested_history_digest_treats_default_assistant_status_as_equivalent() -> None:
+    without_status = cast(
+        TResponseInputItem,
+        {"type": "message", "role": "assistant", "content": "same"},
+    )
+    with_completed_status = cast(
+        TResponseInputItem,
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": "same",
+            "status": "completed",
+        },
+    )
+
+    assert run_items.digest_input_item(without_status) == run_items.digest_input_item(
+        with_completed_status
+    )
+
+
+def test_resumed_input_normalizes_clean_nested_history_items() -> None:
+    item = cast(TResponseInputItem, {"role": "assistant", "content": "same"})
+
+    resumed = run_items.normalize_resumed_input([item])
+
+    assert isinstance(resumed, list)
+    assert resumed == [item]
+
+
+def test_filter_nested_history_owned_refs_requires_the_exact_input_occurrence() -> None:
+    item = cast(TResponseInputItem, {"role": "assistant", "content": "same"})
+    equal_item = cast(TResponseInputItem, dict(item))
+    digest = run_items.digest_input_item(item)
+    assert digest is not None
+    item_ref = run_items.NestedHistoryOwnedItemRef(
+        session_index=1,
+        digest=digest,
+        input_index=0,
+        input_item=item,
+    )
+
+    assert run_items.filter_nested_history_owned_item_refs_for_input([equal_item], [item_ref]) == []
+    assert run_items.filter_nested_history_owned_item_refs_for_input(
+        [equal_item, item],
+        [item_ref],
+    ) == [dataclasses.replace(item_ref, input_index=1)]
+
+
+def test_reconcile_nested_history_rewrite_rejects_ambiguous_equal_occurrences() -> None:
+    item = cast(TResponseInputItem, {"role": "assistant", "content": "same"})
+    equal_item = cast(TResponseInputItem, dict(item))
+    digest = run_items.digest_input_item(item)
+    assert digest is not None
+    item_ref = run_items.NestedHistoryOwnedItemRef(
+        session_index=0,
+        digest=digest,
+        input_index=0,
+        input_item=item,
+    )
+
+    rewritten, retained = run_items.reconcile_nested_history_owned_input_after_rewrite(
+        [item, equal_item],
+        [
+            cast(TResponseInputItem, dict(item)),
+            cast(TResponseInputItem, dict(equal_item)),
+        ],
+        [item_ref],
+    )
+
+    assert retained == []
+    assert rewritten == [item, equal_item]
+
+
+def test_reconcile_nested_history_rewrite_keeps_fully_owned_equal_occurrences() -> None:
+    items = [
+        cast(TResponseInputItem, {"role": "assistant", "content": "same"}),
+        cast(TResponseInputItem, {"role": "assistant", "content": "same"}),
+    ]
+    digest = run_items.digest_input_item(items[0])
+    assert digest is not None
+    item_refs = [
+        run_items.NestedHistoryOwnedItemRef(
+            session_index=index,
+            digest=digest,
+            input_index=index,
+            input_item=items[index],
+        )
+        for index in range(2)
+    ]
+
+    rewritten, retained = run_items.reconcile_nested_history_owned_input_after_rewrite(
+        items,
+        [
+            cast(TResponseInputItem, dict(items[0])),
+            cast(TResponseInputItem, dict(items[1])),
+        ],
+        item_refs,
+    )
+
+    assert retained == item_refs
+    assert [item_ref.input_item for item_ref in retained] == rewritten
+
+
+def test_nested_history_occurrence_resolution_reads_sequences_linearly() -> None:
+    class CountingSequence:
+        def __init__(self, values: list[Any]):
+            self.values = values
+            self.reads = 0
+
+        def __len__(self) -> int:
+            return len(self.values)
+
+        def __getitem__(self, index: int) -> Any:
+            self.reads += 1
+            return self.values[index]
+
+    count = 100
+    agent = Agent(name="A")
+    session_items = [
+        ToolCallItem(
+            agent=agent,
+            raw_item=ResponseFunctionToolCall(
+                id=f"fc_{index}",
+                call_id=f"call_{index}",
+                name="lookup",
+                arguments="{}",
+                type="function_call",
+                status="completed",
+            ),
+        )
+        for index in range(count)
+    ]
+    input_items = cast(
+        list[TResponseInputItem],
+        [run_items.run_item_to_input_item(item) for item in session_items],
+    )
+    assert all(item is not None for item in input_items)
+    refs = [
+        run_items.NestedHistoryOwnedItemRef(
+            session_index=-1,
+            digest=cast(str, run_items.digest_input_item(input_items[index])),
+            input_index=index,
+            run_item=session_items[index],
+            input_item=input_items[index],
+        )
+        for index in range(count)
+    ]
+
+    counted_input = CountingSequence(input_items)
+    retained_refs = run_items.filter_nested_history_owned_item_refs_for_input(
+        cast(Any, counted_input), refs
+    )
+    assert len(retained_refs) == count
+    assert counted_input.reads < count * 4
+
+    counted_session = CountingSequence(session_items)
+    assert run_items.resolve_nested_history_owned_item_indexes(
+        cast(Any, counted_session), refs
+    ) == set(range(count))
+    assert counted_session.reads < count * 4
+
+    counted_input = CountingSequence(input_items)
+    counted_session = CountingSequence(session_items)
+    rebased_refs = run_items.rebase_nested_history_owned_item_refs(
+        cast(Any, counted_input), cast(Any, counted_session), refs
+    )
+    assert len(rebased_refs) == count
+    assert counted_input.reads + counted_session.reads < count * 8
 
 
 def test_strip_metadata_and_reasoning_id_helpers_keep_non_matching_items() -> None:

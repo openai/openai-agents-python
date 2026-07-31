@@ -365,6 +365,64 @@ class TestTrimming:
         assert trimmed_tools[0]["parameters"]["properties"]["customer_id"]["default"] == "cust_123"
         assert len(json.dumps(trimmed_tools, sort_keys=True)) < original_len
 
+    def test_keeps_tool_parameters_named_like_schema_keywords(self) -> None:
+        """Parameter names that collide with trimmed schema keywords must survive."""
+        parameters = {
+            "type": "object",
+            "description": "schema prose " * 200,
+            "properties": {
+                "description": {"type": "string"},
+                "title": {"type": "string"},
+                "$comment": {"type": "string"},
+                "examples": {"type": "string"},
+                "query": {"type": "string"},
+            },
+            "required": ["description", "title", "$comment", "examples", "query"],
+            "additionalProperties": False,
+        }
+        items = [
+            _user("q1"),
+            {"type": "tool_search_call", "call_id": "ts1", "arguments": {"query": "tickets"}},
+            {
+                "type": "tool_search_output",
+                "call_id": "ts1",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "create_ticket",
+                        "description": "tool description " * 200,
+                        "parameters": parameters,
+                    }
+                ],
+            },
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(max_output_chars=400, preview_chars=60)
+        result = trimmer(_make_data(items))
+        trimmed_item_dict = cast(dict[str, Any], result.input[2])
+        trimmed_parameters = trimmed_item_dict["tools"][0]["parameters"]
+
+        # Every declared parameter is still present, so `required` stays satisfiable.
+        assert sorted(trimmed_parameters["properties"]) == [
+            "$comment",
+            "description",
+            "examples",
+            "query",
+            "title",
+        ]
+        assert not [
+            name
+            for name in trimmed_parameters["required"]
+            if name not in trimmed_parameters["properties"]
+        ]
+        # Schema-level prose is still trimmed.
+        assert "description" not in trimmed_parameters
+
     def test_trims_legacy_tool_search_output_results(self) -> None:
         """Legacy tool_search_output snapshots with free-text results should still trim."""
         large = "x" * 2000

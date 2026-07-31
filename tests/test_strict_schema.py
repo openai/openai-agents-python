@@ -56,6 +56,40 @@ def test_object_with_true_additional_properties():
         ensure_strict_json_schema(schema)
 
 
+def test_object_with_empty_dict_additional_properties():
+    # OpenAPI/MCP schemas commonly use ``additionalProperties: {}`` to mean "allow anything".
+    # That empty mapping is falsy in Python, but it is still non-strict and must be rejected.
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "additionalProperties": {},
+    }
+    with pytest.raises(UserError):
+        ensure_strict_json_schema(schema)
+
+
+def test_object_with_schema_additional_properties():
+    # A non-empty additionalProperties schema is also non-strict and must be rejected.
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "additionalProperties": {"type": "string"},
+    }
+    with pytest.raises(UserError):
+        ensure_strict_json_schema(schema)
+
+
+def test_object_with_false_additional_properties_is_allowed():
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "additionalProperties": False,
+    }
+    result = ensure_strict_json_schema(schema)
+    assert result["additionalProperties"] is False
+    assert result["required"] == ["a"]
+
+
 def test_array_items_processing_and_default_removal():
     # When processing an array, the items schema is processed recursively.
     # Also, any "default": None should be removed.
@@ -162,3 +196,28 @@ def test_chained_ref_with_sibling_keys_is_resolved():
     assert a_schema["type"] == "string"
     assert a_schema["description"] == "desc"
     assert "$ref" not in a_schema
+
+
+def test_ref_expansion_bomb_is_rejected():
+    # A $ref ladder where each level references the next twice expands exponentially
+    # (2**N nodes) when inlined. Strict conversion must reject it with a UserError
+    # instead of exhausting CPU and memory.
+    depth = 30
+    defs: dict[str, object] = {
+        f"L{i}": {
+            "type": "object",
+            "properties": {
+                "a": {"$ref": f"#/$defs/L{i + 1}", "title": "t"},
+                "b": {"$ref": f"#/$defs/L{i + 1}", "title": "t"},
+            },
+        }
+        for i in range(depth)
+    }
+    defs[f"L{depth}"] = {"type": "string"}
+    schema = {
+        "$defs": defs,
+        "type": "object",
+        "properties": {"root": {"$ref": "#/$defs/L0", "title": "t"}},
+    }
+    with pytest.raises(UserError):
+        ensure_strict_json_schema(schema)

@@ -20,16 +20,65 @@
   - Large refactor or high file count.
   - Speculative risk without evidence.
   - Not running tests locally.
-- If uncertain, keep gate green and provide focused follow-up checks.
+- If uncertain, keep the gate green. Add a focused follow-up only when it resolves a concrete risk already identified in the diff.
+- A green gate is not an empty audit. Itemize the most important verified release considerations when the diff changes behavior, APIs, packages, schemas, defaults, observability, or user workflows.
 
 ## Actionability contract
 
-- Every risk finding should include:
+- Every risk finding or non-blocking release consideration should include:
   - `Evidence`: specific file/commit/diff/test signal.
   - `Impact`: one-sentence user or runtime effect.
   - `Action`: concrete command/task with pass criteria.
+- A candidate becomes a finding only when it has a concrete contract violation, a reachable supported path, or a release-polish gap with user impact.
+- A verified intentional change may become a **🟢 LOW** release consideration when it defines a contract users must understand, such as a default flip, new trace behavior, public API expansion, supported-version widening, or durable schema transition.
+- For a green gate with behavior or contract impact, include at least one consideration and normally two to five. Group related changes by consumer impact rather than listing files or commits individually.
+- For a resolved LOW consideration, the action may be a release-handoff check: retain exact compatibility, migration, opt-out, or configuration wording in generated release notes and state the pass condition.
+- Changed tests, missing tests, diff size, and risky patterns are discovery signals; they are not findings without contract or runtime evidence.
 - A `BLOCKED` report must contain an `Unblock checklist` with at least one executable item.
-- If no executable unblock item exists, do not block; downgrade to green with follow-up checks.
+- If no executable unblock item exists, do not block. Keep the gate green; use validation or fix actions for unresolved risks and release-handoff checks for resolved LOW considerations.
+- Do not use "No material risks identified" as the sole Risk assessment when the diff has reportable behavior or contract changes. Reserve it for metadata-only or otherwise non-reportable release diffs.
+
+## Two-stage audit
+
+### Stage 1: broad discovery
+
+Use all of the existing breaking-change, regression, dependency, documentation, and improvement signals below. The goal is high recall: collect plausible candidates without prematurely reporting them.
+
+Read changed tests as behavioral documentation. Identify the intended outcome, covered branches, deleted assertions, new skips, and missing failure paths, but do not rerun repository unit tests merely to accumulate passing evidence.
+
+### Stage 2: contract and invariant proof
+
+For each candidate:
+
+1. Compare the released BASE behavior or contract with TARGET. Do not infer compatibility from TARGET alone.
+2. Identify the owning SDK boundary using `.agents/references/README.md`.
+3. Trace the changed value, state, item, identity, or side effect across every downstream consumer required by that boundary.
+4. Check the relevant paired paths and failure modes.
+5. Promote the candidate to a finding only when this trace establishes concrete impact.
+
+Use these contract comparisons when relevant:
+
+| Changed surface | BASE-versus-TARGET audit |
+|---|---|
+| Public API | Exports, import identity, signatures, positional parameter order, dataclass field order, defaults, enums, and documented behavior |
+| Runner and run items | Provider output, result items, semantic stream events, session history, replay, handoffs, and `RunState` |
+| Tool execution | Planning, approvals, guardrails, invocation, hooks, output conversion, persistence, cancellation, and cleanup |
+| Conversation and sessions | First turn, follow-up, retry, filtering, handoff, compaction, interruption, and resume |
+| Model and provider adapters | Model/settings resolution, request conversion, streaming terminals, provider data, errors, retries, and transport ownership |
+| Persisted schemas and config | Serialized shape, version support, backward reads, migrations, defaults, environment variables, and wire compatibility |
+| Package boundary | Supported Python versions, dependencies, extras, distribution contents, public imports, and built wheel/sdist behavior |
+
+Select only the axes implicated by the diff:
+
+- streaming versus non-streaming;
+- sync versus async;
+- fresh execution versus serialized resume;
+- client-managed versus server-managed state;
+- success, exception, and cancellation;
+- sequential versus concurrent execution;
+- normal, partial-failure, and repeated cleanup.
+
+If static inspection cannot resolve a concrete semantic question, run the smallest public-path or installed-artifact probe that can. Prefer an identical BASE and TARGET scenario. A focused unit test is a fallback for reproducing a specific failure, not the default release validation.
 
 ## Breaking change signals
 
@@ -59,7 +108,9 @@
 
 - BASE tag and TARGET ref used for the diff; confirm tags fetched.
 - High-level diff stats and key directories touched.
-- Concrete files/commits that indicate breaking changes or risk, with brief rationale.
-- Tests or commands suggested to validate suspected risks (include pass criteria).
+- Concrete, actionable findings plus the most important verified non-blocking release considerations, each with evidence, impact, affected files, and action.
+- A validation command or task only when it resolves a specific finding; include its pass criteria.
+- For a resolved LOW consideration, a precise generated-release-note or migration-wording check with a pass condition is sufficient; do not manufacture code changes or redundant tests.
 - Explicit release gate call (ship/block) with conditions to unblock.
 - `Unblock checklist` section when (and only when) gate is `BLOCKED`.
+- Do not report routine command results, pass counts, skips, deselections, or a validation-status inventory.

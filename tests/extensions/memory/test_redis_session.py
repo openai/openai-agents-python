@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -706,6 +706,49 @@ async def test_add_items_preserves_created_at_metadata():
         await session.close()
 
 
+async def test_get_items_limit_skips_corrupt_newest_messages():
+    """limit counts valid items, expanding past corrupt newest messages."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for direct data manipulation")
+
+    session = await _create_test_session("limit_corrupt_test")
+
+    try:
+        await session.clear_session()
+        await session.add_items(
+            [
+                {"role": "user", "content": "valid 0"},
+                {"role": "assistant", "content": "valid 1"},
+                {"role": "user", "content": "valid 2"},
+            ]
+        )
+
+        # Append a corrupt newest message.
+        await _safe_rpush(fake_redis, session._messages_key, "not valid json {{{")
+
+        limited = await session.get_items(limit=2)
+        assert [item.get("content") for item in limited] == ["valid 1", "valid 2"]
+    finally:
+        await session.close()
+
+
+async def test_get_items_limit_returns_fewer_when_history_exhausted():
+    """Window expansion stops at the end of history instead of looping."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for direct data manipulation")
+
+    session = await _create_test_session("limit_exhausted_test")
+
+    try:
+        await session.clear_session()
+        await session.add_items([{"role": "user", "content": "only valid"}])
+
+        retrieved = await session.get_items(limit=5)
+        assert [item.get("content") for item in retrieved] == ["only valid"]
+    finally:
+        await session.close()
+
+
 async def test_corrupted_data_handling():
     """Test that corrupted JSON data is handled gracefully."""
     if not USE_FAKE_REDIS:
@@ -720,7 +763,7 @@ async def test_corrupted_data_handling():
         await session.add_items([{"role": "user", "content": "valid message"}])
 
         # Inject corrupted data directly into Redis
-        messages_key = "test:corruption_test:messages"
+        messages_key = session._messages_key
 
         # Add invalid JSON directly using the typed Redis client
         await _safe_rpush(fake_redis, messages_key, "invalid json data")
@@ -840,7 +883,8 @@ async def test_session_settings_default():
         await session.close()
 
 
-async def test_session_settings_constructor():
+@pytest.mark.parametrize("use_dictionary", [False, True], ids=["class", "dictionary"])
+async def test_session_settings_constructor(use_dictionary: bool):
     """Test passing session_settings via constructor."""
     from agents.memory import SessionSettings
 
@@ -849,15 +893,17 @@ async def test_session_settings_constructor():
             session_id="settings_test",
             redis_client=fake_redis,
             key_prefix="test:",
-            session_settings=SessionSettings(limit=5),
+            session_settings={"limit": 5} if use_dictionary else SessionSettings(limit=5),
         )
     else:
         session = RedisSession.from_url(
-            "settings_test", url=REDIS_URL, session_settings=SessionSettings(limit=5)
+            "settings_test",
+            url=REDIS_URL,
+            session_settings={"limit": 5} if use_dictionary else SessionSettings(limit=5),
         )
 
     try:
-        assert session.session_settings is not None
+        assert isinstance(session.session_settings, SessionSettings)
         assert session.session_settings.limit == 5
     finally:
         await session.close()
@@ -1019,3 +1065,276 @@ async def test_runner_with_session_settings_override():
         assert len(history_items) == 2
     finally:
         await session.close()
+
+
+def _create_owned_redis_session(session_id: str) -> RedisSession:
+    """Create a session that owns its client, mirroring the from_url path."""
+    import unittest.mock
+
+    import fakeredis.aioredis
+
+    with unittest.mock.patch(
+        "agents.extensions.memory.redis_session.redis.from_url",
+        return_value=fakeredis.aioredis.FakeRedis(),
+    ):
+        return RedisSession.from_url(session_id, url="redis://localhost:6379/15")
+
+
+async def test_redis_session_closed_operations_raise_runtime_error():
+    """Operations on a closed owned-client session must fail instead of reconnecting."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for isolated close-state verification")
+
+    session = _create_owned_redis_session("closed_state_test")
+    assert session._owns_client is True
+    await session.add_items([{"role": "user", "content": "before close"}])
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="RedisSession is closed"):
+        await session.get_items()
+
+    with pytest.raises(RuntimeError, match="RedisSession is closed"):
+        await session.add_items([{"role": "user", "content": "after close"}])
+
+    with pytest.raises(RuntimeError, match="RedisSession is closed"):
+        await session.pop_item()
+
+    with pytest.raises(RuntimeError, match="RedisSession is closed"):
+        await session.clear_session()
+
+
+async def test_redis_session_closed_rejects_empty_add_items():
+    """add_items([]) must not bypass the closed check through the empty-list fast path."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for isolated close-state verification")
+
+    session = _create_owned_redis_session("closed_empty_add_test")
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="RedisSession is closed"):
+        await session.add_items([])
+
+
+async def test_redis_session_close_is_idempotent():
+    """Repeated and concurrent close() calls must remain safe no-ops."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for isolated close-state verification")
+
+    import asyncio
+
+    session = _create_owned_redis_session("close_idempotent_test")
+
+    await asyncio.gather(session.close(), session.close())
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="RedisSession is closed"):
+        await session.get_items()
+
+
+async def test_redis_session_failed_cleanup_is_terminal_and_retried():
+    """A failed cleanup keeps the session terminal, and the next close() retries it."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for isolated close-state verification")
+
+    import unittest.mock
+
+    session = _create_owned_redis_session("failed_cleanup_test")
+    attempts = 0
+    real_aclose = session._redis.aclose
+
+    async def failing_then_succeeding_aclose(*args: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        # Mirror redis-py, which tears the pool down before surfacing the error.
+        await real_aclose(*args, **kwargs)
+        if attempts == 1:
+            raise OSError("disconnect error surfaced after pool teardown")
+
+    with unittest.mock.patch.object(session._redis, "aclose", failing_then_succeeding_aclose):
+        with pytest.raises(OSError, match="disconnect error surfaced after pool teardown"):
+            await session.close()
+
+        assert session._closed is True
+        for operation in (
+            session.get_items(),
+            session.add_items([{"role": "user", "content": "after failed cleanup"}]),
+            session.pop_item(),
+            session.clear_session(),
+            session.ping(),
+        ):
+            with pytest.raises(RuntimeError, match="RedisSession is closed"):
+                await operation
+
+        await session.close()
+        assert attempts == 2
+        assert session._client_released is True
+
+        await session.close()
+        assert attempts == 2
+
+
+async def test_redis_session_cancelled_cleanup_is_terminal_and_retried():
+    """A cancelled cleanup keeps the session terminal, and the next close() retries it."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for isolated close-state verification")
+
+    import asyncio
+    import unittest.mock
+    from contextlib import suppress
+
+    timeout = 5.0
+    session = _create_owned_redis_session("cancelled_cleanup_test")
+    attempts = 0
+    entered_cleanup = asyncio.Event()
+    real_aclose = session._redis.aclose
+
+    async def hanging_then_succeeding_aclose(*args: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            entered_cleanup.set()
+            await asyncio.Event().wait()  # Hang until cancelled.
+        return await real_aclose(*args, **kwargs)
+
+    close_task: asyncio.Task[None] | None = None
+    try:
+        with unittest.mock.patch.object(session._redis, "aclose", hanging_then_succeeding_aclose):
+            close_task = asyncio.create_task(session.close())
+            await asyncio.wait_for(entered_cleanup.wait(), timeout)
+            close_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await close_task
+            close_task = None
+
+            assert session._closed is True
+            with pytest.raises(RuntimeError, match="RedisSession is closed"):
+                await session.get_items()
+
+            await asyncio.wait_for(session.close(), timeout)
+            assert attempts == 2
+            assert session._client_released is True
+    finally:
+        if close_task is not None:
+            close_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await close_task
+
+
+async def test_redis_session_ping_raises_after_close():
+    """ping() must not reopen a connection on a client this session already closed."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for isolated close-state verification")
+
+    session = _create_owned_redis_session("ping_after_close_test")
+    assert await session.ping() is True
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="RedisSession is closed"):
+        await session.ping()
+
+
+async def test_redis_session_close_is_noop_for_injected_client():
+    """With an injected client, close() stays a no-op and the session remains usable."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for isolated close-state verification")
+
+    import fakeredis.aioredis
+
+    client = fakeredis.aioredis.FakeRedis()
+    session = RedisSession(
+        session_id="injected_client_noop_test",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    assert session._owns_client is False
+
+    await session.add_items([{"role": "user", "content": "before close"}])
+    await session.close()
+
+    await session.add_items([{"role": "user", "content": "after close"}])
+    items = await session.get_items()
+    assert [item.get("content") for item in items] == ["before close", "after close"]
+
+    assert await session.ping() is True
+
+    other = RedisSession(
+        session_id="injected_client_noop_test",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    assert len(await other.get_items()) == 2
+
+    await session.clear_session()
+
+
+async def test_redis_session_operation_waiting_behind_close_raises():
+    """An operation queued behind close() must fail rather than run after shutdown completes."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for controlled close interleaving")
+
+    import asyncio
+    import unittest.mock
+    from contextlib import suppress
+
+    import fakeredis.aioredis
+
+    from agents.memory.session_settings import resolve_session_limit
+
+    timeout = 5.0
+    blocked_probe = 0.1
+    fake_client = fakeredis.aioredis.FakeRedis()
+    close_holds_lock = asyncio.Event()  # Set once close() is inside the session lock.
+    release_close = asyncio.Event()  # Test-owned gate that lets the paused close() finish.
+    op_entered = asyncio.Event()  # Set once the operation is past method entry.
+    real_aclose = fake_client.aclose
+    real_resolve = resolve_session_limit
+
+    async def paused_aclose(*args: Any, **kwargs: Any) -> Any:
+        close_holds_lock.set()
+        await asyncio.wait_for(release_close.wait(), timeout)
+        return await real_aclose(*args, **kwargs)
+
+    def entry_signalling_resolve(*args: Any, **kwargs: Any) -> Any:
+        # This runs immediately before the operation reaches the session lock.
+        op_entered.set()
+        return real_resolve(*args, **kwargs)
+
+    with unittest.mock.patch(
+        "agents.extensions.memory.redis_session.redis.from_url", return_value=fake_client
+    ):
+        session = RedisSession.from_url("close_interleave_test", url="redis://localhost:6379/15")
+    assert session._owns_client is True
+
+    close_task: asyncio.Task[None] | None = None
+    op_task: asyncio.Task[list[TResponseInputItem]] | None = None
+    try:
+        with unittest.mock.patch.object(fake_client, "aclose", paused_aclose):
+            close_task = asyncio.create_task(session.close())
+            await asyncio.wait_for(close_holds_lock.wait(), timeout)
+
+            # Start the operation while close() still holds the lock so it must queue behind it.
+            with unittest.mock.patch(
+                "agents.extensions.memory.redis_session.resolve_session_limit",
+                entry_signalling_resolve,
+            ):
+                op_task = asyncio.create_task(session.get_items())
+                await asyncio.wait_for(op_entered.wait(), timeout)
+
+            # The operation is past method entry, so it can only be blocked on the session lock.
+            _, still_blocked = await asyncio.wait({op_task}, timeout=blocked_probe)
+            assert op_task in still_blocked
+
+            release_close.set()
+            await asyncio.wait_for(close_task, timeout)
+            close_task = None
+
+            with pytest.raises(RuntimeError, match="RedisSession is closed"):
+                await asyncio.wait_for(op_task, timeout)
+            op_task = None
+    finally:
+        release_close.set()
+        for task in (close_task, op_task):
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError, RuntimeError):
+                    await task

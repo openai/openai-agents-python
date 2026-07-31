@@ -70,7 +70,7 @@ If you do not need access to files or a living filesystem, keep using `Agent`. I
 
 ## Choose a sandbox client
 
-Start with `UnixLocalSandboxClient` for local development. Move to `DockerSandboxClient` when you need container isolation or image parity. Move to a hosted provider when you need provider-managed execution.
+Start with `UnixLocalSandboxClient` for local development on macOS or Linux. On Windows, use `DockerSandboxClient` or a hosted provider instead. On any supported platform, move to `DockerSandboxClient` when you need container isolation or image parity, or to a hosted provider when you need provider-managed execution.
 
 In most cases, the `SandboxAgent` definition stays the same while the sandbox client and its options change in [`SandboxRunConfig`][agents.run_config.SandboxRunConfig]. See [Sandbox clients](clients.md) for local, Docker, hosted, and remote-mount options.
 
@@ -249,6 +249,8 @@ manifest = Manifest(
     ),
 )
 ```
+
+Set `host_path` when Docker should bind-mount a different absolute host path at the absolute POSIX `path` inside the container. `UnixLocalSandboxClient` supports only path-only grants, where both paths are the same, and rejects `host_path`. Use `read_only=True` for host data the sandbox should not modify, or use `LocalFile` or `LocalDir` when a copy is sufficient.
 
 Treat manifests that contain `extra_path_grants` as trusted configuration. Do not load grants from model output or other untrusted payloads unless your application has already approved those host paths.
 
@@ -644,6 +646,8 @@ run_config = RunConfig(
 ```
 
 Use this when sandbox state lives in your own storage or job system and you want `Runner` to resume from it directly. See [examples/sandbox/extensions/blaxel_runner.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/blaxel_runner.py) for the serialize/deserialize flow.
+
+Session-state serialization omits native `host_path` values. To resume host-backed grants, provide the current trusted manifest through `SandboxRunConfig.manifest` or `agent.default_manifest`; otherwise resume fails before the sandbox starts. Never derive host paths from serialized or other untrusted input.
 
 ### Start from a snapshot
 

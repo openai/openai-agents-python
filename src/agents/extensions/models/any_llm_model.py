@@ -731,6 +731,31 @@ class AnyLLMModel(Model):
         extra_kwargs = self._build_chat_extra_kwargs(model_settings)
         extra_kwargs.pop("reasoning_effort", None)
 
+        headers = self._merge_headers(model_settings)
+        if self._provider_name in {"gemini", "vertexai"}:
+            http_options = extra_kwargs.get("http_options")
+            if isinstance(http_options, BaseModel):
+                existing_headers = getattr(http_options, "headers", None) or {}
+                extra_kwargs["http_options"] = http_options.model_copy(
+                    update={"headers": {**existing_headers, **headers}}
+                )
+            elif isinstance(http_options, dict):
+                existing_headers = http_options.get("headers") or {}
+                extra_kwargs["http_options"] = {
+                    **http_options,
+                    "headers": {**existing_headers, **headers},
+                }
+            elif http_options is None:
+                extra_kwargs["http_options"] = {"headers": headers}
+        else:
+            extra_kwargs["extra_headers"] = headers
+
+        # The Chat Completions API requires logprobs=True whenever top_logprobs is set. Defer to a
+        # caller-supplied logprobs (via extra_args, already merged into extra_kwargs) to avoid a
+        # duplicate-key collision.
+        if model_settings.top_logprobs is not None and "logprobs" not in extra_kwargs:
+            extra_kwargs["logprobs"] = True
+
         ret = await self._get_provider().acompletion(
             model=self._provider_model,
             messages=converted_messages,
@@ -747,7 +772,6 @@ class AnyLLMModel(Model):
             stream_options=stream_options,
             reasoning_effort=reasoning_effort,
             top_logprobs=model_settings.top_logprobs,
-            extra_headers=self._merge_headers(model_settings),
             **extra_kwargs,
         )
 
@@ -953,6 +977,8 @@ class AnyLLMModel(Model):
                 api_key=self.api_key,
                 api_base=self.base_url,
             )
+            if self._provider_name in {"gemini", "vertexai"}:
+                self._normalize_google_tool_result_roles(base_provider)
             self._provider_cache[False] = base_provider
 
         if disable_provider_retries:
@@ -961,6 +987,30 @@ class AnyLLMModel(Model):
             return cloned
 
         return base_provider
+
+    @staticmethod
+    def _normalize_google_tool_result_roles(provider: Any) -> None:
+        convert_completion_params = getattr(provider, "_convert_completion_params", None)
+        if not callable(convert_completion_params):
+            return
+
+        def convert_with_supported_tool_result_roles(*args: Any, **kwargs: Any) -> Any:
+            converted = convert_completion_params(*args, **kwargs)
+            contents = converted.get("contents")
+            if not isinstance(contents, list):
+                return converted
+
+            converted["contents"] = [
+                content.model_copy(update={"role": "user"})
+                if isinstance(content, BaseModel) and getattr(content, "role", None) == "function"
+                else {**content, "role": "user"}
+                if isinstance(content, dict) and content.get("role") == "function"
+                else content
+                for content in contents
+            ]
+            return converted
+
+        provider._convert_completion_params = convert_with_supported_tool_result_roles
 
     def _clone_provider_without_retries(self, provider: Any) -> Any:
         client = getattr(provider, "client", None)
@@ -975,9 +1025,28 @@ class AnyLLMModel(Model):
     def _normalize_response(self, response: Any) -> Response:
         if isinstance(response, Response):
             return response
-        if isinstance(response, BaseModel):
-            return Response.model_validate(response.model_dump())
-        return Response.model_validate(response)
+
+        payload = response.model_dump() if isinstance(response, BaseModel) else response
+        if isinstance(payload, dict):
+            usage = payload.get("usage")
+            if isinstance(usage, dict):
+                input_tokens_details = usage.get("input_tokens_details")
+                if (
+                    isinstance(input_tokens_details, dict)
+                    and "cache_write_tokens" not in input_tokens_details
+                ):
+                    payload = {
+                        **payload,
+                        "usage": {
+                            **usage,
+                            "input_tokens_details": {
+                                **input_tokens_details,
+                                "cache_write_tokens": 0,
+                            },
+                        },
+                    }
+
+        return Response.model_validate(payload)
 
     def _normalize_chat_completion_response(self, response: Any) -> ChatCompletion:
         if isinstance(response, ChatCompletion):

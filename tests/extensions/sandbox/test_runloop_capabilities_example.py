@@ -89,6 +89,11 @@ class _FakePolicyRef:
         )
 
 
+class _FakePolicyListItem:
+    def __init__(self, policy_id: str) -> None:
+        self.id = policy_id
+
+
 class _FakeNetworkPoliciesClient:
     def __init__(self) -> None:
         self.policies: dict[str, _FakePolicy] = {}
@@ -106,12 +111,12 @@ class _FakeNetworkPoliciesClient:
         self.policies[policy.id] = policy
         return policy
 
-    async def list(self, **params: object) -> list[_FakePolicy]:
+    async def list(self, **params: object) -> list[_FakePolicyListItem]:
         name = params.get("name")
         policies = list(self.policies.values())
         if isinstance(name, str):
-            return [policy for policy in policies if policy.name == name]
-        return policies
+            policies = [policy for policy in policies if policy.name == name]
+        return [_FakePolicyListItem(policy.id) for policy in policies]
 
     async def create(self, **params: object) -> _FakePolicy:
         self.create_calls.append(dict(params))

@@ -14,6 +14,7 @@ from .._tool_identity import get_function_tool_lookup_key_for_call, get_tool_cal
 from ..agent import Agent
 from ..exceptions import UserError
 from ..items import (
+    ItemHelpers,
     MCPApprovalResponseItem,
     RunItem,
     RunItemBase,
@@ -128,6 +129,7 @@ async def execute_mcp_approval_requests(
         }
         if not result["approve"] and reason:
             raw_item["reason"] = reason
+        ItemHelpers.copy_tool_call_caller(request_item, raw_item)
         return MCPApprovalResponseItem(
             raw_item=raw_item,
             agent=agent,

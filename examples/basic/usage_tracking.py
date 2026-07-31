@@ -2,7 +2,12 @@ import asyncio
 
 from pydantic import BaseModel
 
-from agents import Agent, Runner, Usage, function_tool
+from agents import (
+    Agent,
+    Runner,
+    Usage,
+)
+from agents.decorators import tool
 
 
 class Weather(BaseModel):
@@ -11,7 +16,7 @@ class Weather(BaseModel):
     conditions: str
 
 
-@function_tool
+@tool
 def get_weather(city: str) -> Weather:
     """Get the current weather information for a specified city."""
     return Weather(city=city, temperature_range="14-20C", conditions="Sunny with wind.")

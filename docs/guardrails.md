@@ -79,8 +79,8 @@ from agents import (
     RunContextWrapper,
     Runner,
     TResponseInputItem,
-    input_guardrail,
 )
+from agents.decorators import input_guardrail
 
 class MathHomeworkOutput(BaseModel):
     is_math_homework: bool
@@ -136,8 +136,8 @@ from agents import (
     OutputGuardrailTripwireTriggered,
     RunContextWrapper,
     Runner,
-    output_guardrail,
 )
+from agents.decorators import output_guardrail
 class MessageOutput(BaseModel): # (1)!
     response: str
 
@@ -192,10 +192,8 @@ from agents import (
     Agent,
     Runner,
     ToolGuardrailFunctionOutput,
-    function_tool,
-    tool_input_guardrail,
-    tool_output_guardrail,
 )
+from agents.decorators import tool, tool_input_guardrail, tool_output_guardrail
 
 @tool_input_guardrail
 def block_secrets(data):
@@ -215,7 +213,7 @@ def redact_output(data):
     return ToolGuardrailFunctionOutput.allow()
 
 
-@function_tool(
+@tool(
     tool_input_guardrails=[block_secrets],
     tool_output_guardrails=[redact_output],
 )

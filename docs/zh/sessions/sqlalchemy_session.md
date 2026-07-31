@@ -4,19 +4,19 @@ search:
 ---
 # SQLAlchemy 会话
 
-`SQLAlchemySession` 使用 SQLAlchemy 提供生产就绪的会话实现，使你可以使用 SQLAlchemy 支持的任何数据库（PostgreSQL、MySQL、SQLite 等）进行会话存储。
+`SQLAlchemySession` 使用 SQLAlchemy 提供可用于生产环境的会话实现，让你可以使用 SQLAlchemy 支持的任何数据库（PostgreSQL、MySQL、SQLite 等）存储会话。
 
 ## 安装
 
-SQLAlchemy 会话需要 `sqlalchemy` 额外依赖：
+SQLAlchemy 会话需要安装 `sqlalchemy` 可选依赖：
 
 ```bash
 pip install openai-agents[sqlalchemy]
 ```
 
-## 快速开始
+## 快速入门
 
-### 使用数据库 URL
+### 数据库 URL 的使用
 
 最简单的入门方式：
 
@@ -42,9 +42,9 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-### 使用现有引擎
+### 现有引擎的使用
 
-适用于已有 SQLAlchemy 引擎的应用：
+对于已有 SQLAlchemy 引擎的应用程序：
 
 ```python
 import asyncio
@@ -72,6 +72,23 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 ```
+
+## 非 ASCII 文本的存储
+
+默认情况下，`SQLAlchemySession` 在将会话项序列化为 JSON 时会转义非 ASCII 字符。这样既能保留原有的存储格式，也能在加载会话项时无损还原原始文本。
+
+如果希望多语言文本在存储的 JSON 中保持可读，请设置 `ensure_ascii=False`：
+
+```python
+session = SQLAlchemySession.from_url(
+    "user-123",
+    url="sqlite+aiosqlite:///conversations.db",
+    create_tables=True,
+    ensure_ascii=False,
+)
+```
+
+使用现有引擎时，也可以将相同的选项直接传递给 `SQLAlchemySession(...)`。此设置仅会更改数据库中存储的 JSON 表示形式，不会更改会话方法返回的值。
 
 
 ## API 参考

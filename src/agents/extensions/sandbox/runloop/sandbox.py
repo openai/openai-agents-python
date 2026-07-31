@@ -1673,6 +1673,7 @@ class RunloopSandboxClient(BaseSandboxClient[RunloopSandboxClientOptions | None]
         """
         if not isinstance(state, RunloopSandboxSessionState):
             raise TypeError("RunloopSandboxClient.resume expects a RunloopSandboxSessionState")
+        state.assert_path_grants_rebound()
 
         devbox = None
         reconnected = False
@@ -1717,4 +1718,4 @@ class RunloopSandboxClient(BaseSandboxClient[RunloopSandboxClientOptions | None]
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
-        return RunloopSandboxSessionState.model_validate(payload)
+        return self._deserialize_session_state_payload(payload, RunloopSandboxSessionState)

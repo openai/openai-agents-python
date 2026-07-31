@@ -13,8 +13,8 @@ from agents import (
     Runner,
     ToolsToFinalOutputFunction,
     ToolsToFinalOutputResult,
-    function_tool,
 )
+from agents.decorators import tool
 from examples.auto_mode import is_auto_mode
 
 """
@@ -43,7 +43,7 @@ class Weather(BaseModel):
     conditions: str
 
 
-@function_tool
+@tool
 def get_weather(city: str) -> Weather:
     print("[debug] get_weather called")
     return Weather(city=city, temperature_range="14-20C", conditions="Sunny with wind")

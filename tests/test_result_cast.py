@@ -230,7 +230,7 @@ def test_run_result_release_agents_is_idempotent() -> None:
         _ = result.last_agent
 
 
-def test_run_result_streaming_release_agents_releases_current_agent() -> None:
+def test_run_result_streaming_release_agents_uses_weakref_until_agent_is_collected() -> None:
     agent = Agent(name="streaming-agent")
     streaming_result = RunResultStreaming(
         input="stream",
@@ -251,6 +251,8 @@ def test_run_result_streaming_release_agents_releases_current_agent() -> None:
     )
 
     streaming_result.release_agents(release_new_items=False)
+
+    assert 'Current agent: Agent(name="streaming-agent", ...)' in str(streaming_result)
 
     agent_ref = weakref.ref(agent)
     del agent
@@ -298,6 +300,63 @@ def test_run_result_agent_tool_invocation_returns_immutable_metadata() -> None:
     assert invocation is not None
     with pytest.raises(dataclasses.FrozenInstanceError):
         cast(Any, invocation).tool_name = "other"
+
+
+def test_run_result_streaming_create_error_details_with_retained_weakref() -> None:
+    agent = Agent(name="error-detail-agent")
+    streaming_result = RunResultStreaming(
+        input="error",
+        new_items=[],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=RunContextWrapper(context=None),
+        current_agent=agent,
+        current_turn=0,
+        max_turns=1,
+        _current_agent_output_schema=None,
+        trace=None,
+        interruptions=[],
+    )
+
+    streaming_result.release_agents()
+    details = streaming_result._create_error_details()
+    assert details is not None
+    assert details.last_agent.name == "error-detail-agent"
+
+
+def test_run_result_streaming_create_error_details_with_collected_weakref() -> None:
+    agent = Agent(name="collected-agent")
+    streaming_result = RunResultStreaming(
+        input="error",
+        new_items=[],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=RunContextWrapper(context=None),
+        current_agent=agent,
+        current_turn=0,
+        max_turns=1,
+        _current_agent_output_schema=None,
+        trace=None,
+        interruptions=[],
+    )
+
+    streaming_result.release_agents()
+    agent_ref = weakref.ref(agent)
+    del agent
+    gc.collect()
+
+    assert agent_ref() is None
+    # last_agent raises AgentsException, so _create_error_details should return None
+    details = streaming_result._create_error_details()
+    assert details is None
 
 
 def test_run_result_streaming_agent_tool_invocation_returns_metadata() -> None:

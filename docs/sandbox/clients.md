@@ -33,6 +33,8 @@ For most users, start with one of these two sandbox clients:
 
 Unix-local is the easiest way to start developing against a local filesystem. Move to Docker or a hosted provider when you need stronger environment isolation or production-style parity.
 
+`SandboxPathGrant.host_path` is Docker-only and maps a host path to a different POSIX path inside the container. Unix-local supports only same-path grants. See [Manifest path grants](guide.md#manifest) for details.
+
 To switch from Unix-local to Docker, keep the agent definition the same and change only the run config:
 
 ```python
@@ -113,7 +115,7 @@ Hosted sandbox clients expose provider-specific mount strategies. Choose the bac
 | `DaytonaSandboxClient` | Supports rclone-backed cloud storage mounts with `DaytonaCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
 | `E2BSandboxClient` | Supports rclone-backed cloud storage mounts with `E2BCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
 | `RunloopSandboxClient` | Supports rclone-backed cloud storage mounts with `RunloopCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
-| `VercelSandboxClient` | No hosted-specific mount strategy is currently exposed. Use manifest files, repos, or other workspace inputs instead. |
+| `VercelSandboxClient` | Supports create-time-only S3 and S3-compatible bucket mounts with `VercelCloudBucketMountStrategy` on `S3Mount`; mounted sessions cannot be resumed, and inline credentials require `allow_s3_credential_exposure=True`. |
 
 </div>
 
@@ -130,7 +132,7 @@ The table below summarizes which remote storage entries each backend can mount d
 | `DaytonaSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `E2BSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `RunloopSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
-| `VercelSandboxClient` | - | - | - | - | - | - |
+| `VercelSandboxClient` | ✓ | - | - | - | - | - |
 
 </div>
 

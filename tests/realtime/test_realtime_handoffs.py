@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from agents import Agent
 from agents.exceptions import ModelBehaviorError, UserError
 from agents.realtime import RealtimeAgent, realtime_handoff
+from agents.realtime.handoffs import collect_enabled_handoffs
 from agents.run_context import RunContextWrapper
 
 
@@ -44,6 +45,42 @@ def test_realtime_handoff_with_custom_params():
     assert handoff_obj.tool_name == "custom_handoff"
     assert handoff_obj.tool_description == "Custom handoff description"
     assert handoff_obj.is_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_collect_enabled_handoffs_cancels_sibling_checks_on_error() -> None:
+    slow_started = asyncio.Event()
+    slow_cancelled = asyncio.Event()
+    slow_finished = asyncio.Event()
+
+    async def slow_enabled(_ctx: RunContextWrapper[Any], _agent: RealtimeAgent[Any]) -> bool:
+        slow_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            slow_cancelled.set()
+            raise
+        finally:
+            slow_finished.set()
+        return True
+
+    async def failing_enabled(_ctx: RunContextWrapper[Any], _agent: RealtimeAgent[Any]) -> bool:
+        await slow_started.wait()
+        raise RuntimeError("enablement failed")
+
+    parent = RealtimeAgent(
+        name="parent",
+        handoffs=[
+            realtime_handoff(RealtimeAgent(name="slow"), is_enabled=slow_enabled),
+            realtime_handoff(RealtimeAgent(name="failing"), is_enabled=failing_enabled),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="enablement failed"):
+        await collect_enabled_handoffs(parent, RunContextWrapper(None))
+
+    assert slow_cancelled.is_set()
+    assert slow_finished.is_set()
 
 
 @pytest.mark.asyncio
@@ -261,6 +298,34 @@ async def test_realtime_handoff_async_on_handoff_without_input_runs() -> None:
 
     assert result is rt
     assert called == [True]
+
+
+@pytest.mark.asyncio
+async def test_realtime_handoff_async_callable_objects_are_awaited() -> None:
+    class WithInput:
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        async def __call__(self, ctx: RunContextWrapper[Any], value: int) -> None:
+            self.calls.append(value)
+
+    class NoInput:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, ctx: RunContextWrapper[Any]) -> None:
+            self.calls += 1
+
+    rt = RealtimeAgent(name="async_callable")
+    with_input = WithInput()
+    with_input_handoff = realtime_handoff(rt, on_handoff=with_input, input_type=int)
+    assert await with_input_handoff.on_invoke_handoff(RunContextWrapper(None), "7") is rt
+    assert with_input.calls == [7]
+
+    no_input = NoInput()
+    no_input_handoff = realtime_handoff(rt, on_handoff=no_input)
+    assert await no_input_handoff.on_invoke_handoff(RunContextWrapper(None), "") is rt
+    assert no_input.calls == 1
 
 
 class StrictInput(BaseModel):

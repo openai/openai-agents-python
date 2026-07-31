@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from typing import Any, cast
 
 import pytest
@@ -12,7 +13,9 @@ from mcp.types import (
     Tool as MCPTool,
 )
 
+from agents import _debug
 from agents.mcp import MCPServer, MCPServerManager
+from agents.mcp._logging import get_mcp_server_log_name
 from agents.run_context import RunContextWrapper
 
 
@@ -121,6 +124,51 @@ class FlakyServer(MCPServer):
         return ReadResourceResult(contents=[])
 
 
+class PartialFailureServer(FlakyServer):
+    def __init__(self, *, fail_cleanup: bool = False) -> None:
+        super().__init__(failures=0)
+        self.fail_cleanup = fail_cleanup
+        self.cleanup_calls = 0
+        self.resource_open = False
+        self._connect_task: asyncio.Task[object] | None = None
+
+    @property
+    def name(self) -> str:
+        return "partial-failure"
+
+    async def connect(self) -> None:
+        self.connect_calls += 1
+        self._connect_task = asyncio.current_task()
+        if self.resource_open:
+            raise RuntimeError("connect called without cleanup")
+        self.resource_open = True
+        if self.connect_calls == 1:
+            raise RuntimeError("connect failed after opening resource")
+
+    async def cleanup(self) -> None:
+        self.cleanup_calls += 1
+        if asyncio.current_task() is not self._connect_task:
+            raise RuntimeError("Attempted to exit cancel scope in a different task")
+        if self.fail_cleanup:
+            raise RuntimeError("cleanup failed")
+        self.resource_open = False
+
+
+class SensitiveNamedServer(FlakyServer):
+    def __init__(self, name: str) -> None:
+        super().__init__(failures=1)
+        self._name = name
+        self.name_reads = 0
+
+    @property
+    def name(self) -> str:
+        self.name_reads += 1
+        return self._name
+
+    async def connect(self) -> None:
+        raise RuntimeError("SECRET_MCP_CONNECT_ERROR")
+
+
 class CleanupAwareServer(MCPServer):
     def __init__(self) -> None:
         super().__init__()
@@ -172,16 +220,102 @@ class CleanupAwareServer(MCPServer):
         return ReadResourceResult(contents=[])
 
 
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("ordinary-server", "ordinary-server"),
+        (
+            "sse: https://user:password@example.test/events?token=secret#fragment",
+            "sse: https://example.test/events",
+        ),
+        (
+            "streamable_http: https://example.test/mcp?token=secret",
+            "streamable_http: https://example.test/mcp",
+        ),
+        (
+            "streamable_http: https://user:password@example.test:8443/mcp?token=secret",
+            "streamable_http: https://example.test:8443/mcp",
+        ),
+        ("streamable_http: https://[::1]:8000/mcp", "streamable_http: https://[::1]:8000/mcp"),
+        (
+            "streamable-http: https://example.test/mcp#secret",
+            "streamable-http: https://example.test/mcp",
+        ),
+        (
+            "streamable_http: https://user:password@[invalid/mcp?token=secret",
+            "streamable_http: <invalid-url>",
+        ),
+        (
+            "streamable_http: https://user:password/mcp?token=secret",
+            "streamable_http: <invalid-url>",
+        ),
+        ("https://user:password@example.test/mcp?token=secret", "https://example.test/mcp"),
+        ("https://user:password@[invalid/mcp?token=secret", "<invalid-url>"),
+        ("stdio: python server.py?token=secret", "stdio: python server.py?token=secret"),
+    ],
+)
+def test_get_mcp_server_log_name(name: str, expected: str) -> None:
+    assert get_mcp_server_log_name(name) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redacted", [True, False])
+@pytest.mark.parametrize(
+    ("server_name", "diagnostic_sentinel", "always_hidden"),
+    [
+        (
+            "streamable_http: https://SECRET_CREDENTIAL@example.test/"
+            "SECRET_MCP_PATH?token=SECRET_MCP_QUERY#SECRET_MCP_FRAGMENT",
+            "SECRET_MCP_PATH",
+            ("SECRET_CREDENTIAL", "SECRET_MCP_QUERY", "SECRET_MCP_FRAGMENT"),
+        ),
+        (
+            "SECRET_CUSTOM_MCP_SERVER_NAME",
+            "SECRET_CUSTOM_MCP_SERVER_NAME",
+            (),
+        ),
+    ],
+)
+async def test_manager_sanitizes_url_derived_server_names_in_failure_logs(
+    monkeypatch,
+    caplog,
+    redacted: bool,
+    server_name: str,
+    diagnostic_sentinel: str,
+    always_hidden: tuple[str, ...],
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+    server = SensitiveNamedServer(server_name)
+    manager = MCPServerManager([server])
+
+    with caplog.at_level(logging.ERROR, logger="openai.agents"):
+        await manager.connect_all()
+
+    assert (diagnostic_sentinel not in caplog.text) is redacted
+    assert server.name_reads == (0 if redacted else 1)
+    for sentinel in always_hidden:
+        assert sentinel not in caplog.text
+    assert ("SECRET_MCP_CONNECT_ERROR" not in caplog.text) is redacted
+
+
 class CancelledServer(MCPServer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.resource_open = False
+        self.cleanup_calls = 0
+
     @property
     def name(self) -> str:
         return "cancelled"
 
     async def connect(self) -> None:
+        # Simulate a transport that opened resources before cancellation.
+        self.resource_open = True
         raise asyncio.CancelledError()
 
     async def cleanup(self) -> None:
-        return None
+        self.cleanup_calls += 1
+        self.resource_open = False
 
     async def list_tools(
         self, run_context: RunContextWrapper[Any] | None = None, agent: Any | None = None
@@ -294,6 +428,56 @@ async def test_manager_reconnect_failed_only() -> None:
         await manager.reconnect()
         assert manager.active_servers == [server]
         assert manager.failed_servers == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connect_in_parallel", [False, True])
+async def test_manager_reconnect_cleans_partial_failure_before_retry(
+    connect_in_parallel: bool,
+) -> None:
+    healthy_server = CleanupAwareServer()
+    failed_server = PartialFailureServer()
+    manager = MCPServerManager(
+        [healthy_server, failed_server], connect_in_parallel=connect_in_parallel
+    )
+    try:
+        await manager.connect_all()
+
+        assert manager.active_servers == [healthy_server]
+        assert manager.failed_servers == [failed_server]
+
+        await manager.reconnect()
+
+        assert manager.active_servers == [healthy_server, failed_server]
+        assert manager.failed_servers == []
+        assert failed_server not in manager.errors
+        assert failed_server.connect_calls == 2
+        assert failed_server.cleanup_calls == 1
+        assert failed_server.resource_open is True
+        assert healthy_server.connect_calls == 1
+        assert healthy_server.cleanup_calls == 0
+    finally:
+        await manager.cleanup_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connect_in_parallel", [False, True])
+async def test_manager_reconnect_does_not_retry_after_cleanup_failure(
+    connect_in_parallel: bool,
+) -> None:
+    server = PartialFailureServer(fail_cleanup=True)
+    manager = MCPServerManager([server], connect_in_parallel=connect_in_parallel)
+
+    await manager.connect_all()
+    await manager.reconnect()
+
+    assert manager.active_servers == []
+    assert manager.failed_servers == [server]
+    assert server.connect_calls == 1
+    assert server.cleanup_calls == 1
+    assert server.resource_open is True
+    assert str(manager.errors[server]) == "cleanup failed"
+    assert manager._workers == {}
 
 
 @pytest.mark.asyncio
@@ -548,5 +732,28 @@ async def test_manager_cleanup_runs_on_cancelled_error_during_connect() -> None:
         with pytest.raises(asyncio.CancelledError):
             await manager.connect_all()
         assert server.cleanup_calls == 1
+        # The cancelled server must be recorded and cleaned by connect_all()'s
+        # failure path — callers cannot rely on a later cleanup_all() because
+        # `async with` never reaches __aexit__ when __aenter__ raises.
+        assert cancelled_server in manager.failed_servers
+        assert cancelled_server.cleanup_calls == 1
+        assert cancelled_server.resource_open is False
     finally:
         await manager.cleanup_all()
+
+
+@pytest.mark.asyncio
+async def test_manager_async_with_cleans_cancelled_server_when_unsuppressed() -> None:
+    server = CleanupAwareServer()
+    cancelled_server = CancelledServer()
+
+    with pytest.raises(asyncio.CancelledError):
+        async with MCPServerManager(
+            [server, cancelled_server],
+            suppress_cancelled_error=False,
+        ):
+            raise AssertionError("context body should not run when connect raises")
+
+    assert server.cleanup_calls == 1
+    assert cancelled_server.cleanup_calls == 1
+    assert cancelled_server.resource_open is False

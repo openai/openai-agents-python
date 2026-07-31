@@ -198,6 +198,27 @@ def test_provider_map_entries_override_openai_prefix_mode(monkeypatch):
     assert captured_model["value"] == "gpt-4o"
 
 
+def test_provider_map_routes_to_falsey_provider():
+    captured_model: dict[str, Any] = {}
+    expected_model = object()
+
+    class FalseyProvider:
+        def __bool__(self) -> bool:
+            return False
+
+        def get_model(self, model_name: str | None):
+            captured_model["value"] = model_name
+            return expected_model
+
+    provider_map = MultiProviderMap()
+    provider_map.add_provider("custom", cast(Any, FalseyProvider()))
+
+    result = MultiProvider(provider_map=provider_map).get_model("custom/test-model")
+
+    assert result is expected_model
+    assert captured_model["value"] == "test-model"
+
+
 def test_multi_provider_rejects_invalid_prefix_modes():
     bad_openai_prefix_mode: Any = "invalid"
     bad_unknown_prefix_mode: Any = "invalid"

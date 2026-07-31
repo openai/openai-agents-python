@@ -8,11 +8,15 @@ and multi-timeline conversation management.
 
 import asyncio
 
-from agents import Agent, Runner, function_tool
+from agents import (
+    Agent,
+    Runner,
+)
+from agents.decorators import tool
 from agents.extensions.memory import AdvancedSQLiteSession
 
 
-@function_tool
+@tool
 async def get_weather(city: str) -> str:
     if city.strip().lower() == "new york":
         return f"The weather in {city} is cloudy."

@@ -191,6 +191,17 @@ async def _verify_stop_resume(
                 SNAPSHOT_CHECK_PATH,
                 io.BytesIO(SNAPSHOT_CHECK_CONTENT.encode("utf-8")),
             )
+            if mount_check_path is not None:
+                await sandbox.write(
+                    mount_check_path,
+                    io.BytesIO(MOUNT_CHECK_CONTENT.encode("utf-8")),
+                )
+                mount_text = await _read_text(sandbox, mount_check_path)
+                if mount_text != MOUNT_CHECK_CONTENT:
+                    raise RuntimeError(
+                        "Native cloud bucket write verification failed before resume: "
+                        f"expected {MOUNT_CHECK_CONTENT!r}, got {mount_text!r}"
+                    )
             await sandbox.stop()
         finally:
             await sandbox.shutdown()
@@ -204,10 +215,31 @@ async def _verify_stop_resume(
                     f"Snapshot resume verification failed for {workspace_persistence!r}: "
                     f"expected {SNAPSHOT_CHECK_CONTENT!r}, got {restored_text!r}"
                 )
+            if mount_check_path is not None:
+                mount_text = await _read_text(resumed_sandbox, mount_check_path)
+                if mount_text != MOUNT_CHECK_CONTENT:
+                    raise RuntimeError(
+                        "Native cloud bucket resume verification failed: "
+                        f"expected {MOUNT_CHECK_CONTENT!r}, got {mount_text!r}"
+                    )
+                await resumed_sandbox.write(
+                    mount_check_path,
+                    io.BytesIO(MOUNT_CHECK_UPDATED_CONTENT.encode("utf-8")),
+                )
+                updated_mount_text = await _read_text(resumed_sandbox, mount_check_path)
+                if updated_mount_text != MOUNT_CHECK_UPDATED_CONTENT:
+                    raise RuntimeError(
+                        "Native cloud bucket update verification failed after resume: "
+                        f"expected {MOUNT_CHECK_UPDATED_CONTENT!r}, got {updated_mount_text!r}"
+                    )
+                await resumed_sandbox.rm(mount_check_path)
         finally:
             await resumed_sandbox.aclose()
 
-        print(f"native cloud bucket read/write ok ({mount_check_path})")
+        if mount_check_path is None:
+            print("native cloud bucket check skipped (no bucket configured)")
+        else:
+            print(f"native cloud bucket read/write and resume ok ({mount_check_path})")
     print(f"snapshot round-trip ok ({workspace_persistence})")
 
 

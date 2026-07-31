@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -18,6 +19,7 @@ import pytest
 from openai.types.responses.response_output_item import LocalShellCall, LocalShellCallAction
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 
+import agents._debug as _debug
 import agents.sandbox.runtime_agent_preparation as runtime_agent_preparation_module
 from agents import Agent, AgentHooks, LocalShellTool, RunHooks, Runner, function_tool
 from agents.exceptions import InputGuardrailTripwireTriggered, UserError
@@ -25,6 +27,7 @@ from agents.guardrail import GuardrailFunctionOutput, InputGuardrail, OutputGuar
 from agents.items import ModelResponse, ToolCallOutputItem, TResponseInputItem
 from agents.model_settings import ModelSettings
 from agents.prompts import GenerateDynamicPromptData, Prompt
+from agents.result import RunResult, RunResultStreaming
 from agents.run import CallModelData, ModelInputData, RunConfig
 from agents.run_context import AgentHookContext, RunContextWrapper
 from agents.run_state import RunState, _build_agent_identity_map
@@ -201,6 +204,12 @@ class _LiveSessionDeltaRecorder(_FakeSession):
             self._fail_entry_batch_times -= 1
             raise RuntimeError("delta apply failed")
         return []
+
+
+class _RejectingLiveSessionDeltaRecorder(_LiveSessionDeltaRecorder):
+    async def _validate_manifest_application(self, *, only_ephemeral: bool = False) -> None:
+        _ = only_ephemeral
+        raise RuntimeError("live manifest update rejected")
 
 
 class _PathGuardingSession(_FakeSession):
@@ -723,6 +732,7 @@ class _ManifestMutationCapability(Capability):
     type: str = "manifest-mutation"
     rel_path: str
     content: bytes
+    process_calls: int
 
     def __init__(self, *, rel_path: str = "cap.txt", content: bytes = b"capability") -> None:
         super().__init__(
@@ -732,11 +742,13 @@ class _ManifestMutationCapability(Capability):
                 {
                     "rel_path": rel_path,
                     "content": content,
+                    "process_calls": 0,
                 },
             ),
         )
 
     def process_manifest(self, manifest: Manifest) -> Manifest:
+        self.process_calls += 1
         manifest.entries[self.rel_path] = File(content=self.content)
         return manifest
 
@@ -749,6 +761,23 @@ class _ManifestUsersCapability(Capability):
 
     def process_manifest(self, manifest: Manifest) -> Manifest:
         manifest.users.append(User(name="sandbox-user"))
+        return manifest
+
+
+class _ManifestPathGrantsCapability(Capability):
+    type: str = "manifest-path-grants"
+    grants: tuple[SandboxPathGrant, ...]
+    process_calls: int
+
+    def __init__(self, grants: tuple[SandboxPathGrant, ...]) -> None:
+        super().__init__(
+            type="manifest-path-grants",
+            **cast(Any, {"grants": grants, "process_calls": 0}),
+        )
+
+    def process_manifest(self, manifest: Manifest) -> Manifest:
+        self.process_calls += 1
+        manifest.extra_path_grants = self.grants
         return manifest
 
 
@@ -784,6 +813,30 @@ class _ProcessContextSessionCapability(Capability):
                     "content": f"process_calls={self.process_calls}",
                 },
             ),
+        ]
+
+
+class _DropContextTextCapability(Capability):
+    type: str = "drop-context-text"
+    text: str
+
+    def __init__(self, text: str) -> None:
+        super().__init__(type="drop-context-text", **cast(Any, {"text": text}))
+
+    def process_context(self, context: list[TResponseInputItem]) -> list[TResponseInputItem]:
+        return [item for item in context if self.text not in json.dumps(item, default=str)]
+
+
+class _RebuildContextWithoutPrivateMetadataCapability(Capability):
+    type: str = "rebuild-context-without-private-metadata"
+
+    def __init__(self) -> None:
+        super().__init__(type="rebuild-context-without-private-metadata")
+
+    def process_context(self, context: list[TResponseInputItem]) -> list[TResponseInputItem]:
+        return [
+            cast(TResponseInputItem, dict(item)) if isinstance(item, dict) else item
+            for item in context
         ]
 
 
@@ -1829,6 +1882,95 @@ async def test_runner_rebuilds_sandbox_resources_for_handoff_target_agent() -> N
     )
 
 
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_context_rewrite_releases_removed_nested_history_ownership(streamed: bool) -> None:
+    triage_model = FakeModel()
+    worker_model = FakeModel(initial_output=[get_final_output_message("done")])
+    client = _ManifestSessionClient()
+    worker = SandboxAgent(
+        name="worker",
+        model=worker_model,
+        default_manifest=Manifest(),
+        capabilities=[_DropContextTextCapability("handoff message")],
+    )
+    triage = SandboxAgent(
+        name="triage",
+        model=triage_model,
+        default_manifest=Manifest(),
+        capabilities=[],
+        handoffs=[worker],
+    )
+    triage_model.turn_outputs = [
+        [get_final_output_message("handoff message"), get_handoff_tool_call(worker)]
+    ]
+    run_config = RunConfig(
+        sandbox=SandboxRunConfig(client=client),
+        nest_handoff_history=True,
+    )
+
+    result: RunResult | RunResultStreaming
+    if streamed:
+        result = Runner.run_streamed(triage, "route this", run_config=run_config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(triage, "route this", run_config=run_config)
+
+    replay_texts = [
+        _extract_user_text(cast(dict[str, object], item))
+        for item in result.to_input_list()
+        if isinstance(item, dict) and "content" in item
+    ]
+    assert replay_texts.count("handoff message") == 1
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_context_rebuild_retains_unambiguous_nested_history_ownership(
+    streamed: bool,
+) -> None:
+    triage_model = FakeModel()
+    worker_model = FakeModel(initial_output=[get_final_output_message("done")])
+    client = _ManifestSessionClient()
+    worker = SandboxAgent(
+        name="worker",
+        model=worker_model,
+        default_manifest=Manifest(),
+        capabilities=[_RebuildContextWithoutPrivateMetadataCapability()],
+    )
+    triage = SandboxAgent(
+        name="triage",
+        model=triage_model,
+        default_manifest=Manifest(),
+        capabilities=[],
+        handoffs=[worker],
+    )
+    triage_model.turn_outputs = [
+        [get_final_output_message("handoff message"), get_handoff_tool_call(worker)]
+    ]
+    run_config = RunConfig(
+        sandbox=SandboxRunConfig(client=client),
+        nest_handoff_history=True,
+    )
+
+    result: RunResult | RunResultStreaming
+    if streamed:
+        result = Runner.run_streamed(triage, "route this", run_config=run_config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(triage, "route this", run_config=run_config)
+
+    replay_texts = [
+        _extract_user_text(cast(dict[str, object], item))
+        for item in result.to_input_list()
+        if isinstance(item, dict) and "content" in item
+    ]
+    assert replay_texts.count("handoff message") == 1
+    assert result._nested_history_owned_session_item_refs
+
+
 @pytest.mark.asyncio
 async def test_runner_resumed_handoff_materializes_manifest_for_new_sandbox_agent() -> None:
     triage_model = FakeModel()
@@ -1995,14 +2137,17 @@ async def test_unix_local_client_delete_unmounts_nested_mounts_deepest_first(
     assert order == [root / "outer" / "child", root / "outer"]
 
 
+@pytest.mark.parametrize("redacted", [True, False], ids=["redacted", "diagnostic"])
 @pytest.mark.asyncio
 async def test_unix_local_client_delete_skips_rmtree_when_unmount_fails(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    redacted: bool,
 ) -> None:
     client = UnixLocalSandboxClient()
     manifest = _unix_local_manifest(
         entries={
-            "remote": S3Mount(
+            "SECRET_REMOTE_MOUNT": S3Mount(
                 bucket="bucket",
                 mount_strategy=InContainerMountStrategy(pattern=MountpointMountPattern()),
             ),
@@ -2019,7 +2164,7 @@ async def test_unix_local_client_delete_skips_rmtree_when_unmount_fails(
         base_dir: Path,
     ) -> None:
         _ = (self, session, dest, base_dir)
-        raise RuntimeError("busy")
+        raise RuntimeError("SECRET_UNMOUNT_ERROR")
 
     def _fake_rmtree(path: Path, ignore_errors: bool = False) -> None:
         _ = (path, ignore_errors)
@@ -2028,11 +2173,33 @@ async def test_unix_local_client_delete_skips_rmtree_when_unmount_fails(
 
     monkeypatch.setattr(S3Mount, "unmount", _failing_unmount)
     monkeypatch.setattr(shutil, "rmtree", _fake_rmtree)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+    caplog.set_level(logging.WARNING)
 
     await client.delete(session)
 
     assert rmtree_called is False
     assert workspace_root.exists()
+
+    record = next(
+        record
+        for record in caplog.records
+        if "Failed to unmount UnixLocal workspace mount" in logging.Formatter().format(record)
+    )
+    mount_path = str(workspace_root / "SECRET_REMOTE_MOUNT")
+    if redacted:
+        assert record.msg == "%s"
+        assert record.args == ("Failed to unmount UnixLocal workspace mount before deleting root",)
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert "openai_agents_diagnostic_context" not in record.__dict__
+        assert mount_path not in logging.Formatter().format(record)
+        assert "SECRET_UNMOUNT_ERROR" not in logging.Formatter().format(record)
+    else:
+        assert record.__dict__["openai_agents_diagnostic_context"] == {"mount_path": mount_path}
+        assert record.exc_info is not None
+        assert record.exc_info[1] is not None
+        assert "SECRET_UNMOUNT_ERROR" in logging.Formatter().format(record)
 
     shutil.rmtree(workspace_root, ignore_errors=True)
 
@@ -3042,7 +3209,12 @@ async def test_session_manager_reapplies_capability_manifest_mutations_on_resume
 ) -> None:
     client = _FakeClient(_FakeSession(Manifest()))
     capability = _ManifestMutationCapability()
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(
+        name="worker",
+        model=FakeModel(),
+        instructions="Worker.",
+        default_manifest=Manifest(),
+    )
     session_state = TestSessionState(
         manifest=Manifest(),
         snapshot=NoopSnapshot(id="resume"),
@@ -3096,6 +3268,188 @@ async def test_session_manager_reapplies_capability_manifest_mutations_on_resume
     assert session.state.manifest.entries["cap.txt"] == File(content=b"capability")
     assert client.resume_state is not None
     assert client.resume_state.manifest.entries["cap.txt"] == File(content=b"capability")
+    assert capability.process_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_session_manager_rebinds_persisted_path_grants_from_current_manifest(
+    tmp_path: Path,
+) -> None:
+    trusted_manifest = Manifest(
+        extra_path_grants=(
+            SandboxPathGrant(
+                path="/mnt/shared-data",
+                host_path=str(tmp_path),
+                read_only=True,
+            ),
+        )
+    )
+    client = _FakeClient(_FakeSession(Manifest()))
+    agent = SandboxAgent(
+        name="worker",
+        model=FakeModel(),
+        instructions="Worker.",
+        default_manifest=trusted_manifest,
+    )
+    session_state = TestSessionState(
+        manifest=trusted_manifest,
+        snapshot=NoopSnapshot(id="resume"),
+    )
+    serialized_state = client.serialize_session_state(session_state)
+    run_state = cast(
+        RunState[Any, Agent[Any]],
+        RunState(
+            context=RunContextWrapper(context={}),
+            original_input="hello",
+            starting_agent=agent,
+        ),
+    )
+    run_state._current_agent = agent
+    run_state._sandbox = {
+        "backend_id": client.backend_id,
+        "current_agent_key": agent.name,
+        "current_agent_name": agent.name,
+        "session_state": serialized_state,
+        "sessions_by_agent": {
+            agent.name: {
+                "agent_name": agent.name,
+                "session_state": serialized_state,
+            }
+        },
+    }
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(client=client, options={"image": "sandbox"}),
+        run_state=run_state,
+    )
+
+    manager.acquire_agent(agent)
+    await manager.ensure_session(
+        agent=agent,
+        capabilities=[],
+        is_resumed_state=True,
+    )
+
+    assert client.resume_state is not None
+    assert client.resume_state.manifest.extra_path_grants == trusted_manifest.extra_path_grants
+    assert client.resume_state.path_grants_require_rebind == ()
+
+
+@pytest.mark.asyncio
+async def test_session_manager_rebinds_capability_host_path_grant_once(
+    tmp_path: Path,
+) -> None:
+    host_grant = SandboxPathGrant(
+        path="/mnt/shared-data",
+        host_path=str(tmp_path),
+        read_only=True,
+    )
+    capability = _ManifestPathGrantsCapability((host_grant,))
+    client = _FakeClient(_FakeSession(Manifest()))
+    agent = SandboxAgent(
+        name="worker",
+        model=FakeModel(),
+        instructions="Worker.",
+        default_manifest=Manifest(),
+    )
+    session_state = TestSessionState(
+        manifest=Manifest(extra_path_grants=(host_grant,)),
+        snapshot=NoopSnapshot(id="resume"),
+    )
+    serialized_state = client.serialize_session_state(session_state)
+    run_state = cast(
+        RunState[Any, Agent[Any]],
+        RunState(
+            context=RunContextWrapper(context={}),
+            original_input="hello",
+            starting_agent=agent,
+        ),
+    )
+    run_state._current_agent = agent
+    run_state._sandbox = {
+        "backend_id": client.backend_id,
+        "current_agent_key": agent.name,
+        "current_agent_name": agent.name,
+        "session_state": serialized_state,
+        "sessions_by_agent": {
+            agent.name: {
+                "agent_name": agent.name,
+                "session_state": serialized_state,
+            }
+        },
+    }
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(client=client, options={"image": "sandbox"}),
+        run_state=run_state,
+    )
+
+    manager.acquire_agent(agent)
+    await manager.ensure_session(
+        agent=agent,
+        capabilities=[capability],
+        is_resumed_state=True,
+    )
+
+    assert capability.process_calls == 1
+    assert client.resume_state is not None
+    assert client.resume_state.manifest.extra_path_grants == (host_grant,)
+    assert client.resume_state.path_grants_require_rebind == ()
+
+
+@pytest.mark.asyncio
+async def test_session_manager_rejects_unmarked_serialized_host_path(
+    tmp_path: Path,
+) -> None:
+    client = _FakeClient(_FakeSession(Manifest()))
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    serialized_state = TestSessionState(
+        manifest=Manifest(
+            extra_path_grants=(
+                SandboxPathGrant(
+                    path="/mnt/shared-data",
+                    host_path=str(tmp_path),
+                ),
+            )
+        ),
+        snapshot=NoopSnapshot(id="resume"),
+    ).model_dump(mode="json")
+    run_state = cast(
+        RunState[Any, Agent[Any]],
+        RunState(
+            context=RunContextWrapper(context={}),
+            original_input="hello",
+            starting_agent=agent,
+        ),
+    )
+    run_state._current_agent = agent
+    run_state._sandbox = {
+        "backend_id": client.backend_id,
+        "current_agent_key": agent.name,
+        "current_agent_name": agent.name,
+        "session_state": serialized_state,
+        "sessions_by_agent": {
+            agent.name: {
+                "agent_name": agent.name,
+                "session_state": serialized_state,
+            }
+        },
+    }
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(client=client, options={"image": "sandbox"}),
+        run_state=run_state,
+    )
+
+    manager.acquire_agent(agent)
+    with pytest.raises(ValueError, match="requires current trusted host_path"):
+        await manager.ensure_session(
+            agent=agent,
+            capabilities=[],
+            is_resumed_state=True,
+        )
+
+    assert client.resume_state is None
 
 
 @pytest.mark.asyncio
@@ -3227,6 +3581,61 @@ async def test_session_manager_starts_stopped_injected_session_with_manifest_mut
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processed_grants",
+    [
+        (
+            SandboxPathGrant(
+                path="/mnt/shared-data",
+                host_path="/native/new",
+                read_only=True,
+            ),
+        ),
+        (
+            SandboxPathGrant(path="/mnt/shared-data"),
+            SandboxPathGrant(
+                path="/mnt/shared-data",
+                host_path="/native/old",
+                read_only=True,
+            ),
+        ),
+    ],
+    ids=["changed-host-source", "mixed-duplicate-target"],
+)
+async def test_session_manager_rejects_stopped_injected_session_host_mount_changes(
+    processed_grants: tuple[SandboxPathGrant, ...],
+) -> None:
+    current_grants = (
+        SandboxPathGrant(
+            path="/mnt/shared-data",
+            host_path="/native/old",
+            read_only=True,
+        ),
+    )
+    live_session = _LiveSessionDeltaRecorder(
+        Manifest(extra_path_grants=current_grants),
+    )
+    capability = _ManifestPathGrantsCapability(processed_grants)
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(session=live_session),
+        run_state=None,
+    )
+
+    manager.acquire_agent(agent)
+    with pytest.raises(ValueError, match="host-backed `manifest.extra_path_grants`"):
+        await manager.ensure_session(
+            agent=agent,
+            capabilities=[capability],
+            is_resumed_state=False,
+        )
+
+    assert live_session.start_calls == 0
+    assert live_session.state.manifest.extra_path_grants == current_grants
+
+
+@pytest.mark.asyncio
 async def test_session_manager_materializes_running_injected_session_manifest_mutation() -> None:
     live_session = _LiveSessionDeltaRecorder(Manifest())
     live_session._running = True
@@ -3256,6 +3665,31 @@ async def test_session_manager_materializes_running_injected_session_manifest_mu
     assert live_session.stop_calls == 0
     assert live_session.shutdown_calls == 0
     assert payload is None
+
+
+@pytest.mark.asyncio
+async def test_session_manager_validates_running_manifest_update_before_materialization() -> None:
+    inner = _RejectingLiveSessionDeltaRecorder(Manifest())
+    inner._running = True
+    live_session = SandboxSession(inner)
+    capability = _ManifestMutationCapability()
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(session=live_session),
+        run_state=None,
+    )
+
+    manager.acquire_agent(agent)
+    with pytest.raises(RuntimeError, match="live manifest update rejected"):
+        await manager.ensure_session(
+            agent=agent,
+            capabilities=[capability],
+            is_resumed_state=False,
+        )
+
+    assert inner.applied_entry_batches == []
+    assert live_session.state.manifest.entries == {}
 
 
 @pytest.mark.asyncio
@@ -3917,6 +4351,115 @@ def test_unix_local_confined_exec_command_allows_common_darwin_interpreter_roots
     )
     assert '(deny file-write* (subpath "/opt"))' in profile
     assert '(allow file-write* (subpath "/opt/homebrew"))' not in profile
+
+
+def test_unix_local_confined_exec_command_allows_python_virtual_environment_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    host_project_root = tmp_path / "host-project"
+    virtual_env_root = host_project_root / ".venv"
+    virtual_env_bin = virtual_env_root / "bin"
+    virtual_env_bin.mkdir(parents=True)
+    (virtual_env_root / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    python_executable = virtual_env_bin / "python"
+    python_executable.write_text("", encoding="utf-8")
+    session = UnixLocalSandboxSession.from_state(
+        UnixLocalSandboxSessionState(
+            session_id=uuid.uuid4(),
+            manifest=_unix_local_manifest(root=str(workspace_root)),
+            snapshot=NoopSnapshot(id="darwin-virtual-environment"),
+            workspace_root_owned=False,
+        )
+    )
+    unix_local = cast(Any, unix_local_module)
+    path_env = str(virtual_env_bin)
+
+    def _fake_which(name: str, path: str | None = None) -> str | None:
+        if name == "sandbox-exec":
+            return "/usr/bin/sandbox-exec"
+        if name == "python":
+            assert path == path_env
+            return str(python_executable)
+        return None
+
+    monkeypatch.setattr(unix_local.sys, "platform", "darwin")
+    monkeypatch.setattr(unix_local.shutil, "which", _fake_which)
+    monkeypatch.setenv("PATH", path_env)
+
+    command = session._confined_exec_command(
+        command_parts=["python", "-V"],
+        workspace_root=workspace_root,
+        env={"PATH": path_env},
+    )
+    profile_lines = set(command[2].splitlines())
+
+    assert (
+        f'(allow file-read-data file-read-metadata (subpath "{virtual_env_root}"))' in profile_lines
+    )
+    assert (
+        f'(allow file-read-data file-read-metadata (subpath "{host_project_root}"))'
+        not in profile_lines
+    )
+    assert f'(allow file-write* (subpath "{virtual_env_root}"))' not in profile_lines
+
+
+def test_unix_local_confined_exec_command_does_not_expand_manifest_virtual_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    host_project_root = tmp_path / "host-project"
+    virtual_env_root = host_project_root / ".venv"
+    virtual_env_bin = virtual_env_root / "bin"
+    virtual_env_bin.mkdir(parents=True)
+    (virtual_env_root / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    python_executable = virtual_env_bin / "python"
+    python_executable.write_text("", encoding="utf-8")
+    session = UnixLocalSandboxSession.from_state(
+        UnixLocalSandboxSessionState(
+            session_id=uuid.uuid4(),
+            manifest=_unix_local_manifest(root=str(workspace_root)),
+            snapshot=NoopSnapshot(id="darwin-manifest-virtual-environment"),
+            workspace_root_owned=False,
+        )
+    )
+    unix_local = cast(Any, unix_local_module)
+    manifest_path = str(virtual_env_bin)
+
+    def _fake_which(name: str, path: str | None = None) -> str | None:
+        if name == "sandbox-exec":
+            return "/usr/bin/sandbox-exec"
+        if name == "python":
+            assert path == manifest_path
+            return str(python_executable)
+        return None
+
+    monkeypatch.setattr(unix_local.sys, "platform", "darwin")
+    monkeypatch.setattr(unix_local.shutil, "which", _fake_which)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    command = session._confined_exec_command(
+        command_parts=["python", "-V"],
+        workspace_root=workspace_root,
+        env={"PATH": manifest_path},
+    )
+    profile_lines = set(command[2].splitlines())
+
+    assert (
+        f'(allow file-read-data file-read-metadata (subpath "{virtual_env_bin}"))' in profile_lines
+    )
+    assert (
+        f'(allow file-read-data file-read-metadata (subpath "{virtual_env_root}"))'
+        not in profile_lines
+    )
+    assert (
+        f'(allow file-read-data file-read-metadata (subpath "{host_project_root}"))'
+        not in profile_lines
+    )
 
 
 def test_unix_local_darwin_exec_profile_allows_extra_path_grants(tmp_path: Path) -> None:

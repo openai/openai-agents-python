@@ -282,6 +282,35 @@ async def test_local_file_allows_extra_path_granted_source_outside_base_dir(
 
 
 @pytest.mark.asyncio
+async def test_local_file_uses_host_path_for_source_grant(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession(
+        Manifest(
+            extra_path_grants=(
+                SandboxPathGrant(
+                    path="/mnt/shared-data",
+                    host_path=str(outside),
+                    read_only=True,
+                ),
+            )
+        ),
+    )
+
+    result = await LocalFile(src=outside / "secret.txt").apply(
+        session,
+        Path("/workspace/copied.txt"),
+        base,
+    )
+
+    assert result[0].path == Path("/workspace/copied.txt")
+    assert session.writes[Path("/workspace/copied.txt")] == b"secret"
+
+
+@pytest.mark.asyncio
 async def test_local_file_rejects_source_outside_extra_path_grants(tmp_path: Path) -> None:
     base = tmp_path / "base"
     outside = tmp_path / "outside"

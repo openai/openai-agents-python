@@ -17,6 +17,49 @@ from agents.sandbox.entries import BaseEntry, File
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.sandbox_agent import SandboxAgent
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.types import User
+
+
+def test_sandbox_agent_normalizes_first_party_dictionary_configuration() -> None:
+    agent = SandboxAgent(
+        name="sandbox",
+        model_settings={"reasoning": {"context": "all_turns"}},
+        default_manifest={"root": "/workspace"},
+        run_as={"name": "agent"},
+    )
+
+    assert agent.model_settings.reasoning is not None
+    assert agent.model_settings.reasoning.context == "all_turns"
+    assert isinstance(agent.default_manifest, Manifest)
+    assert isinstance(agent.run_as, User)
+    assert agent.run_as.name == "agent"
+
+
+def test_sandbox_agent_rejects_untrusted_manifest_path_grants() -> None:
+    with pytest.raises(
+        TypeError,
+        match=(
+            r"sandbox\.default_manifest\.extra_path_grants must be configured "
+            r"on a trusted Manifest"
+        ),
+    ):
+        SandboxAgent(name="sandbox", default_manifest={"extra_path_grants": [{"path": "/tmp"}]})
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        Manifest(root="/workspace").model_dump(),
+        Manifest(root="/workspace").model_dump(mode="json"),
+    ],
+)
+def test_sandbox_agent_accepts_serialized_manifest_without_path_grants(
+    manifest: dict[str, Any],
+) -> None:
+    agent = SandboxAgent(name="sandbox", default_manifest=manifest)
+
+    assert isinstance(agent.default_manifest, Manifest)
+    assert agent.default_manifest.extra_path_grants == ()
 
 
 class _Capability:

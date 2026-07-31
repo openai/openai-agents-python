@@ -51,18 +51,15 @@ graph LR
 먼저 몇 가지 에이전트를 설정하겠습니다. 이 SDK로 에이전트를 만들어 본 적이 있다면 익숙할 것입니다. 몇 개의 에이전트와 하나의 핸드오프, 하나의 도구를 사용합니다.
 
 ```python
-import asyncio
 import random
 
-from agents import (
-    Agent,
-    function_tool,
-)
+from agents import Agent
+from agents.decorators import tool
 from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 
 
 
-@function_tool
+@tool
 def get_weather(city: str) -> str:
     """Get the weather for a given city."""
     print(f"[debug] get_weather called with city: {city}")
@@ -133,11 +130,8 @@ import random
 import numpy as np
 import sounddevice as sd
 
-from agents import (
-    Agent,
-    function_tool,
-    set_tracing_disabled,
-)
+from agents import Agent
+from agents.decorators import tool
 from agents.voice import (
     AudioInput,
     SingleAgentVoiceWorkflow,
@@ -146,7 +140,7 @@ from agents.voice import (
 from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 
 
-@function_tool
+@tool
 def get_weather(city: str) -> str:
     """Get the weather for a given city."""
     print(f"[debug] get_weather called with city: {city}")

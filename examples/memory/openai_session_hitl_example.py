@@ -8,7 +8,12 @@ requiring approval for specific tool calls.
 
 import asyncio
 
-from agents import Agent, OpenAIConversationsSession, Runner, function_tool
+from agents import (
+    Agent,
+    OpenAIConversationsSession,
+    Runner,
+)
+from agents.decorators import tool
 from examples.auto_mode import confirm_with_fallback, input_with_fallback, is_auto_mode
 
 
@@ -17,7 +22,7 @@ async def _needs_approval(_ctx, _params, _call_id) -> bool:
     return True
 
 
-@function_tool(needs_approval=_needs_approval)
+@tool(needs_approval=_needs_approval)
 def get_weather(location: str) -> str:
     """Get weather for a location.
 

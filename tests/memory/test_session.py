@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agents import Agent, RunConfig, Runner, SQLiteSession, TResponseInputItem
+from agents import Agent, RunConfig, Runner, SessionSettings, SQLiteSession, TResponseInputItem
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 
@@ -430,6 +430,67 @@ async def test_sqlite_session_get_items_with_limit():
         session.close()
 
 
+@pytest.mark.asyncio
+async def test_sqlite_session_get_items_limit_skips_corrupt_newest_rows():
+    """limit counts valid items, expanding past corrupt newest rows."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_limit_corrupt.db"
+        session = SQLiteSession("limit_corrupt", db_path)
+
+        await session.add_items(
+            [
+                {"role": "user", "content": "valid 0"},
+                {"role": "assistant", "content": "valid 1"},
+                {"role": "user", "content": "valid 2"},
+            ]
+        )
+
+        with session._locked_connection() as conn:
+            conn.execute(
+                f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
+                (session.session_id, "not valid json {{{"),
+            )
+            conn.commit()
+
+        # Newest row is corrupt; limit=2 should still return the two latest valid items.
+        limited = await session.get_items(limit=2)
+        assert [item.get("content") for item in limited] == ["valid 1", "valid 2"]
+
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_get_items_session_settings_limit_skips_corrupt_rows():
+    """session_settings.limit also counts valid items when newest rows are corrupt."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_settings_limit_corrupt.db"
+        session = SQLiteSession(
+            "settings_limit_corrupt",
+            db_path,
+            session_settings=SessionSettings(limit=2),
+        )
+
+        await session.add_items(
+            [
+                {"role": "user", "content": "valid 0"},
+                {"role": "assistant", "content": "valid 1"},
+                {"role": "user", "content": "valid 2"},
+            ]
+        )
+
+        with session._locked_connection() as conn:
+            conn.execute(
+                f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
+                (session.session_id, "not valid json {{{"),
+            )
+            conn.commit()
+
+        limited = await session.get_items()
+        assert [item.get("content") for item in limited] == ["valid 1", "valid 2"]
+
+        session.close()
+
+
 @pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
 @pytest.mark.asyncio
 async def test_session_memory_appends_list_input_by_default(runner_method):
@@ -692,6 +753,22 @@ async def test_session_settings_constructor():
     assert session.session_settings.limit == 5
 
     session.close()
+
+
+@pytest.mark.asyncio
+async def test_session_settings_constructor_normalizes_dictionary() -> None:
+    session = SQLiteSession("dictionary_settings_test", session_settings={"limit": 0})
+
+    assert isinstance(session.session_settings, SessionSettings)
+    assert session.session_settings.limit == 0
+    assert session.session_settings.resolve({"limit": 4}).limit == 4
+
+    session.close()
+
+
+def test_session_settings_rejects_unknown_dictionary_fields() -> None:
+    with pytest.raises(TypeError, match="Unknown session settings: limitt"):
+        SQLiteSession("invalid_settings_test", session_settings={"limitt": 1})
 
 
 @pytest.mark.asyncio

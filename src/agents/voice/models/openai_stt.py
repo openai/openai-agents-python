@@ -11,9 +11,10 @@ from typing import Any, cast
 from openai import AsyncOpenAI
 
 from ... import _debug
-from ...exceptions import AgentsException
+from ...exceptions import AgentsException, UserError
 from ...logger import logger
 from ...tracing import Span, SpanError, TranscriptionSpanData, transcription_span
+from ...util._error_tracing import get_trace_error
 from ..exceptions import STTWebsocketConnectionError
 from ..imports import np, npt, websockets
 from ..input import AudioInput, StreamedAudioInput
@@ -40,13 +41,17 @@ class WebsocketDoneSentinel:
 
 
 def _audio_to_base64(audio_data: list[npt.NDArray[np.int16 | np.float32]]) -> str:
-    concatenated_audio = np.concatenate(audio_data)
-    if concatenated_audio.dtype == np.float32:
-        # convert to int16
-        concatenated_audio = np.clip(concatenated_audio, -1.0, 1.0)
-        concatenated_audio = (concatenated_audio * 32767).astype(np.int16)
-    audio_bytes = concatenated_audio.tobytes()
-    return base64.b64encode(audio_bytes).decode("utf-8")
+    return _audio_buffer_to_base64(np.concatenate(audio_data))
+
+
+def _audio_buffer_to_base64(buffer: npt.NDArray[np.int16 | np.float32]) -> str:
+    if buffer.dtype == np.float32:
+        # Convert to int16.
+        buffer = np.clip(buffer, -1.0, 1.0)
+        buffer = (buffer * 32767).astype(np.int16)
+    elif buffer.dtype != np.int16:
+        raise UserError("Buffer must be a numpy array of int16 or float32")
+    return base64.b64encode(buffer.tobytes()).decode("utf-8")
 
 
 async def _wait_for_event(
@@ -197,7 +202,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             raise wrapped_err from e
         except Exception as e:
             await self._output_queue.put(ErrorSentinel(e))
-            raise e
+            raise
 
         await self._configure_session()
 
@@ -247,7 +252,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                 break
             except Exception as e:
                 await self._output_queue.put(ErrorSentinel(e))
-                raise e
+                raise
         await self._output_queue.put(SessionCompleteSentinel())
 
     async def _stream_audio(
@@ -266,7 +271,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                     json.dumps(
                         {
                             "type": "input_audio_buffer.append",
-                            "audio": base64.b64encode(buffer.tobytes()).decode("utf-8"),
+                            "audio": _audio_buffer_to_base64(buffer),
                         }
                     )
                 )
@@ -274,7 +279,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                 break
             except Exception as e:
                 await self._output_queue.put(ErrorSentinel(e))
-                raise e
+                raise
 
             await asyncio.sleep(0)  # yield control
 
@@ -298,7 +303,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                     raise AgentsException("Listener task not initialized")
         except Exception as e:
             await self._output_queue.put(ErrorSentinel(e))
-            raise e
+            raise
 
     def _check_errors(self) -> None:
         if self._connection_task and self._connection_task.done():
@@ -341,7 +346,11 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             try:
                 turn = await self._output_queue.get()
             except asyncio.CancelledError:
-                break
+                if self._tracing_span:
+                    self._end_turn("")
+                if self._websocket:
+                    await self._websocket.close()
+                raise
 
             if (
                 turn is None
@@ -433,8 +442,16 @@ class OpenAISTTModel(STTModel):
                 return response.text
             except Exception as e:
                 span.span_data.output = ""
-                span.set_error(SpanError(message=str(e), data={}))
-                raise e
+                span.set_error(
+                    SpanError(
+                        message=get_trace_error(
+                            trace_include_sensitive_data=trace_include_sensitive_data,
+                            error_message=str(e),
+                        ),
+                        data={},
+                    )
+                )
+                raise
 
     async def create_session(
         self,

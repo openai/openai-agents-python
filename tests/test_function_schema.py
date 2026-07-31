@@ -6,9 +6,9 @@ import pytest
 from pydantic import BaseModel, Field, ValidationError
 from typing_extensions import TypedDict
 
-from agents import RunContextWrapper
+from agents import RunContextWrapper, function_tool
 from agents.exceptions import UserError
-from agents.function_schema import function_schema
+from agents.function_schema import function_schema, generate_func_documentation
 
 
 def no_args_function():
@@ -885,3 +885,247 @@ def test_function_with_annotated_field_multiple_constraints():
 
     with pytest.raises(ValidationError):  # zero factor
         fs.params_pydantic_model(**{"score": 50, "factor": 0.0})
+
+
+def missing_blank_line_google_function(city: str, units: str):
+    """Get the weather for a city.
+    Args:
+        city: The city to get weather for.
+        units: Temperature units to use.
+    """
+    return f"{city} {units}"
+
+
+def blank_line_google_function(city: str, units: str):
+    """Get the weather for a city.
+
+    Args:
+        city: The city to get weather for.
+        units: Temperature units to use.
+    """
+    return f"{city} {units}"
+
+
+def test_google_docstring_missing_blank_line_before_args():
+    """A Google docstring whose summary is immediately followed by ``Args:`` (no blank line)
+    should still yield parameter descriptions and a clean function description."""
+    fs = function_schema(missing_blank_line_google_function, strict_json_schema=False)
+
+    properties = fs.params_json_schema.get("properties", {})
+    assert properties["city"]["description"] == "The city to get weather for."
+    assert properties["units"]["description"] == "Temperature units to use."
+
+    assert fs.description == "Get the weather for a city."
+    assert "Args:" not in (fs.description or "")
+
+
+def test_google_docstring_missing_blank_line_matches_blank_line_form():
+    """The missing-blank-line variant must produce the exact same schema as the well-formed
+    variant that includes the blank line."""
+    fixed = function_schema(missing_blank_line_google_function, strict_json_schema=False)
+    control = function_schema(blank_line_google_function, strict_json_schema=False)
+
+    assert fixed.description == control.description
+    assert fixed.params_json_schema["properties"] == control.params_json_schema["properties"]
+
+
+def test_google_docstring_blank_line_form_is_unchanged():
+    """Well-formed docstrings (with the blank line already present) must be parsed
+    byte-identically before and after the normalization: this guards against the helper
+    accidentally rewriting docstrings that do not need it."""
+    doc = generate_func_documentation(blank_line_google_function)
+    assert doc.description == "Get the weather for a city."
+    assert doc.param_descriptions == {
+        "city": "The city to get weather for.",
+        "units": "Temperature units to use.",
+    }
+
+
+def test_google_docstring_missing_blank_line_function_tool():
+    """End-to-end: a @function_tool-decorated function with the missing-blank-line docstring
+    must expose parameter descriptions and a clean tool description."""
+
+    @function_tool
+    def weather(city: str, units: str) -> str:
+        """Get the weather for a city.
+        Args:
+            city: The city to get weather for.
+            units: Temperature units to use.
+        """
+        return f"{city} {units}"
+
+    properties = weather.params_json_schema.get("properties", {})
+    assert properties["city"]["description"] == "The city to get weather for."
+    assert properties["units"]["description"] == "Temperature units to use."
+    assert "Args:" not in (weather.description or "")
+
+
+def section_body_before_args_google_function(city: str, units: str):
+    """Get the weather for a city.
+
+    Note:
+        Results are cached.
+    Args:
+        city: The city to get weather for.
+        units: Temperature units to use.
+    """
+    return f"{city} {units}"
+
+
+def section_body_before_args_blank_line_google_function(city: str, units: str):
+    """Get the weather for a city.
+
+    Note:
+        Results are cached.
+
+    Args:
+        city: The city to get weather for.
+        units: Temperature units to use.
+    """
+    return f"{city} {units}"
+
+
+def test_google_docstring_missing_blank_line_after_section_body():
+    """A Google docstring whose ``Args:`` directly follows another section's indented body
+    (no blank line) should still yield parameter descriptions. griffe skips the header
+    whenever no blank line sits above it, regardless of how the preceding line is indented."""
+    fs = function_schema(section_body_before_args_google_function, strict_json_schema=False)
+
+    properties = fs.params_json_schema.get("properties", {})
+    assert properties["city"]["description"] == "The city to get weather for."
+    assert properties["units"]["description"] == "Temperature units to use."
+
+    assert "Args:" not in (fs.description or "")
+
+
+def test_google_docstring_after_section_body_matches_blank_line_form():
+    """The variant missing the blank line after a preceding section's body must produce the
+    exact same schema as the well-formed variant that includes it."""
+    fixed = function_schema(section_body_before_args_google_function, strict_json_schema=False)
+    control = function_schema(
+        section_body_before_args_blank_line_google_function, strict_json_schema=False
+    )
+
+    assert fixed.description == control.description
+    assert fixed.params_json_schema["properties"] == control.params_json_schema["properties"]
+
+
+def starred_args_google_function(x: int, *numbers: float, **kwargs: str) -> str:
+    """Add numbers to a base.
+
+    Args:
+        x: The base value.
+        *numbers: The numbers to add.
+        **kwargs: Extra options.
+    """
+    return f"{x} {numbers} {kwargs}"
+
+
+def starred_args_numpy_function(x: int, *numbers: float, **kwargs: str) -> str:
+    """Add numbers to a base.
+
+    Parameters
+    ----------
+    x : int
+        The base value.
+    *numbers : float
+        The numbers to add.
+    **kwargs : str
+        Extra options.
+    """
+    return f"{x} {numbers} {kwargs}"
+
+
+def starred_args_sphinx_function(x: int, *numbers: float, **kwargs: str) -> str:
+    """Add numbers to a base.
+
+    :param x: The base value.
+    :param numbers: The numbers to add.
+    :param kwargs: Extra options.
+    """
+    return f"{x} {numbers} {kwargs}"
+
+
+@pytest.mark.parametrize(
+    "func,style",
+    [
+        (starred_args_google_function, "google"),
+        (starred_args_numpy_function, "numpy"),
+        (starred_args_sphinx_function, "sphinx"),
+    ],
+)
+def test_variadic_param_descriptions_preserved(func, style):
+    """Google and NumPy style docstrings write variadic parameters with their stars
+    ("*numbers:", "**kwargs:"). The parsed descriptions must still attach to the bare
+    signature names in the JSON schema, matching the sphinx form."""
+    fs = function_schema(func, docstring_style=style, strict_json_schema=False)
+
+    properties = fs.params_json_schema.get("properties", {})
+    assert properties["x"]["description"] == "The base value."
+    assert properties["numbers"]["description"] == "The numbers to add."
+    assert properties["kwargs"]["description"] == "Extra options."
+
+
+class _ElementwiseEqual:
+    """Mimics numpy-array equality: ``==`` returns a container whose truthiness raises."""
+
+    # Annotated ``Any`` like numpy's own stubs: elementwise ``__eq__`` does not
+    # return ``bool``.
+    def __eq__(self, other: object) -> Any:
+        return _ElementwiseEqual()
+
+    def __ne__(self, other: object) -> Any:
+        return _ElementwiseEqual()
+
+    def __bool__(self) -> bool:
+        raise ValueError("The truth value of an elementwise comparison is ambiguous.")
+
+    def __hash__(self) -> int:
+        return 0
+
+
+class _AlwaysEqual:
+    """A default value whose ``__eq__`` answers True for anything, including sentinels."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    def __hash__(self) -> int:
+        return 0
+
+
+_ELEMENTWISE_DEFAULT = _ElementwiseEqual()
+_ALWAYS_EQUAL_DEFAULT = _AlwaysEqual()
+
+
+def test_default_with_elementwise_eq_does_not_crash():
+    """Defaults must be compared to the inspect sentinel by identity: a numpy-style
+    default whose ``==`` returns a non-boolean container used to crash schema creation."""
+
+    def score(x: int, weights: Any = _ELEMENTWISE_DEFAULT) -> int:
+        return x
+
+    fs = function_schema(score, strict_json_schema=False)
+    assert "weights" not in fs.params_json_schema.get("required", [])
+
+    parsed = fs.params_pydantic_model(x=1)
+    args, kwargs = fs.to_call_args(parsed)
+    assert isinstance((args + list(kwargs.values()))[-1], _ElementwiseEqual)
+
+
+def test_default_with_always_true_eq_stays_optional():
+    """A default whose ``__eq__`` answers True used to be mistaken for the no-default
+    sentinel, silently marking the parameter required and discarding the default."""
+
+    def strip(text: str, punctuation: Any = _ALWAYS_EQUAL_DEFAULT) -> str:
+        return text
+
+    fs = function_schema(strip, strict_json_schema=False)
+    assert fs.params_json_schema.get("required", []) == ["text"]
+
+    parsed = fs.params_pydantic_model(text="hi")
+    args, kwargs = fs.to_call_args(parsed)
+    assert isinstance((args + list(kwargs.values()))[-1], _AlwaysEqual)

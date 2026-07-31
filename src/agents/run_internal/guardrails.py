@@ -16,6 +16,7 @@ from ..result import RunResultStreaming
 from ..run_context import RunContextWrapper, TContext
 from ..tracing import Span, SpanError, guardrail_span
 from ..util import _error_tracing
+from .run_steps import QueueCompleteSentinel
 
 __all__ = [
     "run_single_input_guardrail",
@@ -95,11 +96,19 @@ async def run_input_guardrails_with_queue(
                     _error_tracing.attach_error_to_current_span(span_error)
                 break
             queue.put_nowait(result)
-    except BaseException:
+    except BaseException as error:
         for t in guardrail_tasks:
             if not t.done():
                 t.cancel()
         await asyncio.gather(*guardrail_tasks, return_exceptions=True)
+        if (
+            isinstance(error, Exception)
+            and asyncio.current_task() is streamed_result._input_guardrails_task
+            and not streamed_result.is_complete
+        ):
+            if streamed_result.run_loop_task and not streamed_result.run_loop_task.done():
+                streamed_result.run_loop_task.cancel()
+            streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
         raise
 
     streamed_result.input_guardrail_results = (

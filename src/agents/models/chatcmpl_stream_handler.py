@@ -377,6 +377,12 @@ class ChatCmplStreamHandler:
 
                 if has_passthrough_output:
                     passthrough_choices.append(choice)
+                elif choice.finish_reason == "content_filter":
+                    # A content-filtered choice ends the stream with an empty delta, so it
+                    # would otherwise be dropped here and the handler would never see the
+                    # finish_reason it needs to synthesize the refusal. Forward a
+                    # delta-stripped copy so buffering semantics are unchanged.
+                    passthrough_choices.append(choice.model_copy(update={"delta": ChoiceDelta()}))
 
             if passthrough_choices or chunk.usage is not None:
                 yield chunk.model_copy(update={"choices": passthrough_choices})

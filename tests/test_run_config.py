@@ -2,9 +2,19 @@ from __future__ import annotations
 
 import pytest
 
-from agents import Agent, RunConfig, Runner, ToolExecutionConfig, ToolNotFoundBehavior
+from agents import (
+    Agent,
+    RunConfig,
+    Runner,
+    SessionSettings,
+    ToolExecutionConfig,
+    ToolNotFoundBehavior,
+)
 from agents.model_settings import ModelSettings
 from agents.models.interface import Model, ModelProvider
+from agents.run_config import SandboxConcurrencyLimits, SandboxRunConfig
+from agents.sandbox.manifest import Manifest
+from agents.sandbox.snapshot import NoopSnapshotSpec
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message
@@ -22,6 +32,99 @@ class DummyProvider(ModelProvider):
         # record the requested model name and return our test model
         self.last_requested = model_name
         return self.model_to_return
+
+
+def test_run_config_normalizes_first_party_dictionary_settings() -> None:
+    config = RunConfig(
+        model_settings={"reasoning": {"context": "all_turns"}, "temperature": 0.0},
+        session_settings={"limit": 5},
+        tool_execution={"max_function_tool_concurrency": 2},
+        sandbox={
+            "manifest": {"root": "/workspace"},
+            "snapshot": {"type": "noop"},
+            "concurrency_limits": {"manifest_entries": 3},
+        },
+    )
+
+    assert isinstance(config.model_settings, ModelSettings)
+    assert config.model_settings.reasoning is not None
+    assert config.model_settings.reasoning.context == "all_turns"
+    assert config.model_settings.temperature == 0.0
+    assert isinstance(config.session_settings, SessionSettings)
+    assert config.session_settings.limit == 5
+    assert isinstance(config.tool_execution, ToolExecutionConfig)
+    assert config.tool_execution.max_function_tool_concurrency == 2
+    assert isinstance(config.sandbox, SandboxRunConfig)
+    assert isinstance(config.sandbox.manifest, Manifest)
+    assert isinstance(config.sandbox.snapshot, NoopSnapshotSpec)
+    assert isinstance(config.sandbox.concurrency_limits, SandboxConcurrencyLimits)
+    assert config.sandbox.concurrency_limits.manifest_entries == 3
+
+
+def test_run_config_preserves_typed_configuration_instances() -> None:
+    settings = ModelSettings(temperature=0.2)
+    session_settings = SessionSettings(limit=3)
+    config = RunConfig(model_settings=settings, session_settings=session_settings)
+
+    assert config.model_settings is settings
+    assert config.session_settings is session_settings
+
+
+def test_run_config_rejects_untrusted_manifest_path_grants() -> None:
+    with pytest.raises(
+        TypeError,
+        match=r"sandbox\.manifest\.extra_path_grants must be configured on a trusted Manifest",
+    ):
+        RunConfig(sandbox={"manifest": {"extra_path_grants": [{"path": "/tmp"}]}})
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        Manifest(root="/workspace").model_dump(),
+        Manifest(root="/workspace").model_dump(mode="json"),
+    ],
+)
+def test_run_config_accepts_serialized_manifest_without_path_grants(
+    manifest: dict[str, object],
+) -> None:
+    config = RunConfig(sandbox={"manifest": manifest})
+
+    assert config.sandbox is not None
+    assert isinstance(config.sandbox.manifest, Manifest)
+    assert config.sandbox.manifest.extra_path_grants == ()
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        ({"model_settings": {"temperatur": 0.2}}, "Unknown model settings: temperatur"),
+        ({"session_settings": {"limitt": 2}}, "Unknown session settings: limitt"),
+        (
+            {"tool_execution": {"max_function_tool_concurrenc": 2}},
+            "Unknown run_config.tool_execution settings: max_function_tool_concurrenc",
+        ),
+    ],
+)
+def test_run_config_rejects_unknown_first_party_dictionary_fields(
+    settings: dict[str, object], message: str
+) -> None:
+    with pytest.raises(TypeError, match=message):
+        RunConfig(**settings)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_runner_accepts_dictionary_run_configuration() -> None:
+    model = FakeModel(initial_output=[get_text_message("done")])
+    agent = Agent(name="test", model=model)
+
+    result = await Runner.run(
+        agent,
+        "hello",
+        run_config={"model_settings": {"temperature": 0.0}},
+    )
+
+    assert result.final_output == "done"
 
 
 @pytest.mark.asyncio

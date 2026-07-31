@@ -80,6 +80,24 @@ def fetch_events() -> list[TestSpanProcessorEvent]:
     return SPAN_PROCESSOR_TESTING._events
 
 
+def fetch_span_errors(span_type: str) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+    for span in fetch_ordered_spans():
+        exported = span.export()
+        if not exported:
+            continue
+        span_data = exported["span_data"]
+        exported_span_type = span_data.get("type")
+        if exported_span_type == "custom" and isinstance(span_data.get("data"), dict):
+            exported_span_type = span_data["data"].get("sdk_span_type", exported_span_type)
+        if exported_span_type != span_type:
+            continue
+        error = exported.get("error")
+        if error is not None:
+            errors.append(error)
+    return errors
+
+
 def assert_no_spans():
     spans = fetch_ordered_spans()
     if spans:

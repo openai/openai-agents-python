@@ -19,6 +19,19 @@ We will increment `Z` for non-breaking changes:
 
 ## Breaking change changelog
 
+### 0.19.0
+
+This minor release does **not** introduce a breaking change. The minor version bump reflects a significant new OpenAI Responses feature area: Programmatic Tool Calling.
+
+Highlights:
+
+-   Added [`ProgrammaticToolCallingTool`][agents.tool.ProgrammaticToolCallingTool], which lets supported OpenAI Responses models generate JavaScript to coordinate eligible tools. It supports per-tool `allowed_callers`, structured function-tool outputs, and integration with Runner streaming, guardrails, approvals, sessions, and `RunState`. See [Programmatic Tool Calling](tools.md#programmatic-tool-calling) for setup and constraints.
+-   Added the public `agents.decorators` module and the shorter `@tool` alias alongside the existing function and guardrail decorators. Function tools now also support async callable objects.
+-   SDK configuration now consistently accepts either typed settings objects or dictionaries across agents, runs, models, sessions, sandboxes, and voice pipelines, with validation for unknown settings.
+-   Hardened error and diagnostic logging across models, tools, MCP, Realtime, sessions, sandboxes, and tracing to avoid exposing raw sensitive payloads while preserving useful debugging context.
+-   Improved AnyLLM, LiteLLM, and Chat Completions compatibility, preserved session history across model retries, and added provider retry guidance for WebSocket overloads that occur before a response starts so opt-in Runner retry policies can act when replay is permitted.
+-   Added [create-time-only S3 mounts for Vercel sandboxes](sandbox/clients.md#mounts-and-remote-storage) through `VercelCloudBucketMountStrategy`. Mounted sessions exclude bucket contents from workspace persistence and intentionally do not support dynamic mount changes or session resume.
+
 ### 0.18.0
 
 This minor release does **not** introduce a breaking change. The minor version bump is for the Realtime agents default model update only.

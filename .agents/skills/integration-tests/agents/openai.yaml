@@ -1,0 +1,4 @@
+interface:
+  display_name: "Integration Tests"
+  short_description: "Run packaged Python SDK integration tests"
+  default_prompt: "Use $integration-tests to run the packaged Python SDK integration suite."

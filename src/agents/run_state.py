@@ -8,7 +8,7 @@ import dataclasses
 import json
 import threading
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, Literal, cast
@@ -33,6 +33,8 @@ from openai.types.responses.response_output_item import (
     LocalShellCall,
     McpApprovalRequest,
     McpListTools,
+    Program,
+    ProgramOutput,
 )
 from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypeVar
@@ -57,7 +59,7 @@ from .guardrail import (
     OutputGuardrail,
     OutputGuardrailResult,
 )
-from .handoffs import Handoff
+from .handoffs import Handoff, handoff as create_handoff
 from .items import (
     CompactionItem,
     HandoffCallItem,
@@ -75,11 +77,27 @@ from .items import (
     ToolSearchCallItem,
     ToolSearchOutputItem,
     TResponseInputItem,
+    TResponseOutputItem,
     coerce_tool_search_call_raw_item,
     coerce_tool_search_output_raw_item,
 )
-from .logger import logger
+from .logger import (
+    log_model_and_tool_action_warning,
+    log_model_and_tool_data_warning,
+    logger,
+)
 from .run_context import RunContextWrapper
+from .run_internal.items import (
+    NestedHistoryOwnedItemRef,
+    digest_input_item,
+    ensure_nested_history_run_item_occurrence_key,
+    nested_history_run_item_occurrence_key,
+    run_item_to_input_item,
+)
+from .run_internal.tool_caller import (
+    ensure_programmatic_tool_call_parent,
+    ensure_tool_caller_allowed,
+)
 from .sandbox.capabilities.capability import Capability
 from .sandbox.session.base_sandbox_session import BaseSandboxSession
 from .tool import (
@@ -89,7 +107,9 @@ from .tool import (
     FunctionTool,
     HostedMCPTool,
     LocalShellTool,
+    ProgrammaticToolCallingTool,
     ShellTool,
+    ToolCaller,
     ToolOrigin,
 )
 from .tool_guardrails import (
@@ -130,7 +150,7 @@ ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.12"
+CURRENT_SCHEMA_VERSION = "1.13"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
 SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
@@ -149,6 +169,10 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.10": "Allows serialized RunState snapshots to disable max_turns with null.",
     "1.11": "Persists SDK-only custom data on tool output items across resume flows.",
     "1.12": "Persists input cache-write token usage across resume flows.",
+    "1.13": (
+        "Persists programmatic tool calling and nested handoff history ownership across resume "
+        "flows."
+    ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -223,6 +247,11 @@ class RunState(Generic[TContext, TAgent]):
 
     _session_items: list[RunItem] = field(default_factory=list)
     """Full, unfiltered run items for session history."""
+
+    _nested_history_owned_session_item_refs: list[NestedHistoryOwnedItemRef] = field(
+        default_factory=list
+    )
+    """Session-item occurrences also present verbatim in SDK-default nested input history."""
 
     _max_turns: int | None = 10
     """Maximum allowed turns before forcing termination, or ``None`` for no limit."""
@@ -306,6 +335,7 @@ class RunState(Generic[TContext, TAgent]):
         self._model_responses = []
         self._generated_items = []
         self._session_items = []
+        self._nested_history_owned_session_item_refs = []
         self._input_guardrail_results = []
         self._output_guardrail_results = []
         self._tool_input_guardrail_results = []
@@ -412,6 +442,44 @@ class RunState(Generic[TContext, TAgent]):
                         normalized_item["status"] = "completed"
             normalized_items.append(normalized_item)
         return normalized_items
+
+    def _generated_session_item_indexes(
+        self,
+        generated_items: Sequence[RunItem],
+    ) -> list[int | None]:
+        """Map generated occurrences to the same live occurrences in session history."""
+        session_indexes_by_identity: dict[int, deque[int]] = {}
+        session_indexes_by_occurrence_key: dict[str, deque[int]] = {}
+        for index, session_item in enumerate(self._session_items):
+            session_indexes_by_identity.setdefault(id(session_item), deque()).append(index)
+            occurrence_key = nested_history_run_item_occurrence_key(session_item)
+            if occurrence_key is not None:
+                session_indexes_by_occurrence_key.setdefault(occurrence_key, deque()).append(index)
+
+        used_session_indexes: set[int] = set()
+        indexes: list[int | None] = []
+
+        def _take_unused(candidates: deque[int] | None) -> int | None:
+            while candidates:
+                candidate = candidates.popleft()
+                if candidate not in used_session_indexes:
+                    return candidate
+            return None
+
+        for generated_item in generated_items:
+            session_index = _take_unused(
+                session_indexes_by_identity.get(id(generated_item)),
+            )
+            if session_index is None:
+                occurrence_key = nested_history_run_item_occurrence_key(generated_item)
+                if occurrence_key is not None:
+                    session_index = _take_unused(
+                        session_indexes_by_occurrence_key.get(occurrence_key),
+                    )
+            if session_index is not None:
+                used_session_indexes.add(session_index)
+            indexes.append(session_index)
+        return indexes
 
     def _serialize_context_payload(
         self,
@@ -713,6 +781,7 @@ class RunState(Generic[TContext, TAgent]):
             cast(Agent[Any], self._current_agent),
             agent_identity_keys_by_id=agent_identity_keys_by_id,
         )
+        generated_items = self._merge_generated_items_with_processed()
 
         result = {
             "$schemaVersion": CURRENT_SCHEMA_VERSION,
@@ -743,9 +812,17 @@ class RunState(Generic[TContext, TAgent]):
             "auto_previous_response_id": self._auto_previous_response_id,
             "generated_prompt_cache_key": self._generated_prompt_cache_key,
             "reasoning_item_id_policy": self._reasoning_item_id_policy,
+            "nested_history_owned_session_item_refs": [
+                {
+                    "index": item_ref.session_index,
+                    "digest": item_ref.digest,
+                    "input_index": item_ref.input_index,
+                }
+                for item_ref in self._nested_history_owned_session_item_refs
+            ],
+            "generated_session_item_indexes": self._generated_session_item_indexes(generated_items),
         }
 
-        generated_items = self._merge_generated_items_with_processed()
         result["generated_items"] = [
             self._serialize_item(item, agent_identity_keys_by_id=agent_identity_keys_by_id)
             for item in generated_items
@@ -1650,12 +1727,16 @@ def _build_handoffs_map(current_agent: Agent[Any]) -> dict[str, Handoff[Any, Age
     if not hasattr(current_agent, "handoffs"):
         return handoffs_map
 
-    for handoff in current_agent.handoffs:
-        if not isinstance(handoff, Handoff):
+    for handoff_item in current_agent.handoffs:
+        if isinstance(handoff_item, Agent):
+            handoff_item = create_handoff(handoff_item)
+        elif not isinstance(handoff_item, Handoff):
             continue
-        handoff_name = getattr(handoff, "tool_name", None) or getattr(handoff, "name", None)
+        handoff_name = getattr(handoff_item, "tool_name", None) or getattr(
+            handoff_item, "name", None
+        )
         if handoff_name:
-            handoffs_map[handoff_name] = handoff
+            handoffs_map[handoff_name] = handoff_item
     return handoffs_map
 
 
@@ -1718,6 +1799,8 @@ async def _deserialize_processed_response(
     scope_id: str | None = None,
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
+    program_call_ids: Collection[str] = (),
+    completed_program_call_ids: Collection[str] = (),
 ) -> ProcessedResponse:
     """Deserialize a ProcessedResponse from JSON data.
 
@@ -1749,6 +1832,9 @@ async def _deserialize_processed_response(
     apply_patch_tools_map = _build_named_tool_map(all_tools, ApplyPatchTool)
     mcp_tools_map = _build_named_tool_map(all_tools, HostedMCPTool)
     handoffs_map = _build_handoffs_map(current_agent)
+    programmatic_tool_present = any(
+        isinstance(tool, ProgrammaticToolCallingTool) for tool in all_tools
+    )
 
     from .run_internal.run_steps import (
         ProcessedResponse,
@@ -1761,6 +1847,26 @@ async def _deserialize_processed_response(
         ToolRunMCPApprovalRequest,
         ToolRunShellCall,
     )
+
+    def _ensure_restored_tool_call_allowed(
+        *,
+        tool_call: Any,
+        allowed_callers: Sequence[ToolCaller] | None,
+        tool_name: str,
+    ) -> None:
+        ensure_programmatic_tool_call_parent(
+            tool_call=tool_call,
+            programmatic_tool_present=programmatic_tool_present,
+            program_call_ids=program_call_ids,
+            completed_program_call_ids=completed_program_call_ids,
+            agent_name=current_agent.name,
+        )
+        ensure_tool_caller_allowed(
+            tool_call=tool_call,
+            allowed_callers=allowed_callers,
+            tool_name=tool_name,
+            agent_name=current_agent.name,
+        )
 
     def _deserialize_actions(
         entries: list[dict[str, Any]],
@@ -1805,6 +1911,15 @@ async def _deserialize_processed_response(
                 tool_call = call_parser(tool_call_data)
             except Exception:
                 continue
+            if isinstance(tool, Handoff):
+                permission_tool_name = getattr(tool, "tool_name", getattr(tool, "name", "handoff"))
+            else:
+                permission_tool_name = getattr(tool, "name", str(tool_name))
+            _ensure_restored_tool_call_allowed(
+                tool_call=tool_call,
+                allowed_callers=getattr(tool, "allowed_callers", None),
+                tool_name=permission_tool_name,
+            )
             deserialized.append(action_factory(tool_call, tool))
         return deserialized
 
@@ -1874,6 +1989,13 @@ async def _deserialize_processed_response(
                     tool_call = ResponseFunctionToolCall(**tool_call_data)
                 except Exception:
                     continue
+                _ensure_restored_tool_call_allowed(
+                    tool_call=tool_call,
+                    allowed_callers=function_tool.allowed_callers,
+                    tool_name=(
+                        get_function_tool_qualified_name(function_tool) or function_tool.name
+                    ),
+                )
 
                 nested_state_data = entry.get("agent_run_state")
                 deserialized.append(
@@ -2015,6 +2137,11 @@ async def _deserialize_processed_response(
         mcp_tool = mcp_tools_map.get(mcp_tool_name) if mcp_tool_name else None
 
         if mcp_tool:
+            _ensure_restored_tool_call_allowed(
+                tool_call=request_item,
+                allowed_callers=mcp_tool.tool_config.get("allowed_callers"),
+                tool_name=mcp_tool.name,
+            )
             mcp_approval_requests.append(
                 ToolRunMCPApprovalRequest(
                     request_item=request_item,
@@ -2061,6 +2188,12 @@ def _deserialize_tool_call_raw_item(normalized_raw_item: Mapping[str, Any]) -> A
         except Exception:
             return normalized_raw_item
 
+    if tool_type == "program":
+        try:
+            return Program(**normalized_raw_item)
+        except Exception:
+            return normalized_raw_item
+
     if tool_type in {"shell_call", "apply_patch_call", "hosted_tool_call", "local_shell_call"}:
         return normalized_raw_item
 
@@ -2071,16 +2204,23 @@ def _deserialize_tool_call_raw_item(normalized_raw_item: Mapping[str, Any]) -> A
 
 
 def _can_construct_statusless_message(exc: ValidationError) -> bool:
-    missing_fields = {
-        str(error["loc"][0])
-        for error in exc.errors()
-        if error.get("type") == "missing"
-        and isinstance(error.get("loc"), tuple)
-        and error.get("loc")
-    }
-    if not missing_fields:
+    errors = exc.errors()
+    if not errors:
         return False
-    return missing_fields <= _ALLOWED_MISSING_MESSAGE_FIELDS
+
+    for error in errors:
+        location = error.get("loc")
+        field = str(location[0]) if isinstance(location, tuple) and location else None
+        if error.get("type") == "missing" and field in _ALLOWED_MISSING_MESSAGE_FIELDS:
+            continue
+        if (
+            error.get("type") == "literal_error"
+            and field == "status"
+            and error.get("input") is None
+        ):
+            continue
+        return False
+    return True
 
 
 def _deserialize_message_content_part(value: object) -> object:
@@ -2096,6 +2236,17 @@ def _deserialize_message_content_part(value: object) -> object:
 
 
 def _deserialize_message_output_item(payload: Mapping[str, Any]) -> ResponseOutputMessage:
+    if payload.get("role") == "assistant" and isinstance(payload.get("content"), str):
+        normalized_payload = dict(payload)
+        normalized_payload["content"] = [
+            ResponseOutputText.model_construct(
+                type="output_text",
+                text=cast(str, payload["content"]),
+            )
+        ]
+        normalized_payload.setdefault("status", "completed")
+        return ResponseOutputMessage.model_construct(**normalized_payload)
+
     try:
         return ResponseOutputMessage(**payload)
     except ValidationError as exc:
@@ -2197,8 +2348,15 @@ def _deserialize_tool_approval_item(
 
 def _deserialize_tool_call_output_raw_item(
     raw_item: Mapping[str, Any],
-) -> FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput | dict[str, Any] | None:
-    """Deserialize a tool call output raw item; return None when validation fails."""
+) -> (
+    FunctionCallOutput
+    | ComputerCallOutput
+    | LocalShellCallOutput
+    | ProgramOutput
+    | dict[str, Any]
+    | None
+):
+    """Deserialize a tool call output raw item, preserving program output mappings."""
     if not isinstance(raw_item, Mapping):
         return cast(
             FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput | dict[str, Any],
@@ -2214,6 +2372,11 @@ def _deserialize_tool_call_output_raw_item(
         return _COMPUTER_OUTPUT_ADAPTER.validate_python(normalized_raw_item)
     if output_type == "local_shell_call_output":
         return _LOCAL_SHELL_OUTPUT_ADAPTER.validate_python(normalized_raw_item)
+    if output_type == "program_output":
+        try:
+            return ProgramOutput(**normalized_raw_item)
+        except Exception:
+            return normalized_raw_item
     if output_type in {"shell_call_output", "apply_patch_call_output", "custom_tool_call_output"}:
         return normalized_raw_item
 
@@ -2243,6 +2406,120 @@ def _parse_guardrail_entry(
         tripwire_triggered=bool(output_data.get("tripwireTriggered")),
     )
     return name, guardrail_output, entry_dict
+
+
+def _raw_item_uses_programmatic_tool_calling(value: Any) -> bool:
+    """Return whether a known raw run item uses the programmatic calling protocol."""
+    if not isinstance(value, Mapping):
+        return False
+    if value.get("type") in {"program", "program_output"}:
+        return True
+    caller = value.get("caller")
+    return (
+        isinstance(caller, Mapping)
+        and caller.get("type") == "program"
+        and isinstance(caller.get("caller_id"), str)
+    )
+
+
+def _run_state_raw_items(state_json: Mapping[str, Any]) -> list[Any]:
+    """Collect raw items from durable RunState locations."""
+    raw_items: list[Any] = []
+
+    original_input = state_json.get("original_input")
+    if isinstance(original_input, list):
+        raw_items.extend(original_input)
+
+    for response_key in ("model_responses", "last_model_response"):
+        responses = state_json.get(response_key)
+        if isinstance(responses, Mapping):
+            responses = [responses]
+        if not isinstance(responses, list):
+            continue
+        for response in responses:
+            if isinstance(response, Mapping) and isinstance(response.get("output"), list):
+                raw_items.extend(response["output"])
+
+    for item_list_key in ("generated_items", "session_items"):
+        items = state_json.get(item_list_key)
+        if not isinstance(items, list):
+            continue
+        raw_items.extend(item.get("raw_item") for item in items if isinstance(item, Mapping))
+
+    processed_response = state_json.get("last_processed_response")
+    if isinstance(processed_response, Mapping):
+        for item_list_key in ("new_items", "interruptions"):
+            items = processed_response.get(item_list_key)
+            if isinstance(items, list):
+                raw_items.extend(
+                    item.get("raw_item") for item in items if isinstance(item, Mapping)
+                )
+        for action_key in (
+            "functions",
+            "computer_actions",
+            "custom_tool_actions",
+            "local_shell_actions",
+            "shell_actions",
+            "apply_patch_actions",
+            "handoffs",
+        ):
+            actions = processed_response.get(action_key)
+            if isinstance(actions, list):
+                raw_items.extend(
+                    action.get("tool_call") for action in actions if isinstance(action, Mapping)
+                )
+
+    current_step = state_json.get("current_step")
+    if isinstance(current_step, Mapping):
+        step_data = current_step.get("data")
+        if isinstance(step_data, Mapping) and isinstance(step_data.get("interruptions"), list):
+            raw_items.extend(
+                item.get("raw_item")
+                for item in step_data["interruptions"]
+                if isinstance(item, Mapping)
+            )
+
+    return raw_items
+
+
+def _run_state_uses_programmatic_tool_calling(state_json: Mapping[str, Any]) -> bool:
+    """Inspect only durable run-item locations for programmatic calling data."""
+    return any(
+        _raw_item_uses_programmatic_tool_calling(item) for item in _run_state_raw_items(state_json)
+    )
+
+
+def _run_state_program_call_ids(
+    state_json: Mapping[str, Any],
+) -> tuple[set[str], set[str]]:
+    """Return all and completed program call IDs from durable RunState items."""
+    program_call_ids: set[str] = set()
+    completed_program_call_ids: set[str] = set()
+    server_manages_conversation = bool(
+        state_json.get("conversation_id")
+        or state_json.get("previous_response_id")
+        or state_json.get("auto_previous_response_id")
+    )
+    for item in _run_state_raw_items(state_json):
+        if not isinstance(item, Mapping):
+            continue
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            call_id = None
+        if item.get("type") == "program" and call_id is not None:
+            program_call_ids.add(call_id)
+        elif item.get("type") == "program_output" and call_id is not None:
+            if server_manages_conversation:
+                program_call_ids.add(call_id)
+            if item.get("status") == "completed":
+                completed_program_call_ids.add(call_id)
+        if server_manages_conversation:
+            caller = item.get("caller")
+            if isinstance(caller, Mapping):
+                caller_id = caller.get("caller_id")
+                if caller.get("type") == "program" and isinstance(caller_id, str) and caller_id:
+                    program_call_ids.add(caller_id)
+    return program_call_ids, completed_program_call_ids
 
 
 def _parse_tool_guardrail_entry(
@@ -2424,6 +2701,14 @@ async def _build_run_state_from_json(
             f"Supported versions are: {supported_versions}. "
             f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
         )
+    if schema_version != CURRENT_SCHEMA_VERSION and _run_state_uses_programmatic_tool_calling(
+        state_json
+    ):
+        raise UserError(
+            "Run state contains Programmatic Tool Calling data but uses schema version "
+            f"{schema_version}. Programmatic Tool Calling requires schema version "
+            f"{CURRENT_SCHEMA_VERSION}."
+        )
 
     agent_identity_map = _build_agent_identity_map(initial_agent)
     agent_map = _build_agent_map(initial_agent)
@@ -2524,14 +2809,16 @@ async def _build_run_state_from_json(
 
     state._current_turn = state_json["current_turn"]
     state._model_responses = _deserialize_model_responses(state_json.get("model_responses", []))
-    state._generated_items = _deserialize_items(
-        state_json.get("generated_items", []),
+    serialized_generated_items = state_json.get("generated_items", [])
+    state._generated_items, generated_source_indexes = _deserialize_items_with_source_indexes(
+        serialized_generated_items,
         agent_map,
         agent_identity_map=agent_identity_map,
     )
 
     last_processed_response_data = state_json.get("last_processed_response")
     if last_processed_response_data and state._context is not None:
+        program_call_ids, completed_program_call_ids = _run_state_program_call_ids(state_json)
         state._last_processed_response = await _deserialize_processed_response(
             last_processed_response_data,
             current_agent,
@@ -2541,18 +2828,128 @@ async def _build_run_state_from_json(
             scope_id=state._agent_tool_state_scope_id,
             context_deserializer=context_deserializer,
             strict_context=strict_context,
+            program_call_ids=program_call_ids,
+            completed_program_call_ids=completed_program_call_ids,
         )
     else:
         state._last_processed_response = None
 
     if "session_items" in state_json:
-        state._session_items = _deserialize_items(
-            state_json.get("session_items", []),
+        serialized_session_items = state_json.get("session_items", [])
+        state._session_items, session_source_indexes = _deserialize_items_with_source_indexes(
+            serialized_session_items,
             agent_map,
             agent_identity_map=agent_identity_map,
         )
     else:
+        serialized_session_items = []
         state._session_items = state._merge_generated_items_with_processed()
+        session_source_indexes = list(range(len(state._session_items)))
+    restored_session_indexes = {
+        source_index: restored_index
+        for restored_index, source_index in enumerate(session_source_indexes)
+    }
+
+    generated_session_indexes = state_json.get("generated_session_item_indexes")
+    if generated_session_indexes is not None:
+        mapping_is_valid = not (
+            not isinstance(serialized_generated_items, list)
+            or not isinstance(serialized_session_items, list)
+            or not isinstance(generated_session_indexes, list)
+            or len(generated_session_indexes) != len(serialized_generated_items)
+        )
+        used_session_indexes: set[int] = set()
+        if mapping_is_valid:
+            for session_index_value in generated_session_indexes:
+                if session_index_value is None:
+                    continue
+                if (
+                    type(session_index_value) is not int
+                    or session_index_value < 0
+                    or session_index_value >= len(serialized_session_items)
+                    or session_index_value in used_session_indexes
+                ):
+                    mapping_is_valid = False
+                    break
+                used_session_indexes.add(session_index_value)
+
+        if not mapping_is_valid:
+            logger.warning("Ignoring invalid generated_session_item_indexes in serialized RunState")
+        else:
+            for restored_generated_index, generated_source_index in enumerate(
+                generated_source_indexes
+            ):
+                session_source_index = generated_session_indexes[generated_source_index]
+                if session_source_index is None:
+                    continue
+                restored_session_index = restored_session_indexes.get(session_source_index)
+                if restored_session_index is None:
+                    continue
+                if (
+                    serialized_generated_items[generated_source_index]
+                    != serialized_session_items[session_source_index]
+                ):
+                    logger.warning(
+                        "Ignoring mismatched generated/session occurrence in serialized RunState"
+                    )
+                    continue
+                state._generated_items[restored_generated_index] = state._session_items[
+                    restored_session_index
+                ]
+
+    nested_history_refs_json = state_json.get("nested_history_owned_session_item_refs", [])
+    if not isinstance(nested_history_refs_json, list):
+        raise UserError(
+            "Run state nested_history_owned_session_item_refs must be a list of objects"
+        )
+    nested_history_refs: list[NestedHistoryOwnedItemRef] = []
+    for item_ref in nested_history_refs_json:
+        if (
+            not isinstance(item_ref, Mapping)
+            or type(item_ref.get("index")) is not int
+            or cast(int, item_ref["index"]) < 0
+            or not isinstance(item_ref.get("digest"), str)
+            or len(cast(str, item_ref["digest"])) != 64
+            or type(item_ref.get("input_index")) is not int
+            or cast(int, item_ref["input_index"]) < 0
+        ):
+            raise UserError(
+                "Run state nested_history_owned_session_item_refs entries must contain a "
+                "non-negative integer index and input_index, and 64-character digest"
+            )
+        session_source_index = cast(int, item_ref["index"])
+        input_index = cast(int, item_ref["input_index"])
+        digest = cast(str, item_ref["digest"])
+        if "session_items" in state_json and session_source_index >= len(serialized_session_items):
+            raise UserError("Run state nested history ownership references a missing session item")
+        session_index = restored_session_indexes.get(session_source_index)
+        if session_index is None:
+            logger.warning(
+                "Ignoring nested history ownership for skipped session item at index %s",
+                session_source_index,
+            )
+            continue
+        if not isinstance(state._original_input, list) or input_index >= len(state._original_input):
+            raise UserError("Run state nested history ownership references a missing input item")
+
+        run_item = state._session_items[session_index]
+        run_input_item = run_item_to_input_item(run_item)
+        if run_input_item is None or digest_input_item(run_input_item) != digest:
+            raise UserError("Run state nested history ownership session digest does not match")
+        ensure_nested_history_run_item_occurrence_key(run_item)
+        input_item = cast(TResponseInputItem, state._original_input[input_index])
+        if digest_input_item(input_item) != digest:
+            raise UserError("Run state nested history ownership input digest does not match")
+        nested_history_refs.append(
+            NestedHistoryOwnedItemRef(
+                session_index=session_index,
+                digest=digest,
+                input_index=input_index,
+                run_item=run_item,
+                input_item=input_item,
+            )
+        )
+    state._nested_history_owned_session_item_refs = nested_history_refs
 
     state._mark_generated_items_merged_with_last_processed()
 
@@ -3106,24 +3503,41 @@ def _deserialize_model_responses(responses_data: list[dict[str, Any]]) -> list[M
     for resp_data in responses_data:
         usage = deserialize_usage(resp_data.get("usage", {}))
 
-        output: list[Any] = [
-            _deserialize_message_output_item(item)
-            if isinstance(item, Mapping) and item.get("type") == "message"
-            else item
-            for item in resp_data["output"]
-        ]
+        output: list[Any] = []
+        for item in resp_data["output"]:
+            if not isinstance(item, Mapping):
+                output.append(item)
+            elif item.get("type") == "message":
+                output.append(_deserialize_message_output_item(item))
+            elif item.get("type") == "program":
+                output.append(_deserialize_tool_call_raw_item(item))
+            elif item.get("type") == "program_output":
+                output.append(_deserialize_tool_call_output_raw_item(item))
+            else:
+                output.append(item)
 
         response_id = resp_data.get("response_id")
         request_id = resp_data.get("request_id")
 
-        result.append(
-            ModelResponse(
+        if any(
+            isinstance(item, Mapping) and item.get("type") in {"program", "program_output"}
+            for item in output
+        ):
+            model_response = ModelResponse(
+                usage=usage,
+                output=[],
+                response_id=response_id,
+                request_id=request_id,
+            )
+            model_response.output = cast(list[TResponseOutputItem], output)
+        else:
+            model_response = ModelResponse(
                 usage=usage,
                 output=output,
                 response_id=response_id,
                 request_id=request_id,
             )
-        )
+        result.append(model_response)
 
     return result
 
@@ -3145,6 +3559,18 @@ def _deserialize_items(
     """
 
     result: list[RunItem] = []
+
+    def _capture_diagnostic_args(*values: object) -> Callable[[], tuple[object, ...]]:
+        def diagnostic_args() -> tuple[object, ...]:
+            return values
+
+        return diagnostic_args
+
+    def _capture_diagnostic_extra(**values: object) -> Callable[[], Mapping[str, object]]:
+        def diagnostic_extra() -> Mapping[str, object]:
+            return values
+
+        return diagnostic_extra
 
     def _resolve_agent_info(
         item_data: Mapping[str, Any], item_type: str
@@ -3181,9 +3607,19 @@ def _deserialize_items(
         agent, agent_name = _resolve_agent_info(item_data, item_type)
         if not agent:
             if agent_name:
-                logger.warning("Agent %s not found, skipping item", agent_name)
+                log_model_and_tool_data_warning(
+                    logger,
+                    "Agent not found, skipping item",
+                    diagnostic_message="Agent %s not found, skipping item",
+                    diagnostic_args=_capture_diagnostic_args(agent_name),
+                )
             else:
-                logger.warning("Item missing agent field, skipping: %s", item_type)
+                log_model_and_tool_data_warning(
+                    logger,
+                    "Item missing agent field, skipping",
+                    diagnostic_message="Item missing agent field, skipping: %s",
+                    diagnostic_args=_capture_diagnostic_args(item_type),
+                )
             continue
 
         raw_item_data = item_data["raw_item"]
@@ -3272,11 +3708,14 @@ def _deserialize_items(
                 if not source_agent or not target_agent:
                     source_name = item_data.get("source_agent")
                     target_name = item_data.get("target_agent")
-                    logger.warning(
-                        "Skipping handoff_output_item: could not resolve agents "
-                        "(source=%s, target=%s).",
-                        source_name,
-                        target_name,
+                    log_model_and_tool_data_warning(
+                        logger,
+                        "Skipping handoff output item: could not resolve agents",
+                        diagnostic_message=(
+                            "Skipping handoff_output_item: could not resolve agents "
+                            "(source=%s, target=%s)."
+                        ),
+                        diagnostic_args=_capture_diagnostic_args(source_name, target_name),
                     )
                     continue
 
@@ -3323,6 +3762,9 @@ def _deserialize_items(
                 raw_item_mcp_response = _MCP_APPROVAL_RESPONSE_ADAPTER.validate_python(
                     normalized_raw_item
                 )
+                caller = normalized_raw_item.get("caller")
+                if caller is not None:
+                    cast(dict[str, Any], raw_item_mcp_response)["caller"] = caller
                 result.append(MCPApprovalResponseItem(agent=agent, raw_item=raw_item_mcp_response))
 
             elif item_type == "tool_approval_item":
@@ -3339,10 +3781,35 @@ def _deserialize_items(
         except UserError:
             raise
         except Exception as e:
-            logger.warning("Failed to deserialize item of type %s: %s", item_type, e)
+            log_model_and_tool_action_warning(
+                logger,
+                "Failed to deserialize item",
+                e,
+                diagnostic_extra=_capture_diagnostic_extra(item_type=item_type),
+            )
             continue
 
     return result
+
+
+def _deserialize_items_with_source_indexes(
+    items_data: list[dict[str, Any]],
+    agent_map: dict[str, Agent[Any]],
+    *,
+    agent_identity_map: Mapping[str, Agent[Any]] | None = None,
+) -> tuple[list[RunItem], list[int]]:
+    """Deserialize items while retaining indexes of source entries that survived."""
+    items: list[RunItem] = []
+    source_indexes: list[int] = []
+    for source_index, item_data in enumerate(items_data):
+        deserialized = _deserialize_items(
+            [item_data],
+            agent_map,
+            agent_identity_map=agent_identity_map,
+        )
+        items.extend(deserialized)
+        source_indexes.extend([source_index] * len(deserialized))
+    return items, source_indexes
 
 
 def _clone_original_input(original_input: str | list[Any]) -> str | list[Any]:

@@ -122,6 +122,7 @@ plugins:
                     - Memory: ref/memory.md
                     - REPL: ref/repl.md
                     - Tools: ref/tool.md
+                    - Decorators: ref/decorators.md
                     - Tool context: ref/tool_context.md
                     - Results: ref/result.md
                     - Streaming events: ref/stream_events.md

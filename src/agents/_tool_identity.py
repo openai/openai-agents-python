@@ -18,6 +18,19 @@ FunctionToolLookupKey = (
 NamedToolLookupKey = FunctionToolLookupKey | str
 
 
+def validate_function_tool_fallback_name(name: str) -> str:
+    """Return an API-safe generated tool name or require an explicit override."""
+    if 1 <= len(name) <= 64 and all(
+        char.isascii() and (char.isalnum() or char in {"_", "-"}) for char in name
+    ):
+        return name
+    raise UserError(
+        f"Cannot derive a function tool name from callable class {name!r}. Generated names must "
+        "contain only ASCII letters, digits, underscores, or hyphens and be at most 64 "
+        "characters. Pass name_override to function_tool()."
+    )
+
+
 class SerializedFunctionToolLookupKey(TypedDict, total=False):
     """Serialized representation of a function-tool lookup key."""
 

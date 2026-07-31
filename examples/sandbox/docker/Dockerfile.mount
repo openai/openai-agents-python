@@ -1,4 +1,11 @@
 FROM ubuntu:22.04
+
+# BEGIN RCLONE RELEASE PIN
+ARG RCLONE_VERSION=1.74.4
+ARG RCLONE_SHA256_LINUX_AMD64=fe435e0c36228e7c2f116a8701f01127bb1f694005fc11d1f27186c8bca4115d
+ARG RCLONE_SHA256_LINUX_ARM64=97685285c9ad6a0cf17d5844115d2a67245af6444db672187074bd9c358de419
+# END RCLONE RELEASE PIN
+
 RUN set -eux \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -38,8 +45,20 @@ RUN set -eux \
     && mount-s3 --version \
     && curl -fsSL https://amazon-efs-utils.aws.com/efs-utils-installer.sh | sh -s -- --install \
     && mount.s3files --version \
-    && curl -fsSL https://rclone.org/install.sh | bash \
+    && arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+        amd64) rclone_arch="amd64"; rclone_sha256="$RCLONE_SHA256_LINUX_AMD64" ;; \
+        arm64) rclone_arch="arm64"; rclone_sha256="$RCLONE_SHA256_LINUX_ARM64" ;; \
+        *) echo "unsupported rclone arch: $arch" >&2; exit 1 ;; \
+    esac \
+    && rclone_archive="rclone-v${RCLONE_VERSION}-linux-${rclone_arch}.zip" \
+    && rclone_url="https://downloads.rclone.org/v${RCLONE_VERSION}/${rclone_archive}" \
+    && curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+        --output "/tmp/${rclone_archive}" "$rclone_url" \
+    && printf '%s  %s\n' "$rclone_sha256" "/tmp/${rclone_archive}" | sha256sum --check --strict - \
+    && unzip -q "/tmp/${rclone_archive}" -d /tmp/rclone \
+    && install -m 0755 "/tmp/rclone/${rclone_archive%.zip}/rclone" /usr/local/bin/rclone \
     && rclone version \
     && touch /etc/fuse.conf \
-    && grep -qxF 'user_allow_other' /etc/fuse.conf || echo 'user_allow_other' >> /etc/fuse.conf \
-    && rm -rf /var/lib/apt/lists/* /tmp/mount-s3.deb
+    && (grep -qxF 'user_allow_other' /etc/fuse.conf || echo 'user_allow_other' >> /etc/fuse.conf) \
+    && rm -rf /var/lib/apt/lists/* /tmp/mount-s3.deb /tmp/rclone /tmp/rclone-v*.zip

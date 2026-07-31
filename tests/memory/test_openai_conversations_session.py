@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -356,6 +357,12 @@ class TestOpenAIConversationsSessionErrorHandling:
         with pytest.raises(Exception, match="API Error"):
             await session._get_session_id()
 
+        mock_openai_client.conversations.create.side_effect = None
+        mock_openai_client.conversations.create.return_value = MagicMock(id="retry_id")
+
+        assert await session._get_session_id() == "retry_id"
+        assert mock_openai_client.conversations.create.call_count == 2
+
     @pytest.mark.asyncio
     async def test_api_failure_during_add_items(self, mock_openai_client):
         """Test handling of API failures during add_items."""
@@ -444,6 +451,79 @@ class TestOpenAIConversationsSessionConcurrentAccess:
         # Conversation should only be created once
         mock_openai_client.conversations.create.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_concurrent_first_writes_share_one_conversation(self, mock_openai_client):
+        """Test that concurrent first writes cannot split session history."""
+        create_started = asyncio.Event()
+        release_create = asyncio.Event()
+        creation_count = 0
+
+        async def create_conversation(*, items):
+            nonlocal creation_count
+            creation_count += 1
+            conversation_id = f"conversation_{creation_count}"
+            create_started.set()
+            await release_create.wait()
+            return MagicMock(id=conversation_id)
+
+        mock_openai_client.conversations.create.side_effect = create_conversation
+        session = OpenAIConversationsSession(openai_client=mock_openai_client)
+        first_items: list[TResponseInputItem] = [{"role": "user", "content": "First message"}]
+        second_items: list[TResponseInputItem] = [{"role": "user", "content": "Second message"}]
+
+        first_write = asyncio.create_task(session.add_items(first_items))
+        await create_started.wait()
+        second_write = asyncio.create_task(session.add_items(second_items))
+        await asyncio.sleep(0)
+        release_create.set()
+        await asyncio.gather(first_write, second_write)
+
+        mock_openai_client.conversations.create.assert_called_once_with(items=[])
+        writes = mock_openai_client.conversations.items.create.call_args_list
+        assert len(writes) == 2
+        assert {call.kwargs["conversation_id"] for call in writes} == {session.session_id}
+
+    @pytest.mark.asyncio
+    async def test_concurrent_first_write_recovers_after_creation_failure(self, mock_openai_client):
+        """Test that a waiting writer recovers when the first initializer fails."""
+        first_create_started = asyncio.Event()
+        release_first_create = asyncio.Event()
+        creation_count = 0
+
+        async def create_conversation(*, items):
+            nonlocal creation_count
+            creation_count += 1
+            if creation_count == 1:
+                first_create_started.set()
+                await release_first_create.wait()
+                raise RuntimeError("Conversation creation failed")
+            return MagicMock(id="surviving_conversation")
+
+        mock_openai_client.conversations.create.side_effect = create_conversation
+        session = OpenAIConversationsSession(openai_client=mock_openai_client)
+        failed_items: list[TResponseInputItem] = [{"role": "user", "content": "Failed writer"}]
+        surviving_items: list[TResponseInputItem] = [
+            {"role": "user", "content": "Surviving writer"}
+        ]
+
+        failed_write = asyncio.create_task(session.add_items(failed_items))
+        await first_create_started.wait()
+        surviving_write = asyncio.create_task(session.add_items(surviving_items))
+        await asyncio.sleep(0)
+
+        mock_openai_client.conversations.create.assert_called_once_with(items=[])
+        release_first_create.set()
+
+        with pytest.raises(RuntimeError, match="Conversation creation failed"):
+            await failed_write
+        await surviving_write
+
+        assert mock_openai_client.conversations.create.call_count == 2
+        mock_openai_client.conversations.items.create.assert_called_once_with(
+            conversation_id="surviving_conversation", items=surviving_items
+        )
+        assert session.session_id == "surviving_conversation"
+
 
 # ============================================================================
 # SessionSettings Tests
@@ -473,3 +553,14 @@ class TestOpenAIConversationsSessionSettings:
 
         assert session.session_settings is not None
         assert session.session_settings.limit == 5
+
+    def test_session_settings_constructor_normalizes_dictionary(self, mock_openai_client):
+        from agents.memory import SessionSettings
+
+        session = OpenAIConversationsSession(
+            openai_client=mock_openai_client,
+            session_settings={"limit": 0},
+        )
+
+        assert isinstance(session.session_settings, SessionSettings)
+        assert session.session_settings.limit == 0

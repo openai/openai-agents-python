@@ -7,9 +7,10 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ..exceptions import UserError
-from ..logger import logger
+from ..logger import log_model_action_error, log_model_and_tool_action_error, logger
 from ..tracing import Span, SpeechGroupSpanData, speech_group_span, speech_span
 from ..tracing.util import time_iso
+from ..util._error_tracing import get_trace_error
 from .events import (
     VoiceStreamEvent,
     VoiceStreamEventAudio,
@@ -178,7 +179,12 @@ class StreamedAudioResult:
             except Exception as e:
                 tts_span.set_error(
                     {
-                        "message": str(e),
+                        "message": get_trace_error(
+                            trace_include_sensitive_data=(
+                                self._voice_pipeline_config.trace_include_sensitive_data
+                            ),
+                            error_message=str(e),
+                        ),
                         "data": {
                             "text": text
                             if self._voice_pipeline_config.trace_include_sensitive_data
@@ -186,11 +192,11 @@ class StreamedAudioResult:
                         },
                     }
                 )
-                logger.error("Error streaming audio: %s", e)
+                log_model_action_error(logger, "Error streaming voice audio", e)
 
                 # Signal completion for whole session because of error
                 await local_queue.put(VoiceStreamEventLifecycle(event="session_ended"))
-                raise e
+                raise
 
     async def _add_text(self, text: str):
         await self._start_turn()
@@ -264,6 +270,8 @@ class StreamedAudioResult:
                     if chunk.event == "turn_ended":
                         self._finish_turn()
                         break
+                    if chunk.event == "session_ended":
+                        return
         await self._queue.put(VoiceStreamEventLifecycle(event="session_ended"))
 
     async def _wait_for_completion(self):
@@ -299,10 +307,13 @@ class StreamedAudioResult:
             try:
                 event = await self._queue.get()
             except asyncio.CancelledError:
-                break
+                self._cleanup_tasks()
+                raise
             if isinstance(event, VoiceStreamEventError):
                 self._stored_exception = event.error
-                logger.error("Error processing output: %s", event.error)
+                log_model_and_tool_action_error(
+                    logger, "Error processing voice output", event.error
+                )
                 break
             if event is None:
                 break

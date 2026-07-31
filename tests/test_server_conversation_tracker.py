@@ -5,6 +5,7 @@ import pytest
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_output_item import McpCall, McpListTools, McpListToolsTool
 
+import agents.run_internal.oai_conversation as oai_conversation
 from agents import Agent, HostedMCPTool
 from agents.items import (
     MCPListToolsItem,
@@ -259,8 +260,24 @@ def test_mark_input_as_sent_and_rewind_input_respects_remaining_initial_input() 
     assert tracker.remaining_initial_input == [pending_1]
 
 
-def test_mark_input_as_sent_uses_raw_generated_source_for_rebuilt_filtered_item() -> None:
+def test_mark_input_as_sent_ignores_stale_id_for_rebuilt_filtered_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     tracker = OpenAIServerConversationTracker(conversation_id="conv2b", previous_response_id=None)
+    stale_raw_item = {
+        "type": "function_call_output",
+        "call_id": "call-stale",
+        "output": "stale",
+    }
+    stale_generated_items = [
+        DummyRunItem(stale_raw_item, type="function_call_output_item"),
+    ]
+    stale_prepared = tracker.prepare_input(
+        original_input=[],
+        generated_items=cast(list[Any], stale_generated_items),
+    )
+    stale_prepared_id = id(stale_prepared[0])
+
     raw_generated_item = {
         "type": "function_call_output",
         "call_id": "call-2b",
@@ -274,11 +291,22 @@ def test_mark_input_as_sent_uses_raw_generated_source_for_rebuilt_filtered_item(
         original_input=[],
         generated_items=cast(list[Any], generated_items),
     )
+    assert stale_prepared_id not in tracker.prepared_item_sources
+
     rebuilt_filtered_item = cast(TResponseInputItem, dict(cast(dict[str, Any], prepared[0])))
+    real_id = id
+
+    def _id_with_stale_collision(item: Any) -> int:
+        if item is rebuilt_filtered_item:
+            return stale_prepared_id
+        return real_id(item)
+
+    monkeypatch.setattr(oai_conversation, "id", _id_with_stale_collision, raising=False)
 
     tracker.mark_input_as_sent([rebuilt_filtered_item])
 
     assert any(item is raw_generated_item for item in tracker.sent_items)
+    assert all(item is not stale_raw_item for item in tracker.sent_items)
     assert all(item is not rebuilt_filtered_item for item in tracker.sent_items)
 
     prepared_again = tracker.prepare_input(

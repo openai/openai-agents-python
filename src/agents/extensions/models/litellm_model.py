@@ -333,11 +333,34 @@ class LitellmModel(Model):
                 else []
             )
 
+            # LiteLLM's Choices omits the logprobs attribute entirely when it was not requested,
+            # so access it defensively (mirrors the finish_reason handling above).
+            logprob_models = None
+            choice_logprobs = getattr(first_choice, "logprobs", None) if first_choice else None
+            if choice_logprobs is not None and getattr(choice_logprobs, "content", None):
+                logprob_models = ChatCmplHelpers.convert_logprobs_for_output_text(
+                    choice_logprobs.content
+                )
+
+            if logprob_models:
+                self._attach_logprobs_to_output(items, logprob_models)
+
             return ModelResponse(
                 output=items,
                 usage=usage,
                 response_id=None,
             )
+
+    def _attach_logprobs_to_output(self, output_items: list[Any], logprobs: list[Any]) -> None:
+        from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+        for output_item in output_items:
+            if not isinstance(output_item, ResponseOutputMessage):
+                continue
+            for content in output_item.content:
+                if isinstance(content, ResponseOutputText):
+                    content.logprobs = logprobs
+                    return
 
     async def stream_response(
         self,
@@ -551,6 +574,11 @@ class LitellmModel(Model):
         if model_settings.extra_args:
             extra_kwargs.update(model_settings.extra_args)
 
+        if converted_tools:
+            # SDK tools are already converted to ordinary function tools, so LiteLLM's proxy-only
+            # MCP discovery would add unsupported server dependencies without handling them.
+            extra_kwargs.setdefault("_skip_mcp_handler", True)
+
         if should_disable_provider_managed_retries():
             # Preserve provider-managed retries on the first attempt, but make runner retries the
             # sole retry layer by forcing LiteLLM's retry knobs off on replay attempts.
@@ -559,6 +587,12 @@ class LitellmModel(Model):
 
         # Prevent duplicate reasoning_effort kwargs when it was promoted to a top-level argument.
         extra_kwargs.pop("reasoning_effort", None)
+
+        # The Chat Completions API requires logprobs=True whenever top_logprobs is set. Defer to a
+        # caller-supplied logprobs (via extra_args, already merged into extra_kwargs) to avoid a
+        # duplicate-key collision.
+        if model_settings.top_logprobs is not None and "logprobs" not in extra_kwargs:
+            extra_kwargs["logprobs"] = True
 
         ret = await litellm.acompletion(
             model=self.model,

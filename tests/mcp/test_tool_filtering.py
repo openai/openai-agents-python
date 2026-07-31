@@ -9,6 +9,7 @@ import asyncio
 import pytest
 from mcp import Tool as MCPTool
 
+import agents._debug as _debug
 from agents import Agent
 from agents.mcp import ToolFilterContext, create_static_tool_filter
 from agents.run_context import RunContextWrapper
@@ -179,6 +180,38 @@ async def test_dynamic_filter_error_handling():
     tools = await server.list_tools(run_context, agent)
     assert len(tools) == 2
     assert {t.name for t in tools} == {"good_tool", "another_good_tool"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redacted", [True, False])
+async def test_dynamic_filter_error_logging_preserves_identity_only_in_diagnostic_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    redacted: bool,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+    server = FakeMCPServer(
+        server_name=(
+            "streamable_http: https://SECRET_CREDENTIAL@example.test/"
+            "SECRET_SERVER_PATH?token=SECRET_QUERY"
+        )
+    )
+    server.add_tool("SECRET_TOOL_NAME", {})
+
+    def failing_filter(context: ToolFilterContext, tool: MCPTool) -> bool:
+        raise ValueError("SECRET_FILTER_ERROR")
+
+    server.tool_filter = failing_filter
+
+    with caplog.at_level("ERROR", logger="openai.agents"):
+        tools = await server.list_tools(create_test_context(), create_test_agent())
+
+    assert tools == []
+    assert "SECRET_CREDENTIAL" not in caplog.text
+    assert "SECRET_QUERY" not in caplog.text
+    assert ("SECRET_TOOL_NAME" in caplog.text) is not redacted
+    assert ("SECRET_SERVER_PATH" in caplog.text) is not redacted
+    assert ("SECRET_FILTER_ERROR" in caplog.text) is not redacted
 
 
 # === Integration Tests ===

@@ -69,6 +69,23 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+## Storing non-ASCII text
+
+By default, `SQLAlchemySession` escapes non-ASCII characters when it serializes session items to JSON. This preserves the historical storage format while still round-tripping the original text when items are loaded.
+
+Set `ensure_ascii=False` when you want multilingual text to remain readable in the stored JSON:
+
+```python
+session = SQLAlchemySession.from_url(
+    "user-123",
+    url="sqlite+aiosqlite:///conversations.db",
+    create_tables=True,
+    ensure_ascii=False,
+)
+```
+
+You can pass the same option directly to `SQLAlchemySession(...)` when using an existing engine. This setting changes only the JSON representation stored in the database; it does not change the values returned by session methods.
+
 
 ## API reference
 

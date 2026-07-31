@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
+from .._config_coercion import coerce_dataclass_config
 from ..exceptions import UserError
-from ..logger import logger
+from ..logger import (
+    log_model_and_tool_action_error,
+    log_model_and_tool_action_warning,
+    logger,
+)
 from ..tracing import TraceCtxManager
 from .input import AudioInput, StreamedAudioInput
 from .model import STTModel, TTSModel
@@ -25,7 +31,7 @@ class VoicePipeline:
         workflow: VoiceWorkflowBase,
         stt_model: STTModel | str | None = None,
         tts_model: TTSModel | str | None = None,
-        config: VoicePipelineConfig | None = None,
+        config: VoicePipelineConfig | dict[str, Any] | None = None,
     ):
         """Create a new voice pipeline.
 
@@ -43,7 +49,11 @@ class VoicePipeline:
         self.tts_model = tts_model if isinstance(tts_model, TTSModel) else None
         self._stt_model_name = stt_model if isinstance(stt_model, str) else None
         self._tts_model_name = tts_model if isinstance(tts_model, str) else None
-        self.config = config or VoicePipelineConfig()
+        self.config = (
+            coerce_dataclass_config(config, VoicePipelineConfig, parameter_name="voice.pipeline")
+            if config is not None
+            else VoicePipelineConfig()
+        )
 
     async def run(self, audio_input: AudioInput | StreamedAudioInput) -> StreamedAudioResult:
         """Run the voice pipeline.
@@ -103,9 +113,9 @@ class VoicePipeline:
                     await output._turn_done()
                     await output._done()
                 except Exception as e:
-                    logger.error("Error processing single turn: %s", e)
+                    log_model_and_tool_action_error(logger, "Error processing single voice turn", e)
                     await output._add_error(e)
-                    raise e
+                    raise
 
         output._set_task(asyncio.create_task(stream_events()))
         return output
@@ -129,7 +139,9 @@ class VoicePipeline:
                         async for intro_text in self.workflow.on_start():
                             await output._add_text(intro_text)
                     except Exception as e:
-                        logger.warning("on_start() failed: %s", e)
+                        log_model_and_tool_action_warning(
+                            logger, "Voice workflow on_start failed", e
+                        )
 
                     transcription_session = await self._get_stt_model().create_session(
                         audio_input,
@@ -144,9 +156,9 @@ class VoicePipeline:
                             await output._add_text(text_event)
                         await output._turn_done()
                 except Exception as e:
-                    logger.error("Error processing turns: %s", e)
+                    log_model_and_tool_action_error(logger, "Error processing voice turns", e)
                     await output._add_error(e)
-                    raise e
+                    raise
                 finally:
                     if transcription_session is not None:
                         await transcription_session.close()

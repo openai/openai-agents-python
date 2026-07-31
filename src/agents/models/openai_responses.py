@@ -50,7 +50,7 @@ from ..computer import AsyncComputer, Computer
 from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
-from ..logger import logger
+from ..logger import log_model_action_debug, log_model_action_error, logger
 from ..model_settings import MCPToolChoice
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..tool import (
@@ -63,12 +63,14 @@ from ..tool import (
     HostedMCPTool,
     ImageGenerationTool,
     LocalShellTool,
+    ProgrammaticToolCallingTool,
     ShellTool,
     ShellToolEnvironment,
     Tool,
     ToolSearchTool,
     WebSearchTool,
     has_required_tool_search_surface,
+    validate_responses_programmatic_tool_calling_configuration,
     validate_responses_tool_search_configuration,
 )
 from ..tracing import SpanError, response_span
@@ -298,7 +300,9 @@ class _ResponseStreamWithRequestId:
             await self._cleanup_once()
         except Exception as exc:
             if self._yielded_terminal_event:
-                logger.debug("Ignoring stream cleanup error after terminal event: %s", exc)
+                log_model_action_debug(
+                    logger, "Ignoring stream cleanup error after terminal event", exc
+                )
                 return
             raise
 
@@ -450,7 +454,9 @@ class OpenAIResponsesModel(Model):
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            logger.debug("Background stream cleanup failed after cancellation: %s", exc)
+            log_model_action_debug(
+                logger, "Background stream cleanup failed after cancellation", exc
+            )
 
     async def get_response(
         self,
@@ -504,12 +510,16 @@ class OpenAIResponsesModel(Model):
                     SpanError(
                         message="Error getting response",
                         data={
-                            "error": str(e) if tracing.include_data() else e.__class__.__name__,
+                            "error": str(e)
+                            if tracing.include_data()
+                            else "Error details are redacted.",
                         },
                     )
                 )
-                request_id = getattr(e, "request_id", None)
-                logger.error("Error getting response: %s. (request_id: %s)", e, request_id)
+                message = "Error getting response"
+                if not _debug.DONT_LOG_MODEL_DATA:
+                    message = f"{message} (request_id: {getattr(e, 'request_id', None)})"
+                log_model_action_error(logger, message, e)
                 raise
 
         return ModelResponse(
@@ -594,8 +604,10 @@ class OpenAIResponsesModel(Model):
                             await self._maybe_aclose_async_iterator(stream)
                         except Exception as exc:
                             if yielded_terminal_event:
-                                logger.debug(
-                                    "Ignoring stream cleanup error after terminal event: %s", exc
+                                log_model_action_debug(
+                                    logger,
+                                    "Ignoring stream cleanup error after terminal event",
+                                    exc,
                                 )
                             else:
                                 raise
@@ -615,11 +627,13 @@ class OpenAIResponsesModel(Model):
                     SpanError(
                         message="Error streaming response",
                         data={
-                            "error": str(e) if tracing.include_data() else e.__class__.__name__,
+                            "error": str(e)
+                            if tracing.include_data()
+                            else "Error details are redacted.",
                         },
                     )
                 )
-                logger.error("Error streaming response: %s", e)
+                log_model_action_error(logger, "Error streaming response", e)
                 raise
 
     @overload
@@ -1015,6 +1029,18 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
             return ModelRetryAdvice(
                 suggested=True,
                 replay_safety="safe",
+                reason=str(request.error),
+            )
+        if (
+            isinstance(request.error, ResponsesWebSocketError)
+            and request.error.event_type == "error"
+            and (
+                request.error.code == "server_is_overloaded"
+                or (request.error.error_type == "server_error" and request.error.code is None)
+            )
+        ):
+            return ModelRetryAdvice(
+                suggested=True,
                 reason=str(request.error),
             )
         return super().get_retry_advice(request)
@@ -1637,6 +1663,11 @@ class Converter:
             return "auto"
         elif tool_choice == "none":
             return "none"
+        elif tool_choice == "programmatic_tool_calling":
+            return cast(
+                response_create_params.ToolChoice,
+                {"type": "programmatic_tool_calling"},
+            )
         elif tool_choice == "file_search":
             return {
                 "type": "file_search",
@@ -1897,6 +1928,11 @@ class Converter:
             tools,
             allow_opaque_search_surface=allow_opaque_tool_search_surface,
         )
+        validate_responses_programmatic_tool_calling_configuration(
+            tools,
+            tool_choice=tool_choice,
+            allow_opaque_tool_search_surface=allow_opaque_tool_search_surface,
+        )
 
         computer_tools = [tool for tool in tools if isinstance(tool, ComputerTool)]
         if len(computer_tools) > 1:
@@ -1975,6 +2011,10 @@ class Converter:
         }
         if include_defer_loading and tool.defer_loading:
             function_tool_param["defer_loading"] = True
+        if tool.allowed_callers is not None:
+            function_tool_param["allowed_callers"] = tool.allowed_callers
+        if tool.output_json_schema is not None:
+            function_tool_param["output_schema"] = tool.output_json_schema
         return function_tool_param, None
 
     @classmethod
@@ -2057,16 +2097,21 @@ class Converter:
         elif isinstance(tool, ApplyPatchTool):
             tool_config = getattr(tool, "tool_config", None)
             if tool_config is not None:
-                return _require_responses_tool_param(tool_config), None
-            return ApplyPatchToolParam(type="apply_patch"), None
+                converted_tool_config = dict(tool_config)
+            else:
+                converted_tool_config = dict(ApplyPatchToolParam(type="apply_patch"))
+            if tool.allowed_callers is not None:
+                converted_tool_config["allowed_callers"] = tool.allowed_callers
+            return _require_responses_tool_param(converted_tool_config), None
         elif isinstance(tool, ShellTool):
+            shell_tool_config: dict[str, Any] = {
+                "type": "shell",
+                "environment": cls._convert_shell_environment(tool.environment),
+            }
+            if tool.allowed_callers is not None:
+                shell_tool_config["allowed_callers"] = tool.allowed_callers
             return (
-                _require_responses_tool_param(
-                    {
-                        "type": "shell",
-                        "environment": cls._convert_shell_environment(tool.environment),
-                    }
-                ),
+                _require_responses_tool_param(shell_tool_config),
                 None,
             )
         elif isinstance(tool, ImageGenerationTool):
@@ -2084,6 +2129,8 @@ class Converter:
             if tool.parameters is not None:
                 tool_search_tool_param["parameters"] = tool.parameters
             return tool_search_tool_param, None
+        elif isinstance(tool, ProgrammaticToolCallingTool):
+            return _require_responses_tool_param({"type": "programmatic_tool_calling"}), None
         else:
             raise UserError(f"Unknown tool type: {type(tool)}, tool")
 

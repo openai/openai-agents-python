@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import Sequence
 
+from ...logger import log_tool_action_error
 from ..errors import OpName
 from .events import EventPayloadPolicy, SandboxSessionEvent, SandboxSessionFinishEvent
 from .sinks import ChainedSink, EventSink
@@ -104,8 +105,8 @@ class Instrumentation:
         if sink.mode == "sync":
             try:
                 await _run()
-            except Exception:
-                self._handle_sink_error(sink, event)
+            except Exception as exc:
+                self._handle_sink_error(sink, event, exc)
         elif sink.mode == "async":
             if sink.on_error == "raise":
                 await _run()
@@ -114,8 +115,8 @@ class Instrumentation:
             async def _task() -> None:
                 try:
                     await _run()
-                except Exception:
-                    self._handle_sink_error(sink, event)
+                except Exception as exc:
+                    self._handle_sink_error(sink, event, exc)
 
             task = asyncio.create_task(_task())
             # Track background deliveries so the task is kept alive and can be discarded once done.
@@ -126,8 +127,8 @@ class Instrumentation:
             async def _task() -> None:
                 try:
                     await _run()
-                except Exception:
-                    self._handle_sink_error(sink, event, force_no_raise=True)
+                except Exception as exc:
+                    self._handle_sink_error(sink, event, exc, force_no_raise=True)
 
             task = asyncio.create_task(_task())
             # Same bookkeeping as async mode, but failures are always swallowed after logging.
@@ -146,16 +147,26 @@ class Instrumentation:
         """
         try:
             await sink.handle(event)
-        except Exception:
+        except Exception as exc:
             force_no_raise = sink.mode == "best_effort"
-            self._handle_sink_error(sink, event, force_no_raise=force_no_raise)
+            self._handle_sink_error(sink, event, exc, force_no_raise=force_no_raise)
 
     def _handle_sink_error(
-        self, sink: EventSink, event: SandboxSessionEvent, *, force_no_raise: bool = False
+        self,
+        sink: EventSink,
+        event: SandboxSessionEvent,
+        exc: Exception,
+        *,
+        force_no_raise: bool = False,
     ) -> None:
         if force_no_raise or sink.on_error in ("log", "ignore"):
             if sink.on_error == "log":
-                logger.exception("sandbox event sink failed (ignored): %s", type(sink).__name__)
+                log_tool_action_error(
+                    logger,
+                    "Sandbox event sink failed (ignored)",
+                    exc,
+                    diagnostic_extra=lambda: {"sink_type": type(sink).__name__},
+                )
             return
         raise RuntimeError(
             "sandbox event sink failed: "

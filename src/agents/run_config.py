@@ -5,14 +5,24 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal
 
+from pydantic import TypeAdapter
 from typing_extensions import NotRequired, TypedDict
 
+from ._config_coercion import (
+    _declared_dataclass_type,
+    coerce_dataclass_config,
+    coerce_pydantic_config,
+)
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import HandoffHistoryMapper, HandoffInputFilter
 from .items import TResponseInputItem
 from .lifecycle import RunHooks
 from .memory import Session, SessionInputCallback, SessionSettings
-from .model_settings import ModelSettings
+from .memory.session_settings import (
+    _coerce_session_settings,
+    _declared_session_settings_type,
+)
+from .model_settings import ModelSettings, _coerce_model_settings, _declared_model_settings_type
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
 from .run_context import TContext
@@ -207,6 +217,86 @@ class SandboxRunConfig:
     Use `SandboxArchiveLimits()` to enable SDK defaults.
     """
 
+    if TYPE_CHECKING:
+
+        def __init__(
+            self,
+            client: BaseSandboxClient[Any] | None = None,
+            options: Any | None = None,
+            session: BaseSandboxSession | None = None,
+            session_state: SandboxSessionState | None = None,
+            manifest: Manifest | dict[str, Any] | None = None,
+            snapshot: SnapshotSpec | SnapshotBase | dict[str, Any] | None = None,
+            concurrency_limits: SandboxConcurrencyLimits | dict[str, Any] = ...,
+            archive_limits: SandboxArchiveLimits | dict[str, Any] | None = None,
+        ) -> None: ...
+
+    def __post_init__(self) -> None:
+        if isinstance(self.manifest, dict):
+            from .sandbox.manifest import _coerce_manifest
+
+            self.manifest = _coerce_manifest(self.manifest, parameter_name="sandbox.manifest")
+        if isinstance(self.snapshot, dict):
+            from .sandbox.snapshot import SnapshotBase, SnapshotSpecUnion
+
+            if "id" in self.snapshot:
+                self.snapshot = SnapshotBase.parse(self.snapshot)
+            else:
+                self.snapshot = TypeAdapter(SnapshotSpecUnion).validate_python(self.snapshot)
+        if isinstance(self.options, dict) and self.client is not None:
+            from .sandbox.session.sandbox_client import BaseSandboxClientOptions
+
+            options_type = BaseSandboxClientOptions._options_class_for_type(self.client.backend_id)
+            if options_type is not None:
+                options = self.options
+                explicit_type = options.get("type")
+                if explicit_type is not None and explicit_type != self.client.backend_id:
+                    raise ValueError(
+                        f"sandbox.options type `{explicit_type}` does not match selected "
+                        f"sandbox client backend `{self.client.backend_id}`"
+                    )
+                if "type" not in options:
+                    options = {
+                        **options,
+                        "type": options_type.model_fields["type"].default,
+                    }
+                self.options = coerce_pydantic_config(
+                    options,
+                    options_type,
+                    parameter_name="sandbox.options",
+                )
+            elif self.client.backend_id == "blaxel":
+                from .extensions.sandbox.blaxel.sandbox import (
+                    BlaxelSandboxClient,
+                    BlaxelSandboxClientOptions,
+                )
+
+                if isinstance(self.client, BlaxelSandboxClient):
+                    self.options = coerce_dataclass_config(
+                        self.options,
+                        BlaxelSandboxClientOptions,
+                        parameter_name="sandbox.options",
+                    )
+        self.concurrency_limits = coerce_dataclass_config(
+            self.concurrency_limits,
+            _declared_dataclass_type(
+                type(self),
+                "concurrency_limits",
+                SandboxConcurrencyLimits,
+            ),
+            parameter_name="sandbox.concurrency_limits",
+        )
+        if self.archive_limits is not None:
+            self.archive_limits = coerce_dataclass_config(
+                self.archive_limits,
+                _declared_dataclass_type(
+                    type(self),
+                    "archive_limits",
+                    SandboxArchiveLimits,
+                ),
+                parameter_name="sandbox.archive_limits",
+            )
+
 
 @dataclass
 class RunConfig:
@@ -222,7 +312,7 @@ class RunConfig:
 
     model_settings: ModelSettings | None = None
     """Configure global model settings. Any non-null values will override the agent-specific model
-    settings.
+    settings. Accepts a ``ModelSettings`` instance or a dictionary containing its fields.
     """
 
     handoff_input_filter: HandoffInputFilter | None = None
@@ -234,9 +324,10 @@ class RunConfig:
     """
 
     nest_handoff_history: bool = False
-    """Opt-in beta: wrap prior run history in a single assistant message before handing off when no
-    custom input filter is set. This is disabled by default while we stabilize nested handoffs; set
-    to True to enable the collapsed transcript behavior. Server-managed conversations
+    """Opt-in beta: compact prior run history into ordered assistant summary segments while
+    preserving lossless message items in their original positions. This is disabled by default
+    while we stabilize nested handoffs; set to True to enable the compacted transcript behavior.
+    Server-managed conversations
     (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`) automatically
     disable this behavior with a warning.
     """
@@ -244,7 +335,8 @@ class RunConfig:
     handoff_history_mapper: HandoffHistoryMapper | None = None
     """Optional function that receives the normalized transcript (history + handoff items) and
     returns the input history that should be passed to the next agent. When left as `None`, the
-    runner collapses the transcript into a single assistant message. This function only runs when
+    runner uses ordered summary segments around lossless message items. When supplied, the
+    function's return value is used as the exact input history. This function only runs when
     `nest_handoff_history` is True.
     """
 
@@ -337,6 +429,64 @@ class RunConfig:
       the run continue.
     """
 
+    if TYPE_CHECKING:
+
+        def __init__(
+            self,
+            model: str | Model | None = None,
+            model_provider: ModelProvider = ...,
+            model_settings: ModelSettings | dict[str, Any] | None = None,
+            handoff_input_filter: HandoffInputFilter | None = None,
+            nest_handoff_history: bool = False,
+            handoff_history_mapper: HandoffHistoryMapper | None = None,
+            input_guardrails: list[InputGuardrail[Any]] | None = None,
+            output_guardrails: list[OutputGuardrail[Any]] | None = None,
+            tracing_disabled: bool = False,
+            tracing: TracingConfig | None = None,
+            trace_include_sensitive_data: bool = ...,
+            workflow_name: str = "Agent workflow",
+            trace_id: str | None = None,
+            group_id: str | None = None,
+            trace_metadata: dict[str, Any] | None = None,
+            session_input_callback: SessionInputCallback | None = None,
+            call_model_input_filter: CallModelInputFilter | None = None,
+            tool_error_formatter: ToolErrorFormatter | None = None,
+            session_settings: SessionSettings | dict[str, Any] | None = None,
+            reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+            sandbox: SandboxRunConfig | dict[str, Any] | None = None,
+            tool_execution: ToolExecutionConfig | dict[str, Any] | None = None,
+            tool_not_found_behavior: ToolNotFoundBehavior = "raise_error",
+        ) -> None: ...
+
+    def __post_init__(self) -> None:
+        if self.model_settings is not None:
+            self.model_settings = _coerce_model_settings(
+                self.model_settings,
+                parameter_name="RunConfig model_settings",
+                model_settings_type=_declared_model_settings_type(type(self), "model_settings"),
+            )
+        if self.session_settings is not None:
+            self.session_settings = _coerce_session_settings(
+                self.session_settings,
+                settings_type=_declared_session_settings_type(type(self), "session_settings"),
+            )
+        if self.sandbox is not None:
+            self.sandbox = coerce_dataclass_config(
+                self.sandbox,
+                _declared_dataclass_type(type(self), "sandbox", SandboxRunConfig),
+                parameter_name="run_config.sandbox",
+            )
+        if self.tool_execution is not None:
+            self.tool_execution = coerce_dataclass_config(
+                self.tool_execution,
+                _declared_dataclass_type(
+                    type(self),
+                    "tool_execution",
+                    ToolExecutionConfig,
+                ),
+                parameter_name="run_config.tool_execution",
+            )
+
 
 class RunOptions(TypedDict, Generic[TContext]):
     """Arguments for ``AgentRunner`` methods."""
@@ -350,7 +500,7 @@ class RunOptions(TypedDict, Generic[TContext]):
     hooks: NotRequired[RunHooks[TContext] | None]
     """Lifecycle hooks for the run."""
 
-    run_config: NotRequired[RunConfig | None]
+    run_config: NotRequired[RunConfig | dict[str, Any] | None]
     """Run configuration."""
 
     previous_response_id: NotRequired[str | None]
@@ -367,6 +517,11 @@ class RunOptions(TypedDict, Generic[TContext]):
 
     error_handlers: NotRequired[RunErrorHandlers[TContext] | None]
     """Error handlers keyed by error kind."""
+
+
+def _coerce_run_config(value: RunConfig | dict[str, Any]) -> RunConfig:
+    """Normalize run configuration dictionaries at public runner boundaries."""
+    return coerce_dataclass_config(value, RunConfig, parameter_name="run_config")
 
 
 __all__ = [

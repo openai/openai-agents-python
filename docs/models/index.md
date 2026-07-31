@@ -110,15 +110,16 @@ Preview-compatible requests must serialize `environment` and display dimensions 
 
 If you pass a non–GPT-5 model name without custom `model_settings`, the SDK reverts to generic `ModelSettings` compatible with any model.
 
-### Responses-only tool search features
+### Responses-only tool features
 
 The following tool features are supported only with OpenAI Responses models:
 
 -   [`ToolSearchTool`][agents.tool.ToolSearchTool]
 -   [`tool_namespace()`][agents.tool.tool_namespace]
 -   `@function_tool(defer_loading=True)` and other deferred-loading Responses tool surfaces
+-   [`ProgrammaticToolCallingTool`][agents.tool.ProgrammaticToolCallingTool], `allowed_callers`, and `tool_choice="programmatic_tool_calling"`
 
-These features are rejected on Chat Completions models and on non-Responses backends. When you use deferred-loading tools, add `ToolSearchTool()` to the agent and let the model load tools through `auto` or `required` tool choice instead of forcing bare namespace names or deferred-only function names. See [Tools](../tools.md#hosted-tool-search) for the setup details and current constraints.
+These features are rejected on Chat Completions models and on non-Responses backends. When you use deferred-loading tools, add `ToolSearchTool()` to the agent and let the model load tools through `auto` or `required` tool choice instead of forcing bare namespace names or deferred-only function names. See [Hosted tool search](../tools.md#hosted-tool-search) and [Programmatic Tool Calling](../tools.md#programmatic-tool-calling) for setup details and current constraints.
 
 ### Responses WebSocket transport
 
@@ -231,6 +232,8 @@ If you use a custom OpenAI-compatible endpoint or proxy, websocket transport als
 -   You can use [`Runner.run_streamed()`][agents.run.Runner.run_streamed] directly after enabling websocket transport. For multi-turn workflows where you want to reuse the same websocket connection across turns (and nested agent-as-tool calls), the [`responses_websocket_session()`][agents.responses_websocket_session] helper is recommended. See the [Running agents](../running_agents.md) guide and [`examples/basic/stream_ws.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/stream_ws.py).
 -   For long reasoning turns or networks with latency spikes, customize websocket keepalive behavior with `responses_websocket_options`. Increase `ping_timeout` to tolerate delayed pong frames, or set `ping_timeout=None` to disable heartbeat timeouts while keeping pings enabled. Prefer HTTP/SSE transport when reliability is more important than websocket latency.
 -   By default the SDK disables the incoming message-size limit (`max_size=None`). For long-lived agent processes behind proxies or in memory-constrained containers, set `responses_websocket_options={"max_size": 8 * 1024 * 1024}` to bound per-message memory usage.
+-   The [Responses API WebSocket service](https://developers.openai.com/api/docs/guides/websocket-mode) processes one response at a time on each connection and limits each connection to 60 minutes. Open a new connection after that limit; use multiple connections when you need parallel runs.
+-   The service keeps only the most recent response in connection-local memory. A failed `4xx` or `5xx` turn evicts the referenced `previous_response_id`. After reconnecting, a stored response can still be continued when available, but `store=False` and ZDR flows have no persisted fallback. Start a new chain with `previous_response_id=None` and send the full input context, or rebuild that context from locally managed session state.
 
 ### Hosted multi-agent (experimental)
 
@@ -264,11 +267,11 @@ Use `get_hosted_agent_metadata()` when a tool needs caller-aware logging or auth
 ```python
 from typing import Any
 
-from agents import function_tool
+from agents.decorators import tool
 from agents.extensions.experimental.hosted_multi_agent import get_hosted_agent_metadata
 from agents.tool_context import ToolContext
 
-@function_tool
+@tool
 def lookup_document(ctx: ToolContext[Any], section: str) -> str:
     metadata = get_hosted_agent_metadata(ctx)
     caller = metadata.agent_name if metadata else "unknown"
@@ -349,8 +352,9 @@ Within a single workflow, you may want to use different models for each agent. F
     While our SDK supports both the [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] and the [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] shapes, we recommend using a single model shape for each workflow because the two shapes support a different set of features and tools. If your workflow requires mixing and matching model shapes, make sure that all the features you're using are available on both.
 
 ```python
-from agents import Agent, Runner, AsyncOpenAI, OpenAIChatCompletionsModel
 import asyncio
+
+from agents import Agent, Runner, AsyncOpenAI, OpenAIChatCompletionsModel
 
 spanish_agent = Agent(
     name="Spanish agent",
@@ -377,12 +381,16 @@ triage_agent = Agent(
 async def main():
     result = await Runner.run(triage_agent, input="Hola, ¿cómo estás?")
     print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 1.  Sets the name of an OpenAI model directly.
 2.  Provides a [`Model`][agents.models.interface.Model] implementation.
 
-When you want to further configure the model used for an agent, you can pass [`ModelSettings`][agents.models.interface.ModelSettings], which provides optional model configuration parameters such as temperature.
+When you want to further configure the model used for an agent, you can pass [`ModelSettings`][agents.model_settings.ModelSettings], which provides optional model configuration parameters such as temperature.
 
 ```python
 from agents import Agent, ModelSettings
@@ -489,6 +497,8 @@ english_agent = Agent(
 ## Runner-managed retries
 
 Retries are runtime-only and opt in. The SDK does not retry general model requests unless you set `ModelSettings(retry=...)` and your retry policy chooses to retry.
+
+On the Responses websocket transport, `retry_policies.provider_suggested()` recognizes pre-response overload frames and code-less `server_error` frames as retry suggestions. This does not enable retries by itself: you still need `ModelRetrySettings`, and the normal replay-safety checks still apply. If any response event has already arrived, the SDK does not replay the request.
 
 ```python
 from agents import Agent, ModelRetrySettings, ModelSettings, retry_policies
@@ -668,3 +678,11 @@ LiteLLM support is included on a best-effort, beta basis for cases where you nee
 If you need LiteLLM, install `openai-agents[litellm]`, then start from [`examples/model_providers/litellm_auto.py`](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/litellm_auto.py) or [`examples/model_providers/litellm_provider.py`](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/litellm_provider.py). You can use `litellm/...` model names or instantiate [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] directly.
 
 Some LiteLLM-backed providers do not populate SDK usage metrics by default. If you need usage reporting, pass `ModelSettings(include_usage=True)` and validate the exact provider backend you plan to deploy if you depend on structured outputs, tool calling, usage reporting, or adapter-specific routing behavior.
+
+If LiteLLM emits Pydantic serializer warnings for response objects, you can opt in to the SDK's compatibility patch before importing the LiteLLM adapter:
+
+```bash
+export OPENAI_AGENTS_ENABLE_LITELLM_SERIALIZER_PATCH=true
+```
+
+The patch is disabled by default and is enabled only for `1` or `true` values. It suppresses a specific class of LiteLLM response-serialization warnings by wrapping a private LiteLLM logging helper, so treat it as a targeted workaround rather than a general serialization setting. Because it depends on a private LiteLLM API, validate it again when upgrading LiteLLM and remove the environment variable when the upstream warning no longer occurs.

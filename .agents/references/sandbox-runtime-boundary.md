@@ -44,6 +44,14 @@ Resolve the session source in this order: injected live session, resumable sandb
 - Temporary clones, mounts, sinks, and dependency resources need failure cleanup during partial startup as well as normal shutdown.
 - Capability tools should report bounded output and preserve provider exit status or structured error data without exposing private runtime metadata to the model.
 
+## Remote Mount Simplicity Boundary
+
+Remote mounts should default to one narrow lifecycle: declare them during sandbox creation, keep their contents outside workspace persistence, and unmount them during close. When tar persistence or hydration requires detaching a mount, restore it immediately afterward. Mount credentials must remain trusted live configuration and must not be reconstructed from serialized session state.
+
+Treat dynamic mount mutation, native-snapshot-backed mounts, and resumable mounts as opt-in provider capabilities rather than default requirements. If a privileged mount transition becomes ambiguous, stop the sandbox instead of adding reconciliation or recovery state. Do not add credential resolvers, refresh loops, persisted mount registries, or dynamic mount APIs unless the provider exposes a trusted primitive that makes the lifecycle transition unambiguous and the change is supported by focused provider evidence.
+
+Provider adapters may deliberately support a narrower lifecycle. Document that boundary next to the adapter state that enforces it so future maintainers do not mistake an intentional exclusion for an unfinished feature. The Vercel S3 adapter follows the create-time-only form of this policy: its trusted mount configuration is live-session-only, sessions containing mounts cannot resume, and mount topology cannot change after creation.
+
 ## Review Checklist
 
 1. Name the owner of every live session, provider client, mount, process, capability, and temporary resource.
@@ -63,6 +71,8 @@ Resolve the session source in this order: injected live session, resumable sandb
 - `src/agents/sandbox/materialization.py`
 - `src/agents/sandbox/workspace_paths.py`
 - `src/agents/sandbox/session/archive_extraction.py`
+- `src/agents/extensions/sandbox/vercel/mounts.py`
+- `src/agents/extensions/sandbox/vercel/sandbox.py`
 - `tests/sandbox/test_runtime.py`
 - `tests/sandbox/test_runtime_agent_preparation.py`
 - `tests/sandbox/test_session_state_roundtrip.py`

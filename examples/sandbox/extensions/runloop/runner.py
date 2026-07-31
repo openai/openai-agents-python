@@ -16,6 +16,7 @@ from openai.types.responses import ResponseTextDeltaEvent
 from agents import ModelSettings, Runner
 from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
+from agents.sandbox.snapshot import NoopSnapshotSpec
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
@@ -107,6 +108,7 @@ async def main(
                 pause_on_exit=pause_on_exit,
                 user_parameters=(RunloopUserParameters(username="root", uid=0) if root else None),
             ),
+            snapshot=NoopSnapshotSpec(),
         ),
         workflow_name="Runloop sandbox example",
     )

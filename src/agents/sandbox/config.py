@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Final
+from typing import TYPE_CHECKING, Any, Final
 
 from openai.types.shared import Reasoning
 
-from ..model_settings import ModelSettings
+from ..model_settings import (
+    ModelSettings,
+    _coerce_model_settings,
+    _declared_model_settings_type,
+)
 from ..models.interface import Model
 
 DEFAULT_PYTHON_SANDBOX_IMAGE: Final = "python:3.14-slim"
@@ -47,7 +51,10 @@ class MemoryGenerateConfig:
     phase_one_model_settings: ModelSettings | None = field(
         default_factory=_default_memory_phase_one_model_settings
     )
-    """Model settings used for phase-1 single-rollout extraction."""
+    """Model settings used for phase-1 single-rollout extraction.
+
+    Accepts a ``ModelSettings`` instance or a dictionary containing its fields.
+    """
 
     phase_two_model: str | Model = "gpt-5.5"
     """Model used for phase-2 memory consolidation."""
@@ -55,7 +62,10 @@ class MemoryGenerateConfig:
     phase_two_model_settings: ModelSettings | None = field(
         default_factory=_default_memory_phase_two_model_settings
     )
-    """Model settings used for phase-2 memory consolidation."""
+    """Model settings used for phase-2 memory consolidation.
+
+    Accepts a ``ModelSettings`` instance or a dictionary containing its fields.
+    """
 
     extra_prompt: str | None = None
     """Optional developer-specific guidance appended to memory extraction and consolidation
@@ -70,7 +80,36 @@ class MemoryGenerateConfig:
     evidence you actually want it to summarize.
     """
 
+    if TYPE_CHECKING:
+
+        def __init__(
+            self,
+            max_raw_memories_for_consolidation: int = 256,
+            phase_one_model: str | Model = "gpt-5.4-mini",
+            phase_one_model_settings: ModelSettings | dict[str, Any] | None = ...,
+            phase_two_model: str | Model = "gpt-5.5",
+            phase_two_model_settings: ModelSettings | dict[str, Any] | None = ...,
+            extra_prompt: str | None = None,
+        ) -> None: ...
+
     def __post_init__(self) -> None:
+        if self.phase_one_model_settings is not None:
+            self.phase_one_model_settings = _coerce_model_settings(
+                self.phase_one_model_settings,
+                parameter_name="MemoryGenerateConfig.phase_one_model_settings",
+                model_settings_type=_declared_model_settings_type(
+                    type(self), "phase_one_model_settings"
+                ),
+            )
+        if self.phase_two_model_settings is not None:
+            self.phase_two_model_settings = _coerce_model_settings(
+                self.phase_two_model_settings,
+                parameter_name="MemoryGenerateConfig.phase_two_model_settings",
+                model_settings_type=_declared_model_settings_type(
+                    type(self), "phase_two_model_settings"
+                ),
+            )
+
         if self.max_raw_memories_for_consolidation <= 0:
             raise ValueError(
                 "MemoryGenerateConfig.max_raw_memories_for_consolidation must be greater than 0."

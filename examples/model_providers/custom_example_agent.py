@@ -3,7 +3,13 @@ import os
 
 from openai import AsyncOpenAI
 
-from agents import Agent, OpenAIChatCompletionsModel, Runner, function_tool, set_tracing_disabled
+from agents import (
+    Agent,
+    OpenAIChatCompletionsModel,
+    Runner,
+    set_tracing_disabled,
+)
+from agents.decorators import tool
 
 BASE_URL = os.getenv("EXAMPLE_BASE_URL") or ""
 API_KEY = os.getenv("EXAMPLE_API_KEY") or ""
@@ -32,7 +38,7 @@ set_tracing_disabled(disabled=True)
 # Runner.run(agent, ..., run_config=RunConfig(model_provider=PROVIDER))
 
 
-@function_tool
+@tool
 def get_weather(city: str):
     print(f"[debug] getting weather for {city}")
     return f"The weather in {city} is sunny."

@@ -256,6 +256,41 @@ async def test_pop_item_skips_corrupt_most_recent():
     assert await session.get_items() == []
 
 
+async def test_get_items_limit_skips_corrupt_newest_rows():
+    """limit counts valid items, expanding past corrupt newest rows."""
+    session = SQLAlchemySession.from_url("limit_corrupt", url=DB_URL, create_tables=True)
+
+    await session.add_items(
+        [
+            {"role": "user", "content": "valid 0"},
+            {"role": "assistant", "content": "valid 1"},
+            {"role": "user", "content": "valid 2"},
+        ]
+    )
+
+    await session._ensure_tables()
+    async with session._session_factory() as sess:
+        async with sess.begin():
+            await sess.execute(
+                insert(session._messages).values(
+                    {"session_id": session.session_id, "message_data": "not valid json {{{"}
+                )
+            )
+
+    limited = await session.get_items(limit=2)
+    assert [item.get("content") for item in limited] == ["valid 1", "valid 2"]
+
+
+async def test_get_items_limit_returns_fewer_when_history_exhausted():
+    """Window expansion stops at the end of history instead of looping."""
+    session = SQLAlchemySession.from_url("limit_exhausted", url=DB_URL, create_tables=True)
+
+    await session.add_items([{"role": "user", "content": "only valid"}])
+
+    retrieved = await session.get_items(limit=5)
+    assert [item.get("content") for item in retrieved] == ["only valid"]
+
+
 async def test_pop_item_returns_none_after_dropping_only_corrupt_rows():
     """pop_item removes corrupt rows and returns None when no valid items remain."""
     session = SQLAlchemySession.from_url("pop_only_corrupt", url=DB_URL, create_tables=True)
@@ -836,7 +871,8 @@ async def test_session_settings_default():
     assert session.session_settings.limit is None
 
 
-async def test_session_settings_from_url():
+@pytest.mark.parametrize("use_dictionary", [False, True], ids=["class", "dictionary"])
+async def test_session_settings_from_url(use_dictionary: bool):
     """Test passing session_settings via from_url."""
     from agents.memory import SessionSettings
 
@@ -844,10 +880,10 @@ async def test_session_settings_from_url():
         "from_url_settings_test",
         url=DB_URL,
         create_tables=True,
-        session_settings=SessionSettings(limit=5),
+        session_settings={"limit": 5} if use_dictionary else SessionSettings(limit=5),
     )
 
-    assert session.session_settings is not None
+    assert isinstance(session.session_settings, SessionSettings)
     assert session.session_settings.limit == 5
 
 

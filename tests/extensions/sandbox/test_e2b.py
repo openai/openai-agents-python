@@ -141,14 +141,15 @@ async def test_e2b_ensure_fuse_uses_root_chmod() -> None:
 
 
 @pytest.mark.asyncio
-async def test_e2b_ensure_rclone_installs_with_root_apt() -> None:
+async def test_e2b_ensure_rclone_installs_verified_release() -> None:
     session = _FakeMountSession(
         [
             _exec_fail(),  # rclone missing
             _exec_ok(),  # apt-get present
+            _exec_ok(stdout=b"x86_64\n"),  # supported release architecture
             _exec_ok(),  # apt-get update succeeds
-            _exec_ok(),  # package install succeeds
-            _exec_ok(),  # upstream rclone install succeeds
+            _exec_ok(),  # prerequisite install succeeds
+            _exec_ok(),  # verified rclone install succeeds
             _exec_ok(),  # rclone now present
         ]
     )
@@ -159,20 +160,20 @@ async def test_e2b_ensure_rclone_installs_with_root_apt() -> None:
         "sh -lc command -v rclone >/dev/null 2>&1 || test -x /usr/local/bin/rclone",
         "sh -lc command -v apt-get >/dev/null 2>&1",
     ]
-    assert session.exec_calls[2] == (
+    assert session.exec_calls[2] == "uname -m"
+    assert session.exec_calls[3] == (
         "sudo -u root -- sh -lc DEBIAN_FRONTEND=noninteractive "
         "DEBCONF_NOWARNINGS=yes apt-get -o Dpkg::Use-Pty=0 update -qq"
     )
-    assert session.exec_calls[3] == (
+    assert session.exec_calls[4] == (
         "sudo -u root -- sh -lc DEBIAN_FRONTEND=noninteractive "
         "DEBCONF_NOWARNINGS=yes apt-get -o Dpkg::Use-Pty=0 install -y -qq "
-        "curl unzip ca-certificates"
+        "ca-certificates coreutils curl unzip"
     )
-    assert (
-        session.exec_calls[4]
-        == "sudo -u root -- sh -lc curl -fsSL https://rclone.org/install.sh | bash"
-    )
-    assert session.exec_calls[5] == (
+    assert session.exec_calls[5].startswith("sudo -u root -- sh -lc set -eu\n")
+    assert "sha256sum --check --strict -" in session.exec_calls[5]
+    assert "rclone.org/install.sh" not in session.exec_calls[5]
+    assert session.exec_calls[6] == (
         "sh -lc command -v rclone >/dev/null 2>&1 || test -x /usr/local/bin/rclone"
     )
 
@@ -271,6 +272,7 @@ class _FakeE2BAsyncCommandHandle:
 class _FakeE2BFiles:
     def __init__(self) -> None:
         self.make_dir_calls: list[tuple[str, float | None]] = []
+        self.make_dir_error: BaseException | None = None
 
     async def write(
         self,
@@ -285,6 +287,8 @@ class _FakeE2BFiles:
 
     async def make_dir(self, path: str, request_timeout: float | None = None) -> bool:
         self.make_dir_calls.append((path, request_timeout))
+        if self.make_dir_error is not None:
+            raise self.make_dir_error
         return True
 
     async def read(self, path: str, format: str = "bytes") -> bytes:
@@ -888,9 +892,17 @@ async def test_e2b_start_prepares_workspace_root_for_command_cwd() -> None:
     result = await session._exec_internal("pwd", timeout=0.01)  # noqa: SLF001
 
     assert result.ok()
+    assert sandbox.files.make_dir_calls == [("/workspace", 10)]
     assert session.state.workspace_root_ready is True
     assert session._workspace_root_ready is True  # noqa: SLF001
     assert _visible_command_calls(sandbox) == [
+        {
+            "command": "test -d /workspace",
+            "timeout": 10.0,
+            "cwd": None,
+            "envs": {},
+            "user": None,
+        },
         {
             "command": "mkdir -p -- /workspace",
             "timeout": 10,
@@ -906,6 +918,49 @@ async def test_e2b_start_prepares_workspace_root_for_command_cwd() -> None:
             "user": None,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_e2b_start_skips_files_api_when_workspace_root_exists() -> None:
+    session, sandbox = _session(workspace_root_ready=False)
+    sandbox.commands.exec_root_ready = True
+    sandbox.files.make_dir_error = TimeoutError("files API unavailable")
+
+    await session.start()
+
+    assert sandbox.files.make_dir_calls == []
+    assert session.state.workspace_root_ready is True
+    assert session._workspace_root_ready is True  # noqa: SLF001
+    assert _visible_command_calls(sandbox)[:2] == [
+        {
+            "command": "test -d /workspace",
+            "timeout": 10.0,
+            "cwd": None,
+            "envs": {},
+            "user": None,
+        },
+        {
+            "command": "mkdir -p -- /workspace",
+            "timeout": 10,
+            "cwd": "/",
+            "envs": {},
+            "user": None,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_e2b_mkdir_recreates_workspace_root_when_readiness_is_stale() -> None:
+    session, sandbox = _session(workspace_root_ready=False)
+    sandbox.commands.exec_root_ready = True
+
+    await session.start()
+    sandbox.commands.exec_root_ready = False
+    command_calls_before_recovery = list(sandbox.commands.calls)
+    await session.mkdir("/workspace", parents=True)
+
+    assert sandbox.files.make_dir_calls == [("/workspace", 10)]
+    assert sandbox.commands.calls == command_calls_before_recovery
 
 
 @pytest.mark.asyncio
@@ -2134,11 +2189,15 @@ async def test_e2b_stop_terminates_live_pty_sessions() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("redacted", [True, False])
 async def test_e2b_shutdown_logs_pause_failure_and_falls_back_to_kill(
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    redacted: bool,
 ) -> None:
+    monkeypatch.setattr("agents._debug.DONT_LOG_TOOL_DATA", redacted)
     sandbox = _FakeE2BSandbox()
-    sandbox.pause_error = RuntimeError("pause failed")
+    sandbox.pause_error = RuntimeError("SECRET_E2B_PAUSE_FAILURE")
     state = E2BSandboxSessionState(
         session_id=uuid.uuid4(),
         manifest=Manifest(root="/workspace"),
@@ -2156,12 +2215,24 @@ async def test_e2b_shutdown_logs_pause_failure_and_falls_back_to_kill(
     assert sandbox.pause_calls == 1
     assert sandbox.kill_calls == 1
     assert "Failed to pause E2B sandbox on shutdown; falling back to kill." in caplog.text
+    assert ("SECRET_E2B_PAUSE_FAILURE" not in caplog.text) is redacted
+    record = caplog.records[-1]
+    assert ("openai_agents_diagnostic_context" in record.__dict__) is not redacted
+    if not redacted:
+        assert record.__dict__["openai_agents_diagnostic_context"] == {
+            "sandbox_id": sandbox.sandbox_id,
+            "pause_on_exit": True,
+        }
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("redacted", [True, False])
 async def test_e2b_shutdown_logs_kill_failure_after_pause_fallback(
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    redacted: bool,
 ) -> None:
+    monkeypatch.setattr("agents._debug.DONT_LOG_TOOL_DATA", redacted)
     sandbox = _FakeE2BSandbox()
     sandbox.pause_error = RuntimeError("pause failed")
     sandbox.kill_error = RuntimeError("kill failed")
@@ -2182,10 +2253,23 @@ async def test_e2b_shutdown_logs_kill_failure_after_pause_fallback(
     assert sandbox.pause_calls == 1
     assert sandbox.kill_calls == 1
     assert "Failed to kill E2B sandbox after pause fallback failure." in caplog.text
+    record = caplog.records[-1]
+    assert ("openai_agents_diagnostic_context" in record.__dict__) is not redacted
+    if not redacted:
+        assert record.__dict__["openai_agents_diagnostic_context"] == {
+            "sandbox_id": sandbox.sandbox_id,
+            "pause_on_exit": True,
+        }
 
 
 @pytest.mark.asyncio
-async def test_e2b_shutdown_logs_direct_kill_failure(caplog: pytest.LogCaptureFixture) -> None:
+@pytest.mark.parametrize("redacted", [True, False])
+async def test_e2b_shutdown_logs_direct_kill_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    redacted: bool,
+) -> None:
+    monkeypatch.setattr("agents._debug.DONT_LOG_TOOL_DATA", redacted)
     sandbox = _FakeE2BSandbox()
     sandbox.kill_error = RuntimeError("kill failed")
     state = E2BSandboxSessionState(
@@ -2205,6 +2289,13 @@ async def test_e2b_shutdown_logs_direct_kill_failure(caplog: pytest.LogCaptureFi
     assert sandbox.pause_calls == 0
     assert sandbox.kill_calls == 1
     assert "Failed to kill E2B sandbox on shutdown." in caplog.text
+    record = caplog.records[-1]
+    assert ("openai_agents_diagnostic_context" in record.__dict__) is not redacted
+    if not redacted:
+        assert record.__dict__["openai_agents_diagnostic_context"] == {
+            "sandbox_id": sandbox.sandbox_id,
+            "pause_on_exit": False,
+        }
 
 
 @pytest.mark.asyncio

@@ -33,6 +33,38 @@ This is the topology used by the core demo app, the CLI example, and the Twilio 
 
 Use this path when your server owns the audio pipeline, tool execution, approval flow, and history handling.
 
+### Low-level WebSocket tuning
+
+Pass `transport_config` to `OpenAIRealtimeWebSocketModel` when you need to tune the underlying server-side WebSocket connection:
+
+```python
+from agents.realtime import (
+    OpenAIRealtimeWebSocketModel,
+    RealtimeAgent,
+    RealtimeRunner,
+)
+
+agent = RealtimeAgent(name="Assistant")
+model = OpenAIRealtimeWebSocketModel(
+    transport_config={
+        "ping_interval": 20.0,
+        "ping_timeout": 60.0,
+        "handshake_timeout": 30.0,
+        "max_size": 8 * 1024 * 1024,
+    }
+)
+runner = RealtimeRunner(starting_agent=agent, model=model)
+```
+
+The supported options are:
+
+-   `ping_interval`: Seconds between client keepalive pings. Set `None` to disable pings.
+-   `ping_timeout`: Seconds to wait for a pong before disconnecting. Set `None` to tolerate delayed pongs without a heartbeat timeout.
+-   `handshake_timeout`: Seconds to wait for the initial connection handshake.
+-   `max_size`: Maximum incoming WebSocket message size in bytes. The SDK default is `None`, which leaves incoming message size unlimited; set an explicit limit when you need to bound per-message memory usage.
+
+These settings configure the client connection rather than the Realtime API session. Continue to use `RealtimeModelConfig` for endpoint, authentication, call attachment, and playback settings.
+
 ## SIP attach is the telephony path
 
 For the telephony flow documented in this repository, the Python SDK attaches to an existing realtime call via `call_id`.

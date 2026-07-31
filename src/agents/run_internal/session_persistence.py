@@ -9,12 +9,18 @@ import asyncio
 import copy
 import inspect
 import json
+from collections import deque
 from collections.abc import Sequence
 from typing import Any, cast
 
+from .. import _debug
 from ..exceptions import UserError
 from ..items import HandoffOutputItem, ItemHelpers, RunItem, ToolCallOutputItem, TResponseInputItem
-from ..logger import logger
+from ..logger import (
+    log_model_and_tool_action_debug,
+    log_model_and_tool_action_warning,
+    logger,
+)
 from ..memory import (
     OpenAIResponsesCompactionArgs,
     Session,
@@ -25,13 +31,19 @@ from ..memory import (
 from ..memory.openai_conversations_session import OpenAIConversationsSession
 from ..run_state import RunState
 from .items import (
+    NestedHistoryOwnedItem,
+    NestedHistoryOwnedItemRef,
     ReasoningItemIdPolicy,
     copy_input_items,
     deduplicate_input_items_preferring_latest,
+    digest_input_item,
     drop_orphan_function_calls,
     ensure_input_item_format,
+    ensure_nested_history_run_item_occurrence_key,
     fingerprint_input_item,
+    nested_history_run_item_occurrence_key,
     normalize_input_items_for_api,
+    reconcile_nested_history_owned_input_after_rewrite,
     run_item_to_input_item,
     strip_internal_input_item_metadata,
 )
@@ -41,6 +53,8 @@ from .run_steps import SingleStepResult
 __all__ = [
     "prepare_input_with_session",
     "persist_session_items_for_guardrail_trip",
+    "reconcile_nested_history_owned_session_item_refs",
+    "resolve_nested_history_owned_session_item_refs",
     "session_items_for_turn",
     "resumed_turn_items",
     "save_result_to_session",
@@ -49,6 +63,95 @@ __all__ = [
     "rewind_session_items",
     "wait_for_session_cleanup",
 ]
+
+
+def resolve_nested_history_owned_session_item_refs(
+    session_items: Sequence[RunItem],
+    current_input: str | Sequence[TResponseInputItem],
+    history_owned_items: Sequence[NestedHistoryOwnedItem],
+) -> list[NestedHistoryOwnedItemRef]:
+    """Locate explicitly owned nested-history occurrences in full session history."""
+    if not history_owned_items or isinstance(current_input, str):
+        return []
+
+    session_indexes_by_identity: dict[int, deque[int]] = {}
+    session_indexes_by_occurrence_key: dict[str, deque[int]] = {}
+    for index, session_item in enumerate(session_items):
+        session_indexes_by_identity.setdefault(id(session_item), deque()).append(index)
+        occurrence_key = nested_history_run_item_occurrence_key(session_item)
+        if occurrence_key is not None:
+            session_indexes_by_occurrence_key.setdefault(occurrence_key, deque()).append(index)
+
+    used_session_indexes: set[int] = set()
+    resolved: list[NestedHistoryOwnedItemRef] = []
+
+    def _peek_unused(candidates: deque[int] | None) -> int | None:
+        while candidates and candidates[0] in used_session_indexes:
+            candidates.popleft()
+        return candidates[0] if candidates else None
+
+    for owned_item in history_owned_items:
+        if owned_item.input_index >= len(current_input):
+            continue
+        input_item = current_input[owned_item.input_index]
+        if digest_input_item(input_item) != owned_item.digest:
+            continue
+
+        occurrence_key = nested_history_run_item_occurrence_key(owned_item.run_item)
+        identity_index = (
+            _peek_unused(session_indexes_by_identity.get(id(owned_item.run_item)))
+            if owned_item.run_item is not None
+            else None
+        )
+        occurrence_index = (
+            _peek_unused(session_indexes_by_occurrence_key.get(occurrence_key))
+            if occurrence_key is not None
+            else None
+        )
+        candidate_indexes = [
+            index for index in (identity_index, occurrence_index) if index is not None
+        ]
+        if not candidate_indexes:
+            continue
+        session_index = min(candidate_indexes)
+        session_input = run_item_to_input_item(session_items[session_index])
+        if session_input is None or digest_input_item(session_input) != owned_item.digest:
+            continue
+        used_session_indexes.add(session_index)
+        session_item = session_items[session_index]
+        ensure_nested_history_run_item_occurrence_key(session_item)
+        resolved.append(
+            NestedHistoryOwnedItemRef(
+                session_index=session_index,
+                digest=owned_item.digest,
+                input_index=owned_item.input_index,
+                run_item=session_item,
+                input_item=input_item,
+            )
+        )
+    return resolved
+
+
+def reconcile_nested_history_owned_session_item_refs(
+    session_items: Sequence[RunItem],
+    previous_refs: Sequence[NestedHistoryOwnedItemRef],
+    previous_input: str | Sequence[TResponseInputItem],
+    current_input: str | Sequence[TResponseInputItem],
+    history_owned_items: Sequence[NestedHistoryOwnedItem],
+) -> list[NestedHistoryOwnedItemRef]:
+    """Retain surviving ownership and add provenance introduced by a history rewrite."""
+    _, retained_refs = reconcile_nested_history_owned_input_after_rewrite(
+        previous_input,
+        current_input,
+        previous_refs,
+    )
+    new_refs = resolve_nested_history_owned_session_item_refs(
+        session_items,
+        current_input,
+        history_owned_items,
+    )
+    retained_set = set(retained_refs)
+    return retained_refs + [item_ref for item_ref in new_refs if item_ref not in retained_set]
 
 
 async def prepare_input_with_session(
@@ -444,8 +547,9 @@ async def rewind_session_items(
         len(target_serializations),
     )
 
-    for i, target in enumerate(target_serializations):
-        logger.debug("Rewind target %d (first 300 chars): %s", i, target[:300])
+    if not (_debug.DONT_LOG_MODEL_DATA or _debug.DONT_LOG_TOOL_DATA):
+        for i, target in enumerate(target_serializations):
+            logger.debug("Rewind target %d (first 300 chars): %s", i, target[:300])
 
     snapshot_serializations = target_serializations.copy()
     rewound = await _rewind_session_tail_suffix(
@@ -456,7 +560,7 @@ async def rewind_session_items(
         mismatch_warning=(
             "Skipping session rewind because the current tail does not match the retry-owned suffix"
         ),
-        pop_failure_warning="Failed to rewind session item: %s",
+        pop_failure_warning="Failed to rewind session item",
     )
     if not rewound:
         return
@@ -473,7 +577,7 @@ async def rewind_session_items(
     try:
         latest_items = await session.get_items(limit=1)
     except Exception as exc:
-        logger.debug("Failed to peek session items while rewinding: %s", exc)
+        log_model_and_tool_action_debug(logger, "Failed to peek session items while rewinding", exc)
         return
 
     if not latest_items:
@@ -486,7 +590,9 @@ async def rewind_session_items(
     try:
         session_items = await session.get_items()
     except Exception as exc:
-        logger.debug("Failed to inspect session tail while stripping stray items: %s", exc)
+        log_model_and_tool_action_debug(
+            logger, "Failed to inspect session tail while stripping stray items", exc
+        )
         return
 
     stray_serializations = _collect_retry_owned_tail_serializations(
@@ -511,7 +617,7 @@ async def rewind_session_items(
             "Skipping stray session cleanup because the current tail no longer matches "
             "retry-owned conversation items"
         ),
-        pop_failure_warning="Failed to strip stray session item: %s",
+        pop_failure_warning="Failed to strip stray session item",
     )
 
 
@@ -535,7 +641,9 @@ async def wait_for_session_cleanup(
         try:
             tail_items = await session.get_items(limit=window)
         except Exception as exc:
-            logger.debug("Failed to verify session cleanup (attempt %d): %s", attempt + 1, exc)
+            log_model_and_tool_action_debug(
+                logger, f"Failed to verify session cleanup (attempt {attempt + 1})", exc
+            )
             await asyncio.sleep(0.1 * (attempt + 1))
             continue
 
@@ -666,7 +774,7 @@ async def _rewind_session_tail_suffix(
     try:
         tail_items = await session.get_items(limit=len(expected_serializations))
     except Exception as exc:
-        logger.warning(pop_failure_warning, exc)
+        log_model_and_tool_action_warning(logger, pop_failure_warning, exc)
         return False
 
     if len(tail_items) != len(expected_serializations):
@@ -693,7 +801,7 @@ async def _rewind_session_tail_suffix(
                 result = await result
         except Exception as exc:
             await _restore_popped_session_items(session, popped_items)
-            logger.warning(pop_failure_warning, exc)
+            log_model_and_tool_action_warning(logger, pop_failure_warning, exc)
             return False
 
         if result is None:
@@ -729,7 +837,9 @@ async def _restore_popped_session_items(
         if inspect.isawaitable(result):
             await result
     except Exception as exc:
-        logger.warning("Failed to restore session items after a rewind mismatch: %s", exc)
+        log_model_and_tool_action_warning(
+            logger, "Failed to restore session items after a rewind mismatch", exc
+        )
 
 
 def _collect_retry_owned_tail_serializations(

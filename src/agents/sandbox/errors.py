@@ -816,6 +816,7 @@ class MountCommandError(MountArtifactError):
         stderr: str | None,
         context: Mapping[str, object] | None = None,
         cause: BaseException | None = None,
+        retryable: bool | None = False,
     ) -> None:
         super().__init__(
             message="mount command failed",
@@ -823,7 +824,7 @@ class MountCommandError(MountArtifactError):
             op="materialize",
             context={"command": command, "stderr": stderr, **_as_context(context)},
             cause=cause,
-            retryable=False,
+            retryable=retryable,
         )
 
 

@@ -26,6 +26,7 @@ from agents.run_internal.guardrails import run_input_guardrails, run_input_guard
 
 from .fake_model import FakeModel
 from .test_responses import get_function_tool_call, get_text_message
+from .testing_processor import fetch_events
 
 SHORT_DELAY = 0.01
 MEDIUM_DELAY = 0.03
@@ -625,6 +626,215 @@ async def test_parallel_guardrail_trip_compat_mode_does_not_cancel_model_task():
     await asyncio.wait_for(model_finished.wait(), timeout=1)
     assert model_started.is_set() is True
     assert model_cancelled.is_set() is False
+
+
+@pytest.mark.asyncio
+async def test_model_error_cancels_parallel_input_guardrail_task():
+    """A non-tripwire model failure must cancel the still-running guardrail task.
+
+    Without cancellation the guardrail task is orphaned and keeps running after
+    ``Runner.run`` has already raised.
+    """
+    guardrail_started = asyncio.Event()
+    guardrail_cancelled = asyncio.Event()
+    guardrail_finished = asyncio.Event()
+
+    @input_guardrail(run_in_parallel=True)
+    async def slow_parallel_check(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        guardrail_started.set()
+        try:
+            await asyncio.sleep(LONG_DELAY)
+            guardrail_finished.set()
+            return GuardrailFunctionOutput(
+                output_info="parallel_ok",
+                tripwire_triggered=False,
+            )
+        except asyncio.CancelledError:
+            guardrail_cancelled.set()
+            raise
+
+    model = FakeModel()
+
+    async def boom_get_response(*args, **kwargs):
+        # Only blow up once the guardrail is genuinely mid-flight.
+        await asyncio.wait_for(guardrail_started.wait(), timeout=1)
+        raise RuntimeError("model boom")
+
+    agent = Agent(
+        name="model_error_agent",
+        input_guardrails=[slow_parallel_check],
+        model=model,
+    )
+
+    with patch.object(model, "get_response", side_effect=boom_get_response):
+        with pytest.raises(RuntimeError, match="model boom"):
+            await Runner.run(agent, "trigger guardrail")
+
+    # By the time Runner.run returns, the guardrail task must already be
+    # cancelled rather than left running to completion in the background.
+    assert guardrail_started.is_set() is True
+    assert guardrail_cancelled.is_set() is True
+    assert guardrail_finished.is_set() is False
+
+
+@pytest.mark.asyncio
+async def test_parallel_guardrail_non_tripwire_error_not_swallowed():
+    """A non-tripwire error raised inside a parallel guardrail must propagate.
+
+    It should also cancel the in-flight model task rather than leave it running.
+    """
+    model_started = asyncio.Event()
+    model_cancelled = asyncio.Event()
+    model_finished = asyncio.Event()
+
+    @input_guardrail(run_in_parallel=True)
+    async def raising_parallel_check(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await asyncio.wait_for(model_started.wait(), timeout=1)
+        raise ValueError("guardrail boom")
+
+    model = FakeModel()
+    original_get_response = model.get_response
+
+    async def slow_get_response(*args, **kwargs):
+        model_started.set()
+        try:
+            await asyncio.sleep(LONG_DELAY)
+            return await original_get_response(*args, **kwargs)
+        except asyncio.CancelledError:
+            model_cancelled.set()
+            raise
+        finally:
+            model_finished.set()
+
+    agent = Agent(
+        name="guardrail_error_agent",
+        input_guardrails=[raising_parallel_check],
+        model=model,
+    )
+    model.set_next_output([get_text_message("should_not_finish")])
+
+    with patch.object(model, "get_response", side_effect=slow_get_response):
+        with pytest.raises(ValueError, match="guardrail boom"):
+            await Runner.run(agent, "trigger guardrail")
+
+    await asyncio.wait_for(model_finished.wait(), timeout=1)
+    assert model_started.is_set() is True
+    assert model_cancelled.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_parallel_guardrail_error_cancels_streaming_model():
+    model_started = asyncio.Event()
+    model_cancelled = asyncio.Event()
+    model_finished = asyncio.Event()
+
+    @input_guardrail(run_in_parallel=True)
+    async def raising_parallel_check(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await asyncio.wait_for(model_started.wait(), timeout=1)
+        raise ValueError("guardrail boom")
+
+    model = FakeModel()
+
+    async def blocking_stream_response(*args, **kwargs):
+        model_started.set()
+        try:
+            await asyncio.Event().wait()
+            yield
+        except asyncio.CancelledError:
+            model_cancelled.set()
+            raise
+        finally:
+            model_finished.set()
+
+    agent = Agent(
+        name="streaming_guardrail_error_agent",
+        input_guardrails=[raising_parallel_check],
+        model=model,
+    )
+
+    async def consume_stream() -> None:
+        async for _event in result.stream_events():
+            pass
+
+    with patch.object(model, "stream_response", side_effect=blocking_stream_response):
+        result = Runner.run_streamed(agent, "trigger guardrail")
+        with pytest.raises(ValueError, match="guardrail boom"):
+            await asyncio.wait_for(consume_stream(), timeout=1)
+
+    await asyncio.wait_for(model_finished.wait(), timeout=1)
+    assert model_started.is_set() is True
+    assert model_cancelled.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_model_error_before_guardrail_error_preserves_stream_finalization():
+    model_cleanup_started = asyncio.Event()
+    allow_model_cleanup = asyncio.Event()
+    model_cleanup_finished = asyncio.Event()
+    model_cleanup_cancelled = asyncio.Event()
+    raise_guardrail_error = asyncio.Event()
+
+    @input_guardrail(run_in_parallel=True)
+    async def raising_parallel_check(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await asyncio.wait_for(model_cleanup_started.wait(), timeout=1)
+        await asyncio.wait_for(raise_guardrail_error.wait(), timeout=1)
+        raise ValueError("guardrail boom")
+
+    class BlockingCleanupFakeModel(FakeModel):
+        async def _cleanup_on_run_end(self, owner: object) -> None:
+            model_cleanup_started.set()
+            try:
+                await allow_model_cleanup.wait()
+                model_cleanup_finished.set()
+            except asyncio.CancelledError:
+                model_cleanup_cancelled.set()
+                raise
+
+    model = BlockingCleanupFakeModel(tracing_enabled=True)
+    model.set_next_output(RuntimeError("model boom"))
+
+    agent = Agent(
+        name="streaming_model_error_agent",
+        input_guardrails=[raising_parallel_check],
+        model=model,
+    )
+
+    result = Runner.run_streamed(agent, "trigger model error")
+
+    await asyncio.wait_for(model_cleanup_started.wait(), timeout=1)
+    assert result.is_complete is True
+    raise_guardrail_error.set()
+
+    guardrail_task = result._input_guardrails_task
+    assert guardrail_task is not None
+
+    async def wait_until_guardrail_task_finishes() -> None:
+        while not guardrail_task.done():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_until_guardrail_task_finishes(), timeout=1)
+    allow_model_cleanup.set()
+
+    with pytest.raises(ValueError, match="guardrail boom"):
+        async for _event in result.stream_events():
+            pass
+
+    assert model_cleanup_finished.is_set() is True
+    assert model_cleanup_cancelled.is_set() is False
+    assert result.run_loop_task is not None
+    assert result.run_loop_task.done() is True
+    assert result.run_loop_task.cancelled() is False
+    assert isinstance(result.run_loop_exception, RuntimeError)
+    assert str(result.run_loop_exception) == "model boom"
+    assert fetch_events()[-1] == "trace_end"
 
 
 @pytest.mark.asyncio

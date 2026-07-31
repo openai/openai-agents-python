@@ -11,7 +11,10 @@ from .base_sandbox_session import BaseSandboxSession
 from .dependencies import Dependencies
 from .manager import Instrumentation
 from .sandbox_session import SandboxSession
-from .sandbox_session_state import SandboxSessionState
+from .sandbox_session_state import (
+    REDACTED_HOST_PATH_GRANT_PATHS_KEY,
+    SandboxSessionState,
+)
 
 SandboxClientOptionsClass = type["BaseSandboxClientOptions"]
 ClientOptionsT = TypeVar("ClientOptionsT")
@@ -172,7 +175,30 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
 
     def serialize_session_state(self, state: SandboxSessionState) -> dict[str, object]:
         """Serialize backend-specific sandbox state into a JSON-compatible payload."""
-        return state.model_dump(mode="json")
+        redacted_paths = set(state.path_grants_require_rebind)
+        persistent_grants = []
+        for grant in state.manifest.extra_path_grants:
+            if grant.host_path is not None:
+                redacted_paths.add(grant.path)
+                continue
+            persistent_grants.append(grant)
+
+        persistent_manifest = state.manifest.model_copy(
+            update={"extra_path_grants": tuple(persistent_grants)},
+        )
+        persistent_state = state.model_copy(update={"manifest": persistent_manifest})
+        payload = cast(dict[str, object], persistent_state.model_dump(mode="json"))
+        if redacted_paths:
+            payload[REDACTED_HOST_PATH_GRANT_PATHS_KEY] = sorted(redacted_paths)
+        return payload
+
+    @staticmethod
+    def _deserialize_session_state_payload(
+        payload: dict[str, object],
+        state_class: type[SandboxSessionState],
+    ) -> SandboxSessionState:
+        state = state_class.model_validate(payload)
+        return SandboxSessionState._mark_persisted_path_grants(state, payload=payload)
 
     @abc.abstractmethod
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:

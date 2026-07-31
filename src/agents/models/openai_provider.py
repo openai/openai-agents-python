@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import weakref
+from typing import Any
 
 import httpx
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
@@ -54,7 +55,7 @@ class OpenAIProvider(ModelProvider):
         use_responses: bool | None = None,
         use_responses_websocket: bool | None = None,
         strict_feature_validation: bool = False,
-        agent_registration: OpenAIAgentRegistrationConfig | None = None,
+        agent_registration: OpenAIAgentRegistrationConfig | dict[str, Any] | None = None,
         responses_websocket_options: OpenAIResponsesWebSocketOptions | None = None,
         buffer_streamed_tool_calls: bool = False,
     ) -> None:

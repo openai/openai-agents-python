@@ -46,7 +46,9 @@ from agents.sandbox.errors import (
     InvalidManifestPathError,
     MountConfigError,
     PtySessionNotFoundError,
+    WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
+    WorkspaceReadNotFoundError,
 )
 from agents.sandbox.files import EntryKind, FileEntry
 from agents.sandbox.manifest import Manifest
@@ -298,6 +300,7 @@ class _HostBackedDockerSession(DockerSandboxSession):
         manifest: Manifest,
         event_log: list[tuple[str, str]] | None = None,
         archive_error: Exception | None = None,
+        read_probe_exit_code: int | None = None,
     ) -> None:
         container = _FakeDockerContainer(host_root, archive_error=archive_error)
         state = DockerSandboxSessionState(
@@ -314,6 +317,19 @@ class _HostBackedDockerSession(DockerSandboxSession):
         self._host_root = host_root
         self._fake_container = container
         self._event_log = event_log if event_log is not None else []
+        self._read_probe_exit_code = read_probe_exit_code
+        self._read_probe_users: list[str | None] = []
+
+    async def _exec_internal_for_user(
+        self,
+        *command: str | Path,
+        timeout: float | None = None,
+        user: str | None = None,
+    ) -> ExecResult:
+        cmd = [str(part) for part in command]
+        if cmd[:2] == ["sh", "-c"] and "READ_PATH_PROBE_V3" in cmd[2]:
+            self._read_probe_users.append(user)
+        return await self._exec_internal(*command, timeout=timeout)
 
     async def _exec_internal(
         self,
@@ -327,6 +343,15 @@ class _HostBackedDockerSession(DockerSandboxSession):
             return ExecResult(stdout=b"", stderr=b"", exit_code=0)
         if cmd == ["test", "-x", helper_path]:
             return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+        if cmd[:2] == ["sh", "-c"] and "READ_PATH_PROBE_V3" in cmd[2]:
+            if self._read_probe_exit_code is not None:
+                return ExecResult(
+                    stdout=b"",
+                    stderr=b"",
+                    exit_code=self._read_probe_exit_code,
+                )
+            exists = self._host_path(cmd[4]).exists()
+            return ExecResult(stdout=b"", stderr=b"", exit_code=0 if exists else 1)
         if cmd and cmd[0] == helper_path:
             for_write = cmd[3]
             candidate = self._host_path(cmd[2]).resolve(strict=False)
@@ -1304,6 +1329,62 @@ async def test_docker_read_returns_file_bytes_without_archive_api(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_docker_read_missing_path_raises_not_found_error(tmp_path: Path) -> None:
+    host_root = tmp_path / "container"
+    (host_root / "workspace").mkdir(parents=True)
+    session = _HostBackedDockerSession(
+        host_root=host_root,
+        manifest=Manifest(root="/workspace"),
+    )
+
+    with pytest.raises(WorkspaceReadNotFoundError):
+        await session.read(Path("missing.txt"))
+
+
+@pytest.mark.asyncio
+async def test_docker_read_existing_unreadable_path_raises_archive_error(tmp_path: Path) -> None:
+    host_root = tmp_path / "container"
+    unreadable_path = host_root / "workspace" / "directory"
+    unreadable_path.mkdir(parents=True)
+    session = _HostBackedDockerSession(
+        host_root=host_root,
+        manifest=Manifest(root="/workspace"),
+    )
+
+    with pytest.raises(WorkspaceArchiveReadError):
+        await session.read(Path("directory"))
+
+
+@pytest.mark.asyncio
+async def test_docker_read_indeterminate_probe_raises_archive_error(tmp_path: Path) -> None:
+    host_root = tmp_path / "container"
+    (host_root / "workspace").mkdir(parents=True)
+    session = _HostBackedDockerSession(
+        host_root=host_root,
+        manifest=Manifest(root="/workspace"),
+        read_probe_exit_code=2,
+    )
+
+    with pytest.raises(WorkspaceArchiveReadError):
+        await session.read(Path("inaccessible/missing.txt"))
+
+
+@pytest.mark.asyncio
+async def test_docker_read_probe_uses_requested_user(tmp_path: Path) -> None:
+    host_root = tmp_path / "container"
+    (host_root / "workspace").mkdir(parents=True)
+    session = _HostBackedDockerSession(
+        host_root=host_root,
+        manifest=Manifest(root="/workspace"),
+    )
+
+    with pytest.raises(WorkspaceReadNotFoundError):
+        await session.read(Path("missing.txt"), user="sandbox-user")
+
+    assert session._read_probe_users == ["sandbox-user"]
+
+
+@pytest.mark.asyncio
 async def test_docker_normalize_path_preserves_safe_leaf_symlink_path(tmp_path: Path) -> None:
     host_root = tmp_path / "container"
     workspace = host_root / "workspace"
@@ -1323,19 +1404,21 @@ async def test_docker_normalize_path_preserves_safe_leaf_symlink_path(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_docker_read_allows_extra_path_grant(tmp_path: Path) -> None:
+async def test_docker_read_uses_sandbox_target_for_split_path_grant(tmp_path: Path) -> None:
     host_root = tmp_path / "container"
     workspace = host_root / "workspace"
     extra_root = host_root / "tmp"
+    native_source = tmp_path / "native-source"
     workspace.mkdir(parents=True)
     extra_root.mkdir(parents=True)
+    native_source.mkdir()
     (extra_root / "result.txt").write_text("scratch output", encoding="utf-8")
 
     session = _HostBackedDockerSession(
         host_root=host_root,
         manifest=Manifest(
             root="/workspace",
-            extra_path_grants=(SandboxPathGrant(path="/tmp"),),
+            extra_path_grants=(SandboxPathGrant(path="/tmp", host_path=str(native_source)),),
         ),
     )
 
@@ -1653,6 +1736,141 @@ async def test_docker_create_container_publishes_exposed_ports(
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_docker_create_container_mounts_explicit_host_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_path = tmp_path / "shared-data"
+    host_path.mkdir()
+    container = _ResumeContainer(status="created")
+    docker_client = _FakeCreateDockerClient(container)
+    client = DockerSandboxClient(docker_client=cast(object, docker_client))
+    manifest = Manifest(
+        extra_path_grants=(
+            SandboxPathGrant(
+                path="/mnt/shared-data",
+                host_path=str(host_path),
+                read_only=True,
+            ),
+        )
+    )
+
+    monkeypatch.setattr(client, "image_exists", lambda _image: True)
+
+    created = await client._create_container(
+        DEFAULT_PYTHON_SANDBOX_IMAGE,
+        manifest=manifest,
+    )
+
+    assert created is container
+    mounts = cast(list[dict[str, object]], docker_client.containers.calls[0]["mounts"])
+    assert mounts == [
+        {
+            "Target": "/mnt/shared-data",
+            "Source": str(host_path),
+            "Type": "bind",
+            "ReadOnly": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_docker_create_container_keeps_path_only_grant_unmounted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _ResumeContainer(status="created")
+    docker_client = _FakeCreateDockerClient(container)
+    client = DockerSandboxClient(docker_client=cast(object, docker_client))
+    manifest = Manifest(extra_path_grants=(SandboxPathGrant(path="/tmp", read_only=True),))
+
+    monkeypatch.setattr(client, "image_exists", lambda _image: True)
+
+    await client._create_container(
+        DEFAULT_PYTHON_SANDBOX_IMAGE,
+        manifest=manifest,
+    )
+
+    assert "mounts" not in docker_client.containers.calls[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_first", [False, True])
+async def test_docker_rejects_duplicate_target_shared_by_split_and_path_only_grants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit_first: bool,
+) -> None:
+    path_only = SandboxPathGrant(path="/mnt/shared-data")
+    explicit = SandboxPathGrant(
+        path="/mnt/shared-data",
+        host_path=str(tmp_path),
+    )
+    grants = (explicit, path_only) if explicit_first else (path_only, explicit)
+    client = DockerSandboxClient(docker_client=cast(object, _FakeDockerClient()))
+    image_lookups = 0
+
+    def _image_exists(_image: str) -> bool:
+        nonlocal image_lookups
+        image_lookups += 1
+        return True
+
+    monkeypatch.setattr(client, "image_exists", _image_exists)
+
+    with pytest.raises(ValueError, match="duplicate Docker sandbox path grant target"):
+        await client._create_container(
+            DEFAULT_PYTHON_SANDBOX_IMAGE,
+            manifest=Manifest(extra_path_grants=grants),
+        )
+
+    assert image_lookups == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("root", "target"),
+    [
+        ("/workspace", "/workspace/shared-data"),
+        ("/workspace/project", "/workspace"),
+    ],
+    ids=["target-inside-workspace", "target-contains-workspace"],
+)
+async def test_docker_rejects_host_path_target_overlapping_workspace_before_image_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root: str,
+    target: str,
+) -> None:
+    client = DockerSandboxClient(docker_client=cast(object, _FakeDockerClient()))
+    image_lookups = 0
+
+    def _image_exists(_image: str) -> bool:
+        nonlocal image_lookups
+        image_lookups += 1
+        return True
+
+    monkeypatch.setattr(client, "image_exists", _image_exists)
+
+    with pytest.raises(
+        ValueError,
+        match="host_path target must be outside the workspace root",
+    ):
+        await client._create_container(
+            DEFAULT_PYTHON_SANDBOX_IMAGE,
+            manifest=Manifest(
+                root=root,
+                extra_path_grants=(
+                    SandboxPathGrant(
+                        path=target,
+                        host_path=str(tmp_path),
+                    ),
+                ),
+            ),
+        )
+
+    assert image_lookups == 0
 
 
 @pytest.mark.asyncio
@@ -2314,12 +2532,16 @@ class _ResumeContainer:
         container_id: str = "container",
         workspace_exists: bool = False,
         published_ports: dict[str, list[dict[str, str]] | None] | None = None,
+        mounts: list[dict[str, object]] | None = None,
     ) -> None:
         self.status = status
         self.id = container_id
         self.exec_calls: list[dict[str, object]] = []
         self._workspace_exists = workspace_exists
-        self.attrs = {"NetworkSettings": {"Ports": published_ports or {}}}
+        self.attrs = {
+            "NetworkSettings": {"Ports": published_ports or {}},
+            "Mounts": mounts or [],
+        }
 
     def reload(self) -> None:
         return
@@ -2759,6 +2981,118 @@ async def test_docker_resume_preserves_workspace_readiness_from_state() -> None:
     assert isinstance(not_ready_session._inner, DockerSandboxSession)
     assert not_ready_session._inner._workspace_root_ready is False
     assert not_ready_session._inner.should_provision_manifest_accounts_on_resume() is False
+
+
+@pytest.mark.asyncio
+async def test_docker_resume_requires_existing_host_mount_to_match_trusted_state(
+    tmp_path: Path,
+) -> None:
+    host_path = tmp_path / "shared-data"
+    host_path.mkdir()
+    manifest = Manifest(
+        extra_path_grants=(
+            SandboxPathGrant(
+                path="/mnt/shared-data",
+                host_path=str(host_path),
+                read_only=True,
+            ),
+        )
+    )
+    matching_client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(
+            _ResumeContainer(
+                status="running",
+                mounts=[
+                    {
+                        "Type": "bind",
+                        "Source": str(host_path),
+                        "Destination": "/mnt/shared-data",
+                        "RW": False,
+                    }
+                ],
+            )
+        )
+    )
+    state = DockerSandboxSessionState(
+        manifest=manifest,
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="container",
+    )
+
+    await matching_client.resume(state)
+
+    mismatched_client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(_ResumeContainer(status="running"))
+    )
+    with pytest.raises(ValueError, match="does not match the current trusted manifest"):
+        await mismatched_client.resume(state)
+
+
+@pytest.mark.asyncio
+async def test_docker_resume_rejects_stale_bind_mount_for_path_only_grant(
+    tmp_path: Path,
+) -> None:
+    host_path = tmp_path / "shared-data"
+    host_path.mkdir()
+    client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(
+            _ResumeContainer(
+                status="running",
+                mounts=[
+                    {
+                        "Type": "bind",
+                        "Source": str(host_path),
+                        "Destination": "/mnt/shared-data",
+                        "RW": True,
+                    }
+                ],
+            )
+        )
+    )
+    state = DockerSandboxSessionState(
+        manifest=Manifest(
+            extra_path_grants=(SandboxPathGrant(path="/mnt/shared-data"),),
+        ),
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="container",
+    )
+
+    with pytest.raises(ValueError, match="not present in the current trusted manifest"):
+        await client.resume(state)
+
+
+@pytest.mark.asyncio
+async def test_docker_resume_rejects_bind_mount_when_persisted_grants_are_removed(
+    tmp_path: Path,
+) -> None:
+    host_path = tmp_path / "shared-data"
+    host_path.mkdir()
+    client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(
+            _ResumeContainer(
+                status="running",
+                mounts=[
+                    {
+                        "Type": "bind",
+                        "Source": str(host_path),
+                        "Destination": "/mnt/shared-data",
+                        "RW": True,
+                    }
+                ],
+            )
+        )
+    )
+    state = DockerSandboxSessionState(
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="container",
+    )
+
+    with pytest.raises(ValueError, match="not present in the current trusted manifest"):
+        await client.resume(state)
 
 
 @pytest.mark.asyncio

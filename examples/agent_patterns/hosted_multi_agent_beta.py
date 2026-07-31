@@ -6,7 +6,11 @@ import asyncio
 from collections.abc import Mapping
 from typing import Any
 
-from agents import Agent, Runner, function_tool
+from agents import (
+    Agent,
+    Runner,
+)
+from agents.decorators import tool
 from agents.extensions.experimental.hosted_multi_agent import (
     OpenAIHostedMultiAgentModel,
     get_hosted_agent_metadata,
@@ -19,7 +23,7 @@ PROPOSALS = {
 }
 
 
-@function_tool
+@tool
 def get_proposal(ctx: ToolContext[Any], proposal: str) -> dict[str, object]:
     """Return deterministic details for one proposal."""
     metadata = get_hosted_agent_metadata(ctx)

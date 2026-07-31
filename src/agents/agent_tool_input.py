@@ -83,11 +83,11 @@ async def resolve_agent_tool_input(
     input_builder: StructuredToolInputBuilder | None = None,
 ) -> str | list[TResponseInputItem]:
     """Resolve structured tool input into a string or list of input items."""
-    should_build_structured_input = bool(
-        input_builder or (schema_info and (schema_info.summary or schema_info.json_schema))
+    should_build_structured_input = input_builder is not None or bool(
+        schema_info and (schema_info.summary or schema_info.json_schema)
     )
     if should_build_structured_input:
-        builder = input_builder or default_tool_input_builder
+        builder = input_builder if input_builder is not None else default_tool_input_builder
         result = builder(
             {
                 "params": params,

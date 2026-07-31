@@ -9,6 +9,7 @@ from typing import Any, Generic, cast
 from ..agent import Agent
 from ..exceptions import UserError
 from ..items import TResponseInputItem
+from ..logger import log_model_and_tool_action_warning
 from ..result import RunResult, RunResultStreaming
 from ..run_config import RunConfig
 from ..run_context import RunContextWrapper, TContext
@@ -106,8 +107,10 @@ class SandboxRuntime(Generic[TContext]):
                             input_override=_stream_memory_input_override(result),
                         )
                     except Exception as error:
-                        logger.warning(
-                            "Failed to enqueue sandbox memory after streamed run: %s", error
+                        log_model_and_tool_action_warning(
+                            logger,
+                            "Failed to enqueue sandbox memory after streamed run",
+                            error,
                         )
                     payload = await self.cleanup()
                     result._sandbox_resume_state = payload

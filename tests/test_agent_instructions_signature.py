@@ -36,6 +36,40 @@ class TestInstructionsSignatureValidation:
         assert result == "Valid sync instructions"
 
     @pytest.mark.asyncio
+    async def test_async_callable_object_is_awaited(self, mock_run_context):
+        """Callable instances whose ``__call__`` is async must be awaited.
+
+        ``inspect.iscoroutinefunction`` returns ``False`` for the instance itself, so the
+        previous implementation returned the unawaited coroutine as the system prompt.
+        """
+
+        class AsyncInstructions:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def __call__(self, context, agent) -> str:
+                self.calls += 1
+                return "Valid async callable instructions"
+
+        instructions = AsyncInstructions()
+        agent = Agent(name="test_agent", instructions=instructions)
+        result = await agent.get_system_prompt(mock_run_context)
+        assert result == "Valid async callable instructions"
+        assert instructions.calls == 1
+
+    @pytest.mark.asyncio
+    async def test_sync_callable_object_still_works(self, mock_run_context):
+        """Sync callable instances should continue to work as dynamic instructions."""
+
+        class SyncInstructions:
+            def __call__(self, context, agent) -> str:
+                return "Valid sync callable instructions"
+
+        agent = Agent(name="test_agent", instructions=SyncInstructions())
+        result = await agent.get_system_prompt(mock_run_context)
+        assert result == "Valid sync callable instructions"
+
+    @pytest.mark.asyncio
     async def test_one_parameter_raises_error(self, mock_run_context):
         """Test that function with only one parameter raises TypeError"""
 

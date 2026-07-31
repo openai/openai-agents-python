@@ -31,6 +31,8 @@ The Agents SDK includes built-in tracing, collecting a comprehensive record of e
 By default, the SDK traces the following:
 
 -   The entire `Runner.{run, run_sync, run_streamed}()` is wrapped in a `trace()`.
+-   Each runner invocation is wrapped in a `task_span()`.
+-   Each model turn is wrapped in a `turn_span()`.
 -   Each time an agent runs, it is wrapped in `agent_span()`
 -   LLM generations are wrapped in `generation_span()`
 -   Function tool calls are each wrapped in `function_span()`
@@ -41,6 +43,18 @@ By default, the SDK traces the following:
 -   Related audio spans may be parented under a `speech_group_span()`
 
 By default, the trace is named "Agent workflow". You can set this name if you use `trace`, or you can configure the name and other properties with the [`RunConfig`][agents.run.RunConfig].
+
+If you want a more compact hierarchy, disable the automatic task and turn spans for a run. Agent, generation, function, guardrail, handoff, and custom spans are still recorded.
+
+```python
+from agents import RunConfig, Runner
+
+result = await Runner.run(
+    agent,
+    "Hello",
+    run_config=RunConfig(tracing={"include_task_and_turn_spans": False}),
+)
+```
 
 In addition, you can set up [custom trace processors](#custom-tracing-processors) to push traces to other destinations (as a replacement, or secondary destination).
 
@@ -135,7 +149,7 @@ By default, `trace_include_sensitive_data` is `True`. You can set the default wi
 
 The high level architecture for tracing is:
 
--   At initialization, we create a global [`TraceProvider`][agents.tracing.setup.TraceProvider], which is responsible for creating traces.
+-   At initialization, we create a global [`TraceProvider`][agents.tracing.provider.TraceProvider], which is responsible for creating traces.
 -   We configure the `TraceProvider` with a [`BatchTraceProcessor`][agents.tracing.processors.BatchTraceProcessor] that sends traces/spans in batches to a [`BackendSpanExporter`][agents.tracing.processors.BackendSpanExporter], which exports the spans and traces to the OpenAI backend in batches.
 
 To customize this default setup, to send traces to alternative or additional backends or modifying exporter behavior, you have two options:
@@ -150,7 +164,7 @@ You can use an OpenAI API key with non-OpenAI models to enable free tracing in t
 
 ```python
 import os
-from agents import set_tracing_export_api_key, Agent, Runner
+from agents import set_tracing_export_api_key, Agent
 from agents.extensions.models.any_llm_model import AnyLLMModel
 
 tracing_api_key = os.environ["OPENAI_API_KEY"]
@@ -191,7 +205,7 @@ The following community and vendor integrations support the OpenAI Agents SDK tr
 
 -   [Weights & Biases](https://weave-docs.wandb.ai/guides/integrations/openai_agents)
 -   [Arize-Phoenix](https://docs.arize.com/phoenix/tracing/integrations-tracing/openai-agents-sdk)
--   [Future AGI](https://docs.futureagi.com/future-agi/products/observability/auto-instrumentation/openai_agents)
+-   [Future AGI](https://docs.futureagi.com/docs/tracing/auto/openai_agents/)
 -   [MLflow (self-hosted/OSS)](https://mlflow.org/docs/latest/tracing/integrations/openai-agent)
 -   [MLflow (Databricks hosted)](https://docs.databricks.com/aws/en/mlflow/mlflow-tracing#-automatic-tracing)
 -   [Braintrust](https://braintrust.dev/docs/guides/traces/integrations#openai-agents-sdk)
@@ -211,7 +225,7 @@ The following community and vendor integrations support the OpenAI Agents SDK tr
 -   [Agenta](https://docs.agenta.ai/observability/integrations/openai-agents)
 -   [PostHog](https://posthog.com/docs/llm-analytics/installation/openai-agents)
 -   [Traccia](https://traccia.ai/docs/integrations/openai-agents)
--   [PromptLayer](https://docs.promptlayer.com/languages/integrations#openai-agents-sdk)
+-   [PromptLayer](https://docs.promptlayer.com/features/integrations#openai-agents-sdk)
 -   [HoneyHive](https://docs.honeyhive.ai/v2/integrations/openai-agents)
 -   [Asqav](https://www.asqav.com/docs/integrations#openai-agents)
 -   [Datadog](https://docs.datadoghq.com/llm_observability/instrumentation/auto_instrumentation/?tab=python#openai-agents)

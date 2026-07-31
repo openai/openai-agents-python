@@ -5,13 +5,17 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import aiosqlite
 
 from ...items import TResponseInputItem
 from ...memory import SessionABC
-from ...memory.session_settings import SessionSettings, resolve_session_limit
+from ...memory.session_settings import (
+    SessionSettings,
+    coerce_session_settings,
+    resolve_session_limit,
+)
 
 
 class AsyncSQLiteSession(SessionABC):
@@ -30,7 +34,7 @@ class AsyncSQLiteSession(SessionABC):
         db_path: str | Path = ":memory:",
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
-        session_settings: SessionSettings | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
     ):
         """Initialize the async SQLite session.
 
@@ -44,7 +48,11 @@ class AsyncSQLiteSession(SessionABC):
                 retrieving items. If None, uses default SessionSettings().
         """
         self.session_id = session_id
-        self.session_settings = session_settings or SessionSettings()
+        self.session_settings = (
+            coerce_session_settings(session_settings)
+            if session_settings is not None
+            else SessionSettings()
+        )
         self.db_path = db_path
         self.sessions_table = sessions_table
         self.messages_table = messages_table
@@ -119,6 +127,16 @@ class AsyncSQLiteSession(SessionABC):
 
         session_limit = resolve_session_limit(limit, self.session_settings)
 
+        def _decode_rows(rows: list[Any]) -> list[TResponseInputItem]:
+            items: list[TResponseInputItem] = []
+            for (message_data,) in rows:
+                try:
+                    item = json.loads(message_data)
+                    items.append(item)
+                except json.JSONDecodeError:
+                    continue
+            return items
+
         async with self._locked_connection() as conn:
             if session_limit is None:
                 cursor = await conn.execute(
@@ -129,32 +147,47 @@ class AsyncSQLiteSession(SessionABC):
                 """,
                     (self.session_id,),
                 )
-            else:
-                cursor = await conn.execute(
-                    f"""
-                    SELECT message_data FROM {self.messages_table}
-                    WHERE session_id = ?
-                    ORDER BY id DESC
-                    LIMIT ?
-                    """,
-                    (self.session_id, session_limit),
-                )
+                rows = list(await cursor.fetchall())
+                await cursor.close()
+                return _decode_rows(rows)
 
+            if session_limit > 0:
+                # Expand the fetch window when corrupt rows sit among the newest entries so
+                # limit counts valid conversation items, matching EncryptedSession and pop_item.
+                window = session_limit
+                while True:
+                    cursor = await conn.execute(
+                        f"""
+                        SELECT message_data FROM {self.messages_table}
+                        WHERE session_id = ?
+                        ORDER BY id DESC
+                        LIMIT ?
+                        """,
+                        (self.session_id, window),
+                    )
+                    rows = list(await cursor.fetchall())
+                    await cursor.close()
+                    items = _decode_rows(rows[::-1])
+                    if len(items) >= session_limit:
+                        return items[-session_limit:]
+                    if len(rows) < window:
+                        return items
+                    window *= 2
+
+            # Preserve historical non-positive LIMIT semantics (including SQLite's
+            # unlimited behavior for negative values).
+            cursor = await conn.execute(
+                f"""
+                SELECT message_data FROM {self.messages_table}
+                WHERE session_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (self.session_id, session_limit),
+            )
             rows = list(await cursor.fetchall())
             await cursor.close()
-
-        if session_limit is not None:
-            rows = rows[::-1]
-
-        items: list[TResponseInputItem] = []
-        for (message_data,) in rows:
-            try:
-                item = json.loads(message_data)
-                items.append(item)
-            except json.JSONDecodeError:
-                continue
-
-        return items
+            return _decode_rows(rows[::-1])
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Add new items to the conversation history.

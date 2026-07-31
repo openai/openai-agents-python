@@ -53,7 +53,7 @@ def pretty_print_run_error_details(result: "RunErrorDetails") -> str:
 
 def pretty_print_run_result_streaming(result: "RunResultStreaming") -> str:
     output = "RunResultStreaming:"
-    output += f'\n- Current agent: Agent(name="{result.current_agent.name}", ...)'
+    output += f'\n- Current agent: Agent(name="{result.last_agent.name}", ...)'
     output += f"\n- Current turn: {result.current_turn}"
     output += f"\n- Max turns: {result.max_turns}"
     output += f"\n- Is complete: {result.is_complete}"

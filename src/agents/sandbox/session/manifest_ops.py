@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..entries import BaseEntry
+from ..manifest import Manifest
 from ..materialization import MaterializationResult, MaterializedFile
 from .manifest_application import ManifestApplier
 
@@ -16,12 +17,13 @@ if TYPE_CHECKING:
 async def apply_manifest(
     session: BaseSandboxSession,
     *,
+    manifest: Manifest | None = None,
     only_ephemeral: bool = False,
     provision_accounts: bool = True,
 ) -> MaterializationResult:
     applier = _build_manifest_applier(session, include_entry_concurrency=True)
     return await applier.apply_manifest(
-        session.state.manifest,
+        manifest if manifest is not None else session.state.manifest,
         only_ephemeral=only_ephemeral,
         provision_accounts=provision_accounts,
         base_dir=session._manifest_base_dir(),

@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
+from ....logger import log_tool_action_debug
 from ....sandbox.entries import Mount
 from ....sandbox.errors import (
     ExecTimeoutError,
@@ -1325,6 +1326,7 @@ class DaytonaSandboxClient(BaseSandboxClient[DaytonaSandboxClientOptions]):
     ) -> SandboxSession:
         if not isinstance(state, DaytonaSandboxSessionState):
             raise TypeError("DaytonaSandboxClient.resume expects a DaytonaSandboxSessionState")
+        state.assert_path_grants_rebound()
 
         daytona_sandbox = None
         reconnected = False
@@ -1335,7 +1337,7 @@ class DaytonaSandboxClient(BaseSandboxClient[DaytonaSandboxClientOptions]):
                 await daytona_sandbox.start(timeout=state.start_timeout)
             reconnected = True
         except Exception as e:
-            logger.debug("daytona sandbox get() failed, will recreate: %s", e)
+            log_tool_action_debug(logger, "Daytona sandbox lookup failed; recreating", e)
 
         if not reconnected or daytona_sandbox is None:
             params = await self._build_create_params(
@@ -1356,7 +1358,7 @@ class DaytonaSandboxClient(BaseSandboxClient[DaytonaSandboxClientOptions]):
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
-        return DaytonaSandboxSessionState.model_validate(payload)
+        return self._deserialize_session_state_payload(payload, DaytonaSandboxSessionState)
 
 
 __all__ = [

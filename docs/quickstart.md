@@ -110,10 +110,11 @@ You can give an agent tools to look up information or perform actions.
 
 ```python
 import asyncio
-from agents import Agent, Runner, function_tool
+from agents import Agent, Runner
+from agents.decorators import tool
 
 
-@function_tool
+@tool
 def history_fun_fact() -> str:
     """Return a short history fact."""
     return "Sharks are older than trees."

@@ -499,6 +499,44 @@ async def test_is_enabled_bool_and_callable():
 
 
 @pytest.mark.asyncio
+async def test_get_all_tools_cancels_sibling_enablement_checks_on_error() -> None:
+    slow_started = asyncio.Event()
+    slow_cancelled = asyncio.Event()
+    slow_finished = asyncio.Event()
+
+    async def slow_enabled(_ctx: RunContextWrapper[Any], _agent: AgentBase) -> bool:
+        slow_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            slow_cancelled.set()
+            raise
+        finally:
+            slow_finished.set()
+        return True
+
+    async def failing_enabled(_ctx: RunContextWrapper[Any], _agent: AgentBase) -> bool:
+        await slow_started.wait()
+        raise RuntimeError("enablement failed")
+
+    @function_tool(is_enabled=slow_enabled)
+    def slow_tool() -> str:
+        return "slow"
+
+    @function_tool(is_enabled=failing_enabled)
+    def failing_tool() -> str:
+        return "failing"
+
+    agent = Agent(name="t", tools=[slow_tool, failing_tool])
+
+    with pytest.raises(RuntimeError, match="enablement failed"):
+        await agent.get_all_tools(RunContextWrapper(None))
+
+    assert slow_cancelled.is_set()
+    assert slow_finished.is_set()
+
+
+@pytest.mark.asyncio
 async def test_get_all_tools_preserves_explicit_tool_search_when_deferred_tools_are_disabled():
     async def deferred_enabled(ctx: RunContextWrapper[BoolCtx], agent: AgentBase) -> bool:
         return ctx.context.enable_tools
@@ -842,6 +880,55 @@ async def test_function_tool_bad_json_includes_payload_when_tool_logging_enabled
     assert exc_info.value.__cause__.doc == bad_json
     assert "SECRET_TOKEN_123" in str(exc_info.value)
     assert "SECRET_TOKEN_123" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_function_tool_argument_logging_excludes_live_context(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    context_secret = "CONTEXT_SECRET_SENTINEL"
+    model_argument = "MODEL_ARGUMENT_SENTINEL"
+
+    class SensitiveContext:
+        def __repr__(self) -> str:
+            return context_secret
+
+    def echo(ctx: ToolContext[Any], value: str) -> str:
+        assert isinstance(ctx.context, SensitiveContext)
+        return value
+
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    tool = function_tool(echo)
+    live_context = ToolContext(
+        SensitiveContext(),
+        tool_name=tool.name,
+        tool_call_id="sensitive-context",
+        tool_arguments=json.dumps({"value": model_argument}),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="openai.agents"):
+        assert (
+            await tool.on_invoke_tool(
+                live_context,
+                json.dumps({"value": model_argument}),
+            )
+            == model_argument
+        )
+
+    records = [
+        record for record in caplog.records if record.msg == "Tool call args: %s, kwargs: %s"
+    ]
+    assert len(records) == 1
+    record = records[0]
+    assert model_argument in logging.Formatter().format(record)
+    assert context_secret not in repr(record.__dict__)
+    assert isinstance(record.args, tuple)
+    logged_args, logged_kwargs = record.args
+    assert isinstance(logged_args, list)
+    assert isinstance(logged_kwargs, dict)
+    assert live_context not in logged_args
+    assert live_context not in logged_kwargs.values()
 
 
 @pytest.mark.asyncio

@@ -45,7 +45,7 @@ from tests.testing_processor import fetch_ordered_spans
 
 
 async def _run_responses_model_with_custom_base_url(
-    model_settings: ModelSettings | None = None,
+    model_settings: ModelSettings | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     class DummyResponses:
         def __init__(self) -> None:
@@ -935,6 +935,56 @@ def test_build_response_create_kwargs_includes_gpt_5_6_request_controls():
 
 
 @pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_dictionary", [False, True], ids=["model-settings", "dictionary"])
+async def test_responses_requests_normalize_dictionary_agent_settings(use_dictionary: bool) -> None:
+    settings: dict[str, Any] = {
+        "reasoning": {"effort": "low", "context": "all_turns"},
+        "context_management": [{"type": "compaction", "compact_threshold": 200000}],
+        "prompt_cache_options": {"mode": "explicit", "ttl": "30m"},
+        "prompt_cache_retention": "24h",
+        "store": False,
+        "metadata": {"request": "example"},
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "frequency_penalty": 0.0,
+        "presence_penalty": 0.0,
+        "max_tokens": 64,
+        "parallel_tool_calls": False,
+        "extra_headers": {"x-model-settings-parity": "preserved"},
+        "extra_query": {"model_settings_parity": "verified"},
+        "extra_body": {"prompt_cache_key": "extra-body-cache-key"},
+        "retry": {
+            "max_retries": 0,
+            "backoff": {"initial_delay": 0.0, "jitter": False},
+        },
+    }
+    kwargs = await _run_responses_model_with_custom_base_url(
+        model_settings=settings if use_dictionary else ModelSettings(**settings)
+    )
+
+    assert isinstance(kwargs["reasoning"], Reasoning)
+    assert kwargs["reasoning"].effort == "low"
+    assert kwargs["reasoning"].context == "all_turns"
+    assert kwargs["context_management"] == settings["context_management"]
+    assert kwargs["prompt_cache_options"] == settings["prompt_cache_options"]
+    assert kwargs["prompt_cache_retention"] == "24h"
+    assert kwargs["store"] is False
+    assert kwargs["metadata"] == {"request": "example"}
+    assert kwargs["temperature"] == 0.0
+    assert kwargs["top_p"] == 1.0
+    assert kwargs["max_output_tokens"] == 64
+    assert "max_tokens" not in kwargs
+    assert kwargs["parallel_tool_calls"] is False
+    assert kwargs["extra_headers"]["x-model-settings-parity"] == "preserved"
+    assert kwargs["extra_query"] == {"model_settings_parity": "verified"}
+    assert kwargs["extra_body"] == {"prompt_cache_key": "extra-body-cache-key"}
+    assert "retry" not in kwargs
+    assert "frequency_penalty" not in kwargs
+    assert "presence_penalty" not in kwargs
+
+
+@pytest.mark.allow_call_model_methods
 def test_build_response_create_kwargs_rejects_duplicate_prompt_cache_options_extra_args():
     client = DummyWSClient()
     model = OpenAIResponsesModel(model="gpt-5.6-sol", openai_client=client)  # type: ignore[arg-type]
@@ -1777,13 +1827,22 @@ async def test_websocket_model_reuses_connection_and_sends_response_create_frame
 
     monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
 
+    configured_agent = Agent(
+        name="configured",
+        model=model,
+        model_settings={
+            "reasoning": {"mode": "pro", "effort": "max", "context": "all_turns"},
+            "context_management": [{"type": "compaction", "compact_threshold": 200000}],
+            "prompt_cache_options": {"mode": "explicit", "ttl": "30m"},
+            "prompt_cache_retention": "24h",
+            "store": False,
+            "metadata": {"request": "example"},
+        },
+    )
     first = await model.get_response(
         system_instructions=None,
         input="hi",
-        model_settings=ModelSettings(
-            reasoning=Reasoning(mode="pro", effort="max", context="all_turns"),
-            prompt_cache_options={"mode": "explicit", "ttl": "30m"},
-        ),
+        model_settings=configured_agent.model_settings,
         tools=[],
         output_schema=None,
         handoffs=[],
@@ -1815,6 +1874,12 @@ async def test_websocket_model_reuses_connection_and_sends_response_create_frame
         "mode": "explicit",
         "ttl": "30m",
     }
+    assert ws.sent_messages[0]["context_management"] == [
+        {"type": "compaction", "compact_threshold": 200000}
+    ]
+    assert ws.sent_messages[0]["prompt_cache_retention"] == "24h"
+    assert ws.sent_messages[0]["store"] is False
+    assert ws.sent_messages[0]["metadata"] == {"request": "example"}
     assert ws.sent_messages[1]["type"] == "response.create"
     assert ws.sent_messages[1]["stream"] is True
     assert ws.sent_messages[1]["previous_response_id"] == "resp-1"
@@ -3942,6 +4007,157 @@ def test_websocket_get_retry_advice_allows_stateless_receive_timeout_retry() -> 
     assert advice is not None
     assert advice.suggested is True
     assert advice.replay_safety is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize("previous_response_id", [None, "resp_prev"])
+def test_websocket_get_retry_advice_marks_pre_response_overload_retryable(
+    previous_response_id: str | None,
+) -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = ResponsesWebSocketError(
+        {
+            "type": "error",
+            "error": {
+                "type": "service_unavailable_error",
+                "code": "server_is_overloaded",
+                "message": "Our servers are currently overloaded. Please try again later.",
+            },
+        }
+    )
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+            previous_response_id=previous_response_id,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize("previous_response_id", [None, "resp_prev"])
+def test_websocket_get_retry_advice_marks_pre_response_server_error_retryable(
+    previous_response_id: str | None,
+) -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = ResponsesWebSocketError(
+        {
+            "type": "error",
+            "error": {
+                "type": "server_error",
+                "code": None,
+                "message": "Sorry, something went wrong.",
+            },
+        }
+    )
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=True,
+            previous_response_id=previous_response_id,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety is None
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_does_not_override_non_transient_error_code() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = ResponsesWebSocketError(
+        {
+            "type": "error",
+            "error": {
+                "type": "server_error",
+                "code": "invalid_request_error",
+                "message": "Invalid request.",
+            },
+        }
+    )
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=True,
+        )
+    )
+
+    assert advice is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize(
+    ("error_type", "code"),
+    [
+        ("service_unavailable_error", "server_is_overloaded"),
+        ("server_error", None),
+    ],
+)
+def test_websocket_get_retry_advice_keeps_partial_transient_error_unsafe(
+    error_type: str,
+    code: str | None,
+) -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = ResponsesWebSocketError(
+        {
+            "type": "error",
+            "error": {
+                "type": error_type,
+                "code": code,
+                "message": "Transient provider error.",
+            },
+        }
+    )
+    setattr(error, "_openai_agents_ws_replay_safety", "unsafe")  # noqa: B010
+    setattr(error, "_openai_agents_ws_response_started", True)  # noqa: B010
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is False
+    assert advice.replay_safety == "unsafe"
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_ignores_other_pre_response_error_codes() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = ResponsesWebSocketError(
+        {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_request",
+                "message": "Invalid request.",
+            },
+        }
+    )
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+        )
+    )
+
+    assert advice is None
 
 
 def test_get_client_disables_provider_managed_retries_when_requested() -> None:

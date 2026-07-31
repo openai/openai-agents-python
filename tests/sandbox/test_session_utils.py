@@ -1,18 +1,29 @@
 from __future__ import annotations
 
 import io
+import os
 import shlex
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 
 import pytest
 
 from agents.sandbox.entries import GCSMount, InContainerMountStrategy, MountpointMountPattern
-from agents.sandbox.errors import MountConfigError
+from agents.sandbox.errors import (
+    MountConfigError,
+    WorkspaceArchiveReadError,
+    WorkspaceReadNotFoundError,
+)
 from agents.sandbox.files import EntryKind, FileEntry
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.session import SandboxSessionStartEvent
-from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.session.base_sandbox_session import (
+    _READ_PATH_PROBE_SCRIPT,
+    _READ_PATH_PROBE_TIMEOUT_S,
+    BaseSandboxSession,
+)
 from agents.sandbox.session.events import SandboxSessionFinishEvent, validate_sandbox_session_event
 from agents.sandbox.session.utils import (
     _best_effort_stream_len,
@@ -69,6 +80,23 @@ class _ManifestSession(_CaptureExecSession):
             manifest=manifest,
             snapshot=NoopSnapshot(id="noop"),
         )
+
+
+class _QueuedExecSession(_CaptureExecSession):
+    def __init__(self, results: list[ExecResult]) -> None:
+        super().__init__()
+        self._results = list(results)
+        self.commands: list[tuple[str, ...]] = []
+        self.timeouts: list[float | None] = []
+
+    async def _exec_internal(
+        self,
+        *command: str | Path,
+        timeout: float | None = None,
+    ) -> ExecResult:
+        self.commands.append(tuple(str(part) for part in command))
+        self.timeouts.append(timeout)
+        return self._results.pop(0)
 
 
 def test_safe_decode_truncates_and_appends_ellipsis() -> None:
@@ -223,6 +251,142 @@ async def test_check_rm_with_exec_runs_parent_write_probe_as_user() -> None:
     assert session.last_command[:4] == ("sudo", "-u", "sandbox-user", "--")
     assert session.last_command[4:6] == ("sh", "-lc")
     assert session.last_command[-2:] == ("/workspace/stale.txt", "0")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("probe_exit_code", "expected_error"),
+    [
+        (0, WorkspaceArchiveReadError),
+        (1, WorkspaceReadNotFoundError),
+        (2, WorkspaceArchiveReadError),
+    ],
+)
+async def test_check_read_with_exec_classifies_failure_as_requested_user(
+    probe_exit_code: int,
+    expected_error: type[Exception],
+) -> None:
+    session = _QueuedExecSession(
+        [
+            ExecResult(stdout=b"", stderr=b"not readable", exit_code=1),
+            ExecResult(stdout=b"", stderr=b"", exit_code=probe_exit_code),
+        ]
+    )
+
+    with pytest.raises(expected_error):
+        await session._check_read_with_exec(
+            Path("target.txt"),
+            user=User(name="sandbox-user"),
+        )
+
+    assert len(session.commands) == 2
+    assert all(command[:4] == ("sudo", "-u", "sandbox-user", "--") for command in session.commands)
+    assert "READ_PATH_PROBE_V3" in session.commands[1][6]
+    assert session.timeouts == [None, _READ_PATH_PROBE_TIMEOUT_S]
+
+
+@pytest.mark.asyncio
+async def test_check_read_with_exec_treats_nonstandard_check_exit_as_archive_error() -> None:
+    session = _QueuedExecSession([ExecResult(stdout=b"", stderr=b"check failed", exit_code=127)])
+
+    with pytest.raises(WorkspaceArchiveReadError):
+        await session._check_read_with_exec(Path("target.txt"))
+
+    assert len(session.commands) == 1
+
+
+@pytest.mark.asyncio
+async def test_read_error_context_does_not_retain_partial_stdout() -> None:
+    partial_stdout = b"sensitive partial contents" * 1024
+    session = _QueuedExecSession(
+        [
+            ExecResult(stdout=partial_stdout, stderr=b"read failed", exit_code=1),
+            ExecResult(stdout=b"", stderr=b"", exit_code=2),
+        ]
+    )
+
+    with pytest.raises(WorkspaceArchiveReadError) as exc_info:
+        await session._check_read_with_exec(Path("target.txt"))
+
+    assert "stdout" not in exc_info.value.context
+    assert exc_info.value.context["stdout_bytes"] == len(partial_stdout)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell behavior is Unix-specific")
+def test_read_path_probe_resolves_symlinks_before_classifying_missing(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    dangling = workspace / "dangling"
+    dangling.symlink_to("missing")
+    non_directory = workspace / "not-a-directory"
+    non_directory.write_text("content", encoding="utf-8")
+    invalid_target = workspace / "invalid-target"
+    invalid_target.symlink_to("not-a-directory/child")
+    dangling_parent = workspace / "dangling-parent"
+    dangling_parent.symlink_to("missing-directory")
+    invalid_parent = workspace / "invalid-parent"
+    invalid_parent.symlink_to("not-a-directory")
+    loop = workspace / "loop"
+    loop.symlink_to("loop")
+    newline_target = workspace / "newline-target\n"
+    newline_target.write_text("content", encoding="utf-8")
+    newline_link = workspace / "newline-link"
+    newline_link.symlink_to(newline_target.name)
+    (workspace / "a").write_text("sibling", encoding="utf-8")
+    current = workspace
+    symlink_parts: list[str] = []
+    for index in range(41):
+        real = current / f"real-{index}"
+        real.mkdir()
+        link_name = f"link-{index}"
+        (current / link_name).symlink_to(real.name, target_is_directory=True)
+        symlink_parts.append(link_name)
+        current = real
+
+    def probe(path: Path, *, env: dict[str, str] | None = None) -> int:
+        result = subprocess.run(
+            ["sh", "-c", _READ_PATH_PROBE_SCRIPT, "sh", str(path)],
+            check=False,
+            capture_output=True,
+            env=env,
+            timeout=5,
+        )
+        return result.returncode
+
+    assert probe(dangling) == 1
+    assert probe(invalid_target) == 2
+    assert probe(dangling_parent / "child") == 1
+    assert probe(invalid_parent / "child") == 2
+    assert probe(loop) == 2
+    assert probe(newline_link) == 0
+    assert probe(workspace / "[a]") == 1
+    assert probe(workspace / "?") == 1
+    assert probe(workspace / "*") == 1
+    assert probe(workspace.joinpath(*symlink_parts, "missing")) == 2
+    assert probe(workspace / ("x" * 256)) == 2
+
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_find = fake_bin / "find"
+    find_args_log = tmp_path / "find-args.log"
+    fake_find.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$@" > "$FIND_ARGS_LOG"\n'
+        'printf "find: %s: Input/output error\\n" "$1" >&2\nexit 1\n',
+        encoding="utf-8",
+    )
+    fake_find.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["FIND_ARGS_LOG"] = str(find_args_log)
+    missing_path = workspace / "missing"
+    assert probe(missing_path, env=env) == 2
+    assert find_args_log.read_text(encoding="utf-8").splitlines() == [
+        str(missing_path),
+        "-prune",
+        "-print",
+    ]
+    fake_find.write_text("#!/bin/sh\nprintf match\n", encoding="utf-8")
+    assert probe(missing_path, env=env) == 2
 
 
 @pytest.mark.parametrize(

@@ -41,7 +41,11 @@ except ImportError as e:
 
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
-from ...memory.session_settings import SessionSettings, resolve_session_limit
+from ...memory.session_settings import (
+    SessionSettings,
+    coerce_session_settings,
+    resolve_session_limit,
+)
 
 
 class RedisSession(SessionABC):
@@ -56,7 +60,7 @@ class RedisSession(SessionABC):
         redis_client: Redis,
         key_prefix: str = "agents:session",
         ttl: int | None = None,
-        session_settings: SessionSettings | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
     ):
         """Initializes a new RedisSession.
 
@@ -71,12 +75,18 @@ class RedisSession(SessionABC):
                 default limit for retrieving items. If None, uses default SessionSettings().
         """
         self.session_id = session_id
-        self.session_settings = session_settings or SessionSettings()
+        self.session_settings = (
+            coerce_session_settings(session_settings)
+            if session_settings is not None
+            else SessionSettings()
+        )
         self._redis = redis_client
         self._key_prefix = key_prefix
         self._ttl = ttl
         self._lock = asyncio.Lock()
         self._owns_client = False  # Track if we own the Redis client
+        self._closed = False
+        self._client_released = False
 
         # Redis key patterns
         self._session_key = f"{self._key_prefix}:{self.session_id}"
@@ -90,7 +100,7 @@ class RedisSession(SessionABC):
         *,
         url: str,
         redis_kwargs: dict[str, Any] | None = None,
-        session_settings: SessionSettings | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> RedisSession:
         """Create a session from a Redis URL string.
@@ -145,6 +155,11 @@ class RedisSession(SessionABC):
     # Session protocol implementation
     # ------------------------------------------------------------------
 
+    def _check_not_closed(self) -> None:
+        """Raise if the session has already been closed."""
+        if self._closed:
+            raise RuntimeError("RedisSession is closed")
+
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
@@ -157,17 +172,7 @@ class RedisSession(SessionABC):
         """
         session_limit = resolve_session_limit(limit, self.session_settings)
 
-        async with self._lock:
-            if session_limit is None:
-                # Get all messages in chronological order
-                raw_messages = await self._redis.lrange(self._messages_key, 0, -1)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
-            else:
-                if session_limit <= 0:
-                    return []
-                # Get the latest N messages (Redis list is ordered chronologically)
-                # Use negative indices to get from the end - Redis uses -N to -1 for last N items
-                raw_messages = await self._redis.lrange(self._messages_key, -session_limit, -1)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
-
+        async def _decode_messages(raw_messages: list[Any]) -> list[TResponseInputItem]:
             items: list[TResponseInputItem] = []
             for raw_msg in raw_messages:
                 try:
@@ -181,8 +186,31 @@ class RedisSession(SessionABC):
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     # Skip corrupted messages
                     continue
-
             return items
+
+        async with self._lock:
+            self._check_not_closed()
+            if session_limit is None:
+                # Get all messages in chronological order
+                raw_messages = await self._redis.lrange(self._messages_key, 0, -1)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
+                return await _decode_messages(raw_messages)
+
+            if session_limit <= 0:
+                return []
+
+            # Get the latest N messages (Redis list is ordered chronologically)
+            # Use negative indices to get from the end - Redis uses -N to -1 for last N items.
+            # Expand the fetch window when corrupt messages sit among the newest entries so
+            # limit counts valid conversation items, matching pop_item and the other backends.
+            window = session_limit
+            while True:
+                raw_messages = await self._redis.lrange(self._messages_key, -window, -1)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
+                items = await _decode_messages(raw_messages)
+                if len(items) >= session_limit:
+                    return items[-session_limit:]
+                if len(raw_messages) < window:
+                    return items
+                window *= 2
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Add new items to the conversation history.
@@ -190,10 +218,12 @@ class RedisSession(SessionABC):
         Args:
             items: List of input items to add to the history
         """
+        self._check_not_closed()
         if not items:
             return
 
         async with self._lock:
+            self._check_not_closed()
             pipe = self._redis.pipeline()
             now = str(int(time.time()))
 
@@ -228,6 +258,7 @@ class RedisSession(SessionABC):
             The most recent item if it exists, None if the session is empty
         """
         async with self._lock:
+            self._check_not_closed()
             while True:
                 # Use RPOP to atomically remove and return the rightmost (most recent) item
                 raw_msg = await self._redis.rpop(self._messages_key)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
@@ -249,6 +280,7 @@ class RedisSession(SessionABC):
     async def clear_session(self) -> None:
         """Clear all items for this session."""
         async with self._lock:
+            self._check_not_closed()
             # Delete all keys associated with this session
             await self._redis.delete(
                 self._session_key,
@@ -260,20 +292,38 @@ class RedisSession(SessionABC):
         """Close the Redis connection.
 
         Only closes the connection if this session owns the Redis client
-        (i.e., created via from_url). If the client was injected externally,
-        the caller is responsible for managing its lifecycle.
+        (i.e., created via from_url). In that case the session becomes terminal
+        and subsequent operations raise RuntimeError. If the client was injected
+        externally, the caller is responsible for managing its lifecycle and
+        this is a no-op.
+
+        The session is terminal from the first close attempt. If releasing the
+        client fails or is cancelled, operations still raise and a later close()
+        retries the unfinished cleanup. Once the client is released, repeated and
+        concurrent calls are safe no-ops.
         """
-        if self._owns_client:
-            await self._redis.aclose()
+        async with self._lock:
+            if not self._owns_client:
+                return
+            self._closed = True
+            if not self._client_released:
+                await self._redis.aclose()
+                self._client_released = True
 
     async def ping(self) -> bool:
         """Test Redis connectivity.
 
         Returns:
             True if Redis is reachable, False otherwise.
+
+        Raises:
+            RuntimeError: If the session owns its client and has been closed.
         """
-        try:
-            await self._redis.ping()  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
-            return True
-        except Exception:
-            return False
+        async with self._lock:
+            # Checked outside the try block; the except clause below would swallow it.
+            self._check_not_closed()
+            try:
+                await self._redis.ping()  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
+                return True
+            except Exception:
+                return False

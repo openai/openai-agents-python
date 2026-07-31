@@ -1,9 +1,16 @@
 import asyncio
 
-from agents import Agent, AgentToolStreamEvent, ModelSettings, Runner, function_tool, trace
+from agents import (
+    Agent,
+    AgentToolStreamEvent,
+    ModelSettings,
+    Runner,
+    trace,
+)
+from agents.decorators import tool
 
 
-@function_tool(
+@tool(
     name_override="billing_status_checker",
     description_override="Answer questions about customer billing status.",
 )

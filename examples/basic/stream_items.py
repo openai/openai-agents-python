@@ -1,10 +1,15 @@
 import asyncio
 import random
 
-from agents import Agent, ItemHelpers, Runner, function_tool
+from agents import (
+    Agent,
+    ItemHelpers,
+    Runner,
+)
+from agents.decorators import tool
 
 
-@function_tool
+@tool
 def how_many_jokes() -> int:
     """Return a random integer of jokes to tell between 1 and 10 (inclusive)."""
     return random.randint(1, 10)

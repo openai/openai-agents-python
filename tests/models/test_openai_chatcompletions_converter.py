@@ -191,6 +191,37 @@ def test_items_to_messages_with_easy_input_message():
     assert out["content"] == "How are you?"
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "hello",
+        "",
+        [],
+        [{"type": "input_text", "text": "hello"}],
+    ],
+)
+@pytest.mark.parametrize(
+    "optional_keys",
+    [
+        {"type": "message"},
+        {"phase": "commentary"},
+        {"type": "message", "phase": "final_answer"},
+    ],
+)
+def test_easy_input_assistant_optional_keys_match_bare_shape(
+    content: Any,
+    optional_keys: dict[str, Any],
+):
+    """Optional message fields must not change easy-input conversion."""
+    untyped = cast(TResponseInputItem, {"role": "assistant", "content": content})
+    extended = cast(
+        TResponseInputItem,
+        {"role": "assistant", "content": content, **optional_keys},
+    )
+
+    assert Converter.items_to_messages([extended]) == Converter.items_to_messages([untyped])
+
+
 def test_items_to_messages_accepts_raw_chat_completions_user_content_parts():
     """
     Raw Chat Completions content parts should be accepted as aliases for the SDK's
@@ -290,6 +321,29 @@ def test_items_to_messages_with_output_message_and_function_call():
     assert tool_call["type"] == "function"
     assert tool_call["function"]["name"] == "math"
     assert tool_call["function"]["arguments"] == "{}"
+
+
+def test_items_to_messages_accepts_statusless_output_message():
+    """Output messages remain recognizable after replay normalization removes null status."""
+    statusless_message = cast(
+        TResponseInputItem,
+        {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "hello",
+                    "annotations": [],
+                }
+            ],
+        },
+    )
+
+    assert Converter.items_to_messages([statusless_message]) == [
+        {"role": "assistant", "content": "hello"}
+    ]
 
 
 def test_convert_tool_choice_handles_standard_and_named_options() -> None:

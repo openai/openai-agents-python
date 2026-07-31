@@ -13,6 +13,7 @@ from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from pydantic import BaseModel, Field
 
+import agents._debug as _debug
 from agents import (
     Agent,
     AgentBase,
@@ -1049,6 +1050,66 @@ async def test_agent_as_tool_supports_custom_input_builder(
     assert builder_calls[0]["params"] == args
     assert builder_calls[0]["summary"] is None
     assert builder_calls[0]["json_schema"] is None
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_supports_falsey_callable_input_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TranslationInput(BaseModel):
+        text: str
+
+    custom_items = [{"role": "user", "content": "custom input"}]
+
+    class FalseyInputBuilder:
+        def __bool__(self) -> bool:
+            return False
+
+        def __call__(self, _options: StructuredToolInputBuilderOptions):
+            return custom_items
+
+    agent = Agent(name="builder_agent")
+    tool = agent.as_tool(
+        tool_name="builder_tool",
+        tool_description="Builder tool",
+        parameters=TranslationInput,
+        input_builder=FalseyInputBuilder(),
+    )
+    captured: dict[str, Any] = {}
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        captured["input"] = input
+        return DummyResult()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    args = {"text": "hola"}
+    tool_context = ToolContext(
+        context=None,
+        tool_name="builder_tool",
+        tool_call_id="call_builder",
+        tool_arguments=json.dumps(args),
+    )
+
+    await tool.on_invoke_tool(tool_context, json.dumps(args))
+
+    assert captured["input"] == custom_items
 
 
 @pytest.mark.asyncio
@@ -2404,10 +2465,21 @@ async def test_agent_as_tool_streaming_dispatches_without_blocking(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_redacted", "tool_redacted"),
+    [(True, False), (False, True), (False, False)],
+)
 async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    model_redacted: bool,
+    tool_redacted: bool,
 ) -> None:
-    agent = Agent(name="handler_error_agent")
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", model_redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
+    agent_name = "SECRET_HANDLER_ERROR_AGENT"
+    agent = Agent(name=agent_name)
+    secret = "SECRET_AGENT_STREAM_PAYLOAD"
 
     class DummyStreamingResult:
         def __init__(self) -> None:
@@ -2427,7 +2499,7 @@ async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
     )
 
     def bad_handler(event: AgentToolStreamEvent) -> None:
-        raise RuntimeError("boom")
+        raise RuntimeError(secret)
 
     tool_call = ResponseFunctionToolCall(
         id="call_bad",
@@ -2450,9 +2522,27 @@ async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
         tool_call=tool_call,
     )
 
-    output = await tool.on_invoke_tool(tool_context, '{"input": "go"}')
+    with caplog.at_level("ERROR", logger="openai.agents"):
+        output = await tool.on_invoke_tool(tool_context, '{"input": "go"}')
 
     assert output == "ok"
+    record = next(
+        record
+        for record in caplog.records
+        if "Error while handling an agent tool on_stream event" in record.getMessage()
+    )
+    if model_redacted or tool_redacted:
+        assert record.msg == "%s"
+        assert record.args == ("Error while handling an agent tool on_stream event",)
+        assert record.exc_info is None
+        assert "openai_agents_diagnostic_context" not in record.__dict__
+        assert secret not in caplog.text
+        assert agent_name not in caplog.text
+    else:
+        assert record.__dict__["openai_agents_diagnostic_context"] == {"agent_name": agent_name}
+        assert record.exc_info is not None
+        assert record.exc_info[1] is not None
+        assert secret in caplog.text
 
 
 @pytest.mark.asyncio

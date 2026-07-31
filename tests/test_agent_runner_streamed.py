@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import httpx
@@ -17,6 +19,7 @@ from openai.types.responses import (
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from typing_extensions import TypedDict
 
+import agents._debug as _debug
 from agents import (
     Agent,
     GuardrailFunctionOutput,
@@ -38,12 +41,20 @@ from agents import (
     handoff,
     retry_policies,
 )
-from agents.items import RunItem, ToolApprovalItem, TResponseInputItem
+from agents.items import (
+    ModelResponse,
+    RunItem,
+    ToolApprovalItem,
+    TResponseInputItem,
+    TResponseStreamEvent,
+)
 from agents.memory.openai_conversations_session import OpenAIConversationsSession
+from agents.models.interface import Model, ModelTracing
 from agents.run import RunConfig
 from agents.run_internal import run_loop
 from agents.run_internal.run_loop import QueueCompleteSentinel
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent, StreamEvent
+from agents.tool import Tool
 from agents.usage import Usage
 
 from .fake_model import FakeModel, get_response_obj
@@ -61,7 +72,7 @@ from .utils.hitl import (
     queue_function_call_and_text,
     resume_streamed_after_first_approval,
 )
-from .utils.simple_session import SimpleListSession
+from .utils.simple_session import CountingSession, SimpleListSession
 
 
 def _conversation_locked_error() -> BadRequestError:
@@ -136,6 +147,20 @@ async def test_simple_first_run():
     assert result.final_output == "second"
     assert len(result.raw_responses) == 1, "exactly one model response should be generated"
     assert len(result.to_input_list()) == 3, "should have original input and generated item"
+
+
+@pytest.mark.asyncio
+async def test_empty_list_input_reaches_model():
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+    model.set_next_output([get_text_message("first")])
+
+    result = Runner.run_streamed(agent, input=[])
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "first"
+    assert model.last_turn_args["input"] == []
 
 
 @pytest.mark.asyncio
@@ -367,6 +392,133 @@ async def test_streamed_run_preserves_request_usage_entries_after_retry() -> Non
     assert usage.request_usage_entries[1].input_tokens == 10
     assert usage.request_usage_entries[1].output_tokens == 5
     assert usage.request_usage_entries[1].total_tokens == 15
+
+
+class _RetryThenMissingUsageModel(Model):
+    """Stream a successful retry whose terminal Response omits usage data."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def get_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: Any,
+        handoffs: list[Handoff],
+        tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        prompt: Any | None,
+    ) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            raise APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            )
+        return ModelResponse(
+            output=[get_text_message("done")],
+            usage=Usage(requests=1),
+            response_id="resp-missing-usage",
+        )
+
+    async def stream_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: Any,
+        handoffs: list[Handoff],
+        tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        prompt: Any | None,
+    ) -> AsyncIterator[TResponseStreamEvent]:
+        self.calls += 1
+        if self.calls == 1:
+            raise APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            )
+        response = get_response_obj([get_text_message("done")])
+        response.usage = None
+        yield ResponseCompletedEvent(
+            type="response.completed",
+            response=response,
+            sequence_number=0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_streamed_run_counts_retry_attempts_when_terminal_usage_missing() -> None:
+    """Retry accounting must survive successful streams that omit Response.usage.
+
+    Non-OpenAI chat-completions adapters (e.g. LiteLLM) can complete a stream without a usage
+    chunk, leaving ``Response.usage`` as ``None``. Failed retry attempts must still be counted,
+    matching the non-streaming ``apply_retry_attempt_usage`` path.
+    """
+
+    model = _RetryThenMissingUsageModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+
+    result = Runner.run_streamed(agent, input="test")
+    async for _ in result.stream_events():
+        pass
+
+    usage = result.context_wrapper.usage
+    assert model.calls == 2
+    assert usage.requests == 2
+    assert len(usage.request_usage_entries) == 2
+    assert usage.request_usage_entries[0].total_tokens == 0
+    assert usage.request_usage_entries[1].total_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_streamed_model_retry_does_not_rewind_committed_session_input() -> None:
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+    session = CountingSession(history=[get_text_input_item("previous")])
+
+    result = Runner.run_streamed(agent, input="test", session=session)
+    async for _ in result.stream_events():
+        pass
+
+    saved_items = await session.get_items()
+    assert [item.get("role") for item in saved_items] == ["user", "user", "assistant"]
+    assert session.pop_calls == 0
 
 
 @pytest.mark.asyncio
@@ -802,13 +954,13 @@ async def test_structured_output():
 
     assert result.final_output == Foo(bar="baz")
     assert len(result.raw_responses) == 4, "should have four model responses"
-    assert len(result.to_input_list()) == 10, (
-        "should have input: conversation summary, function call, function call result, message, "
-        "handoff, handoff output, preamble message, tool call, tool call result, final output"
+    assert len(result.to_input_list()) == 11, (
+        "should preserve ordered history segments plus function calls, messages, handoff items, "
+        "and the final output without replaying the carried-forward message twice"
     )
-    assert len(result.to_input_list(mode="normalized")) == 6, (
+    assert len(result.to_input_list(mode="normalized")) == 7, (
         "should have normalized replay input: conversation summary, carried-forward message, "
-        "preamble message, tool call, tool call result, final output"
+        "handoff summary, preamble message, tool call, tool call result, final output"
     )
 
     assert result.last_agent == agent_1, "should have handed off to agent_1"
@@ -1153,6 +1305,72 @@ async def test_input_guardrail_tripwire_triggered_causes_exception_streamed():
         result = Runner.run_streamed(agent, input="user_message")
         async for _ in result.stream_events():
             pass
+
+
+@pytest.mark.parametrize(
+    ("model_redacted", "tool_redacted"),
+    [(True, False), (False, True), (False, False)],
+    ids=["model_redacted", "tool_redacted", "diagnostic"],
+)
+@pytest.mark.asyncio
+async def test_streamed_finalizer_failure_follows_both_data_policies(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    model_redacted: bool,
+    tool_redacted: bool,
+) -> None:
+    async def safe_guardrail(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        _ = context, agent, input
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    error = RuntimeError("SECRET_STREAM_FINALIZER_ERROR")
+
+    async def fail_finalizer(_result: Any) -> bool:
+        raise error
+
+    monkeypatch.setattr(
+        run_loop,
+        "input_guardrail_tripwire_triggered_for_stream",
+        fail_finalizer,
+    )
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", model_redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
+    agent_name = "SECRET_STREAM_AGENT_NAME"
+    agent = Agent(
+        name=agent_name,
+        input_guardrails=[InputGuardrail(guardrail_function=safe_guardrail)],
+        model=FakeModel(initial_output=[get_text_message("done")]),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="openai.agents"):
+        result = Runner.run_streamed(agent, input="user_message")
+        async for _ in result.stream_events():
+            pass
+
+    assert result.final_output == "done"
+    record = next(
+        record
+        for record in caplog.records
+        if "Error finalizing streamed result" in record.getMessage()
+    )
+    redacted = model_redacted or tool_redacted
+    if redacted:
+        assert record.msg == "%s"
+        assert record.args == ("Error finalizing streamed result",)
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert "openai_agents_diagnostic_context" not in record.__dict__
+        rendered = logging.Formatter().format(record)
+        assert agent_name not in rendered
+        assert "SECRET_STREAM_FINALIZER_ERROR" not in rendered
+    else:
+        context = record.__dict__["openai_agents_diagnostic_context"]
+        assert context == {"agent_name": agent_name}
+        assert record.exc_info is not None
+        assert record.exc_info[1] is error
+        assert "SECRET_STREAM_FINALIZER_ERROR" in logging.Formatter().format(record)
 
 
 @pytest.mark.asyncio
@@ -1588,13 +1806,13 @@ async def test_streaming_events():
 
     assert result.final_output == Foo(bar="baz")
     assert len(result.raw_responses) == 4, "should have four model responses"
-    assert len(result.to_input_list()) == 9, (
-        "should have input: conversation summary, function call, function call result, message, "
-        "handoff, handoff output, tool call, tool call result, final output"
+    assert len(result.to_input_list()) == 10, (
+        "should preserve ordered history segments plus function calls, messages, handoff items, "
+        "and the final output without replaying the carried-forward message twice"
     )
-    assert len(result.to_input_list(mode="normalized")) == 5, (
+    assert len(result.to_input_list(mode="normalized")) == 6, (
         "should have normalized replay input: conversation summary, carried-forward message, "
-        "tool call, tool call result, final output"
+        "handoff summary, tool call, tool call result, final output"
     )
 
     assert result.last_agent == agent_1, "should have handed off to agent_1"

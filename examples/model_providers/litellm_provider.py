@@ -3,7 +3,12 @@ from __future__ import annotations
 import asyncio
 import os
 
-from agents import Agent, Runner, function_tool, set_tracing_disabled
+from agents import (
+    Agent,
+    Runner,
+    set_tracing_disabled,
+)
+from agents.decorators import tool
 from agents.extensions.models.litellm_model import LitellmModel
 
 """This example uses the LitellmModel directly, to hit any model provider.
@@ -18,7 +23,7 @@ Find more providers here: https://docs.litellm.ai/docs/providers
 set_tracing_disabled(disabled=True)
 
 
-@function_tool
+@tool
 def get_weather(city: str):
     print(f"[debug] getting weather for {city}")
     return f"The weather in {city} is sunny."

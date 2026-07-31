@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 import pytest
 
-from tests.testing_processor import fetch_events
+import agents._debug as _debug
+from agents import trace
+from tests.testing_processor import fetch_events, fetch_span_errors
 
 try:
     from agents.voice import (
         AudioInput,
         StreamedAudioResult,
+        STTModelSettings,
         TTSModelSettings,
         VoicePipeline,
         VoicePipelineConfig,
@@ -26,6 +32,22 @@ except ImportError:
     pass
 
 
+@dataclass
+class _ProviderSTTModelSettings(STTModelSettings):
+    provider_language: str | None = None
+
+
+@dataclass
+class _ProviderTTSModelSettings(TTSModelSettings):
+    provider_voice: str | None = None
+
+
+@dataclass
+class _ProviderVoicePipelineConfig(VoicePipelineConfig):
+    stt_settings: _ProviderSTTModelSettings = field(default_factory=_ProviderSTTModelSettings)
+    tts_settings: _ProviderTTSModelSettings = field(default_factory=_ProviderTTSModelSettings)
+
+
 def test_streamed_audio_result_odd_length_buffer_int16() -> None:
     result = StreamedAudioResult(
         FakeTTS(),
@@ -37,6 +59,105 @@ def test_streamed_audio_result_odd_length_buffer_int16() -> None:
 
     assert transformed.dtype == np.int16
     assert transformed.tolist() == [1]
+
+
+@pytest.mark.asyncio
+async def test_streamed_audio_result_propagates_consumer_cancellation(monkeypatch) -> None:
+    result = StreamedAudioResult(
+        FakeTTS(),
+        TTSModelSettings(),
+        VoicePipelineConfig(),
+    )
+    get_started = asyncio.Event()
+    never_finishes = asyncio.Event()
+    producer_started = asyncio.Event()
+    producer_stopped = asyncio.Event()
+
+    async def wait_for_event() -> VoiceStreamEvent:
+        get_started.set()
+        await never_finishes.wait()
+        raise AssertionError("Unreachable")
+
+    async def produce_events() -> None:
+        producer_started.set()
+        try:
+            await never_finishes.wait()
+        finally:
+            producer_stopped.set()
+
+    producer = asyncio.create_task(produce_events())
+    result._tasks.append(producer)
+    monkeypatch.setattr(result._queue, "get", wait_for_event)
+    consumer = asyncio.ensure_future(anext(result.stream()))
+    await asyncio.gather(get_started.wait(), producer_started.wait())
+    consumer.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+    await producer_stopped.wait()
+    assert producer.cancelled()
+
+
+def test_voice_pipeline_config_normalizes_dictionary_settings() -> None:
+    config = VoicePipelineConfig(
+        stt_settings={"language": "ja", "temperature": 0.0},
+        tts_settings={"voice": "alloy", "buffer_size": 1},
+    )
+
+    assert isinstance(config.stt_settings, STTModelSettings)
+    assert config.stt_settings.language == "ja"
+    assert config.stt_settings.temperature == 0.0
+    assert isinstance(config.tts_settings, TTSModelSettings)
+    assert config.tts_settings.voice == "alloy"
+    assert config.tts_settings.buffer_size == 1
+
+
+def test_voice_pipeline_config_subclass_uses_declared_settings_types() -> None:
+    config = _ProviderVoicePipelineConfig(
+        stt_settings={"provider_language": "ja"},  # type: ignore[arg-type]
+        tts_settings={"provider_voice": "voice"},  # type: ignore[arg-type]
+    )
+
+    assert isinstance(config.stt_settings, _ProviderSTTModelSettings)
+    assert config.stt_settings.provider_language == "ja"
+    assert isinstance(config.tts_settings, _ProviderTTSModelSettings)
+    assert config.tts_settings.provider_voice == "voice"
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        ({"stt_settings": {"languge": "ja"}}, "Unknown voice.stt settings: languge"),
+        ({"tts_settings": {"voce": "alloy"}}, "Unknown voice.tts settings: voce"),
+    ],
+)
+def test_voice_pipeline_config_rejects_unknown_dictionary_settings(
+    settings: dict[str, Any], message: str
+) -> None:
+    with pytest.raises(TypeError, match=message):
+        VoicePipelineConfig(**settings)
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_normalizes_nested_dictionary_config() -> None:
+    fake_stt = FakeSTT(["first"])
+    fake_tts = FakeTTS()
+    pipeline = VoicePipeline(
+        workflow=FakeWorkflow([["out_1"]]),
+        stt_model=fake_stt,
+        tts_model=fake_tts,
+        config={
+            "stt_settings": {"language": "ja"},
+            "tts_settings": {"voice": "alloy", "buffer_size": 1},
+        },
+    )
+
+    result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
+    events, audio_chunks = await extract_events(result)
+
+    assert isinstance(pipeline.config, VoicePipelineConfig)
+    assert events == ["turn_started", "audio", "turn_ended", "session_ended"]
+    await fake_tts.verify_audio("out_1", audio_chunks[0])
 
 
 def test_streamed_audio_result_odd_length_buffer_float32() -> None:
@@ -80,6 +201,91 @@ async def test_streamed_audio_result_preserves_cross_chunk_sample_boundaries() -
             break
 
     assert audio_chunks == [np.array([1], dtype=np.int16).tobytes()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("trace_include_sensitive_data", "expected_error"),
+    [
+        (False, "Error details are redacted."),
+        (True, "sensitive-tts-error"),
+    ],
+)
+async def test_streamed_audio_error_respects_sensitive_data_setting(
+    trace_include_sensitive_data: bool,
+    expected_error: str,
+) -> None:
+    class FailingTTS(FakeTTS):
+        async def run(self, text: str, settings: TTSModelSettings):
+            del text, settings
+            raise RuntimeError("sensitive-tts-error")
+            yield b""  # pragma: no cover
+
+    result = StreamedAudioResult(
+        FailingTTS(),
+        TTSModelSettings(),
+        VoicePipelineConfig(trace_include_sensitive_data=trace_include_sensitive_data),
+    )
+    local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
+
+    with trace("tts-error"):
+        with pytest.raises(RuntimeError, match="sensitive-tts-error"):
+            await result._stream_audio("sensitive input", local_queue)
+
+    assert fetch_span_errors("speech") == [
+        {
+            "message": expected_error,
+            "data": {
+                "text": "sensitive input" if trace_include_sensitive_data else "",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_streamed_audio_dispatcher_handles_stream_failure() -> None:
+    """A failed _stream_audio task must not leave _dispatch_audio blocked forever."""
+
+    class FailingTTS(FakeTTS):
+        async def run(self, text: str, settings: TTSModelSettings):
+            del text, settings
+            raise RuntimeError("tts-failure")
+            yield b""  # pragma: no cover
+
+    result = StreamedAudioResult(
+        FailingTTS(),
+        TTSModelSettings(),
+        VoicePipelineConfig(trace_include_sensitive_data=False),
+    )
+
+    await result._add_text("This is the first sentence. This is the second one.")
+
+    with pytest.raises(RuntimeError, match="tts-failure"):
+        await result._turn_done()
+
+    # The single-turn pipeline queues the error and re-raises without calling _done(),
+    # so _completed_session stays false. The dispatcher must return as soon as it
+    # forwards the session_ended sentinel from the failed segment instead of blocking
+    # on the dead queue (or spinning in the outer wait loop).
+    dispatcher_task = result._dispatcher_task
+    assert dispatcher_task is not None
+    await asyncio.wait_for(dispatcher_task, timeout=5.0)
+    assert dispatcher_task.done()
+
+    # The failed segment's session_ended is forwarded once; the dispatcher's normal
+    # epilogue must not queue a second terminal event.
+    events: list[VoiceStreamEvent] = []
+    while True:
+        try:
+            events.append(result._queue.get_nowait())
+        except asyncio.QueueEmpty:
+            break
+    terminal_events = [
+        event
+        for event in events
+        if isinstance(event, VoiceStreamEventLifecycle) and event.event == "session_ended"
+    ]
+    assert len(terminal_events) == 1
 
 
 @pytest.mark.asyncio
@@ -316,10 +522,24 @@ class _BlockingWorkflow(FakeWorkflow):
         yield "out_1"
 
 
+class _FailingWorkflow(FakeWorkflow):
+    def __init__(self, error: BaseException):
+        super().__init__()
+        self.error = error
+
+    async def run(self, _: str):
+        raise self.error
+        yield ""  # pragma: no cover
+
+
 class _OnStartYieldThenFailWorkflow(FakeWorkflow):
+    def __init__(self, outputs: list[list[str]], error: BaseException | None = None):
+        super().__init__(outputs)
+        self.error = error or RuntimeError("boom")
+
     async def on_start(self):
         yield "intro"
-        raise RuntimeError("boom")
+        raise self.error
 
 
 @pytest.mark.asyncio
@@ -372,3 +592,140 @@ async def test_voicepipeline_multi_turn_on_start_exception_does_not_abort() -> N
 
     assert events[-1] == "session_ended"
     assert "error" not in events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_redacted", "tool_redacted", "redacted"),
+    [
+        (True, False, True),
+        (False, True, True),
+        (False, False, False),
+    ],
+)
+async def test_voice_on_start_errors_apply_model_and_tool_logging_policies(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    model_redacted: bool,
+    tool_redacted: bool,
+    redacted: bool,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", model_redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
+    cause = ValueError("SECRET_VOICE_ON_START_TOOL_PAYLOAD")
+    error = RuntimeError("Voice startup failed")
+    error.__cause__ = cause
+    pipeline = VoicePipeline(
+        workflow=_OnStartYieldThenFailWorkflow([["out_1"]], error),
+        stt_model=FakeSTT(["first"]),
+        tts_model=FakeTTS(),
+    )
+    streamed_audio_input = await FakeStreamedAudioInput.get(count=1)
+    caplog.set_level(logging.WARNING, logger="openai.agents")
+
+    result = await pipeline.run(streamed_audio_input)
+    events, _ = await extract_events(result)
+
+    assert events[-1] == "session_ended"
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "openai.agents"
+        and (
+            record.msg
+            in {
+                "Voice workflow on_start failed",
+                "Voice workflow on_start failed: %s",
+            }
+            or (
+                isinstance(record.args, tuple)
+                and record.args
+                and record.args[0] == "Voice workflow on_start failed"
+            )
+        )
+    ]
+    assert len(records) == 1
+    record = records[0]
+    if redacted:
+        assert record.msg == "%s"
+        assert record.args == ("Voice workflow on_start failed",)
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert error not in record.__dict__.values()
+        assert cause not in record.__dict__.values()
+        assert "SECRET_VOICE_ON_START_TOOL_PAYLOAD" not in logging.Formatter().format(record)
+    else:
+        assert record.msg == "%s: %s"
+        assert isinstance(record.args, tuple)
+        assert error in record.args
+        assert record.exc_info is not None
+        assert record.exc_info[1] is error
+        assert "SECRET_VOICE_ON_START_TOOL_PAYLOAD" in logging.Formatter().format(record)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize(
+    ("model_redacted", "tool_redacted", "redacted"),
+    [
+        (True, False, True),
+        (False, True, True),
+        (False, False, False),
+    ],
+)
+async def test_voice_workflow_errors_apply_model_and_tool_logging_policies(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    streamed: bool,
+    model_redacted: bool,
+    tool_redacted: bool,
+    redacted: bool,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", model_redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
+    error = RuntimeError("SECRET_VOICE_TOOL_PAYLOAD")
+    pipeline = VoicePipeline(
+        workflow=_FailingWorkflow(error),
+        stt_model=FakeSTT(["first"]),
+        tts_model=FakeTTS(),
+    )
+    audio_input = (
+        await FakeStreamedAudioInput.get(count=1)
+        if streamed
+        else AudioInput(buffer=np.zeros(2, dtype=np.int16))
+    )
+    caplog.set_level(logging.ERROR, logger="openai.agents")
+
+    result = await pipeline.run(audio_input)
+    with pytest.raises(RuntimeError, match="SECRET_VOICE_TOOL_PAYLOAD"):
+        await extract_events(result)
+    assert result.text_generation_task is not None
+    assert result.text_generation_task.exception() is error
+
+    expected_pipeline_message = (
+        "Error processing voice turns" if streamed else "Error processing single voice turn"
+    )
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "openai.agents"
+        and isinstance(record.args, tuple)
+        and record.args
+        and record.args[0] in {expected_pipeline_message, "Error processing voice output"}
+    ]
+    assert len(records) == 2
+    for record in records:
+        if redacted:
+            assert record.msg == "%s"
+            assert record.args in {
+                (expected_pipeline_message,),
+                ("Error processing voice output",),
+            }
+            assert record.exc_info is None
+            assert "SECRET_VOICE_TOOL_PAYLOAD" not in logging.Formatter().format(record)
+        else:
+            assert record.msg == "%s: %s"
+            assert isinstance(record.args, tuple)
+            assert error in record.args
+            assert record.exc_info is not None
+            assert record.exc_info[1] is error

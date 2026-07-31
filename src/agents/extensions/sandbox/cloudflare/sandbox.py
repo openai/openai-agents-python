@@ -29,6 +29,8 @@ from urllib.parse import quote
 
 import aiohttp
 
+from .... import _debug
+from ....logger import log_tool_action_debug
 from ....sandbox.errors import (
     ConfigurationError,
     ErrorCode,
@@ -693,13 +695,16 @@ class CloudflareSandboxSession(BaseSandboxSession):
             async with http.delete(url) as resp:
                 if resp.status < 400 or resp.status == 404:
                     return
-                detail = await _read_cloudflare_response_body(resp)
-                logger.debug(
-                    "Failed to delete Cloudflare sandbox on shutdown: %s",
-                    _cloudflare_http_error_message("DELETE /sandbox", resp.status, detail),
-                )
-        except Exception:
-            logger.debug("Failed to delete Cloudflare sandbox on shutdown", exc_info=True)
+                if _debug.DONT_LOG_TOOL_DATA:
+                    logger.debug("Failed to delete Cloudflare sandbox on shutdown")
+                else:
+                    detail = await _read_cloudflare_response_body(resp)
+                    logger.debug(
+                        "Failed to delete Cloudflare sandbox on shutdown: %s",
+                        _cloudflare_http_error_message("DELETE /sandbox", resp.status, detail),
+                    )
+        except Exception as exc:
+            log_tool_action_debug(logger, "Failed to delete Cloudflare sandbox on shutdown", exc)
 
     async def _after_shutdown(self) -> None:
         await self._close_http()
@@ -846,7 +851,10 @@ class CloudflareSandboxSession(BaseSandboxSession):
                     try:
                         payload = json.loads(msg.data)
                     except json.JSONDecodeError:
-                        logger.debug("Ignoring non-JSON PTY text frame: %s", msg.data)
+                        if _debug.DONT_LOG_TOOL_DATA:
+                            logger.debug("Ignoring non-JSON PTY text frame")
+                        else:
+                            logger.debug("Ignoring non-JSON PTY text frame: %s", msg.data)
                         continue
 
                     msg_type = payload.get("type")
@@ -859,7 +867,10 @@ class CloudflareSandboxSession(BaseSandboxSession):
                         entry.output_notify.set()
                         break
                     if msg_type == "error":
-                        logger.warning("Cloudflare PTY error frame: %s", payload.get("message"))
+                        if _debug.DONT_LOG_TOOL_DATA:
+                            logger.warning("Cloudflare PTY error frame")
+                        else:
+                            logger.warning("Cloudflare PTY error frame: %s", payload.get("message"))
                         entry.output_closed.set()
                         entry.output_notify.set()
                         break
@@ -875,8 +886,8 @@ class CloudflareSandboxSession(BaseSandboxSession):
                     break
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.debug("Cloudflare PTY pump ended with an exception", exc_info=True)
+        except Exception as exc:
+            log_tool_action_debug(logger, "Cloudflare PTY pump ended with an exception", exc)
             entry.output_closed.set()
             entry.output_notify.set()
 
@@ -1480,6 +1491,7 @@ class CloudflareSandboxClient(BaseSandboxClient[CloudflareSandboxClientOptions])
             raise TypeError(
                 "CloudflareSandboxClient.resume expects a CloudflareSandboxSessionState"
             )
+        state.assert_path_grants_rebound()
         inner = CloudflareSandboxSession.from_state(
             state,
             exec_timeout_s=self._exec_timeout_s,
@@ -1492,7 +1504,7 @@ class CloudflareSandboxClient(BaseSandboxClient[CloudflareSandboxClientOptions])
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
-        return CloudflareSandboxSessionState.model_validate(payload)
+        return self._deserialize_session_state_payload(payload, CloudflareSandboxSessionState)
 
     async def _request_sandbox_id(
         self,

@@ -45,7 +45,7 @@ These surfaces answer different questions:
 | Property or helper | What it contains | Best for |
 | --- | --- | --- |
 | [`input`][agents.result.RunResultBase.input] | The base input for this run segment. If a handoff input filter rewrote the history, this reflects the filtered input the run continued with. | Auditing what this run actually used as input |
-| [`to_input_list()`][agents.result.RunResultBase.to_input_list] | An input-item view of the run. The default `mode="preserve_all"` keeps the full converted history from `new_items`; `mode="normalized"` prefers canonical continuation input when handoff filtering rewrites model history. | Manual chat loops, client-managed conversation state, and plain-item history inspection |
+| [`to_input_list()`][agents.result.RunResultBase.to_input_list] | An input-item view of the run. The default `mode="preserve_all"` keeps the converted history from `new_items`, except it does not append an exact session item occurrence already moved into SDK-default nested handoff history a second time; `mode="normalized"` prefers canonical continuation input when handoff filtering rewrites model history. | Manual chat loops, client-managed conversation state, and plain-item history inspection |
 | [`new_items`][agents.result.RunResultBase.new_items] | Rich [`RunItem`][agents.items.RunItem] wrappers with agent, tool, handoff, and approval metadata. | Logs, UIs, audits, and debugging |
 | [`raw_responses`][agents.result.RunResultBase.raw_responses] | Raw [`ModelResponse`][agents.items.ModelResponse] objects from each model call in the run. | Provider-level diagnostics or raw response inspection |
 
@@ -56,6 +56,8 @@ In practice:
 -   Use [`session=...`](sessions/index.md) when you want the SDK to load and save history for you.
 -   If you are using OpenAI server-managed state with `conversation_id` or `previous_response_id`, usually pass only the new user input and reuse the stored ID instead of resending `to_input_list()`.
 -   Use the default `to_input_list()` mode or `new_items` when you need the full converted history for logs, UIs, or audits.
+
+When SDK-default nested handoff history preserves a message item verbatim, Sessions, `RunState`, and `to_input_list()` track the exact owned occurrence rather than deduplicating by content. Identical messages that occurred separately remain separate; only the already-owned occurrence is kept from being appended a second time.
 
 Unlike the JavaScript SDK, Python does not expose a separate `output` property for the model-shaped delta only. Use `new_items` when you need SDK metadata, or inspect `raw_responses` when you need the raw model payloads.
 
@@ -70,11 +72,38 @@ Computer-tool replay follows the raw Responses payload shape. Preview-model `com
 -   [`ToolSearchCallItem`][agents.items.ToolSearchCallItem] and [`ToolSearchOutputItem`][agents.items.ToolSearchOutputItem] for Responses tool search requests and loaded tool-search results
 -   [`ToolCallItem`][agents.items.ToolCallItem] and [`ToolCallOutputItem`][agents.items.ToolCallOutputItem] for tool calls and their results
 -   [`ToolApprovalItem`][agents.items.ToolApprovalItem] for tool calls that paused for approval
+-   [`MCPApprovalRequestItem`][agents.items.MCPApprovalRequestItem], [`MCPApprovalResponseItem`][agents.items.MCPApprovalResponseItem], and [`MCPListToolsItem`][agents.items.MCPListToolsItem] for hosted MCP approvals and tool catalogs
 -   [`HandoffCallItem`][agents.items.HandoffCallItem] and [`HandoffOutputItem`][agents.items.HandoffOutputItem] for handoff requests and completed transfers
 
 Choose `new_items` over `to_input_list()` whenever you need agent associations, tool outputs, handoff boundaries, or approval boundaries.
 
 When you use hosted tool search, inspect `ToolSearchCallItem.raw_item` to see the search request the model emitted, and `ToolSearchOutputItem.raw_item` to see which namespaces, functions, or hosted MCP servers were loaded for that turn.
+
+With Programmatic Tool Calling, the generated `program` is a `ToolCallItem`, ordinary child tool calls owned by that program are also `ToolCallItem` entries, and the matching `program_output` is a `ToolCallOutputItem`. Program-owned hosted MCP `mcp_approval_request` and `mcp_list_tools` items are exceptions: they become `MCPApprovalRequestItem` and `MCPListToolsItem` entries.
+
+Raw items can be typed Responses objects or mappings. In particular, program-owned shell and apply-patch calls use mappings. Use a mapping-safe inspection pattern:
+
+```python
+from collections.abc import Mapping
+
+
+def raw_field(item, name):
+    raw_item = item.raw_item
+    if isinstance(raw_item, Mapping):
+        return raw_item.get(name)
+    return getattr(raw_item, name, None)
+
+
+raw_type = raw_field(item, "type")
+caller = raw_field(item, "caller")
+caller_id = (
+    caller.get("caller_id")
+    if isinstance(caller, Mapping)
+    else getattr(caller, "caller_id", None)
+)
+```
+
+For a program-owned child call, `caller` has type `program`, and `caller_id` identifies the parent program call.
 
 ## Continue or resume the conversation
 
