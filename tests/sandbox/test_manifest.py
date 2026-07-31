@@ -1,6 +1,10 @@
+import json
 from pathlib import Path
+from typing import Literal
 
 import pytest
+from pydantic import model_serializer
+from pydantic_core import PydanticSerializationError
 
 from agents.sandbox.entries import (
     Dir,
@@ -10,8 +14,29 @@ from agents.sandbox.entries import (
     MountpointMountPattern,
 )
 from agents.sandbox.errors import InvalidManifestPathError
-from agents.sandbox.manifest import Manifest
+from agents.sandbox.manifest import EnvEntry, Environment, EnvValue, Manifest, StrEnvValue
 from agents.sandbox.manifest_render import _truncate_manifest_description
+
+
+class _SecretReferenceEnvValue(EnvValue):
+    type: Literal["test.secret_reference"] = "test.secret_reference"
+    key: str
+
+    async def resolve(self) -> str:
+        return f"resolved-secret-for-{self.key}"
+
+
+class _CustomSerializedEnvValue(EnvValue):
+    type: Literal["test.custom_serializer"] = "test.custom_serializer"
+    key: str
+    internal_value: str = ""
+
+    async def resolve(self) -> str:
+        return self.internal_value
+
+    @model_serializer
+    def _serialize_reference(self) -> dict[str, str]:
+        return {"key": self.key}
 
 
 def test_manifest_rejects_nested_child_paths_that_escape_workspace() -> None:
@@ -212,3 +237,213 @@ def test_manifest_description_truncation_preserves_unbounded_description() -> No
     description = "short"
 
     assert _truncate_manifest_description(description, None) == description
+
+
+@pytest.mark.asyncio
+async def test_manifest_round_trips_tagged_env_values_without_resolved_secrets() -> None:
+    manifest = Manifest(
+        environment=Environment(
+            value={
+                "DIRECT": _SecretReferenceEnvValue(key="direct"),
+                "ENTRY": EnvEntry(
+                    description="secret reference",
+                    ephemeral=True,
+                    value=_SecretReferenceEnvValue(key="entry"),
+                ),
+            }
+        )
+    )
+
+    payload_json = manifest.model_dump_json()
+    payload = json.loads(payload_json)
+
+    assert payload["environment"] == {
+        "value": {
+            "DIRECT": {"type": "test.secret_reference", "key": "direct"},
+            "ENTRY": {
+                "description": "secret reference",
+                "ephemeral": True,
+                "value": {"type": "test.secret_reference", "key": "entry"},
+            },
+        }
+    }
+    assert "resolved-secret" not in payload_json
+
+    restored = Manifest.model_validate_json(payload_json)
+
+    assert type(restored.environment.value["DIRECT"]) is _SecretReferenceEnvValue
+    restored_entry = restored.environment.value["ENTRY"]
+    assert isinstance(restored_entry, EnvEntry)
+    assert type(restored_entry.value) is _SecretReferenceEnvValue
+    assert await restored.environment.resolve() == {
+        "DIRECT": "resolved-secret-for-direct",
+        "ENTRY": "resolved-secret-for-entry",
+    }
+
+
+def test_manifest_preserves_type_from_env_value_custom_serializer() -> None:
+    manifest = Manifest(
+        environment=Environment(
+            value={
+                "DIRECT": _CustomSerializedEnvValue(
+                    key="direct",
+                    internal_value="direct-secret",
+                ),
+                "ENTRY": EnvEntry(
+                    value=_CustomSerializedEnvValue(
+                        key="entry",
+                        internal_value="entry-secret",
+                    )
+                ),
+            }
+        )
+    )
+
+    payload = manifest.model_dump(mode="json")
+    serialized = json.dumps(payload)
+
+    assert payload["environment"]["value"] == {
+        "DIRECT": {"type": "test.custom_serializer", "key": "direct"},
+        "ENTRY": {
+            "description": None,
+            "ephemeral": False,
+            "value": {"type": "test.custom_serializer", "key": "entry"},
+        },
+    }
+    assert "direct-secret" not in serialized
+    assert "entry-secret" not in serialized
+
+    restored = Manifest.model_validate(payload)
+
+    assert type(restored.environment.value["DIRECT"]) is _CustomSerializedEnvValue
+    restored_entry = restored.environment.value["ENTRY"]
+    assert isinstance(restored_entry, EnvEntry)
+    assert type(restored_entry.value) is _CustomSerializedEnvValue
+
+
+def test_manifest_round_trips_str_env_value() -> None:
+    manifest = Manifest(
+        environment=Environment(value={"PLAIN": "plain", "TYPED": StrEnvValue(value="typed")})
+    )
+
+    payload = manifest.model_dump(mode="json")
+    restored = Manifest.model_validate(payload)
+
+    assert payload["environment"] == {
+        "value": {"PLAIN": "plain", "TYPED": {"type": "str", "value": "typed"}}
+    }
+    assert restored.environment.value == {
+        "PLAIN": "plain",
+        "TYPED": StrEnvValue(value="typed"),
+    }
+
+
+def test_manifest_reads_legacy_discriminator_free_str_env_values() -> None:
+    payload = {
+        "environment": {
+            "value": {
+                "DIRECT": {"value": "direct-value"},
+                "ENTRY": {
+                    "description": "typed entry",
+                    "ephemeral": True,
+                    "value": {"value": "entry-value"},
+                },
+            }
+        }
+    }
+
+    restored = Manifest.model_validate(payload)
+
+    assert restored.environment.value == {
+        "DIRECT": StrEnvValue(value="direct-value"),
+        "ENTRY": EnvEntry(
+            description="typed entry",
+            ephemeral=True,
+            value=StrEnvValue(value="entry-value"),
+        ),
+    }
+
+
+def test_manifest_rejects_ambiguous_discriminator_free_env_values() -> None:
+    payload = {
+        "environment": {
+            "value": {
+                "AMBIGUOUS": {"value": "plain", "description": "not a legacy StrEnvValue"},
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="must include a string `type` field"):
+        Manifest.model_validate(payload)
+
+
+@pytest.mark.parametrize(("exclude_unset", "exclude_defaults"), [(True, False), (False, True)])
+def test_manifest_env_value_type_survives_narrowed_dumps(
+    exclude_unset: bool,
+    exclude_defaults: bool,
+) -> None:
+    manifest = Manifest(
+        environment=Environment(value={"TOKEN": _SecretReferenceEnvValue(key="token")})
+    )
+
+    payload = manifest.model_dump(
+        mode="json",
+        exclude_unset=exclude_unset,
+        exclude_defaults=exclude_defaults,
+    )
+
+    assert payload["environment"]["value"]["TOKEN"]["type"] == "test.secret_reference"
+    assert Manifest.model_validate(payload).environment == manifest.environment
+
+
+def test_manifest_rejects_unknown_env_value_type() -> None:
+    payload = {"environment": {"value": {"TOKEN": {"type": "unknown.env.value"}}}}
+
+    with pytest.raises(ValueError, match="Unknown env value type `unknown.env.value`"):
+        Manifest.model_validate(payload)
+
+
+@pytest.mark.asyncio
+async def test_untagged_env_value_imports_and_resolves_but_does_not_serialize() -> None:
+    class _UntaggedEnvValue(EnvValue):
+        key: str
+
+        async def resolve(self) -> str:
+            return f"resolved-secret-for-{self.key}"
+
+    value = _UntaggedEnvValue(key="token")
+
+    assert await value.resolve() == "resolved-secret-for-token"
+    with pytest.raises(
+        PydanticSerializationError,
+        match="_UntaggedEnvValue must explicitly declare its own non-empty `type`",
+    ):
+        Manifest(environment=Environment(value={"TOKEN": value})).model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_inherited_env_value_tag_imports_and_resolves_but_does_not_serialize() -> None:
+    class _LabeledStrEnvValue(StrEnvValue):
+        label: str
+
+    value = _LabeledStrEnvValue(value="plain", label="example")
+
+    assert await value.resolve() == "plain"
+    with pytest.raises(
+        PydanticSerializationError,
+        match="_LabeledStrEnvValue must explicitly declare its own non-empty `type`",
+    ):
+        Manifest(environment=Environment(value={"VALUE": value})).model_dump_json()
+
+
+def test_duplicate_env_value_type_registration_raises() -> None:
+    with pytest.raises(
+        TypeError,
+        match="already registered by _SecretReferenceEnvValue",
+    ):
+
+        class _DuplicateSecretReferenceEnvValue(EnvValue):
+            type: Literal["test.secret_reference"] = "test.secret_reference"
+
+            async def resolve(self) -> str:
+                return "unused"

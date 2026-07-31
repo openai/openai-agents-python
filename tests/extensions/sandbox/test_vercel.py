@@ -1072,11 +1072,11 @@ async def test_vercel_s3_manifest_sanitization_preserves_typed_environment(
     )
     assert serialized_environment == {
         "value": {
-            "DIRECT": {"value": "direct-value"},
+            "DIRECT": {"type": "str", "value": "direct-value"},
             "ENTRY": {
                 "description": "typed entry",
                 "ephemeral": True,
-                "value": {"value": "entry-value"},
+                "value": {"type": "str", "value": "entry-value"},
             },
         }
     }

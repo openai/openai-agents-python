@@ -1,10 +1,18 @@
 import abc
 import asyncio
+import inspect
 from collections.abc import Iterator, Mapping
 from pathlib import Path, PurePath, PurePosixPath
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializeAsAny,
+    field_serializer,
+    field_validator,
+)
+from pydantic_core import PydanticSerializationError
 from typing_extensions import assert_never
 
 from .._config_coercion import coerce_pydantic_config
@@ -41,27 +49,144 @@ DEFAULT_REMOTE_MOUNT_COMMAND_ALLOWLIST = [
 ]
 
 
+EnvValueClass = type["EnvValue"]
+
+
 # TODO (sdcoffey) env val from secret store
 class EnvValue(BaseModel, abc.ABC):
+    type: str = ""
+    _subclass_registry: ClassVar[dict[str, EnvValueClass]] = {}
+
     @abc.abstractmethod
     async def resolve(self) -> str: ...
 
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs: object) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+
+        annotations = inspect.get_annotations(cls)
+        if "type" not in annotations:
+            return
+
+        type_field = cls.model_fields.get("type")
+        type_default = type_field.default if type_field is not None else None
+        if not isinstance(type_default, str) or type_default == "":
+            return
+
+        existing = EnvValue._subclass_registry.get(type_default)
+        if existing is not None and existing is not cls:
+            raise TypeError(
+                f"env value type `{type_default}` is already registered by {existing.__name__}"
+            )
+        EnvValue._subclass_registry[type_default] = cls
+
+    @classmethod
+    def parse(cls, payload: object) -> "EnvValue":
+        """Deserialize a mapping into the subclass registered under its `type` field.
+
+        An existing `EnvValue` instance is returned unchanged.
+        """
+        if isinstance(payload, EnvValue):
+            return payload
+        if not isinstance(payload, Mapping):
+            raise TypeError(
+                f"env value must be an EnvValue or mapping, got {type(payload).__name__}"
+            )
+
+        value = payload.get("value")
+        if set(payload) == {"value"} and isinstance(value, str):
+            return StrEnvValue(value=value)
+
+        env_value_type = payload.get("type")
+        if not isinstance(env_value_type, str):
+            raise ValueError("env value mapping must include a string `type` field")
+
+        env_value_class = EnvValue._subclass_registry.get(env_value_type)
+        if env_value_class is None:
+            known = ", ".join(sorted(EnvValue._subclass_registry)) or "<none>"
+            raise ValueError(
+                f"Unknown env value type `{env_value_type}`. Registered types: {known}"
+            )
+        return env_value_class.model_validate(dict(payload))
+
 
 class StrEnvValue(EnvValue):
+    type: Literal["str"] = "str"
     value: str
 
     async def resolve(self) -> str:
         return self.value
 
 
+def _serialize_env_value_with_type(value: EnvValue, serialized: object) -> dict[str, Any]:
+    if EnvValue._subclass_registry.get(value.type) is not type(value):
+        raise PydanticSerializationError(
+            f"{type(value).__name__} must explicitly declare its own non-empty `type` "
+            "to be serialized"
+        )
+    if not isinstance(serialized, Mapping):
+        raise PydanticSerializationError(
+            f"{type(value).__name__} serializer must return a mapping to preserve its `type`"
+        )
+
+    data = dict(serialized)
+    data["type"] = value.type
+    return data
+
+
 class EnvEntry(BaseModel):
     description: str | None = None
     ephemeral: bool = Field(default=False)
-    value: EnvValue
+    value: SerializeAsAny[EnvValue]
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _parse_value(cls, value: object) -> EnvValue:
+        return EnvValue.parse(value)
+
+    @field_serializer("value", mode="wrap")
+    def _serialize_value(self, value: EnvValue, handler: Any) -> dict[str, Any]:
+        return _serialize_env_value_with_type(value, handler(value))
+
+
+def _parse_environment_value(payload: object) -> "str | EnvValue | EnvEntry":
+    """Route one environment member to the shape it represents."""
+    if isinstance(payload, str | EnvValue | EnvEntry):
+        return payload
+    if not isinstance(payload, Mapping):
+        raise TypeError(
+            f"environment value must be a str, EnvValue, or EnvEntry, got {type(payload).__name__}"
+        )
+    if "type" in payload or isinstance(payload.get("value"), str):
+        return EnvValue.parse(payload)
+    return EnvEntry.model_validate(dict(payload))
 
 
 class Environment(BaseModel):
-    value: dict[str, str | EnvValue | EnvEntry] = Field(default_factory=dict)
+    value: dict[str, str | SerializeAsAny[EnvValue] | EnvEntry] = Field(default_factory=dict)
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _parse_value(cls, value: object) -> dict[str, "str | EnvValue | EnvEntry"]:
+        if not isinstance(value, Mapping):
+            raise ValueError(f"Environment mapping must be a mapping, got {type(value).__name__}")
+        return {key: _parse_environment_value(entry) for key, entry in value.items()}
+
+    @field_serializer("value", mode="wrap")
+    def _serialize_value(
+        self,
+        values: dict[str, "str | EnvValue | EnvEntry"],
+        handler: Any,
+    ) -> dict[str, Any]:
+        serialized = handler(values)
+        if not isinstance(serialized, Mapping):
+            raise PydanticSerializationError("Environment serializer must return a mapping")
+
+        data = dict(serialized)
+        for key, value in values.items():
+            if isinstance(value, EnvValue) and key in data:
+                data[key] = _serialize_env_value_with_type(value, data[key])
+        return data
 
     def normalized(self) -> dict[str, EnvEntry]:
         result: dict[str, EnvEntry] = {}
