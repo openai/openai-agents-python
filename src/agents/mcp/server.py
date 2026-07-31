@@ -101,58 +101,35 @@ else:
 
 T = TypeVar("T")
 
-_SAFE_HTTP_REQUEST_HEADER_NAMES = frozenset(
-    {
-        "accept",
-        "accept-encoding",
-        "cache-control",
-        "connection",
-        "content-length",
-        "content-type",
-        "host",
-        "last-event-id",
-        "mcp-protocol-version",
-        "mcp-session-id",
-        "transfer-encoding",
-        "user-agent",
-    }
-)
 _SAFE_EXCEPTION_GROUP_MESSAGE = "MCP request failed with additional errors."
 _SAFE_EXCEPTION_MESSAGE = "An additional error occurred during the MCP request."
 
 
 def _safe_transport_cause(http_error: Exception) -> Exception | None:
-    """Keep a transport exception only when its HTTPX request data needs no sanitization."""
+    """Keep a transport exception only when its HTTPX URLs need no sanitization."""
     if not isinstance(http_error, httpx.HTTPStatusError | httpx.RequestError):
         return http_error
 
     request_urls: list[str] = []
-    requests: list[httpx.Request] = []
     try:
-        requests.append(http_error.request)
+        request_urls.append(str(http_error.request.url))
     except RuntimeError:
         pass
 
     if isinstance(http_error, httpx.HTTPStatusError):
         for response in [*http_error.response.history, http_error.response]:
             try:
-                response_request = response.request
+                response_url = response.request.url
             except RuntimeError:
                 return None
 
-            requests.append(response_request)
-            response_url = response_request.url
+            request_urls.append(str(response_url))
             redirect_location = response.headers.get("location")
             if redirect_location is not None:
                 try:
                     request_urls.append(str(response_url.join(redirect_location)))
                 except (httpx.InvalidURL, ValueError):
                     return None
-
-    for request in requests:
-        request_urls.append(str(request.url))
-        if any(name.lower() not in _SAFE_HTTP_REQUEST_HEADER_NAMES for name in request.headers):
-            return None
 
     return http_error if all(get_mcp_server_log_name(url) == url for url in request_urls) else None
 
@@ -162,11 +139,9 @@ def _first_unsafe_transport_error(http_errors: list[Exception]) -> Exception | N
     return next((error for error in http_errors if _safe_transport_cause(error) is None), None)
 
 
-def _is_unsafe_transport_error(error: BaseException) -> bool:
-    """Return whether an exception carries an HTTPX URL that requires sanitization."""
-    return isinstance(error, httpx.HTTPStatusError | httpx.RequestError) and (
-        _safe_transport_cause(error) is None
-    )
+def _is_http_transport_error(error: BaseException) -> bool:
+    """Return whether an exception is an HTTPX transport error."""
+    return isinstance(error, httpx.HTTPStatusError | httpx.RequestError)
 
 
 def _credential_safe_exception_group(error_group: BaseExceptionGroup) -> BaseExceptionGroup:
@@ -913,26 +888,24 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         try:
             return await func()
         except (httpx.HTTPStatusError, httpx.RequestError) as http_error:
-            if _safe_transport_cause(http_error) is not None:
-                raise
             transport_error = self._user_error_for_request_operation(operation, http_error)
         except BaseExceptionGroup as error_group:
             http_errors = self._extract_http_errors_from_exception(error_group)
-            unsafe_http_error = _first_unsafe_transport_error(http_errors)
-            if unsafe_http_error is None:
+            if not http_errors:
                 raise
-            unsafe_group, remaining_group = error_group.split(_is_unsafe_transport_error)
-            assert unsafe_group is not None
+            selected_http_error = http_errors[0]
+            http_group, remaining_group = error_group.split(_is_http_transport_error)
+            assert http_group is not None
             if remaining_group is None:
                 transport_error = self._user_error_for_request_operation(
                     operation,
-                    unsafe_http_error,
+                    selected_http_error,
                 )
             else:
                 base_error_group = _credential_safe_exception_group(remaining_group)
             http_errors.clear()
-            del unsafe_http_error
-            del unsafe_group
+            del selected_http_error
+            del http_group
             del remaining_group
 
         if base_error_group is not None:

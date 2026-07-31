@@ -217,51 +217,81 @@ async def test_prompt_and_resource_request_errors_hide_url_credentials(
     ("method_name", "args", "_operation"),
     _PROMPT_RESOURCE_OPERATIONS,
 )
-async def test_prompt_and_resource_safe_request_errors_preserve_original_exception(
+async def test_prompt_and_resource_request_errors_hide_attached_request_data(
     method_name: str,
     args: tuple[object, ...],
     _operation: str,
 ):
-    server = MCPServerStreamableHttp(params={"url": _SAFE_URL})
-    request_error = httpx.ReadError(
-        "request failed",
-        request=httpx.Request("POST", _SAFE_URL),
-    )
-    session = MagicMock()
-    setattr(session, method_name, AsyncMock(side_effect=request_error))
-    server.session = session
-
-    with pytest.raises(httpx.ReadError) as request_error_info:
-        await getattr(server, method_name)(*args)
-
-    assert request_error_info.value is request_error
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("header_name", ["authorization", "cookie", "x-api-key", "x-token"])
-async def test_prompt_request_errors_hide_header_credentials(header_name: str):
-    header_secret = "SECRET_HEADER_CREDENTIAL"
+    session_secret = "SECRET_MCP_SESSION_ID"
+    body_secret = "SECRET_REQUEST_BODY"
     server = MCPServerStreamableHttp(params={"url": _SAFE_URL})
     request_error = httpx.ReadError(
         "request failed",
         request=httpx.Request(
             "POST",
             _SAFE_URL,
-            headers={header_name: header_secret},
+            headers={"mcp-session-id": session_secret},
+            content=body_secret,
         ),
     )
     session = MagicMock()
-    session.list_prompts = AsyncMock(side_effect=request_error)
+    setattr(session, method_name, AsyncMock(side_effect=request_error))
+    server.session = session
+
+    with pytest.raises(UserError) as user_error_info:
+        await getattr(server, method_name)(*args)
+
+    rendered = "".join(traceback.format_exception(user_error_info.value))
+    assert session_secret not in rendered
+    assert body_secret not in rendered
+    assert user_error_info.value.__cause__ is None
+    assert user_error_info.value.__context__ is None
+    _assert_not_retained_in_traceback_locals(user_error_info.value, request_error)
+    _assert_not_retained_in_exception_graph(user_error_info.value, request_error)
+
+
+@pytest.mark.asyncio
+async def test_prompt_http_status_errors_hide_attached_response_data():
+    request_body_secret = "SECRET_REQUEST_BODY"
+    response_header_secret = "SECRET_RESPONSE_COOKIE"
+    response_body_secret = "SECRET_RESPONSE_BODY"
+    history_body_secret = "SECRET_HISTORY_BODY"
+    server = MCPServerStreamableHttp(params={"url": _SAFE_URL})
+    request = httpx.Request("POST", _SAFE_URL, content=request_body_secret)
+    history_request = httpx.Request("POST", _SAFE_URL)
+    history_response = httpx.Response(
+        307,
+        request=history_request,
+        headers={"set-cookie": history_body_secret},
+        content=history_body_secret,
+    )
+    response = httpx.Response(
+        503,
+        request=request,
+        headers={"set-cookie": response_header_secret},
+        content=response_body_secret,
+        history=[history_response],
+    )
+    http_error = httpx.HTTPStatusError("boom", request=request, response=response)
+    session = MagicMock()
+    session.list_prompts = AsyncMock(side_effect=http_error)
     server.session = session
 
     with pytest.raises(UserError) as user_error_info:
         await server.list_prompts()
 
     rendered = "".join(traceback.format_exception(user_error_info.value))
-    assert header_secret not in rendered
+    for secret in (
+        request_body_secret,
+        response_header_secret,
+        response_body_secret,
+        history_body_secret,
+    ):
+        assert secret not in rendered
     assert user_error_info.value.__cause__ is None
     assert user_error_info.value.__context__ is None
-    _assert_not_retained_in_traceback_locals(user_error_info.value, request_error)
+    _assert_not_retained_in_traceback_locals(user_error_info.value, http_error)
+    _assert_not_retained_in_exception_graph(user_error_info.value, http_error)
 
 
 @pytest.mark.asyncio
@@ -372,7 +402,7 @@ async def test_resource_request_mixed_group_preserves_cancellation():
 
 
 @pytest.mark.asyncio
-async def test_resource_request_preserves_safe_nested_group():
+async def test_resource_request_sanitizes_safe_url_nested_group():
     server = MCPServerStreamableHttp(params={"url": _SAFE_URL})
     request_error = httpx.ConnectError(
         "connection failed",
@@ -383,10 +413,13 @@ async def test_resource_request_preserves_safe_nested_group():
     session.read_resource = AsyncMock(side_effect=error_group)
     server.session = session
 
-    with pytest.raises(BaseExceptionGroup) as error_group_info:
+    with pytest.raises(UserError) as user_error_info:
         await server.read_resource("file:///safe.txt")
 
-    assert error_group_info.value is error_group
+    assert user_error_info.value.__cause__ is None
+    assert user_error_info.value.__context__ is None
+    _assert_not_retained_in_traceback_locals(user_error_info.value, error_group)
+    _assert_not_retained_in_exception_graph(user_error_info.value, request_error)
 
 
 @pytest.mark.asyncio
