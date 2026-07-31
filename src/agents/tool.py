@@ -393,6 +393,51 @@ class FunctionToolResult:
     """Nested agent run result (for agent-as-tool)."""
 
 
+class _FunctionToolWrappedCallableDescriptor:
+    """Expose decorator callable metadata on instances without affecting class inspection."""
+
+    @overload
+    def __get__(
+        self,
+        instance: None,
+        owner: type[FunctionTool],
+    ) -> _FunctionToolWrappedCallableDescriptor: ...
+
+    @overload
+    def __get__(
+        self,
+        instance: FunctionTool,
+        owner: type[FunctionTool] | None = None,
+    ) -> ToolFunction[...]: ...
+
+    def __get__(
+        self,
+        instance: FunctionTool | None,
+        owner: type[FunctionTool] | None = None,
+    ) -> ToolFunction[...] | _FunctionToolWrappedCallableDescriptor:
+        """Return the callable passed to `function_tool`.
+
+        Calling this callable directly bypasses the function-tool runtime pipeline, including JSON
+        schema validation, context injection, guardrails, timeouts, failure handling, and tracing.
+
+        Raises:
+            AttributeError: If accessed on the class, if the tool was not created by
+                `function_tool`, or if its invoker was replaced.
+        """
+        if instance is None:
+            raise AttributeError("FunctionTool classes have no wrapped Python callable")
+        if not isinstance(instance.on_invoke_tool, _FailureHandlingFunctionToolInvoker):
+            raise AttributeError("FunctionTool has no wrapped Python callable")
+        wrapped_callable = instance.on_invoke_tool._get_wrapped_callable()
+        if wrapped_callable is _MISSING_FUNCTION_TOOL_WRAPPED_CALLABLE:
+            raise AttributeError("FunctionTool has no wrapped Python callable")
+        return cast("ToolFunction[...]", wrapped_callable)
+
+    def __set__(self, instance: FunctionTool, value: object) -> None:
+        """Reject replacement so wrapper metadata cannot diverge from runtime invocation."""
+        raise AttributeError("FunctionTool.__wrapped__ is read-only")
+
+
 @dataclass
 class FunctionTool:
     """A tool that wraps a function. In most cases, you should use  the `function_tool` helpers to
@@ -529,23 +574,7 @@ class FunctionTool:
             tool_qualified_name(self.name, get_explicit_function_tool_namespace(self)) or self.name
         )
 
-    @property
-    def __wrapped__(self) -> ToolFunction[...]:
-        """Return the callable passed to `function_tool`.
-
-        Calling this callable directly bypasses the function-tool runtime pipeline, including JSON
-        schema validation, context injection, guardrails, timeouts, failure handling, and tracing.
-
-        Raises:
-            AttributeError: If this tool was not created by `function_tool`, or its invoker was
-                replaced.
-        """
-        if not isinstance(self.on_invoke_tool, _FailureHandlingFunctionToolInvoker):
-            raise AttributeError("FunctionTool has no wrapped Python callable")
-        wrapped_callable = self.on_invoke_tool._get_wrapped_callable()
-        if wrapped_callable is _MISSING_FUNCTION_TOOL_WRAPPED_CALLABLE:
-            raise AttributeError("FunctionTool has no wrapped Python callable")
-        return cast("ToolFunction[...]", wrapped_callable)
+    __wrapped__ = _FunctionToolWrappedCallableDescriptor()
 
     def __post_init__(self):
         self.allowed_callers = _normalize_tool_allowed_callers(

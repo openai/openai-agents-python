@@ -199,6 +199,15 @@ def test_tool_exposes_original_callable_without_mutating_it() -> None:
         cast(Any, wrapped_tool).__wrapped__ = original
 
 
+def test_wrapped_callable_descriptor_is_hidden_on_function_tool_classes() -> None:
+    @dataclasses.dataclass(init=False)
+    class FunctionToolSubclass(FunctionTool):
+        pass
+
+    assert not hasattr(FunctionTool, "__wrapped__")
+    assert not hasattr(FunctionToolSubclass, "__wrapped__")
+
+
 def test_configured_tool_exposes_original_callable() -> None:
     def original(value: int) -> int:
         return value + 1
