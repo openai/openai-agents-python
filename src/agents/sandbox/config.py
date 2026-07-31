@@ -80,6 +80,13 @@ class MemoryGenerateConfig:
     evidence you actually want it to summarize.
     """
 
+    phase_one_model_context_window_tokens: int | None = None
+    """Effective context window for the phase-one model, in tokens.
+
+    Known model names use SDK metadata when this is ``None``. Set this for custom or unknown
+    models so phase-one prompt generation can reserve context for instructions, schema, and output.
+    """
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -90,6 +97,7 @@ class MemoryGenerateConfig:
             phase_two_model: str | Model = "gpt-5.5",
             phase_two_model_settings: ModelSettings | dict[str, Any] | None = ...,
             extra_prompt: str | None = None,
+            phase_one_model_context_window_tokens: int | None = None,
         ) -> None: ...
 
     def __post_init__(self) -> None:
@@ -118,6 +126,13 @@ class MemoryGenerateConfig:
             raise ValueError(
                 "MemoryGenerateConfig.max_raw_memories_for_consolidation "
                 "must be less than or equal to 4096."
+            )
+        if (
+            self.phase_one_model_context_window_tokens is not None
+            and self.phase_one_model_context_window_tokens <= 0
+        ):
+            raise ValueError(
+                "MemoryGenerateConfig.phase_one_model_context_window_tokens must be greater than 0."
             )
 
 

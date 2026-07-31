@@ -16,9 +16,9 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 import agents._debug as _debug
 import agents.sandbox.capabilities.memory as memory_module
 import agents.sandbox.memory.manager as memory_manager_module
-import agents.sandbox.memory.phase_one as phase_one_module
 from agents import (
     Agent,
+    AgentOutputSchema,
     ModelSettings,
     ReasoningItem,
     RunConfig,
@@ -50,7 +50,10 @@ from agents.sandbox.memory.manager import (
     _rollout_file_name_for_rollout_id,
     get_or_create_memory_generation_manager,
 )
-from agents.sandbox.memory.phase_one import render_phase_one_prompt
+from agents.sandbox.memory.phase_one import (
+    _resolve_phase_one_input_token_limit,
+    render_phase_one_prompt,
+)
 from agents.sandbox.memory.prompts import (
     render_memory_consolidation_prompt,
     render_rollout_extraction_prompt,
@@ -69,6 +72,7 @@ from agents.sandbox.memory.storage import (
 )
 from agents.sandbox.runtime import _stream_memory_input_override
 from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+from agents.sandbox.util.token_truncation import approx_token_count
 from tests.fake_model import FakeModel
 from tests.test_responses import get_final_output_message, get_text_message
 from tests.utils.hitl import make_shell_call
@@ -143,6 +147,7 @@ def _memory_config(
     layout: MemoryLayoutConfig | None = None,
     read: MemoryReadConfig | None = None,
     phase_one_model: FakeModel | None = None,
+    phase_one_model_context_window_tokens: int | None = None,
     phase_two_model: FakeModel | None = None,
 ) -> Memory:
     return Memory(
@@ -152,6 +157,7 @@ def _memory_config(
             max_raw_memories_for_consolidation=max_raw_memories_for_consolidation,
             extra_prompt=extra_prompt,
             phase_one_model=phase_one_model or FakeModel(initial_output=[_phase_one_message()]),
+            phase_one_model_context_window_tokens=phase_one_model_context_window_tokens,
             phase_two_model=phase_two_model
             or FakeModel(
                 initial_output=[
@@ -321,6 +327,62 @@ def test_render_phase_one_prompt_truncates_large_rollout_contents() -> None:
     assert "tokens truncated" in prompt
     assert "rollout content omitted" in prompt
     assert "Do not assume the rendered rollout below is complete" in prompt
+
+
+def test_render_phase_one_prompt_respects_complete_input_budget() -> None:
+    payload = {
+        "input": [{"role": "user", "content": f"start{'a' * 40_000}middle{'z' * 40_000}end"}],
+        "generated_items": [],
+        "terminal_metadata": {"terminal_state": "completed", "has_final_output": False},
+    }
+    input_overhead_tokens = 500
+
+    prompt = render_phase_one_prompt(
+        rollout_contents=dump_rollout_json(payload),
+        input_token_limit=2_000,
+        input_overhead_tokens=input_overhead_tokens,
+    )
+
+    assert approx_token_count(prompt) + input_overhead_tokens <= 2_000
+    assert "start" in prompt
+    assert "end" in prompt
+    assert "middle" not in prompt
+
+
+def test_render_phase_one_prompt_rejects_budget_below_fixed_overhead() -> None:
+    payload = {
+        "input": [{"role": "user", "content": "hello"}],
+        "generated_items": [],
+        "terminal_metadata": {"terminal_state": "completed"},
+    }
+
+    with pytest.raises(ValueError, match="too small for the fixed phase-one prompt overhead"):
+        render_phase_one_prompt(
+            rollout_contents=dump_rollout_json(payload),
+            input_token_limit=100,
+            input_overhead_tokens=100,
+        )
+
+
+def test_phase_one_input_budget_uses_known_model_context_window() -> None:
+    config = MemoryGenerateConfig(phase_one_model="gpt-4o")
+
+    assert _resolve_phase_one_input_token_limit(config) == int(128_000 * 0.7)
+
+
+def test_phase_one_input_budget_prefers_explicit_context_window() -> None:
+    config = MemoryGenerateConfig(
+        phase_one_model="gpt-4o",
+        phase_one_model_context_window_tokens=20_000,
+    )
+
+    assert _resolve_phase_one_input_token_limit(config) == 14_000
+
+
+def test_phase_one_input_budget_preserves_fallback_for_unknown_models() -> None:
+    config = MemoryGenerateConfig(phase_one_model="custom-model")
+
+    assert _resolve_phase_one_input_token_limit(config) is None
 
 
 def test_sandbox_memory_input_preserves_empty_session_delta() -> None:
@@ -523,14 +585,15 @@ async def test_phase_two_selection_tracks_added_retained_and_removed_rollouts() 
 
 
 @pytest.mark.asyncio
-async def test_runner_memory_generation_sanitizes_and_truncates_phase_one_prompt(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(phase_one_module, "_PHASE_ONE_ROLLOUT_TOKEN_LIMIT", 1000)
+async def test_runner_memory_generation_sanitizes_and_truncates_phase_one_prompt() -> None:
     client = UnixLocalSandboxClient()
     session = await client.create(manifest=Manifest())
     phase_one_model = FakeModel(initial_output=[_phase_one_message()])
-    memory = _memory_config(phase_one_model=phase_one_model)
+    context_window_tokens = 20_000
+    memory = _memory_config(
+        phase_one_model=phase_one_model,
+        phase_one_model_context_window_tokens=context_window_tokens,
+    )
     agent = SandboxAgent(
         name="worker",
         model=FakeModel(
@@ -580,6 +643,20 @@ async def test_runner_memory_generation_sanitizes_and_truncates_phase_one_prompt
         closed = True
 
         prompt = _extract_user_text(phase_one_model)
+        turn_args = phase_one_model.first_turn_args
+        assert turn_args is not None
+        system_instructions = turn_args["system_instructions"]
+        assert isinstance(system_instructions, str)
+        output_schema = turn_args["output_schema"]
+        assert isinstance(output_schema, AgentOutputSchema)
+        schema_json = json.dumps(
+            output_schema.json_schema(),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        assert approx_token_count(system_instructions) + approx_token_count(
+            prompt
+        ) + approx_token_count(schema_json) <= int(context_window_tokens * 0.7)
         assert "developer debug" not in prompt
         assert "system note" not in prompt
         assert "reasoning" not in prompt
@@ -696,6 +773,17 @@ def test_memory_generate_config_rejects_non_positive_recent_rollout_limit() -> N
         match=("MemoryGenerateConfig.max_raw_memories_for_consolidation must be greater than 0"),
     ):
         MemoryGenerateConfig(max_raw_memories_for_consolidation=0)
+
+
+@pytest.mark.parametrize("context_window_tokens", [0, -1])
+def test_memory_generate_config_rejects_non_positive_phase_one_context_window(
+    context_window_tokens: int,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="MemoryGenerateConfig.phase_one_model_context_window_tokens must be greater than 0",
+    ):
+        MemoryGenerateConfig(phase_one_model_context_window_tokens=context_window_tokens)
 
 
 def test_memory_layout_config_defaults_match_codex_names() -> None:

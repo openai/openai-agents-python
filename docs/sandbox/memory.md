@@ -95,6 +95,24 @@ memory = Memory(
 
 Use `extra_prompt` to tell the memory generator which signals matter most for your use case, such as customer and company details for a GTM agent.
 
+Phase 1 reserves context for its instructions, structured-output schema, and output before adding
+rollout content. The SDK uses context-window metadata for known model names. When using a custom or
+unknown phase-one model, set its effective context window explicitly:
+
+```python
+memory = Memory(
+    generate=MemoryGenerateConfig(
+        phase_one_model=custom_model,
+        phase_one_model_context_window_tokens=32_000,
+    ),
+)
+```
+
+The SDK limits the complete estimated phase-one input to 70% of that window and keeps the existing
+150,000-token rollout ceiling. The remaining context is reserved for model output and
+provider-specific framing. Token counts are conservative estimates, so custom providers should set
+the value to their effective usable context window rather than a larger advertised maximum.
+
 If recent raw memories exceed `max_raw_memories_for_consolidation` (defaults to 256), Phase 2 keeps only memories from the newest conversations and removes older ones. Recency is based on the last time the conversation is updated. This forgetting mechanism helps memories reflect the newest environment.
 
 ## Multi-turn conversations

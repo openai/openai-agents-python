@@ -17,7 +17,7 @@ from ..config import MemoryGenerateConfig
 from ..session.base_sandbox_session import BaseSandboxSession
 from .phase_one import (
     normalize_rollout_slug,
-    render_phase_one_prompt,
+    render_phase_one_prompt_for_config,
     rollout_id_from_rollout_path,
     run_phase_one,
     validate_rollout_artifacts,
@@ -161,7 +161,10 @@ class SandboxMemoryGenerationManager:
             self._storage.sessions_dir / rollout_file_name
         )
 
-        phase_one_prompt = render_phase_one_prompt(rollout_contents=rollout_contents)
+        phase_one_prompt = render_phase_one_prompt_for_config(
+            config=self._generate_config,
+            rollout_contents=rollout_contents,
+        )
         artifacts = await run_phase_one(
             config=self._generate_config,
             prompt=phase_one_prompt,
