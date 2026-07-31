@@ -230,6 +230,10 @@ async def prepare_input_with_session(
             history_for_callback,
             ignore_openai_conversation_item_ids=is_openai_conversation_session,
         )
+        # Object identity with a copied history item proves the item came from history, and it
+        # stays true however many times the callback emits that same object. The reference maps
+        # below are consumed per occurrence, so they alone cannot classify a repeat.
+        history_object_ids = {id(history_item) for history_item in history_for_callback}
         new_refs = _build_reference_map(new_items_for_callback)
         history_counts = _build_frequency_map(
             history_for_callback,
@@ -250,6 +254,11 @@ async def prepare_input_with_session(
                 continue
             if _consume_reference(history_refs, history_key, item):
                 history_counts[history_key] = max(history_counts.get(history_key, 0) - 1, 0)
+                prune_history_indexes.add(combined_index)
+                continue
+            if id(item) in history_object_ids:
+                # A repeat of a history object the callback already emitted. The content budget
+                # was spent on the first occurrence, so leave it for reconstructed items.
                 prune_history_indexes.add(combined_index)
                 continue
             if history_counts.get(history_key, 0) > 0:

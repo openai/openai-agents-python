@@ -2274,6 +2274,104 @@ async def test_prepare_input_with_session_matches_copied_items_by_content() -> N
 
 
 @pytest.mark.asyncio
+async def test_prepare_input_with_session_callback_repeats_history_item() -> None:
+    """Repeating the same history object must not persist it as new turn input."""
+    history_item = cast(TResponseInputItem, {"role": "user", "content": "history"})
+    session = SimpleListSession(history=[history_item])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        # Re-emphasize the original request at the end of the model context.
+        return [history[0], new_input[0], history[0]]
+
+    prepared, session_items = await prepare_input_with_session("new", session, callback)
+
+    assert [cast(dict[str, Any], item).get("content") for item in prepared] == [
+        "history",
+        "new",
+        "history",
+    ]
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_callback_repeats_equal_history_items() -> None:
+    """Distinct history entries with equal content stay classified as history when repeated."""
+    first = cast(TResponseInputItem, {"role": "user", "content": "same"})
+    second = cast(TResponseInputItem, {"role": "user", "content": "same"})
+    session = SimpleListSession(history=[first, second])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        return [history[0], history[1], history[0], history[1], new_input[0]]
+
+    prepared, session_items = await prepare_input_with_session("new", session, callback)
+
+    assert [cast(dict[str, Any], item).get("content") for item in prepared] == [
+        "same",
+        "same",
+        "same",
+        "same",
+        "new",
+    ]
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_repeated_history_keeps_equal_new_item() -> None:
+    """A new item equal in content to a repeated history item is still persisted once."""
+    history_item = cast(TResponseInputItem, {"role": "user", "content": "same"})
+    session = SimpleListSession(history=[history_item])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        return [history[0], history[0], new_input[0]]
+
+    prepared, session_items = await prepare_input_with_session("same", session, callback)
+
+    assert [cast(dict[str, Any], item).get("content") for item in prepared] == [
+        "same",
+        "same",
+        "same",
+    ]
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == ["same"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_extra_reconstructed_item_stays_new_input() -> None:
+    """Content matching stays budget-limited: only object identity proves history origin.
+
+    The first rebuilt copy is attributed to history by content, but a further copy beyond the
+    item's multiplicity in history carries no evidence that it came from history, so it is
+    persisted. Attributing it to history would require unbounded value equality, which would
+    silently drop genuinely new items that happen to match stored content.
+    """
+    history_item = cast(TResponseInputItem, {"role": "user", "content": "history"})
+    session = SimpleListSession(history=[history_item])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        rebuilt = cast(TResponseInputItem, dict(cast(dict[str, Any], history[0])))
+        return [history[0], rebuilt, new_input[0]]
+
+    prepared, session_items = await prepare_input_with_session("new", session, callback)
+
+    assert [cast(dict[str, Any], item).get("content") for item in prepared] == [
+        "history",
+        "history",
+        "new",
+    ]
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == [
+        "history",
+        "new",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_prepare_input_with_openai_conversation_strips_assistant_history_ids() -> None:
     class DummyOpenAIConversationsSession(OpenAIConversationsSession):
         def __init__(self, history: list[TResponseInputItem]) -> None:
