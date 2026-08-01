@@ -394,18 +394,25 @@ async def _run_output_guardrails_for_stream(
     context_wrapper: RunContextWrapper[TContext],
     streamed_result: RunResultStreaming,
 ) -> list[Any]:
+    # Recorded as each guardrail completes so a tripwire still publishes the results that
+    # already finished, mirroring the non-streamed path.
+    completed_results: list[Any] = []
     streamed_result._output_guardrails_task = asyncio.create_task(
         run_output_guardrails(
             agent.output_guardrails + (run_config.output_guardrails or []),
             agent,
             output,
             context_wrapper,
+            completed_results,
         )
     )
 
     try:
         return cast(list[Any], await streamed_result._output_guardrails_task)
     except OutputGuardrailTripwireTriggered:
+        streamed_result.output_guardrail_results = (
+            streamed_result.output_guardrail_results + completed_results
+        )
         raise
     except asyncio.CancelledError:
         raise

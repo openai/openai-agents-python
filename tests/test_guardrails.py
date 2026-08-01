@@ -13,6 +13,7 @@ from agents import (
     InputGuardrail,
     InputGuardrailTripwireTriggered,
     OutputGuardrail,
+    OutputGuardrailTripwireTriggered,
     RunConfig,
     RunContextWrapper,
     Runner,
@@ -2129,6 +2130,119 @@ async def test_input_guardrail_exception_reports_completed_results():
             Agent(name="t"),
             _ordered_input_guardrails(second_triggers=False, second_raises=True),
             "test input",
+            RunContextWrapper(context=None),
+            collected,
+        )
+
+    assert _result_names(collected) == ["passes"]
+
+
+def _ordered_output_guardrails(
+    *, second_triggers: bool, second_raises: bool = False
+) -> list[OutputGuardrail[Any]]:
+    """Build two output guardrails whose completion order is fixed by an explicit barrier."""
+    first_done = asyncio.Event()
+
+    async def first_fn(
+        context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        first_done.set()
+        return GuardrailFunctionOutput(output_info="passes", tripwire_triggered=False)
+
+    async def second_fn(
+        context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        await first_done.wait()
+        if second_raises:
+            raise RuntimeError("guardrail exploded")
+        return GuardrailFunctionOutput(output_info="second", tripwire_triggered=second_triggers)
+
+    return [
+        OutputGuardrail(guardrail_function=first_fn, name="passes"),
+        OutputGuardrail(guardrail_function=second_fn, name="raises" if second_raises else "trips"),
+    ]
+
+
+def _output_tripwire_agent(model: FakeModel) -> Agent[Any]:
+    return Agent(
+        name="output_guardrail_results_agent",
+        model=model,
+        output_guardrails=_ordered_output_guardrails(second_triggers=True),
+    )
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_tripwire_reports_results():
+    """Runner.run() reports every completed output guardrail result on the raised tripwire."""
+    model = FakeModel()
+    model.set_next_output([get_text_message("hello")])
+
+    with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
+        await Runner.run(_output_tripwire_agent(model), "test input")
+
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _result_names(run_data.output_guardrail_results) == ["passes", "trips"]
+    assert exc_info.value.guardrail_result.guardrail.get_name() == "trips"
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_tripwire_reports_results_streamed():
+    """The streamed path reports the same results, including on the streamed result object."""
+    model = FakeModel()
+    model.set_next_output([get_text_message("hello")])
+
+    result = Runner.run_streamed(_output_tripwire_agent(model), "test input")
+    with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
+        async for _ in result.stream_events():
+            pass
+
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _result_names(run_data.output_guardrail_results) == ["passes", "trips"]
+    assert _result_names(result.output_guardrail_results) == ["passes", "trips"]
+
+
+def test_output_guardrail_tripwire_reports_results_sync():
+    """Runner.run_sync() matches the async entry points."""
+    model = FakeModel()
+    model.set_next_output([get_text_message("hello")])
+
+    with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
+        Runner.run_sync(_output_tripwire_agent(model), "test input")
+
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _result_names(run_data.output_guardrail_results) == ["passes", "trips"]
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_results_reported_on_success():
+    """Passing output guardrails still land on the successful result exactly once."""
+    model = FakeModel()
+    model.set_next_output([get_text_message("hello")])
+    agent = Agent(
+        name="output_guardrail_results_agent",
+        model=model,
+        output_guardrails=_ordered_output_guardrails(second_triggers=False),
+    )
+
+    result = await Runner.run(agent, "test input")
+
+    assert _result_names(result.output_guardrail_results) == ["passes", "trips"]
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_exception_reports_completed_results():
+    """A guardrail raising a non-tripwire error still preserves earlier results."""
+    from agents.run_internal.guardrails import run_output_guardrails
+
+    collected: list[Any] = []
+    with pytest.raises(RuntimeError, match="guardrail exploded"):
+        await run_output_guardrails(
+            _ordered_output_guardrails(second_triggers=False, second_raises=True),
+            Agent(name="t"),
+            "out",
             RunContextWrapper(context=None),
             collected,
         )
