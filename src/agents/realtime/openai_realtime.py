@@ -1113,11 +1113,13 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
         try:
             if "previous_item_id" in event and event["previous_item_id"] is None:
-                event["previous_item_id"] = ""  # TODO (rm) remove
+                validation_event = {**event, "previous_item_id": ""}  # TODO (rm) remove
+            else:
+                validation_event = event
             validation_event = (
-                _normalize_custom_voice_for_server_event_validation(event)
-                if _should_normalize_custom_voice_for_server_event(event)
-                else event
+                _normalize_custom_voice_for_server_event_validation(validation_event)
+                if _should_normalize_custom_voice_for_server_event(validation_event)
+                else validation_event
             )
             parsed: AllRealtimeServerEvents = self._server_event_type_adapter.validate_python(
                 validation_event

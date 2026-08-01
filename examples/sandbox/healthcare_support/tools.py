@@ -19,6 +19,8 @@ class HealthcareSupportContext:
     session_id: str = ""
     human_handoffs: list[dict[str, Any]] = field(default_factory=list)
     human_handoff_approved: bool = False
+    policy_skill_loaded: bool = False
+    policy_search_commands: list[str] = field(default_factory=list)
     emit_event: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 
     async def emit(self, event_name: str, **payload: Any) -> None:

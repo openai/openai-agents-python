@@ -12,7 +12,6 @@ from examples.sandbox.healthcare_support.models import (
     BenefitReview,
     CaseResolution,
     MemoryRecap,
-    SandboxPolicyPacket,
 )
 from examples.sandbox.healthcare_support.tools import (
     HealthcareSupportContext,
@@ -49,13 +48,18 @@ and return a structured packet summary.
 You must:
 1. Load and use the `prior-auth-packet-builder` skill.
 2. Inspect the workspace with shell commands before writing anything.
-3. Use `rg` against `policies/` for prior-auth, imaging, referral, billing, PPO, and Blue Cross
-   policy guidance.
-4. Create `output/policy_findings.md` with the most relevant policy guidance.
+3. Search `policies/` for prior-auth, imaging, referral, billing, PPO, and Blue Cross policy
+   guidance. Run the preferred `rg` search and portable fallback as one shell command:
+   `rg -n -i 'prior authorization|prior-auth|imaging|referral|billing|PPO|Blue Cross' policies ||
+   grep -RniE 'prior authorization|prior-auth|imaging|referral|billing|PPO|Blue Cross' policies`.
+   Do not treat an `rg` launcher or bootstrap failure as an empty result.
+4. Create `output/policy_findings.md` with the exact headings `## Case summary`,
+   `## Matched policy files`, `## Prior authorization`, `## Referral`, and
+   `## Missing information`. Cite each matched policy by its filename.
 5. Create `output/human_review_checklist.md` with a short checklist for a human reviewer.
-6. Set `human_review_recommended=true` only when the policy search or case input shows missing
+6. Call `finalize_policy_packet` only after both files exist. This is the only way to finish.
+7. Set `human_review_recommended=true` only when the policy search or case input shows missing
    authorization/referral details that should be reviewed by a human before responding.
-7. Include the exact shell commands you ran in `shell_commands`.
 8. Return only facts grounded in the files you inspected.
 """.strip()
 
@@ -102,16 +106,22 @@ benefits_agent = Agent[HealthcareSupportContext](
 )
 
 
-def build_policy_sandbox_agent(*, skills_root: Path) -> SandboxAgent[HealthcareSupportContext]:
+def build_policy_sandbox_agent(
+    *,
+    skills_root: Path,
+    finalize_policy_packet_tool: Tool,
+) -> SandboxAgent[HealthcareSupportContext]:
     return SandboxAgent[HealthcareSupportContext](
         name="HealthcarePolicySandboxAgent",
         model="gpt-5.6-sol",
         instructions=(
             POLICY_SANDBOX_PROMPT + "\n\n"
-            "Use `load_skill` before reading the skill file. Use `exec_command` with `pwd`, "
-            "`ls`, `cat`, and `rg` to inspect the sandbox workspace. Use `apply_patch` to create "
-            "`output/policy_findings.md` and `output/human_review_checklist.md`."
+            "First call `load_skill` for `prior-auth-packet-builder`, then read its `SKILL.md`. "
+            "Use `exec_command` with `pwd`, `ls`, `cat`, and the documented `rg || grep` search "
+            "command. Use one `apply_patch` call to create both `output/policy_findings.md` and "
+            "`output/human_review_checklist.md`. Then call `finalize_policy_packet`."
         ),
+        tools=[finalize_policy_packet_tool],
         capabilities=[
             Shell(),
             Filesystem(),
@@ -128,7 +138,8 @@ def build_policy_sandbox_agent(*, skills_root: Path) -> SandboxAgent[HealthcareS
             verbosity="low",
             tool_choice="required",
         ),
-        output_type=AgentOutputSchema(SandboxPolicyPacket, strict_json_schema=False),
+        reset_tool_choice=False,
+        tool_use_behavior={"stop_at_tool_names": ["finalize_policy_packet"]},
     )
 
 

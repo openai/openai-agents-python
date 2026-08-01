@@ -18,6 +18,7 @@ from agents import (
     gen_trace_id,
     trace,
 )
+from agents.decorators import tool
 from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxPathGrant, SandboxRunConfig
 from agents.sandbox.entries import Dir, File, LocalDir
@@ -27,6 +28,7 @@ from examples.sandbox.healthcare_support.data import HealthcareSupportDataStore
 from examples.sandbox.healthcare_support.models import (
     CaseResolution,
     MemoryRecap,
+    SandboxPolicyPacket,
     ScenarioCase,
 )
 from examples.sandbox.healthcare_support.support_agents import (
@@ -45,6 +47,18 @@ SESSION_DB_PATH = CACHE_ROOT / "sessions.db"
 DEFAULT_SESSION_ID = "healthcare-support-demo-memory"
 
 ApprovalHandler = Callable[[dict[str, Any]], Awaitable[bool]]
+
+REQUIRED_POLICY_ARTIFACTS = {
+    "human_review_checklist.md",
+    "policy_findings.md",
+}
+REQUIRED_POLICY_FINDINGS_HEADINGS = {
+    "## Case summary",
+    "## Matched policy files",
+    "## Missing information",
+    "## Prior authorization",
+    "## Referral",
+}
 
 
 class WorkflowHooks(RunHooks[HealthcareSupportContext]):
@@ -90,6 +104,27 @@ class WorkflowHooks(RunHooks[HealthcareSupportContext]):
         result: object,
     ) -> None:
         tool_context = cast(ToolContext[HealthcareSupportContext], context)
+        if agent.name == "HealthcarePolicySandboxAgent":
+            if (
+                tool.name == "load_skill"
+                and isinstance(result, dict)
+                and result.get("status") == "loaded"
+            ):
+                context.context.policy_skill_loaded = True
+            elif tool.name == "exec_command":
+                try:
+                    arguments = json.loads(tool_context.tool_arguments or "{}")
+                except json.JSONDecodeError:
+                    arguments = {}
+                command = arguments.get("cmd")
+                rendered_result = str(result)
+                if (
+                    isinstance(command, str)
+                    and "rg " in command
+                    and "grep -RniE" in command
+                    and "Process exited with code 0" in rendered_result
+                ):
+                    context.context.policy_search_commands.append(command)
         await context.context.emit(
             "tool_end",
             agent=agent.name,
@@ -154,41 +189,98 @@ def _build_manifest(scenario: ScenarioCase) -> Manifest:
 
 async def _structured_tool_output_extractor(result: Any) -> str:
     final_output = result.final_output
+    if isinstance(final_output, str):
+        try:
+            final_output = SandboxPolicyPacket.model_validate_json(final_output)
+        except ValueError as exc:
+            raise RuntimeError("Sandbox policy agent did not finalize a policy packet.") from exc
+    if isinstance(final_output, SandboxPolicyPacket):
+        generated_names = {Path(path).name for path in final_output.generated_files}
+        missing_artifacts = REQUIRED_POLICY_ARTIFACTS - generated_names
+        if missing_artifacts:
+            missing = ", ".join(sorted(missing_artifacts))
+            raise RuntimeError(f"Sandbox policy packet did not generate required files: {missing}")
+        if not final_output.matched_policy_files:
+            raise RuntimeError("Sandbox policy packet did not inspect any policy files.")
+        if not any(
+            "rg " in command or "grep " in command for command in final_output.shell_commands
+        ):
+            raise RuntimeError("Sandbox policy packet did not record a policy search command.")
     if isinstance(final_output, BaseModel):
         return json.dumps(final_output.model_dump(mode="json"), sort_keys=True)
     return str(final_output)
 
 
-def _fallback_artifacts(*, scenario: ScenarioCase, resolution: CaseResolution) -> dict[str, str]:
-    policy_doc = f"""# Policy Findings
+async def _read_sandbox_text(sandbox: Any, path: Path) -> str:
+    handle = await sandbox.read(path)
+    try:
+        payload = handle.read()
+    finally:
+        handle.close()
+    if isinstance(payload, str):
+        return payload
+    return bytes(payload).decode("utf-8", errors="replace")
 
-## Case
-{scenario.description}
 
-## Policy summary
-{resolution.policy_summary}
+def _build_finalize_policy_packet_tool(
+    *,
+    sandbox: Any,
+) -> Tool:
+    async def packet_ready(
+        context: RunContextWrapper[HealthcareSupportContext],
+        _agent: Any,
+    ) -> bool:
+        if not context.context.policy_skill_loaded or not context.context.policy_search_commands:
+            return False
+        output_names = {Path(entry.path).name for entry in await sandbox.ls("output")}
+        return REQUIRED_POLICY_ARTIFACTS <= output_names
 
-## Next step
-{resolution.next_step}
-"""
-    checklist_doc = f"""# Human Review Checklist
+    @tool(is_enabled=packet_ready)
+    async def finalize_policy_packet(
+        context: RunContextWrapper[HealthcareSupportContext],
+        matched_policy_files: list[str],
+        policy_summary: str,
+        human_review_recommended: bool,
+    ) -> str:
+        """Validate completed policy artifacts and return their grounded packet summary."""
+        policy_findings = await _read_sandbox_text(sandbox, Path("output/policy_findings.md"))
+        checklist = await _read_sandbox_text(sandbox, Path("output/human_review_checklist.md"))
 
-- Confirm whether the request needs prior authorization for this service and payer.
-- Verify referral state and any missing clinical or billing identifiers.
-- Use this internal summary: {resolution.internal_summary}
-- Patient-facing response: {resolution.patient_facing_response}
-"""
-    return {
-        "policy_findings.md": policy_doc,
-        "human_review_checklist.md": checklist_doc,
-    }
+        missing_headings = REQUIRED_POLICY_FINDINGS_HEADINGS - {
+            line.strip() for line in policy_findings.splitlines()
+        }
+        if missing_headings:
+            missing = ", ".join(sorted(missing_headings))
+            raise RuntimeError(f"Policy findings artifact is missing required sections: {missing}")
+        if not checklist.strip():
+            raise RuntimeError("Human review checklist artifact is empty.")
+
+        known_policy_names = {path.name for path in POLICIES_ROOT.glob("*.md")}
+        matched_names = {Path(path).name for path in matched_policy_files}
+        if not matched_names or not matched_names <= known_policy_names:
+            raise RuntimeError("Policy packet includes unknown or missing policy files.")
+        if not all(name in policy_findings for name in matched_names):
+            raise RuntimeError("Policy findings artifact does not cite every matched policy file.")
+
+        packet = SandboxPolicyPacket(
+            matched_policy_files=sorted(matched_names),
+            generated_files=[
+                "output/human_review_checklist.md",
+                "output/policy_findings.md",
+            ],
+            shell_commands=list(context.context.policy_search_commands),
+            policy_summary=policy_summary,
+            human_review_recommended=human_review_recommended,
+        )
+        return packet.model_dump_json()
+
+    return finalize_policy_packet
 
 
 async def _copy_output_files(
     *,
     sandbox: Any,
     scenario: ScenarioCase,
-    resolution: CaseResolution,
 ) -> list[dict[str, str]]:
     scenario_id = scenario.scenario_id
     destination_root = CACHE_ROOT / "output" / scenario_id
@@ -220,19 +312,22 @@ async def _copy_output_files(
             "content": content,
         }
 
-    for filename, content in _fallback_artifacts(
-        scenario=scenario,
-        resolution=resolution,
-    ).items():
-        if filename in copied_by_name:
-            continue
-        local_path = destination_root / filename
-        local_path.write_text(content, encoding="utf-8")
-        copied_by_name[filename] = {
-            "name": filename,
-            "path": str(local_path),
-            "content": content,
-        }
+    missing_artifacts = REQUIRED_POLICY_ARTIFACTS - set(copied_by_name)
+    if missing_artifacts:
+        missing = ", ".join(sorted(missing_artifacts))
+        raise RuntimeError(f"Sandbox policy agent did not create required artifacts: {missing}")
+
+    policy_findings = copied_by_name["policy_findings.md"]["content"]
+    missing_headings = REQUIRED_POLICY_FINDINGS_HEADINGS - {
+        line.strip() for line in policy_findings.splitlines()
+    }
+    if missing_headings:
+        missing = ", ".join(sorted(missing_headings))
+        raise RuntimeError(f"Policy findings artifact is missing required sections: {missing}")
+
+    policy_names = {path.name for path in POLICIES_ROOT.glob("*.md")}
+    if not any(name in policy_findings for name in policy_names):
+        raise RuntimeError("Policy findings artifact did not cite an inspected policy file.")
 
     return [copied_by_name[name] for name in sorted(copied_by_name)]
 
@@ -316,6 +411,8 @@ async def run_healthcare_support_workflow(
     context.scenario = scenario
     context.human_handoffs.clear()
     context.human_handoff_approved = False
+    context.policy_skill_loaded = False
+    context.policy_search_commands.clear()
 
     await context.emit(
         "scenario_loaded",
@@ -339,7 +436,10 @@ async def run_healthcare_support_workflow(
         workspace=["case/scenario.json", "case/transcript.txt", "policies/", "output/"],
     )
 
-    policy_agent = build_policy_sandbox_agent(skills_root=SKILLS_ROOT)
+    policy_agent = build_policy_sandbox_agent(
+        skills_root=SKILLS_ROOT,
+        finalize_policy_packet_tool=_build_finalize_policy_packet_tool(sandbox=sandbox),
+    )
     sandbox_policy_tool = policy_agent.as_tool(
         tool_name="sandbox_policy_packet",
         tool_description="Inspect policy files in a sandbox and generate support artifacts.",
@@ -383,7 +483,6 @@ async def run_healthcare_support_workflow(
                 copied_files = await _copy_output_files(
                     sandbox=sandbox,
                     scenario=scenario,
-                    resolution=resolution,
                 )
                 await context.emit("artifacts_ready", files=copied_files)
 

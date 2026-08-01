@@ -57,6 +57,7 @@ class StreamedAudioResult:
         self._ordered_tasks: deque[asyncio.Queue[VoiceStreamEvent | None]] = (
             deque()
         )  # New: deque to hold local queues for each text segment
+        self._dispatcher_event = asyncio.Event()
         self._dispatcher_task: asyncio.Task[Any] | None = (
             None  # Task to dispatch audio chunks in order
         )
@@ -86,6 +87,10 @@ class StreamedAudioResult:
 
     async def _add_error(self, error: Exception):
         await self._queue.put(VoiceStreamEventError(error))
+
+    def _enqueue_audio_segment(self, local_queue: asyncio.Queue[VoiceStreamEvent | None]) -> None:
+        self._ordered_tasks.append(local_queue)
+        self._dispatcher_event.set()
 
     def _transform_audio_buffer(
         self, buffer: list[bytes], output_dtype: npt.DTypeLike
@@ -209,7 +214,7 @@ class StreamedAudioResult:
 
         if combined_sentences:
             local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
-            self._ordered_tasks.append(local_queue)
+            self._enqueue_audio_segment(local_queue)
             self._tasks.append(
                 asyncio.create_task(self._stream_audio(combined_sentences, local_queue))
             )
@@ -219,7 +224,7 @@ class StreamedAudioResult:
     async def _turn_done(self):
         if self._text_buffer:
             local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
-            self._ordered_tasks.append(local_queue)  # Append the local queue for the final segment
+            self._enqueue_audio_segment(local_queue)
             self._tasks.append(
                 asyncio.create_task(
                     self._stream_audio(self._text_buffer, local_queue, finish_turn=True)
@@ -228,7 +233,7 @@ class StreamedAudioResult:
             self._text_buffer = ""
         elif self._started_processing_turn:
             local_queue = asyncio.Queue()
-            self._ordered_tasks.append(local_queue)
+            self._enqueue_audio_segment(local_queue)
             await local_queue.put(VoiceStreamEventLifecycle(event="turn_ended"))
         self._done_processing = True
         if self._dispatcher_task is None:
@@ -249,6 +254,7 @@ class StreamedAudioResult:
 
     async def _done(self):
         self._completed_session = True
+        self._dispatcher_event.set()
         await self._wait_for_completion()
 
     async def _dispatch_audio(self):
@@ -257,7 +263,10 @@ class StreamedAudioResult:
             if len(self._ordered_tasks) == 0:
                 if self._completed_session:
                     break
-                await asyncio.sleep(0)
+                self._dispatcher_event.clear()
+                # Recheck state after clearing so a notification cannot be lost before waiting.
+                if len(self._ordered_tasks) == 0 and not self._completed_session:
+                    await self._dispatcher_event.wait()
                 continue
             local_queue = self._ordered_tasks.popleft()
             while True:
@@ -280,18 +289,25 @@ class StreamedAudioResult:
             tasks.append(self._dispatcher_task)
         await asyncio.gather(*tasks)
 
-    def _cleanup_tasks(self):
-        self._finish_turn()
+    async def _cleanup_tasks(self):
+        current_task = asyncio.current_task()
+        tasks: list[asyncio.Task[Any]] = []
+        seen: set[asyncio.Task[Any]] = set()
+        for task in [*self._tasks, self._dispatcher_task, self.text_generation_task]:
+            if task is None or task is current_task or task in seen:
+                continue
+            seen.add(task)
+            tasks.append(task)
 
-        for task in self._tasks:
+        for task in tasks:
             if not task.done():
                 task.cancel()
 
-        if self._dispatcher_task and not self._dispatcher_task.done():
-            self._dispatcher_task.cancel()
-
-        if self.text_generation_task and not self.text_generation_task.done():
-            self.text_generation_task.cancel()
+        try:
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            self._finish_turn()
 
     def _check_errors(self):
         for task in self._tasks:
@@ -307,7 +323,7 @@ class StreamedAudioResult:
             try:
                 event = await self._queue.get()
             except asyncio.CancelledError:
-                self._cleanup_tasks()
+                await self._cleanup_tasks()
                 raise
             if isinstance(event, VoiceStreamEventError):
                 self._stored_exception = event.error
@@ -324,15 +340,17 @@ class StreamedAudioResult:
 
         # On the normal completion path, let the producer task finish gracefully so any active
         # trace context can emit `trace_end` before we run cleanup.
-        if (
-            saw_session_end
-            and self.text_generation_task is not None
-            and not self.text_generation_task.done()
-        ):
-            await asyncio.shield(self.text_generation_task)
+        try:
+            if (
+                saw_session_end
+                and self.text_generation_task is not None
+                and not self.text_generation_task.done()
+            ):
+                await asyncio.shield(self.text_generation_task)
 
-        self._check_errors()
-        self._cleanup_tasks()
+            self._check_errors()
+        finally:
+            await self._cleanup_tasks()
 
         if self._stored_exception:
             raise self._stored_exception

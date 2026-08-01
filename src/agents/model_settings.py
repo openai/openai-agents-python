@@ -143,7 +143,8 @@ class ModelSettings:
     store: bool | None = None
     """Whether to store the generated model response for later retrieval.
     For Responses API: automatically enabled when not specified.
-    For Chat Completions API: disabled when not specified."""
+    For Chat Completions API: enabled when not specified for the official OpenAI API, and
+    omitted for other providers so their own default applies."""
 
     prompt_cache_retention: Literal["in_memory", "24h"] | None = None
     """The retention policy for the prompt cache. Set to `24h` to enable extended

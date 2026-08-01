@@ -1,4 +1,6 @@
+import asyncio
 from collections.abc import AsyncIterator
+from typing import Any, cast
 
 import pytest
 from openai.types.chat.chat_completion_chunk import (
@@ -27,8 +29,9 @@ from openai.types.responses import (
 
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.extensions.models.litellm_provider import LitellmProvider
+from agents.items import TResponseStreamEvent
 from agents.model_settings import ModelSettings
-from agents.models.interface import ModelTracing
+from agents.models.interface import Model, ModelTracing
 
 
 @pytest.mark.allow_call_model_methods
@@ -695,3 +698,267 @@ async def test_stream_response_content_filter_refusal_after_reasoning(monkeypatc
     assert deltas and all(d.content_index == 0 and d.output_index == 1 for d in deltas)
     # The empty "" delta still opens no text part.
     assert "response.output_text.delta" not in [e.type for e in output_events]
+
+
+class _ClosableChatStream:
+    """A provider stream that records closes.
+
+    This mirrors litellm's `CustomStreamWrapper`, which exposes `aclose` and no `close`.
+    """
+
+    def __init__(self, chunks: list[ChatCompletionChunk]) -> None:
+        self._chunks = list(chunks)
+        self.aclose_calls = 0
+
+    def __aiter__(self) -> "_ClosableChatStream":
+        return self
+
+    async def __anext__(self) -> ChatCompletionChunk:
+        if not self._chunks:
+            raise StopAsyncIteration
+        return self._chunks.pop(0)
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+
+
+class _BlockingChatStream(_ClosableChatStream):
+    """Yields its chunks and then blocks so the consumer can be cancelled mid-stream."""
+
+    def __init__(self, chunks: list[ChatCompletionChunk], blocked: asyncio.Event) -> None:
+        super().__init__(chunks)
+        self._blocked = blocked
+
+    async def __anext__(self) -> ChatCompletionChunk:
+        if self._chunks:
+            return self._chunks.pop(0)
+        self._blocked.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+class _SlowCloseChatStream(_ClosableChatStream):
+    """Blocks in `aclose` until released, mirroring a provider close that waits on transport I/O."""
+
+    def __init__(
+        self,
+        chunks: list[ChatCompletionChunk],
+        blocked: asyncio.Event,
+        release: asyncio.Event,
+    ) -> None:
+        super().__init__(chunks)
+        self._blocked = blocked
+        self._release = release
+        self.aclose_completed = 0
+
+    async def __anext__(self) -> ChatCompletionChunk:
+        if self._chunks:
+            return self._chunks.pop(0)
+        self._blocked.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+        await self._release.wait()
+        self.aclose_completed += 1
+
+
+class _FailingCloseChatStream(_ClosableChatStream):
+    """Raises from `aclose` after recording the cleanup attempt."""
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+        raise RuntimeError("close-failure")
+
+
+def _text_chunk(text: str) -> ChatCompletionChunk:
+    return ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(content=text))],
+    )
+
+
+def _patch_fetch_response(monkeypatch, provider_stream: _ClosableChatStream) -> None:
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, provider_stream
+
+    monkeypatch.setattr(LitellmModel, "_fetch_response", patched_fetch_response)
+
+
+def _stream_response(model: Model) -> AsyncIterator[TResponseStreamEvent]:
+    return model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_closes_provider_stream_on_explicit_aclose(monkeypatch) -> None:
+    """Closing the returned generator early must release the provider stream."""
+    provider_stream = _ClosableChatStream([_text_chunk("He"), _text_chunk("llo")])
+    _patch_fetch_response(monkeypatch, provider_stream)
+    model = LitellmProvider().get_model("gpt-4")
+
+    stream_agen = cast(Any, _stream_response(model))
+    async for _event in stream_agen:
+        break
+    await stream_agen.aclose()
+
+    assert provider_stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_closes_provider_stream_on_normal_exhaustion(monkeypatch) -> None:
+    """Consuming the stream to completion must also release the provider stream."""
+    provider_stream = _ClosableChatStream([_text_chunk("He"), _text_chunk("llo")])
+    _patch_fetch_response(monkeypatch, provider_stream)
+    model = LitellmProvider().get_model("gpt-4")
+
+    async for _event in _stream_response(model):
+        pass
+
+    assert provider_stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_ignores_close_failure_after_terminal_event(monkeypatch) -> None:
+    """A completed response must remain successful when provider cleanup fails."""
+    provider_stream = _FailingCloseChatStream([_text_chunk("Hello")])
+    _patch_fetch_response(monkeypatch, provider_stream)
+    model = LitellmProvider().get_model("gpt-4")
+
+    output_events = [event async for event in _stream_response(model)]
+
+    assert output_events[-1].type == "response.completed"
+    assert provider_stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_ignores_close_failure_when_closed_at_terminal_event(
+    monkeypatch,
+) -> None:
+    """Terminal state must be recorded before yielding the completed event."""
+    provider_stream = _FailingCloseChatStream([_text_chunk("Hello")])
+    _patch_fetch_response(monkeypatch, provider_stream)
+    model = LitellmProvider().get_model("gpt-4")
+    stream_agen = cast(Any, _stream_response(model))
+
+    async for event in stream_agen:
+        if event.type == "response.completed":
+            break
+    await stream_agen.aclose()
+
+    assert provider_stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_propagates_close_failure_before_terminal_event(monkeypatch) -> None:
+    """Cleanup failures before completion remain observable by the caller."""
+    provider_stream = _FailingCloseChatStream([_text_chunk("Hello")])
+    _patch_fetch_response(monkeypatch, provider_stream)
+    model = LitellmProvider().get_model("gpt-4")
+    stream_agen = cast(Any, _stream_response(model))
+
+    first_event = await anext(stream_agen)
+    assert first_event.type == "response.created"
+
+    with pytest.raises(RuntimeError, match="close-failure"):
+        await stream_agen.aclose()
+
+    assert provider_stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_closes_provider_stream_after_cancellation(monkeypatch) -> None:
+    """Cancelling the consumer unwinds into the `finally` and releases the provider stream.
+
+    Closing the already-finished generator afterwards is a no-op, so the stream is closed once.
+    """
+    blocked = asyncio.Event()
+    provider_stream = _BlockingChatStream([_text_chunk("He")], blocked)
+    _patch_fetch_response(monkeypatch, provider_stream)
+    model = LitellmProvider().get_model("gpt-4")
+
+    stream_agen = cast(Any, _stream_response(model))
+
+    async def consume() -> None:
+        async for _event in stream_agen:
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(blocked.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        task.cancel()
+
+    await stream_agen.aclose()
+
+    assert provider_stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_does_not_block_cancellation_on_slow_close(monkeypatch) -> None:
+    """A provider close that waits on transport I/O must not delay cancellation."""
+    blocked = asyncio.Event()
+    release = asyncio.Event()
+    provider_stream = _SlowCloseChatStream([_text_chunk("He")], blocked, release)
+    _patch_fetch_response(monkeypatch, provider_stream)
+    model = LitellmProvider().get_model("gpt-4")
+
+    stream_agen = cast(Any, _stream_response(model))
+
+    async def consume() -> None:
+        async for _event in stream_agen:
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(blocked.wait(), timeout=5)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        assert provider_stream.aclose_calls == 1
+        assert provider_stream.aclose_completed == 0
+
+        release.set()
+        for _ in range(200):
+            if provider_stream.aclose_completed == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert provider_stream.aclose_completed == 1
+    finally:
+        release.set()
+        task.cancel()

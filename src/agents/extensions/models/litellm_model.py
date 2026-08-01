@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import os
 import time
@@ -39,7 +41,7 @@ from ... import _debug
 from ...agent_output import AgentOutputSchemaBase
 from ...handoffs import Handoff
 from ...items import ModelResponse, TResponseInputItem, TResponseStreamEvent
-from ...logger import logger
+from ...logger import log_model_action_debug, logger
 from ...model_settings import ModelSettings
 from ...models._openai_retry import get_openai_retry_advice
 from ...models._retry_runtime import should_disable_provider_managed_retries
@@ -398,13 +400,34 @@ class LitellmModel(Model):
             )
 
             final_response: Response | None = None
-            async for chunk in ChatCmplStreamHandler.handle_stream(
-                response, stream, model=self.model
-            ):
-                yield chunk
+            close_stream_in_background = False
+            yielded_terminal_event = False
+            try:
+                async for chunk in ChatCmplStreamHandler.handle_stream(
+                    response, stream, model=self.model
+                ):
+                    if chunk.type == "response.completed":
+                        final_response = chunk.response
+                        yielded_terminal_event = True
 
-                if chunk.type == "response.completed":
-                    final_response = chunk.response
+                    yield chunk
+            except asyncio.CancelledError:
+                close_stream_in_background = True
+                self._schedule_async_iterator_close(stream)
+                raise
+            finally:
+                if not close_stream_in_background:
+                    try:
+                        await self._maybe_aclose(stream)
+                    except Exception as exc:
+                        if yielded_terminal_event:
+                            log_model_action_debug(
+                                logger,
+                                "Ignoring stream cleanup error after terminal event",
+                                exc,
+                            )
+                        else:
+                            raise
 
             if tracing.include_data() and final_response:
                 span_generation.span_data.output = [final_response.model_dump()]
@@ -832,6 +855,34 @@ class LitellmModel(Model):
 
     def _merge_headers(self, model_settings: ModelSettings):
         return {**HEADERS, **(model_settings.extra_headers or {}), **(HEADERS_OVERRIDE.get() or {})}
+
+    @staticmethod
+    async def _maybe_aclose(value: Any) -> None:
+        aclose = getattr(value, "aclose", None)
+        if callable(aclose):
+            await aclose()
+            return
+
+        close = getattr(value, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
+    def _schedule_async_iterator_close(self, iterator: Any) -> None:
+        task = asyncio.create_task(self._maybe_aclose(iterator))
+        task.add_done_callback(self._consume_background_cleanup_task_result)
+
+    @staticmethod
+    def _consume_background_cleanup_task_result(task: asyncio.Task[Any]) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            log_model_action_debug(
+                logger, "Background stream cleanup failed after cancellation", exc
+            )
 
 
 class LitellmConverter:

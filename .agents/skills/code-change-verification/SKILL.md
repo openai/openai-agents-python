@@ -12,12 +12,29 @@ Ensure work is only marked complete after formatting, linting, type checking, an
 ## Quick start
 
 1. Keep this skill at `./.agents/skills/code-change-verification` so it loads automatically for the repository.
-2. macOS/Linux: `bash .agents/skills/code-change-verification/scripts/run.sh`.
+2. macOS/Linux: `env UV_DEFAULT_INDEX=https://pypi.org/simple bash .agents/skills/code-change-verification/scripts/run.sh`.
 3. Windows: `powershell -ExecutionPolicy Bypass -File .agents/skills/code-change-verification/scripts/run.ps1`.
 4. The scripts run `make format` first, then run `make lint`, `make typecheck`, and `make tests` in parallel with fail-fast semantics.
 5. While the parallel steps are still running, the scripts emit periodic heartbeat updates so you can tell that work is still in progress.
 6. If any command fails, fix the issue, rerun the script, and report the failing output.
 7. Confirm completion only when all commands succeed with no remaining issues.
+
+## Codex execution policy
+
+The full test suite exercises `UnixLocalSandboxSession`, which starts its own macOS sandbox. A
+nested run inside the Codex filesystem sandbox fails with
+`sandbox-exec: sandbox_apply: Operation not permitted` even when the implementation is correct.
+
+When Codex invokes the macOS/Linux verification command:
+
+- Use the exact command from Quick start so it matches the persistent command allow rule.
+- Set `sandbox_permissions=require_escalated` on the first invocation. The matching allow rule makes
+  this non-interactive; it does not require a new user approval.
+- Do not first run the suite inside the Codex sandbox and retry after the expected UnixLocal
+  failures.
+
+This execution policy changes only where the verification process runs. The SDK sandbox tests must
+remain enabled and unchanged.
 
 ## Environment setup
 
