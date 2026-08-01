@@ -416,3 +416,51 @@ def test_anthropic_thinking_blocks_without_tool_calls():
     assert (
         second_content.get("text") == "The weather in Paris is sunny with a temperature of 22°C."
     ), "Text content should be preserved"
+
+
+def test_thinking_blocks_do_not_leak_across_an_intervening_user_turn():
+    """A reasoning item not followed by its own assistant message must not leak.
+
+    When a turn produces extended thinking but no visible output, the only stored
+    output item is the reasoning item, so the next item in the history is the user's
+    next message. The signed thinking blocks belong to that earlier turn and must not
+    be prepended to a later assistant message.
+    """
+    silent_turn = InternalChatCompletionMessage(
+        role="assistant",
+        content="",
+        reasoning_content="Nothing to say yet.",
+        thinking_blocks=[
+            {
+                "type": "thinking",
+                "thinking": "Earlier private thinking.",
+                "signature": "EarlierTurnSignature",
+            }
+        ],
+        tool_calls=None,
+    )
+    output_items = Converter.message_to_output_items(silent_turn)
+    assert [item.type for item in output_items] == ["reasoning"]
+
+    history: list[dict[str, Any]] = [{"role": "user", "content": "first question"}]
+    history += [item.model_dump() for item in output_items]
+    history += [
+        {"role": "user", "content": "second question"},
+        {
+            "id": "msg_2",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "an answer", "annotations": []}],
+        },
+    ]
+
+    messages = Converter.items_to_messages(
+        history,  # type: ignore[arg-type]
+        model="anthropic/claude-4-opus",
+        preserve_thinking_blocks=True,
+    )
+
+    assistant_messages = [msg for msg in messages if msg.get("role") == "assistant"]
+    assert len(assistant_messages) == 1
+    assert assistant_messages[0].get("content") == "an answer"

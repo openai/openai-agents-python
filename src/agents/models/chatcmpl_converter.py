@@ -538,8 +538,8 @@ class Converter:
         pending_reasoning_content: str | None = None  # For DeepSeek reasoning_content
         normalized_base_url = base_url.rstrip("/") if base_url is not None else None
 
-        def flush_assistant_message(*, clear_pending_reasoning_content: bool = True) -> None:
-            nonlocal current_assistant_msg, pending_reasoning_content
+        def flush_assistant_message(*, clear_pending_reasoning: bool = True) -> None:
+            nonlocal current_assistant_msg, pending_reasoning_content, pending_thinking_blocks
             if current_assistant_msg is not None:
                 # The API doesn't support empty arrays for tool_calls
                 if not current_assistant_msg.get("tool_calls"):
@@ -548,8 +548,13 @@ class Converter:
                     pending_reasoning_content = None
                 result.append(current_assistant_msg)
                 current_assistant_msg = None
-            elif clear_pending_reasoning_content:
+            elif clear_pending_reasoning:
                 pending_reasoning_content = None
+            if clear_pending_reasoning:
+                # Thinking blocks belong to the assistant turn that produced them, so a
+                # reasoning item that is not directly followed by that turn's assistant
+                # message must not leak its signed blocks into a later one.
+                pending_thinking_blocks = None
 
         def apply_pending_reasoning_content(
             assistant_msg: ChatCompletionAssistantMessageParam,
@@ -637,8 +642,8 @@ class Converter:
             # 3) response output message => assistant
             elif resp_msg := cls.maybe_response_output_message(item):
                 # A reasoning item can be followed by an assistant message and then tool calls
-                # in the same turn, so preserve pending reasoning_content across this flush.
-                flush_assistant_message(clear_pending_reasoning_content=False)
+                # in the same turn, so preserve pending reasoning state across this flush.
+                flush_assistant_message(clear_pending_reasoning=False)
                 new_asst = ChatCompletionAssistantMessageParam(role="assistant")
                 contents = resp_msg["content"]
 
