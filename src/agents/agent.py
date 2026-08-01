@@ -939,7 +939,7 @@ class Agent(AgentBase, Generic[TContext]):
                         scope_id=tool_state_scope_id,
                     )
 
-            if custom_output_extractor:
+            if custom_output_extractor is not None:
                 return await custom_output_extractor(run_result)
 
             if run_result.final_output is not None and (

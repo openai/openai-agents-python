@@ -410,6 +410,55 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
+async def test_agent_as_tool_honors_falsey_custom_output_extractor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="summarizer")
+
+    class DummyResult:
+        final_output = "default output"
+        new_items: list[Any] = []
+        interruptions: list[Any] = []
+
+    run_result = DummyResult()
+
+    async def fake_run(cls, *args, **kwargs):
+        return run_result
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    class FalseyExtractor:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def __bool__(self) -> bool:
+            return False
+
+        async def __call__(self, result: Any) -> str:
+            assert result is run_result
+            self.call_count += 1
+            return "custom output"
+
+    extractor = FalseyExtractor()
+    tool = agent.as_tool(
+        tool_name="summary_tool",
+        tool_description="Summarize input",
+        custom_output_extractor=extractor,
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="summary_tool",
+        tool_call_id="call_2",
+        tool_arguments='{"input": "summarize this"}',
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input": "summarize this"}')
+
+    assert output == "custom output"
+    assert extractor.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_agent_as_tool_fallback_uses_current_run_items_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
