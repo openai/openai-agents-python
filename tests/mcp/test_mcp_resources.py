@@ -62,8 +62,8 @@ async def test_list_resources_returns_result(server: MCPServerStreamableHttp):
 
     result = await server.list_resources()
 
-    assert result.resources == expected.resources
-    mock_session.list_resources.assert_awaited_once_with(cursor=None)
+    assert result is expected
+    mock_session.list_resources.assert_awaited_once_with(None)
 
 
 @pytest.mark.asyncio
@@ -76,8 +76,8 @@ async def test_list_resources_forwards_cursor(server: MCPServerStreamableHttp):
 
     result = await server.list_resources(cursor="tok_abc")
 
-    assert result.resources == page2.resources
-    mock_session.list_resources.assert_awaited_once_with(cursor="tok_abc")
+    assert result is page2
+    mock_session.list_resources.assert_awaited_once_with("tok_abc")
 
 
 @pytest.mark.asyncio
@@ -94,8 +94,8 @@ async def test_list_resource_templates_returns_result(server: MCPServerStreamabl
 
     result = await server.list_resource_templates()
 
-    assert result.resourceTemplates == expected.resourceTemplates
-    mock_session.list_resource_templates.assert_awaited_once_with(cursor=None)
+    assert result is expected
+    mock_session.list_resource_templates.assert_awaited_once_with(None)
 
 
 @pytest.mark.asyncio
@@ -108,8 +108,8 @@ async def test_list_resource_templates_forwards_cursor(server: MCPServerStreamab
 
     result = await server.list_resource_templates(cursor="tok_xyz")
 
-    assert result.resourceTemplates == page2.resourceTemplates
-    mock_session.list_resource_templates.assert_awaited_once_with(cursor="tok_xyz")
+    assert result is page2
+    mock_session.list_resource_templates.assert_awaited_once_with("tok_xyz")
 
 
 @pytest.mark.asyncio

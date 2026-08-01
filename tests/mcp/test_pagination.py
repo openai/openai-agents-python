@@ -1,17 +1,7 @@
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
-from mcp.types import (
-    AnyUrl,
-    ListPromptsResult,
-    ListResourcesResult,
-    ListResourceTemplatesResult,
-    ListToolsResult,
-    Prompt,
-    Resource,
-    ResourceTemplate,
-    Tool,
-)
+from mcp.types import ListPromptsResult, ListToolsResult, Prompt, Tool
 
 from agents.mcp.server import MCPServerStreamableHttp
 
@@ -21,68 +11,136 @@ def server():
     return MCPServerStreamableHttp({"url": "http://localhost"})
 
 
+def _tool(name: str) -> Tool:
+    return Tool(name=name, description="", inputSchema={"type": "object", "properties": {}})
+
+
 @pytest.mark.asyncio
-async def test_list_tools_pagination_and_loop_guard(server: MCPServerStreamableHttp):
+async def test_list_tools_accumulates_pages(server: MCPServerStreamableHttp):
     mock_session = MagicMock()
-    page1 = ListToolsResult(
-        tools=[
-            Tool(name="tool_1", description="", inputSchema={"type": "object", "properties": {}})
-        ],
-        nextCursor="tok_loop",
+    mock_session.list_tools = AsyncMock(
+        side_effect=[
+            ListToolsResult(tools=[_tool("tool_1")], nextCursor="page_2"),
+            ListToolsResult(tools=[_tool("tool_2")]),
+        ]
     )
-    # The session repeatedly returns the same cursor
-    mock_session.list_tools = AsyncMock(return_value=page1)
     server.session = mock_session
 
     result = await server.list_tools()
 
-    # The result should contain the tool twice because the loop breaks on the second identical fetch
-    assert len(result) == 2
-    assert result[0].name == "tool_1"
+    assert [tool.name for tool in result] == ["tool_1", "tool_2"]
+    assert mock_session.list_tools.await_args_list == [
+        call(cursor=None),
+        call(cursor="page_2"),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_list_prompts_pagination_and_loop_guard(server: MCPServerStreamableHttp):
+async def test_list_tools_does_not_append_repeated_cursor_page(server: MCPServerStreamableHttp):
     mock_session = MagicMock()
-    page1 = ListPromptsResult(
-        prompts=[Prompt(name="prompt_1", description="")], nextCursor="tok_loop"
+    mock_session.list_tools = AsyncMock(
+        side_effect=[
+            ListToolsResult(tools=[_tool("tool_1")], nextCursor="tok_loop"),
+            ListToolsResult(tools=[_tool("duplicate")], nextCursor="tok_loop"),
+        ]
     )
-    mock_session.list_prompts = AsyncMock(return_value=page1)
+    server.session = mock_session
+
+    result = await server.list_tools()
+
+    assert [tool.name for tool in result] == ["tool_1"]
+    assert mock_session.list_tools.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_list_prompts_accumulates_pages_and_merges_metadata(
+    server: MCPServerStreamableHttp,
+):
+    mock_session = MagicMock()
+    mock_session.list_prompts = AsyncMock(
+        side_effect=[
+            ListPromptsResult(
+                prompts=[Prompt(name="prompt_1", description="")],
+                nextCursor="page_2",
+                _meta={"page_1": True, "shared": "first"},
+            ),
+            ListPromptsResult(
+                prompts=[Prompt(name="prompt_2", description="")],
+                _meta={"page_2": True, "shared": "second"},
+            ),
+        ]
+    )
     server.session = mock_session
 
     result = await server.list_prompts()
 
-    assert len(result.prompts) == 2
-    assert result.prompts[0].name == "prompt_1"
+    assert [prompt.name for prompt in result.prompts] == ["prompt_1", "prompt_2"]
+    assert result.nextCursor is None
+    assert result.meta == {"page_1": True, "page_2": True, "shared": "second"}
+    assert mock_session.list_prompts.await_args_list == [
+        call(cursor=None),
+        call(cursor="page_2"),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_list_resources_pagination_and_loop_guard(server: MCPServerStreamableHttp):
+async def test_list_prompts_does_not_append_repeated_cursor_page(
+    server: MCPServerStreamableHttp,
+):
     mock_session = MagicMock()
-    page1 = ListResourcesResult(
-        resources=[Resource(uri=AnyUrl("file:///1"), name="res_1", mimeType="text/plain")],
-        nextCursor="tok_loop",
+    mock_session.list_prompts = AsyncMock(
+        side_effect=[
+            ListPromptsResult(
+                prompts=[Prompt(name="prompt_1", description="")],
+                nextCursor="tok_loop",
+                _meta={"page": 1},
+            ),
+            ListPromptsResult(
+                prompts=[Prompt(name="duplicate", description="")],
+                nextCursor="tok_loop",
+                _meta={"page": 2},
+            ),
+        ]
     )
-    mock_session.list_resources = AsyncMock(return_value=page1)
     server.session = mock_session
 
-    result = await server.list_resources()
+    result = await server.list_prompts()
 
-    assert len(result.resources) == 2
-    assert result.resources[0].name == "res_1"
+    assert [prompt.name for prompt in result.prompts] == ["prompt_1"]
+    assert result.meta == {"page": 1}
+    assert mock_session.list_prompts.await_count == 2
 
 
 @pytest.mark.asyncio
-async def test_list_resource_templates_pagination_and_loop_guard(server: MCPServerStreamableHttp):
+async def test_list_prompts_returns_none_metadata_when_pages_have_none(
+    server: MCPServerStreamableHttp,
+):
     mock_session = MagicMock()
-    page1 = ListResourceTemplatesResult(
-        resourceTemplates=[ResourceTemplate(uriTemplate="file:///{path}", name="temp_1")],
-        nextCursor="tok_loop",
+    mock_session.list_prompts = AsyncMock(
+        return_value=ListPromptsResult(prompts=[Prompt(name="prompt", description="")])
     )
-    mock_session.list_resource_templates = AsyncMock(return_value=page1)
     server.session = mock_session
 
-    result = await server.list_resource_templates()
+    result = await server.list_prompts()
 
-    assert len(result.resourceTemplates) == 2
-    assert result.resourceTemplates[0].name == "temp_1"
+    assert result.meta is None
+
+
+@pytest.mark.asyncio
+async def test_list_tools_supports_empty_string_next_cursor(server: MCPServerStreamableHttp):
+    mock_session = MagicMock()
+    mock_session.list_tools = AsyncMock(
+        side_effect=[
+            ListToolsResult(tools=[_tool("tool_1")], nextCursor=""),
+            ListToolsResult(tools=[_tool("tool_2")]),
+        ]
+    )
+    server.session = mock_session
+
+    result = await server.list_tools()
+
+    assert [tool.name for tool in result] == ["tool_1", "tool_2"]
+    assert mock_session.list_tools.await_args_list == [
+        call(cursor=None),
+        call(cursor=""),
+    ]

@@ -1127,27 +1127,36 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 # Fetch the tools from the server
                 all_tools = []
                 cursor = None
-                seen_cursors = set()
+                seen_cursors: set[str | None] = set()
                 while True:
                     if cursor in seen_cursors:
                         logger.warning(
-                            "MCP server %s returned repeated cursor %s during list_tools. "
+                            "MCP server %s returned repeated cursor during list_tools. "
                             "Breaking to prevent infinite loop.",
                             self._error_name,
-                            cursor,
                         )
                         break
                     seen_cursors.add(cursor)
-                    _cursor = cursor
-                    result = await self._run_with_retries(
-                        lambda c=_cursor: self._maybe_serialize_request(
-                            lambda: session.list_tools(cursor=c)
+                    _cursor: str | None = cursor
+
+                    async def fetch_tools_page(page_cursor: str | None = _cursor) -> Any:
+                        return await self._maybe_serialize_request(
+                            lambda: session.list_tools(cursor=page_cursor)
                         )
-                    )
-                    all_tools.extend(result.tools)
-                    if not result.nextCursor:
+
+                    result = await self._run_with_retries(fetch_tools_page)
+                    next_cursor = result.nextCursor
+                    if next_cursor is not None and next_cursor in seen_cursors:
+                        logger.warning(
+                            "MCP server %s returned repeated cursor during list_tools. "
+                            "Breaking to prevent infinite loop.",
+                            self._error_name,
+                        )
                         break
-                    cursor = result.nextCursor
+                    all_tools.extend(result.tools)
+                    if next_cursor is None:
+                        break
+                    cursor = next_cursor
                 self._tools_list = all_tools
                 self._cache_dirty = False
                 tools = self._tools_list
@@ -1287,29 +1296,52 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         assert session is not None
         all_prompts = []
         cursor = None
-        seen_cursors = set()
+        seen_cursors: set[str | None] = set()
+        first_result: ListPromptsResult | None = None
+        combined_meta: dict[str, Any] = {}
         while True:
             if cursor in seen_cursors:
                 logger.warning(
-                    "MCP server %s returned repeated cursor %s during list_prompts. "
+                    "MCP server %s returned repeated cursor during list_prompts. "
                     "Breaking to prevent infinite loop.",
                     self._error_name,
-                    cursor,
                 )
                 break
             seen_cursors.add(cursor)
-            _cursor = cursor
+            _cursor: str | None = cursor
+
+            async def fetch_prompts_page(page_cursor: str | None = _cursor) -> ListPromptsResult:
+                return await self._maybe_serialize_request(
+                    lambda: session.list_prompts(cursor=page_cursor)
+                )
+
             result = await self._run_request_with_transport_error_redaction(
-                "list prompts",
-                lambda c=_cursor: self._maybe_serialize_request(
-                    lambda: session.list_prompts(cursor=c)
-                ),
+                "list prompts", fetch_prompts_page
             )
-            all_prompts.extend(result.prompts)
-            if not result.nextCursor:
+            next_cursor = result.nextCursor
+            if next_cursor is not None and next_cursor in seen_cursors:
+                logger.warning(
+                    "MCP server %s returned repeated cursor during list_prompts. "
+                    "Breaking to prevent infinite loop.",
+                    self._error_name,
+                )
                 break
-            cursor = result.nextCursor
-        return ListPromptsResult(prompts=all_prompts, nextCursor=None)
+            if first_result is None:
+                first_result = result
+            all_prompts.extend(result.prompts)
+            if result.meta:
+                combined_meta.update(result.meta)
+            if next_cursor is None:
+                break
+            cursor = next_cursor
+        assert first_result is not None
+        return first_result.model_copy(
+            update={
+                "prompts": all_prompts,
+                "nextCursor": None,
+                "meta": combined_meta or None,
+            }
+        )
 
     async def get_prompt(
         self, name: str, arguments: dict[str, Any] | None = None
@@ -1330,31 +1362,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
         session = self.session
         assert session is not None
-        all_resources = []
-        current_cursor = cursor
-        seen_cursors = set()
-        while True:
-            if current_cursor in seen_cursors:
-                logger.warning(
-                    "MCP server %s returned repeated cursor %s during list_resources. "
-                    "Breaking to prevent infinite loop.",
-                    self._error_name,
-                    current_cursor,
-                )
-                break
-            seen_cursors.add(current_cursor)
-            _cursor = current_cursor
-            result = await self._run_request_with_transport_error_redaction(
-                "list resources",
-                lambda c=_cursor: self._maybe_serialize_request(
-                    lambda: session.list_resources(cursor=c)
-                ),
-            )
-            all_resources.extend(result.resources)
-            if not result.nextCursor:
-                break
-            current_cursor = result.nextCursor
-        return ListResourcesResult(resources=all_resources, nextCursor=None)
+        return await self._run_request_with_transport_error_redaction(
+            "list resources",
+            lambda: self._maybe_serialize_request(lambda: session.list_resources(cursor)),
+        )
 
     async def list_resource_templates(
         self, cursor: str | None = None
@@ -1364,31 +1375,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
         session = self.session
         assert session is not None
-        all_templates = []
-        current_cursor = cursor
-        seen_cursors = set()
-        while True:
-            if current_cursor in seen_cursors:
-                logger.warning(
-                    "MCP server %s returned repeated cursor %s during list_resource_templates. "
-                    "Breaking to prevent infinite loop.",
-                    self._error_name,
-                    current_cursor,
-                )
-                break
-            seen_cursors.add(current_cursor)
-            _cursor = current_cursor
-            result = await self._run_request_with_transport_error_redaction(
-                "list resource templates",
-                lambda c=_cursor: self._maybe_serialize_request(
-                    lambda: session.list_resource_templates(cursor=c)
-                ),
-            )
-            all_templates.extend(result.resourceTemplates)
-            if not result.nextCursor:
-                break
-            current_cursor = result.nextCursor
-        return ListResourceTemplatesResult(resourceTemplates=all_templates, nextCursor=None)
+        return await self._run_request_with_transport_error_redaction(
+            "list resource templates",
+            lambda: self._maybe_serialize_request(lambda: session.list_resource_templates(cursor)),
+        )
 
     async def read_resource(self, uri: str) -> ReadResourceResult:
         """Read the contents of a specific resource by URI.
