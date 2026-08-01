@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from mcp.types import ListPromptsResult, ListToolsResult
 
 from agents import Agent, _debug
 from agents.exceptions import UserError
@@ -93,6 +94,18 @@ def _assert_url_credentials_hidden_from_traceback_locals(error: BaseException) -
             attached_values = repr(tuple(current.tb_frame.f_locals.values()))
             for secret in _URL_SECRETS:
                 assert secret not in attached_values
+        current = current.tb_next
+
+
+def _assert_text_hidden_from_server_traceback_locals(
+    error: BaseException,
+    sensitive_text: str,
+) -> None:
+    current = error.__traceback__
+    while current is not None:
+        if current.tb_frame.f_code.co_filename.endswith("/src/agents/mcp/server.py"):
+            attached_values = repr(tuple(current.tb_frame.f_locals.values()))
+            assert sensitive_text not in attached_values
         current = current.tb_next
 
 
@@ -324,6 +337,111 @@ async def test_prompt_request_http_status_hides_url_credentials():
     _assert_url_credentials_hidden(user_error_info.value)
     _assert_not_retained_in_traceback_locals(user_error_info.value, http_error)
     _assert_url_credentials_hidden_from_traceback_locals(user_error_info.value)
+
+
+def _paginated_list_result(
+    method_name: str,
+    next_cursor: str,
+) -> ListToolsResult | ListPromptsResult:
+    if method_name == "list_tools":
+        return ListToolsResult(tools=[], nextCursor=next_cursor)
+    return ListPromptsResult(prompts=[], nextCursor=next_cursor)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method_name", ["list_tools", "list_prompts"])
+async def test_paginated_list_failure_does_not_retain_opaque_cursor(method_name: str):
+    cursor = "SECRET_OPAQUE_CURSOR"
+    failure_message = "SECRET_CONTINUATION_FAILURE"
+    continuation_error = RuntimeError(failure_message)
+    server = MCPServerStreamableHttp(params={"url": _SAFE_URL})
+    session = MagicMock()
+    setattr(
+        session,
+        method_name,
+        AsyncMock(
+            side_effect=[
+                _paginated_list_result(method_name, cursor),
+                continuation_error,
+            ]
+        ),
+    )
+    server.session = session
+    server.max_retry_attempts = 0
+
+    with pytest.raises(UserError) as user_error_info:
+        await getattr(server, method_name)()
+
+    rendered = "".join(traceback.format_exception(user_error_info.value))
+    assert "Request failed" in str(user_error_info.value)
+    assert cursor not in rendered
+    assert failure_message not in rendered
+    assert user_error_info.value.__cause__ is None
+    assert user_error_info.value.__context__ is None
+    _assert_not_retained_in_exception_graph(user_error_info.value, continuation_error)
+    _assert_text_hidden_from_server_traceback_locals(user_error_info.value, cursor)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method_name", ["list_tools", "list_prompts"])
+async def test_paginated_list_cycle_does_not_retain_opaque_cursor(method_name: str):
+    cursor = "SECRET_OPAQUE_CURSOR"
+    server = MCPServerStreamableHttp(params={"url": _SAFE_URL})
+    session = MagicMock()
+    setattr(
+        session,
+        method_name,
+        AsyncMock(
+            side_effect=[
+                _paginated_list_result(method_name, cursor),
+                _paginated_list_result(method_name, cursor),
+            ]
+        ),
+    )
+    server.session = session
+    server.max_retry_attempts = 0
+
+    with pytest.raises(UserError, match=f"repeated cursor while listing {method_name[5:]}") as info:
+        await getattr(server, method_name)()
+
+    assert cursor not in "".join(traceback.format_exception(info.value))
+    assert info.value.__cause__ is None
+    assert info.value.__context__ is None
+    _assert_text_hidden_from_server_traceback_locals(info.value, cursor)
+    if method_name == "list_tools":
+        assert server.cached_tools is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method_name", ["list_tools", "list_prompts"])
+async def test_paginated_list_cancellation_preserves_control_flow_without_cursor(
+    method_name: str,
+):
+    cursor = "SECRET_OPAQUE_CURSOR"
+    cancellation = asyncio.CancelledError(cursor)
+    server = MCPServerStreamableHttp(params={"url": _SAFE_URL})
+    session = MagicMock()
+    setattr(
+        session,
+        method_name,
+        AsyncMock(
+            side_effect=[
+                _paginated_list_result(method_name, cursor),
+                cancellation,
+            ]
+        ),
+    )
+    server.session = session
+    server.max_retry_attempts = 0
+
+    with pytest.raises(asyncio.CancelledError) as cancellation_info:
+        await getattr(server, method_name)()
+
+    assert str(cancellation_info.value) == ""
+    assert cancellation_info.value.__cause__ is None
+    assert cancellation_info.value.__context__ is None
+    _assert_not_retained_in_exception_graph(cancellation_info.value, cancellation)
+    _assert_text_hidden_from_server_traceback_locals(cancellation_info.value, cursor)
 
 
 @pytest.mark.asyncio

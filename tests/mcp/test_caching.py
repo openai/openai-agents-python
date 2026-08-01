@@ -1,7 +1,7 @@
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
-from mcp.types import ListToolsResult, Tool as MCPTool
+from mcp.types import ListToolsResult, PaginatedRequestParams, Tool as MCPTool
 
 from agents import Agent
 from agents.mcp import MCPServerStdio
@@ -61,3 +61,36 @@ async def test_server_caching_works(
         # Without invalidating the cache, calling list_tools() again should return the cached value
         result_tools = await server.list_tools(run_context, agent)
         assert result_tools == tools
+
+
+@pytest.mark.asyncio
+@patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
+@patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+@patch("mcp.client.session.ClientSession.list_tools")
+async def test_paginated_tools_are_cached_before_filtering(
+    mock_list_tools: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
+):
+    first_page_tool = MCPTool(name="first_page_tool", inputSchema={})
+    second_page_tool = MCPTool(name="second_page_tool", inputSchema={})
+    mock_list_tools.side_effect = [
+        ListToolsResult(tools=[first_page_tool], nextCursor=""),
+        ListToolsResult(tools=[second_page_tool]),
+    ]
+    server = MCPServerStdio(
+        params={"command": tee},
+        cache_tools_list=True,
+        tool_filter={"allowed_tool_names": ["second_page_tool"]},
+    )
+
+    async with server:
+        filtered_tools = await server.list_tools()
+        cached_tools = server.cached_tools
+        filtered_tools_again = await server.list_tools()
+
+    assert filtered_tools == [second_page_tool]
+    assert filtered_tools_again == [second_page_tool]
+    assert cached_tools == [first_page_tool, second_page_tool]
+    assert mock_list_tools.await_args_list == [
+        call(),
+        call(params=PaginatedRequestParams(cursor="")),
+    ]

@@ -34,6 +34,8 @@ from mcp.types import (
     ListPromptsResult,
     ListResourcesResult,
     ListResourceTemplatesResult,
+    ListToolsResult,
+    PaginatedRequestParams,
     ReadResourceResult,
 )
 from typing_extensions import NotRequired, TypedDict
@@ -764,6 +766,27 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         async with self._request_lock:
             return await func()
 
+    async def _list_tools_page(
+        self, session: ClientSession, cursor: str | None = None
+    ) -> ListToolsResult:
+        return await self._maybe_serialize_request(
+            lambda: session.list_tools()
+            if cursor is None
+            else session.list_tools(params=PaginatedRequestParams(cursor=cursor))
+        )
+
+    async def _list_prompts_page(
+        self, session: ClientSession, cursor: str | None = None
+    ) -> ListPromptsResult:
+        return await self._run_request_with_transport_error_redaction(
+            "list prompts",
+            lambda: self._maybe_serialize_request(
+                lambda: session.list_prompts()
+                if cursor is None
+                else session.list_prompts(params=PaginatedRequestParams(cursor=cursor))
+            ),
+        )
+
     async def _apply_tool_filter(
         self,
         tools: list[MCPTool],
@@ -1120,17 +1143,58 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         transport_error: UserError | None = None
         transport_cause: Exception | None = None
         try:
+            tools: list[MCPTool]
             # Return from cache if caching is enabled, we have tools, and the cache is not dirty
             if self.cache_tools_list and not self._cache_dirty and self._tools_list:
                 tools = self._tools_list
             else:
-                # Fetch the tools from the server
-                result = await self._run_with_retries(
-                    lambda: self._maybe_serialize_request(lambda: session.list_tools())
-                )
-                self._tools_list = result.tools
+                tools = []
+                cursor: str | None = None
+                seen_cursors: set[str | None] = set()
+
+                async def fetch_pages() -> bool:
+                    nonlocal cursor
+                    while True:
+                        result = await self._list_tools_page(session, cursor)
+                        tools.extend(result.tools)
+                        seen_cursors.add(cursor)
+                        next_cursor = result.nextCursor
+                        if next_cursor is None:
+                            return True
+                        if next_cursor in seen_cursors:
+                            return False
+                        cursor = next_cursor
+
+                pagination_complete = False
+                pagination_failure: BaseException | None = None
+                try:
+                    pagination_complete = await self._run_with_retries(fetch_pages)
+                except BaseException as error:
+                    if cursor is None:
+                        raise
+                    if isinstance(error, BaseExceptionGroup):
+                        pagination_failure = _credential_safe_exception_group(error)
+                    elif isinstance(error, Exception):
+                        pagination_failure = self._user_error_for_request_operation(
+                            "list tools", error
+                        )
+                    else:
+                        pagination_failure = _credential_safe_exception_leaf(error)
+
+                if pagination_failure is not None or not pagination_complete:
+                    cursor = None
+                    seen_cursors.clear()
+                    tools.clear()
+                    del fetch_pages
+                    if pagination_failure is not None:
+                        raise pagination_failure from None
+                    raise UserError(
+                        f"MCP server '{self._error_name}' returned a repeated cursor while "
+                        "listing tools."
+                    ) from None
+
+                self._tools_list = tools
                 self._cache_dirty = False
-                tools = self._tools_list
 
             # Filter tools based on tool_filter
             filtered_tools = tools
@@ -1265,10 +1329,52 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
         session = self.session
         assert session is not None
-        return await self._run_request_with_transport_error_redaction(
-            "list prompts",
-            lambda: self._maybe_serialize_request(lambda: session.list_prompts()),
-        )
+        result = await self._list_prompts_page(session)
+        if result.nextCursor is None:
+            return result
+
+        prompts = list(result.prompts)
+        cursor: str | None = result.nextCursor
+        seen_cursors: set[str | None] = {None}
+        pagination_failure: BaseException | None = None
+        repeated_cursor = False
+        page: ListPromptsResult | None = None
+        next_cursor: str | None = None
+        while cursor is not None:
+            try:
+                page = await self._list_prompts_page(session, cursor)
+            except BaseException as error:
+                if isinstance(error, BaseExceptionGroup):
+                    pagination_failure = _credential_safe_exception_group(error)
+                elif isinstance(error, Exception):
+                    pagination_failure = self._user_error_for_request_operation(
+                        "list prompts", error
+                    )
+                else:
+                    pagination_failure = _credential_safe_exception_leaf(error)
+                break
+            prompts.extend(page.prompts)
+            seen_cursors.add(cursor)
+            next_cursor = page.nextCursor
+            if next_cursor is not None and next_cursor in seen_cursors:
+                repeated_cursor = True
+                break
+            cursor = next_cursor
+
+        if pagination_failure is not None or repeated_cursor:
+            cursor = None
+            seen_cursors.clear()
+            prompts.clear()
+            page = None
+            next_cursor = None
+            del result
+            if pagination_failure is not None:
+                raise pagination_failure from None
+            raise UserError(
+                f"MCP server '{self._error_name}' returned a repeated cursor while listing prompts."
+            ) from None
+
+        return result.model_copy(update={"prompts": prompts, "nextCursor": None})
 
     async def get_prompt(
         self, name: str, arguments: dict[str, Any] | None = None
