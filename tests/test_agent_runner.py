@@ -2296,6 +2296,52 @@ async def test_prepare_input_with_session_callback_repeats_history_item() -> Non
 
 
 @pytest.mark.asyncio
+async def test_prepare_input_with_session_callback_pops_and_repeats_history_item() -> None:
+    """Removing an item from the history list does not make it new input when re-emitted."""
+    history_item = cast(TResponseInputItem, {"role": "user", "content": "history"})
+    session = SimpleListSession(history=[history_item])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        # The callback owns the lists it receives, so moving an item out of `history` is allowed.
+        moved = history.pop(0)
+        return history + [moved, new_input[0], moved]
+
+    prepared, session_items = await prepare_input_with_session("new", session, callback)
+
+    assert [cast(dict[str, Any], item).get("content") for item in prepared] == [
+        "history",
+        "new",
+        "history",
+    ]
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_async_callback_pops_and_repeats_history_item() -> None:
+    """An async callback that pops history while awaiting keeps the item out of session input."""
+    history_item = cast(TResponseInputItem, {"role": "user", "content": "history"})
+    session = SimpleListSession(history=[history_item])
+
+    async def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        await asyncio.sleep(0)
+        moved = history.pop(0)
+        return history + [moved, new_input[0], moved]
+
+    prepared, session_items = await prepare_input_with_session("new", session, callback)
+
+    assert [cast(dict[str, Any], item).get("content") for item in prepared] == [
+        "history",
+        "new",
+        "history",
+    ]
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == ["new"]
+
+
+@pytest.mark.asyncio
 async def test_prepare_input_with_session_callback_repeats_equal_history_items() -> None:
     """Distinct history entries with equal content stay classified as history when repeated."""
     first = cast(TResponseInputItem, {"role": "user", "content": "same"})

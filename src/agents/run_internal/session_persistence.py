@@ -217,6 +217,15 @@ async def prepare_input_with_session(
             )
         history_for_callback = copy.deepcopy(converted_history)
         new_items_for_callback = copy.deepcopy(new_input_list)
+        # The callback may mutate the lists it receives, so capture history provenance before it
+        # runs. This snapshot also keeps every copied history item alive for the rest of this
+        # function, so an item the callback removes from `history_for_callback` still counts as
+        # history and its recorded id cannot be reused by an unrelated object.
+        history_objects = list(history_for_callback)
+        # Object identity with a copied history item proves the item came from history, and it
+        # stays true however many times the callback emits that same object. The reference maps
+        # below are consumed per occurrence, so they alone cannot classify a repeat.
+        history_object_ids = {id(history_item) for history_item in history_objects}
         combined = session_input_callback(history_for_callback, new_items_for_callback)
         if inspect.isawaitable(combined):
             combined = await combined
@@ -227,16 +236,12 @@ async def prepare_input_with_session(
         # the copied history and copied new-input lists so we can reconstruct which output items
         # belong to the new turn and therefore still need to be persisted.
         history_refs = _build_reference_map(
-            history_for_callback,
+            history_objects,
             ignore_openai_conversation_item_ids=is_openai_conversation_session,
         )
-        # Object identity with a copied history item proves the item came from history, and it
-        # stays true however many times the callback emits that same object. The reference maps
-        # below are consumed per occurrence, so they alone cannot classify a repeat.
-        history_object_ids = {id(history_item) for history_item in history_for_callback}
         new_refs = _build_reference_map(new_items_for_callback)
         history_counts = _build_frequency_map(
-            history_for_callback,
+            history_objects,
             ignore_openai_conversation_item_ids=is_openai_conversation_session,
         )
         new_counts = _build_frequency_map(new_items_for_callback)
