@@ -23,6 +23,18 @@ def test_coerce_shell_call_reads_max_output_length() -> None:
     assert result.action.max_output_length == 512
 
 
+@pytest.mark.parametrize("timeout_key", ["timeout_ms", "timeoutMs", "timeout"])
+def test_coerce_shell_call_preserves_zero_timeout(timeout_key: str) -> None:
+    tool_call = {
+        "call_id": "shell-zero-timeout",
+        "action": {"commands": ["ls"], timeout_key: 0},
+    }
+
+    result = run_loop.coerce_shell_call(tool_call)
+
+    assert result.action.timeout_ms == 0
+
+
 def test_coerce_shell_call_requires_commands() -> None:
     tool_call = {"call_id": "shell-2", "action": {"commands": []}}
     with pytest.raises(ModelBehaviorError):
