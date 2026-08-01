@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from inline_snapshot import snapshot
@@ -17,11 +17,13 @@ from agents import (
     ModelRefusalError,
     RunConfig,
     RunContextWrapper,
+    RunHooks,
     Runner,
     TResponseInputItem,
     UserError,
     _debug,
 )
+from agents.run_internal.error_handlers import attach_generic_agent_error
 from agents.tracing.span_data import AgentSpanData
 from agents.tracing.spans import SpanImpl
 
@@ -730,3 +732,87 @@ async def test_successful_run_leaves_agent_span_without_error():
 
     assert result.final_output == "done"
     assert fetch_span_errors("agent") == []
+
+
+class UnformattableError(Exception):
+    """An exception whose ``__str__`` raises, like an error with a broken custom formatter."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.str_calls = 0
+
+    def __str__(self) -> str:
+        self.str_calls += 1
+        raise RuntimeError("__str__ is broken")
+
+
+class RaisingHooks(RunHooks[Any]):
+    """Raises the given error from a run hook, i.e. from user code inside the agent span."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def on_agent_start(self, context: RunContextWrapper[Any], agent: Agent[Any]) -> None:
+        raise self.error
+
+
+@pytest.mark.asyncio
+async def test_run_propagates_exception_whose_str_raises():
+    """Tracing must not replace the run exception when formatting it fails."""
+    error = UnformattableError()
+
+    with pytest.raises(UnformattableError) as exc_info:
+        await Runner.run(
+            Agent(name="test_agent", model=FakeModel(tracing_enabled=True)),
+            input="first_test",
+            hooks=RaisingHooks(error),
+        )
+
+    assert exc_info.value is error
+    assert fetch_span_errors("agent") == [
+        {"message": "Error in agent run", "data": {"error": "Error details are unavailable."}}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_streamed_run_propagates_exception_whose_str_raises():
+    """The streamed path shares the helper, so it keeps the same guarantee."""
+    error = UnformattableError()
+
+    result = Runner.run_streamed(
+        Agent(name="test_agent", model=FakeModel(tracing_enabled=True)),
+        input="first_test",
+        hooks=RaisingHooks(error),
+    )
+    with pytest.raises(UnformattableError) as exc_info:
+        async for _ in result.stream_events():
+            pass
+
+    assert exc_info.value is error
+    assert fetch_span_errors("agent") == [
+        {"message": "Error in agent run", "data": {"error": "Error details are unavailable."}}
+    ]
+
+
+class RecordingSpan:
+    """The subset of the span API the generic agent-error helper uses."""
+
+    def __init__(self) -> None:
+        self.error: Any = None
+
+    def set_error(self, error: Any) -> None:
+        self.error = error
+
+
+def test_redacted_tracing_never_stringifies_the_exception():
+    """With redaction on, the detail is fixed, so the exception is never formatted at all."""
+    span = RecordingSpan()
+    error = UnformattableError()
+
+    attach_generic_agent_error(cast(Any, span), error, trace_include_sensitive_data=False)
+
+    assert error.str_calls == 0
+    assert span.error == {
+        "message": "Error in agent run",
+        "data": {"error": "Error details are redacted."},
+    }

@@ -106,11 +106,11 @@ from .agent_runner_helpers import (
 )
 from .approvals import approvals_from_step
 from .error_handlers import (
+    attach_generic_agent_error,
     build_run_error_data,
     create_message_output_item,
     format_final_output_text,
     resolve_run_error_handler_result,
-    should_attach_generic_agent_error,
     validate_handler_final_output,
 )
 from .guardrails import (
@@ -1241,21 +1241,11 @@ async def start_streaming(
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                         break
             except Exception as e:
-                if current_span and should_attach_generic_agent_error(e):
-                    _error_tracing.attach_error_to_span(
-                        current_span,
-                        SpanError(
-                            message="Error in agent run",
-                            data={
-                                "error": _error_tracing.get_trace_error(
-                                    trace_include_sensitive_data=(
-                                        run_config.trace_include_sensitive_data
-                                    ),
-                                    error_message=str(e),
-                                )
-                            },
-                        ),
-                    )
+                attach_generic_agent_error(
+                    current_span,
+                    e,
+                    trace_include_sensitive_data=run_config.trace_include_sensitive_data,
+                )
                 raise
     except AgentsException as exc:
         streamed_result.is_complete = True
@@ -1271,19 +1261,11 @@ async def start_streaming(
         )
         raise
     except Exception as e:
-        if current_span and should_attach_generic_agent_error(e):
-            _error_tracing.attach_error_to_span(
-                current_span,
-                SpanError(
-                    message="Error in agent run",
-                    data={
-                        "error": _error_tracing.get_trace_error(
-                            trace_include_sensitive_data=run_config.trace_include_sensitive_data,
-                            error_message=str(e),
-                        )
-                    },
-                ),
-            )
+        attach_generic_agent_error(
+            current_span,
+            e,
+            trace_include_sensitive_data=run_config.trace_include_sensitive_data,
+        )
         streamed_result.is_complete = True
         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
         raise
