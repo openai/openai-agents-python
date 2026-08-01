@@ -445,6 +445,29 @@ async def test_paginated_list_cancellation_preserves_control_flow_without_cursor
 
 
 @pytest.mark.asyncio
+async def test_paginated_tools_clear_cursor_before_filter_failure():
+    cursor = "SECRET_OPAQUE_CURSOR"
+    server = MCPServerStreamableHttp(
+        params={"url": _SAFE_URL},
+        tool_filter=lambda context, tool: True,
+    )
+    session = MagicMock()
+    session.list_tools = AsyncMock(
+        side_effect=[
+            ListToolsResult(tools=[], nextCursor=cursor),
+            ListToolsResult(tools=[]),
+        ]
+    )
+    server.session = session
+
+    with pytest.raises(UserError, match="run_context and agent are required") as error_info:
+        await server.list_tools()
+
+    assert cursor not in "".join(traceback.format_exception(error_info.value))
+    _assert_text_hidden_from_server_traceback_locals(error_info.value, cursor)
+
+
+@pytest.mark.asyncio
 async def test_resource_request_nested_group_replaces_ordinary_siblings_safely():
     server = MCPServerStreamableHttp(params={"url": _CREDENTIALED_URL})
     request_error = httpx.ConnectError(

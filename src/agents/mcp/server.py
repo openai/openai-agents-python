@@ -1193,6 +1193,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                         "listing tools."
                     ) from None
 
+                cursor = None
+                seen_cursors.clear()
+                del fetch_pages
                 self._tools_list = tools
                 self._cache_dirty = False
 
