@@ -2477,3 +2477,134 @@ async def test_streamed_resume_tool_guardrail_results_match_non_streamed():
     assert len(streamed.tool_output_guardrail_results) == len(
         non_streamed.tool_output_guardrail_results
     )
+
+
+@pytest.mark.asyncio
+async def test_streamed_resume_terminal_turn_reports_tool_guardrail_results():
+    """A resumed streamed turn that ends the run reports its tool guardrail results.
+
+    With `tool_use_behavior="stop_on_first_tool"` the approved tool produces the final output
+    inside the resumed turn, so the run finalizes from the resume branch rather than from the
+    regular turn loop.
+    """
+
+    def _build() -> tuple[FakeModel, Agent[Any]]:
+        @tool_input_guardrail
+        def record_input(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+            return ToolGuardrailFunctionOutput.allow(output_info="input-checked")
+
+        @tool_output_guardrail
+        def record_output(_data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+            return ToolGuardrailFunctionOutput.allow(output_info="output-checked")
+
+        @function_tool(
+            name_override="approval_tool",
+            needs_approval=True,
+            tool_input_guardrails=[record_input],
+            tool_output_guardrails=[record_output],
+        )
+        def approval_tool() -> str:
+            return "approved-result"
+
+        model = FakeModel()
+        agent = Agent(
+            name="TestAgent",
+            model=model,
+            tools=[approval_tool],
+            tool_use_behavior="stop_on_first_tool",
+        )
+        model.set_next_output(
+            [get_function_tool_call("approval_tool", "{}", call_id="call_approval")]
+        )
+        return model, agent
+
+    _, streamed_agent = _build()
+    streamed_first = Runner.run_streamed(streamed_agent, input="hello")
+    await consume_stream(streamed_first)
+    assert len(streamed_first.interruptions) == 1
+    streamed = await resume_streamed_after_first_approval(streamed_agent, streamed_first)
+
+    assert streamed.final_output == "approved-result"
+    assert len(streamed.tool_input_guardrail_results) == 1
+    assert streamed.tool_input_guardrail_results[0].output.output_info == "input-checked"
+    assert len(streamed.tool_output_guardrail_results) == 1
+    assert streamed.tool_output_guardrail_results[0].output.output_info == "output-checked"
+
+    _, non_streamed_agent = _build()
+    non_streamed_first = await Runner.run(non_streamed_agent, "hello")
+    assert len(non_streamed_first.interruptions) == 1
+    non_streamed_state = non_streamed_first.to_state()
+    non_streamed_state.approve(non_streamed_first.interruptions[0])
+    non_streamed = await Runner.run(non_streamed_agent, non_streamed_state)
+
+    assert len(streamed.tool_input_guardrail_results) == len(
+        non_streamed.tool_input_guardrail_results
+    )
+    assert len(streamed.tool_output_guardrail_results) == len(
+        non_streamed.tool_output_guardrail_results
+    )
+
+
+@pytest.mark.asyncio
+async def test_streamed_resume_handoff_turn_reports_tool_guardrail_results():
+    """A resumed streamed turn that hands off keeps the guardrail results it produced."""
+
+    def _build() -> tuple[FakeModel, Agent[Any]]:
+        @tool_input_guardrail
+        def record_input(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+            return ToolGuardrailFunctionOutput.allow(output_info="input-checked")
+
+        @tool_output_guardrail
+        def record_output(_data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+            return ToolGuardrailFunctionOutput.allow(output_info="output-checked")
+
+        @function_tool(
+            name_override="approval_tool",
+            needs_approval=True,
+            tool_input_guardrails=[record_input],
+            tool_output_guardrails=[record_output],
+        )
+        def approval_tool() -> str:
+            return "approved-result"
+
+        model = FakeModel()
+        target = Agent(name="target", model=model)
+        agent = Agent(
+            name="TestAgent",
+            model=model,
+            tools=[approval_tool],
+            handoffs=[target],
+        )
+        model.add_multiple_turn_outputs(
+            [
+                [
+                    get_function_tool_call("approval_tool", "{}", call_id="call_approval"),
+                    get_handoff_tool_call(target),
+                ],
+                [get_text_message("done")],
+            ]
+        )
+        return model, agent
+
+    _, streamed_agent = _build()
+    streamed_first = Runner.run_streamed(streamed_agent, input="hello")
+    await consume_stream(streamed_first)
+    assert len(streamed_first.interruptions) == 1
+    streamed = await resume_streamed_after_first_approval(streamed_agent, streamed_first)
+
+    assert streamed.final_output == "done"
+    assert len(streamed.tool_input_guardrail_results) == 1
+    assert len(streamed.tool_output_guardrail_results) == 1
+
+    _, non_streamed_agent = _build()
+    non_streamed_first = await Runner.run(non_streamed_agent, "hello")
+    non_streamed_state = non_streamed_first.to_state()
+    non_streamed_state.approve(non_streamed_first.interruptions[0])
+    non_streamed = await Runner.run(non_streamed_agent, non_streamed_state)
+
+    assert len(streamed.tool_input_guardrail_results) == len(
+        non_streamed.tool_input_guardrail_results
+    )
+    assert len(streamed.tool_output_guardrail_results) == len(
+        non_streamed.tool_output_guardrail_results
+    )

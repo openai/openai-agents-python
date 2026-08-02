@@ -449,6 +449,23 @@ async def _finalize_streamed_final_output(
     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
 
 
+def _accumulate_tool_guardrail_results(
+    streamed_result: RunResultStreaming,
+    turn_result: SingleStepResult,
+) -> None:
+    """Carry a turn's tool guardrail results onto the streamed result.
+
+    The non-streaming loop extends its run-wide lists from every turn result, so the streaming
+    loop has to do the same for `RunResultStreaming` to report the guardrails that ran.
+    """
+    streamed_result.tool_input_guardrail_results = (
+        streamed_result.tool_input_guardrail_results + turn_result.tool_input_guardrail_results
+    )
+    streamed_result.tool_output_guardrail_results = (
+        streamed_result.tool_output_guardrail_results + turn_result.tool_output_guardrail_results
+    )
+
+
 async def _finalize_streamed_interruption(
     *,
     streamed_result: RunResultStreaming,
@@ -858,6 +875,12 @@ async def start_streaming(
                         run_config.model_settings
                     ).store
 
+                    # The non-streaming resume path extends its run-wide lists before finalizing
+                    # but skips a resumed turn that loops back to the model, so a guardrail that
+                    # re-runs for the same tool call on resume is not counted twice.
+                    if not isinstance(turn_result.next_step, NextStepRunAgain):
+                        _accumulate_tool_guardrail_results(streamed_result, turn_result)
+
                     if isinstance(turn_result.next_step, NextStepInterruption):
                         await _finalize_streamed_interruption(
                             streamed_result=streamed_result,
@@ -1140,16 +1163,7 @@ async def start_streaming(
                 streamed_result.raw_responses = streamed_result.raw_responses + [
                     turn_result.model_response
                 ]
-                # Mirror the non-streaming loop, which extends the run-wide tool guardrail lists
-                # from every turn result so the run result reports the guardrails that ran.
-                streamed_result.tool_input_guardrail_results = (
-                    streamed_result.tool_input_guardrail_results
-                    + turn_result.tool_input_guardrail_results
-                )
-                streamed_result.tool_output_guardrail_results = (
-                    streamed_result.tool_output_guardrail_results
-                    + turn_result.tool_output_guardrail_results
-                )
+                _accumulate_tool_guardrail_results(streamed_result, turn_result)
                 input_before_turn_rewrite = streamed_result.input
                 streamed_result.input = turn_result.original_input
                 if isinstance(turn_result.next_step, NextStepHandoff):
