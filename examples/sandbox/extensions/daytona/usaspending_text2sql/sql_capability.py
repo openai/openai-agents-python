@@ -119,6 +119,7 @@ def _make_run_sql_tool(
                 Only read-only queries are allowed.
             limit: Optional display row limit override.
         """
+        # Zero intentionally uses the configured default, just like None.
         display_limit = max(1, min(limit or max_display_rows, max_display_rows))
 
         command = (

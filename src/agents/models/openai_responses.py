@@ -2071,8 +2071,19 @@ class Converter:
                 "type": "file_search",
                 "vector_store_ids": tool.vector_store_ids,
             }
-            if tool.max_num_results:
-                file_search_tool_param["max_num_results"] = tool.max_num_results
+            if tool.max_num_results is not None:
+                if (
+                    isinstance(tool.max_num_results, bool)
+                    or not isinstance(tool.max_num_results, int)
+                    or not 0 <= tool.max_num_results <= 50
+                ):
+                    raise UserError(
+                        "FileSearchTool max_num_results must be zero, an integer between 1 and 50, "
+                        "or None."
+                    )
+                # Zero intentionally follows the released provider-default path, just like None.
+                if tool.max_num_results > 0:
+                    file_search_tool_param["max_num_results"] = tool.max_num_results
             if tool.ranking_options:
                 file_search_tool_param["ranking_options"] = tool.ranking_options
             if tool.filters:

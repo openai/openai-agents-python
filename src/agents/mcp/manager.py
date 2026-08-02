@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
@@ -11,6 +12,21 @@ from ._logging import get_mcp_server_log_message
 from .server import MCPServer
 
 
+def _validate_lifecycle_timeout(timeout_seconds: float | None, *, field_name: str) -> float | None:
+    """Validate an MCP manager lifecycle timeout without changing its semantics."""
+    if timeout_seconds is None:
+        return None
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int | float):
+        raise TypeError(f"{field_name} must be a positive number of seconds or None.")
+    try:
+        is_finite = math.isfinite(timeout_seconds)
+    except OverflowError:
+        is_finite = False
+    if not is_finite or timeout_seconds <= 0:
+        raise ValueError(f"{field_name} must be a positive finite number of seconds or None.")
+    return timeout_seconds
+
+
 @dataclass
 class _ServerCommand:
     action: str
@@ -19,15 +35,8 @@ class _ServerCommand:
 
 
 class _ServerWorker:
-    def __init__(
-        self,
-        server: MCPServer,
-        connect_timeout_seconds: float | None,
-        cleanup_timeout_seconds: float | None,
-    ) -> None:
+    def __init__(self, server: MCPServer) -> None:
         self._server = server
-        self._connect_timeout_seconds = connect_timeout_seconds
-        self._cleanup_timeout_seconds = cleanup_timeout_seconds
         self._queue: asyncio.Queue[_ServerCommand] = asyncio.Queue()
         self._task = asyncio.create_task(self._run())
 
@@ -35,11 +44,11 @@ class _ServerWorker:
     def is_done(self) -> bool:
         return self._task.done()
 
-    async def connect(self) -> None:
-        await self._submit("connect", self._connect_timeout_seconds)
+    async def connect(self, timeout_seconds: float | None) -> None:
+        await self._submit("connect", timeout_seconds)
 
-    async def cleanup(self) -> None:
-        await self._submit("cleanup", self._cleanup_timeout_seconds)
+    async def cleanup(self, timeout_seconds: float | None) -> None:
+        await self._submit("cleanup", timeout_seconds)
 
     async def _submit(self, action: str, timeout_seconds: float | None) -> None:
         loop = asyncio.get_running_loop()
@@ -75,6 +84,7 @@ async def _run_with_timeout_in_task(
     # Use an in-task timeout to preserve task affinity for MCP cleanup.
     # asyncio.wait_for creates a new Task on Python < 3.11, which breaks
     # libraries that require connect/cleanup in the same task (e.g. AnyIO cancel scopes).
+    timeout_seconds = _validate_lifecycle_timeout(timeout_seconds, field_name="timeout_seconds")
     if timeout_seconds is None:
         await func()
         return
@@ -142,6 +152,9 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
       `active_servers`.
     - `connect_in_parallel=True` uses a dedicated worker task per server to
       allow concurrent connects while preserving task affinity for cleanup.
+    - Lifecycle timeouts are validated during construction and assignment. They
+      accept positive finite seconds or `None` to disable the timeout. Zero is
+      rejected because it would create an immediate deadline.
     """
 
     def __init__(
@@ -179,6 +192,28 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
     def all_servers(self) -> list[MCPServer]:
         """Return all MCP servers managed by this instance."""
         return list(self._all_servers)
+
+    @property
+    def connect_timeout_seconds(self) -> float | None:
+        """Return the lifecycle connect timeout."""
+        return self._connect_timeout_seconds
+
+    @connect_timeout_seconds.setter
+    def connect_timeout_seconds(self, timeout_seconds: float | None) -> None:
+        self._connect_timeout_seconds = _validate_lifecycle_timeout(
+            timeout_seconds, field_name="connect_timeout_seconds"
+        )
+
+    @property
+    def cleanup_timeout_seconds(self) -> float | None:
+        """Return the lifecycle cleanup timeout."""
+        return self._cleanup_timeout_seconds
+
+    @cleanup_timeout_seconds.setter
+    def cleanup_timeout_seconds(self, timeout_seconds: float | None) -> None:
+        self._cleanup_timeout_seconds = _validate_lifecycle_timeout(
+            timeout_seconds, field_name="cleanup_timeout_seconds"
+        )
 
     async def __aenter__(self) -> MCPServerManager:
         await self.connect_all()
@@ -328,7 +363,7 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
     async def _run_connect(self, server: MCPServer) -> None:
         if self.connect_in_parallel:
             worker = self._get_worker(server)
-            await worker.connect()
+            await worker.connect(self.connect_timeout_seconds)
         else:
             await self._run_with_timeout(server.connect, self.connect_timeout_seconds)
 
@@ -340,7 +375,7 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
                 self._connected_servers.discard(server)
                 return
             try:
-                await worker.cleanup()
+                await worker.cleanup(self.cleanup_timeout_seconds)
             finally:
                 self._workers.pop(server, None)
                 self._connected_servers.discard(server)
@@ -409,11 +444,7 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
     def _get_worker(self, server: MCPServer) -> _ServerWorker:
         worker = self._workers.get(server)
         if worker is None or worker.is_done:
-            worker = _ServerWorker(
-                server=server,
-                connect_timeout_seconds=self.connect_timeout_seconds,
-                cleanup_timeout_seconds=self.cleanup_timeout_seconds,
-            )
+            worker = _ServerWorker(server=server)
             self._workers[server] = worker
         return worker
 

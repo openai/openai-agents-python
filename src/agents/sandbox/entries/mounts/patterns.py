@@ -171,11 +171,17 @@ class FuseMountPattern(MountPatternBase):
     log_level: str = Field(default="log_debug")
     cache_type: Literal["block_cache", "file_cache"] = Field(default="block_cache")
     cache_path: Path | None = None
-    cache_size_mb: int | None = None
+    cache_size_mb: int | None = Field(
+        default=None,
+        description="Cache size in MB. None or 0 uses the SDK default for the cache type.",
+    )
     block_cache_block_size_mb: int = Field(default=16)
     block_cache_disk_timeout_sec: int = Field(default=3600)
     file_cache_timeout_sec: int = Field(default=120)
-    file_cache_max_size_mb: int | None = None
+    file_cache_max_size_mb: int | None = Field(
+        default=None,
+        description="File-cache maximum size in MB. None or 0 uses cache_size_mb.",
+    )
     attr_cache_timeout_sec: int | None = None
     entry_cache_timeout_sec: int | None = None
     negative_entry_cache_timeout_sec: int | None = None
@@ -361,6 +367,8 @@ class FuseMountPattern(MountPatternBase):
 
         endpoint = fuse_config.endpoint or f"https://{account}.blob.core.windows.net"
         cache_type = self.cache_type
+        # Zero has no portable meaning across Blobfuse cache types, so the SDK intentionally uses
+        # its cache-type-specific default for both zero and None.
         cache_size_mb = self.cache_size_mb or (50_000 if cache_type == "block_cache" else 4_096)
         file_cache_max_size_mb = self.file_cache_max_size_mb or cache_size_mb
         blobfuse_config = self.BlobfuseConfig(

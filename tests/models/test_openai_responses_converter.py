@@ -452,6 +452,47 @@ def test_convert_tools_basic_types_and_includes():
         Converter.convert_tools(tools=[comp_tool, comp_tool], handoffs=[])
 
 
+@pytest.mark.parametrize("max_num_results", [1, 50])
+def test_convert_file_search_tool_preserves_supported_result_limits(
+    max_num_results: int,
+) -> None:
+    converted = Converter.convert_tools(
+        [FileSearchTool(vector_store_ids=["vs1"], max_num_results=max_num_results)],
+        handoffs=[],
+    )
+
+    file_params = next(tool for tool in converted.tools if tool["type"] == "file_search")
+    assert file_params.get("max_num_results") == max_num_results
+
+
+@pytest.mark.parametrize("max_num_results", [None, 0])
+def test_convert_file_search_tool_omits_provider_default_result_limit(
+    max_num_results: int | None,
+) -> None:
+    converted = Converter.convert_tools(
+        [FileSearchTool(vector_store_ids=["vs1"], max_num_results=max_num_results)],
+        handoffs=[],
+    )
+
+    file_params = next(tool for tool in converted.tools if tool["type"] == "file_search")
+    assert "max_num_results" not in file_params
+
+
+@pytest.mark.parametrize("max_num_results", [-1, 51, True, 0.0, 1.5, "3"])
+def test_convert_file_search_tool_rejects_unsupported_result_limits(
+    max_num_results: object,
+) -> None:
+    tool = FileSearchTool(
+        vector_store_ids=["vs1"],
+        max_num_results=max_num_results,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(
+        UserError, match="max_num_results must be zero, an integer between 1 and 50"
+    ):
+        Converter.convert_tools([tool], handoffs=[])
+
+
 def test_convert_tools_includes_explicit_false_external_web_access() -> None:
     web_tool = WebSearchTool(external_web_access=False)
 

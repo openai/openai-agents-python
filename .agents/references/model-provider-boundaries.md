@@ -34,7 +34,7 @@ Validate capabilities at the adapter boundary where the resolved model and compl
 ## Provider Data and Terminal Semantics
 
 - Preserve provider-supplied string IDs, request IDs, usage, and opaque provider data when the public SDK contract exposes them.
-- Normalize provider objects and mapping payloads without relying on truthiness for valid empty or zero values.
+- Normalize provider objects and mapping payloads without relying on truthiness for valid empty or zero values. When a field intentionally treats zero like `None`, make that field-specific contract explicit in the normalization, documentation, and tests rather than applying a generic optional-number rule.
 - A transport stream ending is not automatically a successful model response. Responses `failed` and `incomplete` terminals, explicit error events, and a missing terminal payload must produce the documented failure behavior in both HTTP and websocket paths.
 - Keep semantically equivalent HTTP, websocket, streaming, and non-streaming paths aligned on final `ModelResponse`, errors, request IDs, and usage.
 

@@ -3,6 +3,7 @@ import builtins
 import logging
 import sys
 import traceback
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -14,6 +15,7 @@ from agents.exceptions import UserError
 from agents.mcp.server import (
     MCPServerSse,
     MCPServerStreamableHttp,
+    _client_session_read_timeout,
     _MCPServerWithClientSession,
 )
 from agents.run_context import RunContextWrapper
@@ -173,6 +175,43 @@ class CrashingClientSessionServer(_MCPServerWithClientSession):
         return "crashing_client_session_server"
 
 
+@pytest.mark.parametrize("timeout_seconds", [None, 0, 0.0])
+def test_client_session_read_timeout_treats_zero_as_disabled(
+    timeout_seconds: float | None,
+) -> None:
+    assert _client_session_read_timeout(timeout_seconds) is None
+
+
+@pytest.mark.parametrize("timeout_seconds", [0.000001, 2.5])
+def test_client_session_read_timeout_preserves_positive_value(timeout_seconds: float) -> None:
+    assert _client_session_read_timeout(timeout_seconds) == timedelta(seconds=timeout_seconds)
+
+
+@pytest.mark.parametrize(
+    ("timeout_seconds", "error_type"),
+    [
+        (True, TypeError),
+        ("5", TypeError),
+        (-1, ValueError),
+        (-0.5, ValueError),
+        (float("nan"), ValueError),
+        (float("inf"), ValueError),
+        (5e-7, ValueError),
+        (1e20, ValueError),
+        (10**400, ValueError),
+    ],
+)
+def test_server_rejects_unsupported_client_session_read_timeout_at_construction(
+    timeout_seconds: object,
+    error_type: type[Exception],
+) -> None:
+    with pytest.raises(error_type, match="client_session_timeout_seconds"):
+        MCPServerSse(
+            params={"url": "https://mcp.example.com/sse"},
+            client_session_timeout_seconds=timeout_seconds,  # type: ignore[arg-type]
+        )
+
+
 @pytest.mark.asyncio
 async def test_server_errors_cause_error_and_cleanup_called():
     server = CrashingClientSessionServer()
@@ -181,6 +220,33 @@ async def test_server_errors_cause_error_and_cleanup_called():
         await server.connect()
 
     assert server.cleanup_called
+
+
+@pytest.mark.asyncio
+async def test_server_revalidates_mutated_timeout_before_creating_streams() -> None:
+    server = CrashingClientSessionServer()
+    server.client_session_timeout_seconds = 5e-7
+
+    with pytest.raises(ValueError, match="at least one microsecond"):
+        await server.connect()
+
+    assert server.cleanup_called is False
+
+
+@pytest.mark.asyncio
+async def test_isolated_session_revalidates_mutated_timeout_before_creating_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = MCPServerStreamableHttp(params={"url": "https://mcp.example.com/mcp"})
+    create_streams = MagicMock()
+    monkeypatch.setattr(server, "create_streams", create_streams)
+    server.client_session_timeout_seconds = 5e-7
+
+    with pytest.raises(ValueError, match="at least one microsecond"):
+        async with server._isolated_client_session():
+            raise AssertionError("context body should not run")
+
+    create_streams.assert_not_called()
 
 
 @pytest.mark.asyncio

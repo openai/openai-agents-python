@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 import pytest
@@ -14,7 +15,7 @@ from mcp.types import (
 )
 
 from agents import _debug
-from agents.mcp import MCPServer, MCPServerManager
+from agents.mcp import MCPServer, MCPServerManager, manager as manager_module
 from agents.mcp._logging import get_mcp_server_log_name
 from agents.run_context import RunContextWrapper
 
@@ -382,6 +383,80 @@ class CleanupFailingServer(TaskBoundServer):
     async def cleanup(self) -> None:
         await super().cleanup()
         raise RuntimeError("cleanup failed")
+
+
+@pytest.mark.parametrize("field_name", ["connect_timeout_seconds", "cleanup_timeout_seconds"])
+@pytest.mark.parametrize(
+    ("timeout_seconds", "error_type"),
+    [
+        (True, TypeError),
+        ("1", TypeError),
+        (0, ValueError),
+        (-1, ValueError),
+        (float("nan"), ValueError),
+        (float("inf"), ValueError),
+        (10**400, ValueError),
+    ],
+)
+def test_manager_rejects_unsupported_lifecycle_timeouts(
+    field_name: str,
+    timeout_seconds: object,
+    error_type: type[Exception],
+) -> None:
+    kwargs = {field_name: timeout_seconds}
+
+    with pytest.raises(error_type, match=field_name):
+        MCPServerManager([], **kwargs)  # type: ignore[arg-type]
+
+
+def test_manager_validates_lifecycle_timeout_assignment() -> None:
+    manager = MCPServerManager(
+        [],
+        connect_timeout_seconds=1.5,
+        cleanup_timeout_seconds=None,
+    )
+
+    manager.connect_timeout_seconds = None
+    manager.cleanup_timeout_seconds = 2.5
+
+    assert manager.connect_timeout_seconds is None
+    assert manager.cleanup_timeout_seconds == 2.5
+    with pytest.raises(ValueError, match="connect_timeout_seconds"):
+        manager.connect_timeout_seconds = 0
+    assert manager.connect_timeout_seconds is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connect_in_parallel", [False, True])
+async def test_manager_uses_current_lifecycle_timeouts(
+    connect_in_parallel: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = TaskBoundServer()
+    observed_timeouts: list[float | None] = []
+
+    async def run_with_timeout(
+        func: Callable[[], Awaitable[Any]], timeout_seconds: float | None
+    ) -> None:
+        observed_timeouts.append(timeout_seconds)
+        await func()
+
+    monkeypatch.setattr(manager_module, "_run_with_timeout_in_task", run_with_timeout)
+    manager = MCPServerManager(
+        [server],
+        connect_timeout_seconds=None,
+        cleanup_timeout_seconds=None,
+        connect_in_parallel=connect_in_parallel,
+    )
+    manager.connect_timeout_seconds = 1.5
+    await manager.connect_all()
+
+    manager.cleanup_timeout_seconds = 2.5
+    await manager.cleanup_all()
+
+    assert server.cleaned is True
+    assert manager._workers == {}
+    assert observed_timeouts == [1.5, 2.5]
 
 
 @pytest.mark.asyncio

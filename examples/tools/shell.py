@@ -42,6 +42,7 @@ class ShellExecutor:
             )
             timed_out = False
             try:
+                # Zero is intentionally equivalent to no explicit Shell action timeout.
                 timeout = (action.timeout_ms or 0) / 1000 or None
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
                     proc.communicate(), timeout=timeout

@@ -23,6 +23,51 @@ def test_coerce_shell_call_reads_max_output_length() -> None:
     assert result.action.max_output_length == 512
 
 
+@pytest.mark.parametrize("timeout_key", ["timeout_ms", "timeoutMs", "timeout"])
+@pytest.mark.parametrize("timeout_value", [0, 0.0])
+def test_coerce_shell_call_treats_zero_timeout_as_unspecified(
+    timeout_key: str,
+    timeout_value: float,
+) -> None:
+    tool_call = {
+        "call_id": "shell-zero-timeout",
+        "action": {"commands": ["ls"], timeout_key: timeout_value},
+    }
+
+    result = run_loop.coerce_shell_call(tool_call)
+
+    assert result.action.timeout_ms is None
+
+
+@pytest.mark.parametrize("timeout_key", ["timeout_ms", "timeoutMs", "timeout"])
+def test_coerce_shell_call_preserves_positive_timeout(timeout_key: str) -> None:
+    tool_call = {
+        "call_id": "shell-positive-timeout",
+        "action": {"commands": ["ls"], timeout_key: 250},
+    }
+
+    result = run_loop.coerce_shell_call(tool_call)
+
+    assert result.action.timeout_ms == 250
+
+
+@pytest.mark.parametrize(
+    "timeout_value",
+    [-1, 0.5, False, "250"],
+)
+def test_coerce_shell_call_rejects_unsupported_timeout_values(timeout_value: object) -> None:
+    tool_call = {
+        "call_id": "shell-invalid-timeout",
+        "action": {"commands": ["ls"], "timeout_ms": timeout_value},
+    }
+
+    with pytest.raises(
+        ModelBehaviorError,
+        match="Shell call action timeout must be a positive integer",
+    ):
+        run_loop.coerce_shell_call(tool_call)
+
+
 def test_coerce_shell_call_requires_commands() -> None:
     tool_call = {"call_id": "shell-2", "action": {"commands": []}}
     with pytest.raises(ModelBehaviorError):

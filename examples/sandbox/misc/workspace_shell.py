@@ -37,11 +37,9 @@ class WorkspaceShellCapability(Capability):
         if self._session is None:
             raise RuntimeError("Workspace shell is not bound to a sandbox session.")
 
-        timeout_s = (
-            request.data.action.timeout_ms / 1000
-            if request.data.action.timeout_ms is not None
-            else None
-        )
+        # Zero is intentionally equivalent to no explicit Shell action timeout.
+        timeout_ms = request.data.action.timeout_ms
+        timeout_s = timeout_ms / 1000 if timeout_ms else None
         outputs: list[ShellCommandOutput] = []
         for command in request.data.action.commands:
             result = await self._session.exec(command, timeout=timeout_s, shell=True)

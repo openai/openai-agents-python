@@ -36,7 +36,7 @@ OpenAI offers a few built-in tools when using the [`OpenAIResponsesModel`][agent
 
 Advanced hosted search options:
 
--   `FileSearchTool` supports `filters`, `ranking_options`, and `include_search_results` in addition to `vector_store_ids` and `max_num_results`.
+-   `FileSearchTool` supports `filters`, `ranking_options`, and `include_search_results` in addition to `vector_store_ids` and `max_num_results`. Set `max_num_results` to an integer from 1 through 50; `None` or zero uses the provider default.
 -   `WebSearchTool` supports `filters`, `user_location`, and `search_context_size`.
 
 ```python
@@ -238,6 +238,8 @@ Local runtime tools require you to supply implementations:
 -   [`LocalShellTool`][agents.tool.LocalShellTool]: legacy local-shell integration.
 -   [`ApplyPatchTool`][agents.tool.ApplyPatchTool]: implement [`ApplyPatchEditor`][agents.editor.ApplyPatchEditor] to apply diffs locally.
 -   Local shell skills are available with `ShellTool(environment={"type": "local", "skills": [...]})`.
+
+Shell action timeouts use positive integer milliseconds for a finite timeout. The SDK treats both `0` and `None` as no explicit timeout before calling a local `ShellTool` executor because zero does not have a portable meaning across executor implementations; other values are rejected before executor invocation. This is specific to the timeout field: `max_output_length=0` remains a supported request for empty captured output.
 
 ### ComputerTool and the Responses computer tool
 

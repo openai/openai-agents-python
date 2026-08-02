@@ -1273,6 +1273,50 @@ async def test_blobfuse_generated_config_preserves_zero_attr_cache_timeout() -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pattern", "expected_config"),
+    [
+        (
+            FuseMountPattern(cache_size_mb=0),
+            b"block_cache:\n  block-size-mb: 16\n  mem-size-mb: 50000\n",
+        ),
+        (
+            FuseMountPattern(
+                cache_type="file_cache",
+                cache_size_mb=0,
+                file_cache_max_size_mb=0,
+            ),
+            b"file_cache:\n  path: /workspace/.sandbox-blobfuse-cache/"
+            b"12345678123456781234567812345678/acct/container\n"
+            b"  timeout-sec: 120\n  max-size-mb: 4096\n",
+        ),
+    ],
+)
+async def test_blobfuse_zero_cache_sizes_use_sdk_defaults(
+    pattern: FuseMountPattern,
+    expected_config: bytes,
+) -> None:
+    session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    session = _GeneratedConfigApplySession(session_id=session_id)
+
+    await pattern.apply(
+        session,
+        Path("/workspace/mnt"),
+        FuseMountConfig(
+            account="acct",
+            container="container",
+            endpoint=None,
+            identity_client_id=None,
+            account_key="secret",
+            mount_type="azure_blob_mount",
+            read_only=True,
+        ),
+    )
+
+    assert expected_config in session.write_calls[0][1]
+
+
+@pytest.mark.asyncio
 async def test_blobfuse_cache_path_must_be_relative_to_workspace() -> None:
     with pytest.raises(MountConfigError) as exc_info:
         FuseMountPattern(cache_path=Path("/tmp/blobfuse-cache"))

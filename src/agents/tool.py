@@ -766,7 +766,9 @@ class FileSearchTool:
     """The IDs of the vector stores to search."""
 
     max_num_results: int | None = None
-    """The maximum number of results to return."""
+    """The maximum number of results to return, from 1 through 50. None or zero uses the
+    provider default.
+    """
 
     include_search_results: bool = False
     """Whether to include the search results in the output produced by the LLM."""
