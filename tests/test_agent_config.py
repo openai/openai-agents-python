@@ -292,6 +292,13 @@ def test_agent_rejects_unknown_first_party_dictionary_model_settings(
         Agent(name="test", model_settings=settings)
 
 
+@pytest.mark.parametrize("setting_name", ["reasoning", "context_management", "temperature"])
+def test_agent_does_not_promote_model_settings_to_constructor(setting_name: str) -> None:
+    arguments: dict[str, Any] = {setting_name: None}
+    with pytest.raises(TypeError, match=f"unexpected keyword argument '{setting_name}'"):
+        Agent(name="test", **arguments)
+
+
 class CustomPlainTextSchema(AgentOutputSchemaBase):
     def is_plain_text(self) -> bool:
         return True
