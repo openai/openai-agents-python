@@ -59,6 +59,7 @@ class AsyncSQLiteSession(SessionABC):
         self._connection: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
         self._init_lock = asyncio.Lock()
+        self._closed = False
 
     async def _init_db_for_connection(self, conn: aiosqlite.Connection) -> None:
         """Initialize the database schema for a specific connection."""
@@ -107,10 +108,16 @@ class AsyncSQLiteSession(SessionABC):
 
         return self._connection
 
+    def _check_not_closed(self) -> None:
+        """Raise if the session has already been closed."""
+        if self._closed:
+            raise RuntimeError("AsyncSQLiteSession is closed")
+
     @asynccontextmanager
     async def _locked_connection(self) -> AsyncIterator[aiosqlite.Connection]:
         """Provide a connection under the session lock."""
         async with self._lock:
+            self._check_not_closed()
             conn = await self._get_connection()
             yield conn
 
@@ -195,6 +202,7 @@ class AsyncSQLiteSession(SessionABC):
         Args:
             items: List of input items to add to the history
         """
+        self._check_not_closed()
         if not items:
             return
 
@@ -288,9 +296,15 @@ class AsyncSQLiteSession(SessionABC):
             await conn.commit()
 
     async def close(self) -> None:
-        """Close the database connection."""
-        if self._connection is None:
-            return
+        """Close the database connection.
+
+        The session becomes terminal from the first close attempt: subsequent
+        operations raise RuntimeError rather than reopening the database. Repeated
+        and concurrent calls are safe no-ops.
+        """
         async with self._lock:
+            self._closed = True
+            if self._connection is None:
+                return
             await self._connection.close()
             self._connection = None
