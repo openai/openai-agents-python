@@ -389,6 +389,32 @@ class TestOpenAIConversationsSessionErrorHandling:
         with pytest.raises(Exception, match="Clear session failed"):
             await session.clear_session()
 
+        assert session.session_id == "test_id"
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_clear_session_restores_session_id(self, mock_openai_client):
+        """Test that cancelling a clear keeps the prior conversation available."""
+        delete_started = asyncio.Event()
+        hold_delete = asyncio.Event()
+
+        async def delete_conversation(*, conversation_id):
+            delete_started.set()
+            await hold_delete.wait()
+
+        mock_openai_client.conversations.delete.side_effect = delete_conversation
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+
+        clear_task = asyncio.create_task(session.clear_session())
+        await delete_started.wait()
+        clear_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await clear_task
+
+        assert session.session_id == "test_id"
+
     @pytest.mark.asyncio
     async def test_invalid_item_id_in_pop_item(self, mock_openai_client):
         """Test handling of invalid item ID during pop_item."""
@@ -523,6 +549,64 @@ class TestOpenAIConversationsSessionConcurrentAccess:
             conversation_id="surviving_conversation", items=surviving_items
         )
         assert session.session_id == "surviving_conversation"
+
+    @pytest.mark.asyncio
+    async def test_write_during_clear_waits_for_new_conversation(
+        self, mock_openai_client, monkeypatch
+    ):
+        """Test that a write cannot target the conversation being cleared."""
+        delete_started = asyncio.Event()
+        release_delete = asyncio.Event()
+        write_lookup_started = asyncio.Event()
+        item_write_started = asyncio.Event()
+
+        async def delete_conversation(*, conversation_id):
+            assert conversation_id == "conversation_to_clear"
+            delete_started.set()
+            await release_delete.wait()
+
+        async def create_items(*, conversation_id, items):
+            item_write_started.set()
+
+        mock_openai_client.conversations.delete.side_effect = delete_conversation
+        mock_openai_client.conversations.create.return_value = MagicMock(
+            id="replacement_conversation"
+        )
+        mock_openai_client.conversations.items.create.side_effect = create_items
+        session = OpenAIConversationsSession(
+            conversation_id="conversation_to_clear",
+            openai_client=mock_openai_client,
+        )
+
+        clear_task = asyncio.create_task(session.clear_session())
+        await delete_started.wait()
+
+        original_get_session_id = session._get_session_id
+
+        async def tracked_get_session_id():
+            write_lookup_started.set()
+            return await original_get_session_id()
+
+        monkeypatch.setattr(session, "_get_session_id", tracked_get_session_id)
+        new_items: list[TResponseInputItem] = [{"role": "user", "content": "New message"}]
+        write_task = asyncio.create_task(session.add_items(new_items))
+        await write_lookup_started.wait()
+
+        try:
+            assert not item_write_started.is_set()
+        finally:
+            release_delete.set()
+            await asyncio.gather(clear_task, write_task)
+
+        mock_openai_client.conversations.delete.assert_awaited_once_with(
+            conversation_id="conversation_to_clear"
+        )
+        mock_openai_client.conversations.create.assert_awaited_once_with(items=[])
+        mock_openai_client.conversations.items.create.assert_awaited_once_with(
+            conversation_id="replacement_conversation",
+            items=new_items,
+        )
+        assert session.session_id == "replacement_conversation"
 
 
 # ============================================================================
