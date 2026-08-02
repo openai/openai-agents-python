@@ -1,5 +1,7 @@
 # MCP Manager Example (FastAPI)
 
+This repository example targets MCP Python SDK v2 and is intended to run with the repository's locked development environment. The Agents SDK client itself supports both MCP v1 and v2.
+
 This example shows how to use `MCPServerManager` to keep MCP server lifecycle management in a single task inside a FastAPI app with the Streamable HTTP transport.
 
 ## Run the MCP server (Streamable HTTP)

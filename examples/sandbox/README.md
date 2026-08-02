@@ -4,6 +4,8 @@ These examples show how to run agents with an isolated workspace. Start with the
 
 Most examples call a model through `Runner`, so set `OPENAI_API_KEY` in the repository-root `.env` file, in the example's `.env` file when it has one, or in your shell environment.
 
+`sandbox_agent_with_tools.py` starts the repository's MCP v2 reference server and is intended to run with the locked development environment. The Agents SDK client itself supports both MCP v1 and v2.
+
 ## Small API examples
 
 | Example | Run | What it shows |
