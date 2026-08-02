@@ -319,7 +319,6 @@ async def test_transcription_event_puts_output_in_queue(created, updated, comple
         )
         turns = session.transcribe_turns()
 
-        # We'll collect transcribed turns in a list
         collected_turns = []
         async for turn in turns:
             collected_turns.append(turn)
@@ -328,6 +327,43 @@ async def test_transcription_event_puts_output_in_queue(created, updated, comple
         # Check we got "Hello world!"
         assert "Hello world!" in collected_turns
         # Cleanup
+
+
+@pytest.mark.asyncio
+async def test_transcribe_turns_finishes_trailing_trace_span() -> None:
+    """
+    A streamed session starts a transcription span for the next (never-completing)
+    turn after the final transcript. That trailing span must be finished when the
+    session ends instead of being left dangling in the trace processor.
+    """
+    mock_ws = create_mock_websocket(
+        [
+            json.dumps({"type": "transcription_session.created"}),
+            json.dumps({"type": "transcription_session.updated"}),
+            json.dumps(
+                {"type": "input_audio_transcription_completed", "transcript": "Hello world!"}
+            ),
+        ]
+    )
+
+    with patch("websockets.connect", return_value=mock_ws):
+        audio_input = await FakeStreamedAudioInput.get(count=2)
+        session = OpenAISTTTranscriptionSession(
+            input=audio_input,
+            client=AsyncMock(api_key="FAKE_KEY"),
+            model="whisper-1",
+            settings=STTModelSettings(),
+            trace_include_sensitive_data=False,
+            trace_include_sensitive_audio_data=False,
+        )
+
+        collected_turns: list[str] = []
+        async for turn in session.transcribe_turns():
+            collected_turns.append(turn)
+        await session.close()
+
+        assert collected_turns == ["Hello world!"]
+        assert session._tracing_span is None
 
 
 @pytest.mark.asyncio

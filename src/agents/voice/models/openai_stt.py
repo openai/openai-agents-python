@@ -123,9 +123,6 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         self._tracing_span.start()
 
     def _end_turn(self, _transcript: str) -> None:
-        if len(_transcript) < 1:
-            return
-
         if self._tracing_span:
             # Only encode audio if tracing is enabled AND buffer is not empty
             if self._trace_include_sensitive_audio_data and self._turn_audio_buffer:
