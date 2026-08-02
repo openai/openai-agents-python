@@ -84,11 +84,11 @@ def _ensure_strict_json_schema(
                 budget=budget,
             )
 
-    typ = json_schema.get("type")
-    if typ == "object" and "additionalProperties" not in json_schema:
+    is_object = is_object_schema(json_schema)
+    if is_object and "additionalProperties" not in json_schema:
         json_schema["additionalProperties"] = False
     elif (
-        typ == "object"
+        is_object
         and "additionalProperties" in json_schema
         # Compare with ``is not False`` rather than truthiness: OpenAPI/MCP schemas often use
         # ``additionalProperties: {}`` (an empty schema meaning "allow anything"). That value is
@@ -214,6 +214,21 @@ def resolve_ref(*, root: dict[str, object], ref: str) -> object:
         resolved = value
 
     return resolved
+
+
+def is_object_schema(json_schema: dict[str, object]) -> bool:
+    """Return True for nodes strict mode must treat as objects.
+
+    `type` alone is not enough: JSON Schema does not require it, and OpenAPI 3.1 spells a
+    nullable object as `{"type": ["object", "null"]}`. This must stay in sync with the
+    `required` rewrite below, which keys off `properties` alone -- if the two disagree, a node
+    comes out half-converted (strict `required`, no `additionalProperties`) and the provider
+    rejects the whole schema.
+    """
+    typ = json_schema.get("type")
+    if is_list(typ):
+        return "object" in typ
+    return typ == "object" or is_dict(json_schema.get("properties"))
 
 
 def is_dict(obj: object) -> TypeGuard[dict[str, object]]:
