@@ -220,6 +220,14 @@ def _log_server_event_validation_failure(event: Any) -> None:
 
 
 @dataclass(frozen=True)
+class _PendingToolResponseInput:
+    request_version: int
+    item_id: str
+    delete_event_id: str
+    completion: asyncio.Future[None]
+
+
+@dataclass(frozen=True)
 class _PendingResponseCreate:
     event_id: str
     request_version: int
@@ -229,6 +237,20 @@ class _PendingResponseCreate:
     input_item_id: str | None
     input_delete_event_id: str | None
     cleanup_primary_error: Any | None
+    tool_inputs: tuple[_PendingToolResponseInput, ...]
+    cleanup_pending_item_ids: frozenset[str]
+
+
+class _ResponseCreateRejectedError(RuntimeError):
+    def __init__(self, error: Any) -> None:
+        self.error = error
+        super().__init__(f"response.create was rejected: {error!r}")
+
+
+@dataclass
+class _PendingAudioResponseRetirement:
+    playback_started: bool = False
+    timer_handle: asyncio.TimerHandle | None = None
 
 
 class _ResponseCreateCleanupError(RuntimeError):
@@ -264,6 +286,7 @@ class _ResponseCreateSequencer:
         self._pending_request_versions: set[int] = set()
         self._manual_response_create_versions: set[int] = set()
         self._paired_input_response_create_versions: set[int] = set()
+        self._tool_inputs_by_request_version: dict[int, _PendingToolResponseInput] = {}
         self._pending_response_create: _PendingResponseCreate | None = None
         self._condition = asyncio.Condition()
 
@@ -305,6 +328,30 @@ class _ResponseCreateSequencer:
             }
         return max(eligible_versions)
 
+    def _retire_covered_response_create_versions(
+        self,
+        pending: _PendingResponseCreate,
+        *,
+        preserve_paired_barrier: bool = False,
+    ) -> None:
+        tracked_versions = (
+            self._pending_request_versions
+            | self._manual_response_create_versions
+            | self._paired_input_response_create_versions
+            | self._tool_inputs_by_request_version.keys()
+        )
+        covered_versions = {
+            version for version in tracked_versions if version <= pending.target_version
+        }
+        self._pending_request_versions.difference_update(covered_versions)
+        self._manual_response_create_versions.difference_update(covered_versions)
+        paired_versions_to_retire = covered_versions
+        if preserve_paired_barrier:
+            paired_versions_to_retire = covered_versions - {pending.request_version}
+        self._paired_input_response_create_versions.difference_update(paired_versions_to_retire)
+        for version in covered_versions:
+            self._tool_inputs_by_request_version.pop(version, None)
+
     def set_ongoing_response_for_test(self, value: bool) -> None:
         self._ongoing_response = value
 
@@ -321,8 +368,11 @@ class _ResponseCreateSequencer:
     ) -> tuple[str | None, bool]:
         async with self._condition:
             pending = self._pending_response_create
+            requires_correlation = pending is not None and (
+                pending.response_create_id is not None or bool(pending.tool_inputs)
+            )
             matches_pending = pending is not None and (
-                pending.response_create_id is None
+                not requires_correlation
                 or (
                     response_create_event_id is not None
                     and response_create_event_id == pending.event_id
@@ -334,8 +384,13 @@ class _ResponseCreateSequencer:
             is_guardrail_recovery = response_create_id is not None
             self._ongoing_response = True
             if matches_pending:
+                assert pending is not None
+                self._paired_input_response_create_versions.discard(pending.request_version)
                 self._pending_response_create = None
                 self._response_control = "free"
+                for tool_input in pending.tool_inputs:
+                    if not tool_input.completion.done():
+                        tool_input.completion.set_result(None)
             self._condition.notify_all()
             return response_create_id, is_guardrail_recovery
 
@@ -348,11 +403,22 @@ class _ResponseCreateSequencer:
 
     async def release_waiters(self) -> None:
         async with self._condition:
+            pending = self._pending_response_create
+            completions = [
+                tool_input.completion
+                for tool_input in self._tool_inputs_by_request_version.values()
+            ]
+            if pending is not None:
+                completions.extend(tool_input.completion for tool_input in pending.tool_inputs)
+            for completion in completions:
+                if not completion.done():
+                    completion.cancel()
             self._ongoing_response = False
             self._pending_response_create = None
             self._pending_request_versions.clear()
             self._manual_response_create_versions.clear()
             self._paired_input_response_create_versions.clear()
+            self._tool_inputs_by_request_version.clear()
             self._response_create_request_version = 0
             self._response_create_event_counter = 0
             self._response_create_id_namespace = uuid.uuid4().hex
@@ -369,7 +435,7 @@ class _ResponseCreateSequencer:
             self._condition.notify_all()
             return request_version
 
-    async def reserve_user_input_response_create_request(
+    async def reserve_paired_input_response_create_request(
         self, *, manual: bool = False
     ) -> tuple[int, bool]:
         async with self._condition:
@@ -381,16 +447,44 @@ class _ResponseCreateSequencer:
             self._pending_request_versions.add(request_version)
             if defer_input:
                 self._manual_response_create_versions.add(request_version)
-            if manual:
                 self._paired_input_response_create_versions.add(request_version)
             self._condition.notify_all()
             return request_version, defer_input
+
+    async def reserve_tool_output_response_create_request(
+        self,
+    ) -> tuple[int, bool, _PendingToolResponseInput]:
+        async with self._condition:
+            self._response_create_request_version += 1
+            request_version = self._response_create_request_version
+            defer_input = any(
+                version < request_version for version in self._paired_input_response_create_versions
+            )
+            self._pending_request_versions.add(request_version)
+            if defer_input:
+                self._manual_response_create_versions.add(request_version)
+                self._paired_input_response_create_versions.add(request_version)
+            item_id = (
+                f"agents_py_tool_output_{self._response_create_id_namespace}_{request_version}"
+            )
+            tool_input = _PendingToolResponseInput(
+                request_version=request_version,
+                item_id=item_id,
+                delete_event_id=f"{item_id}_delete",
+                completion=asyncio.get_running_loop().create_future(),
+            )
+            self._tool_inputs_by_request_version[request_version] = tool_input
+            self._condition.notify_all()
+            return request_version, defer_input, tool_input
 
     async def abandon_response_create_request(self, request_version: int) -> None:
         async with self._condition:
             self._pending_request_versions.discard(request_version)
             self._manual_response_create_versions.discard(request_version)
             self._paired_input_response_create_versions.discard(request_version)
+            tool_input = self._tool_inputs_by_request_version.pop(request_version, None)
+            if tool_input is not None and not tool_input.completion.done():
+                tool_input.completion.cancel()
             self._condition.notify_all()
 
     async def begin_response_create_input_cleanup(
@@ -403,11 +497,37 @@ class _ResponseCreateSequencer:
             if pending is None or pending.event_id != event_id:
                 return None
             pending = replace(pending, cleanup_primary_error=primary_error)
+            cleanup_item_ids = {tool_input.item_id for tool_input in pending.tool_inputs}
+            if pending.input_item_id is not None:
+                cleanup_item_ids.add(pending.input_item_id)
+            pending = replace(
+                pending,
+                cleanup_pending_item_ids=frozenset(cleanup_item_ids),
+            )
+            self._paired_input_response_create_versions.add(pending.request_version)
             self._pending_response_create = pending
             return pending
 
+    async def fail_response_create_completion(
+        self,
+        event_id: str,
+        failure: BaseException,
+    ) -> bool:
+        async with self._condition:
+            pending = self._pending_response_create
+            if pending is None or pending.event_id != event_id:
+                return False
+            for tool_input in pending.tool_inputs:
+                if not tool_input.completion.done():
+                    tool_input.completion.set_exception(failure)
+            self._condition.notify_all()
+            return True
+
     async def clear_pending_response_create(
-        self, event_id: str | None = None
+        self,
+        event_id: str | None = None,
+        *,
+        failure: Any | None = None,
     ) -> _PendingResponseCreate | None:
         async with self._condition:
             if self._pending_response_create is None:
@@ -417,14 +537,36 @@ class _ResponseCreateSequencer:
             # The caller only uses the no-event-id path for response.create-like
             # server errors, so clearing here won't release unrelated requests.
             pending = self._pending_response_create
-            self._pending_request_versions.discard(pending.request_version)
-            if pending.is_manual:
-                self._manual_response_create_versions.discard(pending.request_version)
-                self._paired_input_response_create_versions.discard(pending.request_version)
+            resolved_failure = failure if failure is not None else pending.cleanup_primary_error
+            for tool_input in pending.tool_inputs:
+                if tool_input.completion.done():
+                    continue
+                if resolved_failure is None:
+                    tool_input.completion.cancel()
+                elif isinstance(resolved_failure, BaseException):
+                    tool_input.completion.set_exception(resolved_failure)
+                else:
+                    tool_input.completion.set_exception(
+                        _ResponseCreateRejectedError(resolved_failure)
+                    )
+            self._retire_covered_response_create_versions(pending)
             self._pending_response_create = None
             if not (self._ongoing_response and self._response_control == "cancel_requested"):
                 self._response_control = "free"
             self._condition.notify_all()
+            return pending
+
+    async def mark_response_create_input_deleted(
+        self,
+        item_id: str,
+    ) -> _PendingResponseCreate | None:
+        async with self._condition:
+            pending = self._pending_response_create
+            if pending is None or item_id not in pending.cleanup_pending_item_ids:
+                return None
+            remaining_item_ids = pending.cleanup_pending_item_ids - {item_id}
+            pending = replace(pending, cleanup_pending_item_ids=remaining_item_ids)
+            self._pending_response_create = pending
             return pending
 
     async def wait_for_response_create_slot(
@@ -434,6 +576,7 @@ class _ResponseCreateSequencer:
         manual: bool = False,
         event_id: str | None = None,
         response_create_id: str | None = None,
+        has_paired_input: bool = False,
     ) -> _PendingResponseCreate | None:
         while True:
             async with self._condition:
@@ -462,6 +605,12 @@ class _ResponseCreateSequencer:
                     if manual
                     else self._auto_response_create_target_version(request_version)
                 )
+                tool_inputs = tuple(
+                    self._tool_inputs_by_request_version[version]
+                    for version in sorted(self._tool_inputs_by_request_version)
+                    if version <= target_version
+                )
+                paired_tool_input = self._tool_inputs_by_request_version.get(request_version)
                 pending = _PendingResponseCreate(
                     event_id=resolved_event_id,
                     request_version=request_version,
@@ -469,28 +618,36 @@ class _ResponseCreateSequencer:
                     is_manual=manual,
                     response_create_id=response_create_id,
                     input_item_id=(
-                        f"{resolved_event_id}_input" if response_create_id is not None else None
+                        paired_tool_input.item_id
+                        if paired_tool_input is not None and has_paired_input
+                        else (
+                            f"{resolved_event_id}_input"
+                            if response_create_id is not None or has_paired_input
+                            else None
+                        )
                     ),
                     input_delete_event_id=(
-                        f"{resolved_event_id}_delete_input"
-                        if response_create_id is not None
-                        else None
+                        paired_tool_input.delete_event_id
+                        if paired_tool_input is not None and has_paired_input
+                        else (
+                            f"{resolved_event_id}_delete_input"
+                            if response_create_id is not None or has_paired_input
+                            else None
+                        )
                     ),
                     cleanup_primary_error=None,
+                    tool_inputs=tool_inputs,
+                    cleanup_pending_item_ids=frozenset(),
                 )
                 self._pending_response_create = pending
                 return pending
 
     async def mark_response_create_sent(self, pending: _PendingResponseCreate) -> None:
         async with self._condition:
-            covered_versions = {
-                version
-                for version in self._pending_request_versions
-                if version <= pending.target_version
-            }
-            self._pending_request_versions.difference_update(covered_versions)
-            self._manual_response_create_versions.difference_update(covered_versions)
-            self._paired_input_response_create_versions.difference_update(covered_versions)
+            self._retire_covered_response_create_versions(
+                pending,
+                preserve_paired_barrier=pending.is_manual,
+            )
             self._condition.notify_all()
 
     async def begin_cancel_response(self) -> bool:
@@ -622,7 +779,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._current_item_id: str | None = None
         self._audio_state_tracker: ModelAudioTracker = ModelAudioTracker()
         self._interrupted_audio_response_ids: set[str] = set()
-        self._pending_audio_response_retirements: dict[str, asyncio.TimerHandle | None] = {}
+        self._pending_audio_response_retirements: dict[str, _PendingAudioResponseRetirement] = {}
         self._response_create_sequencer = _ResponseCreateSequencer()
         self._tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None = None
         self._playback_tracker: RealtimePlaybackTracker | None = None
@@ -876,17 +1033,28 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
     async def _reserve_response_create_request(self, *, manual: bool = False) -> int:
         return await self._response_create_sequencer.reserve_response_create_request(manual=manual)
 
-    async def _reserve_user_input_response_create_request(
+    async def _reserve_paired_input_response_create_request(
         self, *, manual: bool = False
     ) -> tuple[int, bool]:
-        return await self._response_create_sequencer.reserve_user_input_response_create_request(
+        return await self._response_create_sequencer.reserve_paired_input_response_create_request(
             manual=manual
         )
 
+    async def _reserve_tool_output_response_create_request(
+        self,
+    ) -> tuple[int, bool, _PendingToolResponseInput]:
+        return await self._response_create_sequencer.reserve_tool_output_response_create_request()
+
     async def _clear_pending_response_create(
-        self, event_id: str | None = None
+        self,
+        event_id: str | None = None,
+        *,
+        failure: Any | None = None,
     ) -> _PendingResponseCreate | None:
-        return await self._response_create_sequencer.clear_pending_response_create(event_id)
+        return await self._response_create_sequencer.clear_pending_response_create(
+            event_id,
+            failure=failure,
+        )
 
     async def _abandon_response_create_request(self, request_version: int) -> None:
         await self._response_create_sequencer.abandon_response_create_request(request_version)
@@ -901,16 +1069,48 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             primary_error,
         )
 
-    async def _delete_pending_response_create_input(self, pending: _PendingResponseCreate) -> None:
-        assert pending.input_item_id is not None
-        assert pending.input_delete_event_id is not None
-        await self._send_raw_message(
-            OpenAIConversationItemDeleteEvent(
-                type="conversation.item.delete",
-                item_id=pending.input_item_id,
-                event_id=pending.input_delete_event_id,
-            )
+    async def _fail_response_create_completion(
+        self,
+        pending: _PendingResponseCreate,
+        failure: BaseException,
+    ) -> None:
+        await self._response_create_sequencer.fail_response_create_completion(
+            pending.event_id,
+            failure,
         )
+
+    async def _mark_response_create_input_deleted(
+        self,
+        item_id: str,
+    ) -> _PendingResponseCreate | None:
+        return await self._response_create_sequencer.mark_response_create_input_deleted(item_id)
+
+    @staticmethod
+    def _pending_response_create_inputs(
+        pending: _PendingResponseCreate,
+    ) -> tuple[tuple[str, str], ...]:
+        inputs: list[tuple[str, str]] = []
+        if pending.input_item_id is not None:
+            assert pending.input_delete_event_id is not None
+            inputs.append((pending.input_item_id, pending.input_delete_event_id))
+        for tool_input in pending.tool_inputs:
+            entry = (tool_input.item_id, tool_input.delete_event_id)
+            if entry not in inputs:
+                inputs.append(entry)
+        return tuple(inputs)
+
+    async def _delete_pending_response_create_inputs(
+        self,
+        pending: _PendingResponseCreate,
+    ) -> None:
+        for item_id, delete_event_id in self._pending_response_create_inputs(pending):
+            await self._send_raw_message(
+                OpenAIConversationItemDeleteEvent(
+                    type="conversation.item.delete",
+                    item_id=item_id,
+                    event_id=delete_event_id,
+                )
+            )
 
     async def _send_response_create_when_idle(
         self,
@@ -926,6 +1126,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             manual=manual,
             event_id=response_create.event_id if response_create is not None else None,
             response_create_id=response_create_id,
+            has_paired_input=input_event is not None,
         )
         if pending is None:
             return
@@ -945,7 +1146,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 await self._send_raw_message(input_event)
                 input_sent = True
             response_params: OpenAIRealtimeResponseCreateParams | None
-            if pending.response_create_id is not None:
+            if pending.response_create_id is not None or pending.tool_inputs:
                 response_params = (
                     response_create.response
                     if response_create is not None and response_create.response is not None
@@ -974,7 +1175,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 )
             await self._send_raw_message(response_create_event)
         except BaseException as response_create_error:
-            if input_sent and pending.input_item_id is not None:
+            inputs_were_sent = input_event is None or input_sent
+            if inputs_were_sent and self._pending_response_create_inputs(pending):
                 cleanup_pending = await self._begin_response_create_input_cleanup(
                     pending,
                     response_create_error,
@@ -982,14 +1184,22 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 if cleanup_pending is not None:
                     pending = cleanup_pending
                 try:
-                    await self._delete_pending_response_create_input(pending)
+                    await self._delete_pending_response_create_inputs(pending)
                 except BaseException as cleanup_error:
-                    raise _ResponseCreateCleanupError(
+                    combined_error = _ResponseCreateCleanupError(
                         response_create_error,
                         cleanup_error,
-                    ) from response_create_error
+                    )
+                    await self._fail_response_create_completion(pending, combined_error)
+                    raise combined_error from response_create_error
+                await self._fail_response_create_completion(pending, response_create_error)
             else:
-                await self._clear_pending_response_create(pending.event_id)
+                await self._clear_pending_response_create(
+                    pending.event_id,
+                    failure=response_create_error,
+                )
+            if pending.tool_inputs:
+                return
             raise
 
         await self._response_create_sequencer.mark_response_create_sent(pending)
@@ -1053,7 +1263,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         input_event: OpenAIRealtimeClientEvent | None = None,
         manual: bool = False,
         response_create_id: str | None = None,
-    ) -> None:
+    ) -> asyncio.Task[None]:
         task = asyncio.create_task(
             self._send_response_create_in_background(
                 request_version,
@@ -1065,6 +1275,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         )
         self._response_create_tasks.add(task)
         task.add_done_callback(self._response_create_tasks.discard)
+        return task
 
     async def _cancel_response_create_tasks(self) -> None:
         if not self._response_create_tasks:
@@ -1083,7 +1294,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
     async def _send_user_input(self, event: RealtimeModelSendUserInput) -> None:
         converted = _ConversionHelper.convert_user_input_to_item_create(event)
         manual = event.response_create_id is not None
-        request_version, defer_input = await self._reserve_user_input_response_create_request(
+        request_version, defer_input = await self._reserve_paired_input_response_create_request(
             manual=manual
         )
         if not defer_input:
@@ -1107,9 +1318,31 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 OpenAIInputAudioBufferCommitEvent(type="input_audio_buffer.commit")
             )
 
-    async def _send_tool_output(self, event: RealtimeModelSendToolOutput) -> None:
+    async def _send_tool_output(
+        self,
+        event: RealtimeModelSendToolOutput,
+    ) -> asyncio.Future[None] | None:
         converted = _ConversionHelper.convert_tool_output(event)
-        await self._send_raw_message(converted)
+        request_version: int | None = None
+        defer_input = False
+        tool_input: _PendingToolResponseInput | None = None
+        if event.start_response:
+            (
+                request_version,
+                defer_input,
+                tool_input,
+            ) = await self._reserve_tool_output_response_create_request()
+            assert isinstance(converted, OpenAIConversationItemCreateEvent)
+            converted = converted.model_copy(
+                update={"item": converted.item.model_copy(update={"id": tool_input.item_id})}
+            )
+        if not defer_input:
+            try:
+                await self._send_raw_message(converted)
+            except BaseException:
+                if request_version is not None:
+                    await self._abandon_response_create_request(request_version)
+                raise
 
         tool_item = RealtimeToolCallItem(
             item_id=event.tool_call.id or "",
@@ -1123,9 +1356,19 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         )
         await self._emit_event(RealtimeModelItemUpdatedEvent(item=tool_item))
 
-        if event.start_response:
-            request_version = await self._reserve_response_create_request()
-            self._start_response_create(request_version)
+        if request_version is not None:
+            self._start_response_create(
+                request_version,
+                input_event=converted if defer_input else None,
+                manual=defer_input,
+            )
+        return tool_input.completion if tool_input is not None else None
+
+    async def _send_tool_output_with_completion(
+        self,
+        event: RealtimeModelSendToolOutput,
+    ) -> asyncio.Future[None] | None:
+        return await self._send_tool_output(event)
 
     def _get_playback_state(self) -> RealtimePlaybackState:
         if self._playback_tracker:
@@ -1385,7 +1628,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._interrupted_audio_response_ids.discard(response_id)
         if self._playback_tracker is not None:
             self._playback_tracker._add_progress_listener(self._retire_inactive_response_audio)
-        self._pending_audio_response_retirements.setdefault(response_id, None)
+        self._pending_audio_response_retirements.setdefault(
+            response_id,
+            _PendingAudioResponseRetirement(),
+        )
         self._retire_inactive_response_audio()
 
     def _retire_inactive_response_audio(self) -> None:
@@ -1397,17 +1643,25 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         )
         elapsed_ms = playback_state.get("elapsed_ms")
 
-        for response_id in list(self._pending_audio_response_retirements):
+        for response_id, retirement in list(self._pending_audio_response_retirements.items()):
             response_items = self._audio_state_tracker.get_audio_items_for_response(response_id)
-            if not response_items or current_item not in response_items:
+            if not response_items:
                 self._complete_response_audio_retirement(response_id)
                 continue
+            if current_item not in response_items:
+                if self._playback_tracker is None:
+                    self._complete_response_audio_retirement(response_id)
+                elif retirement.playback_started:
+                    self._complete_response_audio_retirement(response_id)
+                continue
+
+            retirement.playback_started = True
 
             audio_limits = self._get_audio_limits(*current_item)
             if audio_limits is None or elapsed_ms is None:
                 continue
             audio_length_ms, _ = audio_limits
-            if elapsed_ms >= audio_length_ms:
+            if current_item == response_items[-1] and elapsed_ms >= audio_length_ms:
                 self._complete_response_audio_retirement(response_id)
                 continue
 
@@ -1418,28 +1672,30 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 )
 
     def _schedule_response_audio_retirement(self, response_id: str, remaining_ms: float) -> None:
-        if self._pending_audio_response_retirements.get(response_id) is not None:
+        retirement = self._pending_audio_response_retirements.get(response_id)
+        if retirement is None or retirement.timer_handle is not None:
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        self._pending_audio_response_retirements[response_id] = loop.call_later(
+        retirement.timer_handle = loop.call_later(
             max(remaining_ms / 1000, 0.001),
             self._on_response_audio_retirement_timer,
             response_id,
         )
 
     def _on_response_audio_retirement_timer(self, response_id: str) -> None:
-        if response_id not in self._pending_audio_response_retirements:
+        retirement = self._pending_audio_response_retirements.get(response_id)
+        if retirement is None:
             return
-        self._pending_audio_response_retirements[response_id] = None
+        retirement.timer_handle = None
         self._retire_inactive_response_audio()
 
     def _complete_response_audio_retirement(self, response_id: str) -> None:
-        handle = self._pending_audio_response_retirements.pop(response_id, None)
-        if handle is not None:
-            handle.cancel()
+        retirement = self._pending_audio_response_retirements.pop(response_id, None)
+        if retirement is not None and retirement.timer_handle is not None:
+            retirement.timer_handle.cancel()
         self._interrupted_audio_response_ids.discard(response_id)
         self._audio_state_tracker.on_response_done(response_id)
         self._remove_playback_progress_listener_if_idle()
@@ -1451,9 +1707,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     def _clear_response_audio_indexes(self) -> None:
         self._interrupted_audio_response_ids.clear()
-        for handle in self._pending_audio_response_retirements.values():
-            if handle is not None:
-                handle.cancel()
+        for retirement in self._pending_audio_response_retirements.values():
+            if retirement.timer_handle is not None:
+                retirement.timer_handle.cancel()
         self._pending_audio_response_retirements.clear()
         self._audio_state_tracker.clear_response_indexes()
         self._remove_playback_progress_listener_if_idle()
@@ -1668,21 +1924,22 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             is_guardrail_recovery = False
             pending = self._response_create_sequencer.pending_response_create
             if pending is not None:
-                if (
-                    pending.input_delete_event_id is not None
-                    and parsed.error.event_id == pending.input_delete_event_id
-                ):
+                pending_inputs = self._pending_response_create_inputs(pending)
+                delete_event_ids = {delete_event_id for _item_id, delete_event_id in pending_inputs}
+                if parsed.error.event_id in delete_event_ids:
                     response_create_id = pending.response_create_id
                     is_guardrail_recovery = response_create_id is not None
                     primary_error = pending.cleanup_primary_error
                     if primary_error is None:
                         primary_error = RuntimeError("Rejected guardrail recovery response.create")
+                    cleanup_failure = _ResponseCreateCleanupError(
+                        primary_error,
+                        parsed.error,
+                    )
+                    await self._fail_response_create_completion(pending, cleanup_failure)
                     await self._emit_event(
                         RealtimeModelExceptionEvent(
-                            exception=_ResponseCreateCleanupError(
-                                primary_error,
-                                parsed.error,
-                            ),
+                            exception=cleanup_failure,
                             context="Error cleaning up rejected guardrail recovery input",
                             response_create_id=response_create_id,
                             is_guardrail_recovery=is_guardrail_recovery,
@@ -1691,8 +1948,11 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 elif self._error_matches_pending_response_create(parsed.error):
                     response_create_id = pending.response_create_id
                     is_guardrail_recovery = response_create_id is not None
-                    if pending.input_item_id is None:
-                        await self._clear_pending_response_create(parsed.error.event_id)
+                    if not pending_inputs:
+                        await self._clear_pending_response_create(
+                            parsed.error.event_id,
+                            failure=parsed.error,
+                        )
                     else:
                         cleanup_pending = await self._begin_response_create_input_cleanup(
                             pending,
@@ -1701,14 +1961,19 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                         if cleanup_pending is not None:
                             pending = cleanup_pending
                         try:
-                            await self._delete_pending_response_create_input(pending)
+                            await self._delete_pending_response_create_inputs(pending)
                         except BaseException as cleanup_error:
+                            cleanup_failure = _ResponseCreateCleanupError(
+                                parsed.error,
+                                cleanup_error,
+                            )
+                            await self._fail_response_create_completion(
+                                pending,
+                                cleanup_failure,
+                            )
                             await self._emit_event(
                                 RealtimeModelExceptionEvent(
-                                    exception=_ResponseCreateCleanupError(
-                                        parsed.error,
-                                        cleanup_error,
-                                    ),
+                                    exception=cleanup_failure,
                                     context=(
                                         "Error starting cleanup for rejected "
                                         "guardrail recovery input"
@@ -1726,8 +1991,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             )
         elif parsed.type == "conversation.item.deleted":
             pending = self._response_create_sequencer.pending_response_create
-            if pending is not None and parsed.item_id == pending.input_item_id:
-                await self._clear_pending_response_create(pending.event_id)
+            if pending is not None and parsed.item_id in pending.cleanup_pending_item_ids:
+                pending = await self._mark_response_create_input_deleted(parsed.item_id)
+                if pending is not None and not pending.cleanup_pending_item_ids:
+                    await self._clear_pending_response_create(pending.event_id)
             await self._emit_event(RealtimeModelItemDeletedEvent(item_id=parsed.item_id))
         elif (
             parsed.type == "conversation.item.added"

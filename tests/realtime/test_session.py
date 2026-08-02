@@ -2340,6 +2340,58 @@ class TestToolCallExecution:
         assert len(mock_model.sent_tool_outputs) == 1
 
     @pytest.mark.asyncio
+    async def test_deferred_tool_output_failure_retries_cached_output_without_rerun(
+        self, mock_agent, mock_function_tool
+    ):
+        class DeferredToolOutputModel(MockRealtimeModel):
+            def __init__(self):
+                super().__init__()
+                self.completions: list[asyncio.Future[None]] = []
+
+            async def _send_tool_output_with_completion(self, event):
+                await self.send_event(event)
+                completion = asyncio.get_running_loop().create_future()
+                self.completions.append(completion)
+                return completion
+
+        mock_agent.get_all_tools.return_value = [mock_function_tool]
+        mock_model = DeferredToolOutputModel()
+        session = RealtimeSession(mock_model, mock_agent, None)
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function",
+            call_id="call_deferred_retry_output",
+            arguments="{}",
+        )
+
+        await session.on_event(tool_call_event)
+        while not mock_model.completions:
+            await asyncio.sleep(0)
+
+        assert tool_call_event.call_id in session._pending_tool_outputs
+        assert tool_call_event.call_id not in session._completed_tool_call_ids
+
+        mock_model.completions[0].set_exception(RuntimeError("deferred send failed"))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert tool_call_event.call_id in session._pending_tool_outputs
+        assert tool_call_event.call_id not in session._completed_tool_call_ids
+        assert not session._pending_response_request_order
+
+        await session.on_event(tool_call_event)
+        while len(mock_model.completions) < 2:
+            await asyncio.sleep(0)
+
+        mock_model.completions[1].set_result(None)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert tool_call_event.call_id not in session._pending_tool_outputs
+        assert tool_call_event.call_id in session._completed_tool_call_ids
+        mock_function_tool.on_invoke_tool.assert_called_once()
+        assert len(mock_model.sent_tool_outputs) == 2
+
+    @pytest.mark.asyncio
     async def test_function_tool_timeout_returns_result_message(self, mock_model, mock_agent):
         async def invoke_slow_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
             await asyncio.sleep(0.2)

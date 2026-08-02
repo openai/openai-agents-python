@@ -13,6 +13,7 @@ from pydantic import TypeAdapter
 from agents import Agent, function_tool
 from agents.exceptions import UserError
 from agents.handoffs import handoff
+from agents.realtime.agent import RealtimeAgent
 from agents.realtime.model import RealtimeModelConfig, RealtimePlaybackTracker
 from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
@@ -33,6 +34,7 @@ from agents.realtime.model_inputs import (
     RealtimeModelSendUserInput,
 )
 from agents.realtime.openai_realtime import OpenAIRealtimeWebSocketModel, TransportConfig
+from agents.realtime.session import RealtimeSession, _PendingToolOutput
 
 
 class TestOpenAIRealtimeWebSocketModel:
@@ -1271,6 +1273,104 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert model._pending_audio_response_retirements == {}
         assert model._playback_tracker._progress_listeners == set()
 
+    def test_custom_playback_retains_response_audio_before_playback_starts(self, model):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="response_1",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+
+        model._retire_response_audio("response_1")
+
+        assert model._audio_state_tracker.get_audio_items_for_response("response_1") == (
+            ("audio_item", 0),
+        )
+        model._playback_tracker.on_play_ms("audio_item", 0, 100)
+        assert model._audio_state_tracker.get_audio_items_for_response("response_1") == ()
+
+    def test_custom_playback_retains_later_response_while_earlier_response_plays(self, model):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "earlier_item",
+            0,
+            b"\x00" * 4800,
+            response_id="response_1",
+        )
+        model._audio_state_tracker.on_audio_delta(
+            "later_item",
+            0,
+            b"\x00" * 4800,
+            response_id="response_2",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("earlier_item", 0, 50)
+
+        model._retire_response_audio("response_2")
+
+        assert model._audio_state_tracker.get_audio_items_for_response("response_2") == (
+            ("later_item", 0),
+        )
+        model._playback_tracker.on_play_ms("later_item", 0, 100)
+        assert model._audio_state_tracker.get_audio_items_for_response("response_2") == ()
+
+    def test_custom_playback_waits_for_last_item_in_response(self, model):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "first_item",
+            0,
+            b"\x00" * 4800,
+            response_id="response_1",
+        )
+        model._audio_state_tracker.on_audio_delta(
+            "second_item",
+            0,
+            b"\x00" * 4800,
+            response_id="response_1",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("first_item", 0, 50)
+
+        model._retire_response_audio("response_1")
+        model._playback_tracker.on_play_ms("first_item", 0, 50)
+
+        assert model._audio_state_tracker.get_audio_items_for_response("response_1") == (
+            ("first_item", 0),
+            ("second_item", 0),
+        )
+
+        model._playback_tracker.on_play_ms("second_item", 0, 50)
+        assert model._audio_state_tracker.get_audio_items_for_response("response_1")
+        model._playback_tracker.on_play_ms("second_item", 0, 50)
+        assert model._audio_state_tracker.get_audio_items_for_response("response_1") == ()
+
+    def test_custom_playback_retires_started_response_after_advancing_away(self, model):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "old_item",
+            0,
+            b"\x00" * 4800,
+            response_id="response_1",
+        )
+        model._audio_state_tracker.on_audio_delta(
+            "new_item",
+            0,
+            b"\x00" * 4800,
+            response_id="response_2",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("old_item", 0, 25)
+
+        model._retire_response_audio("response_1")
+        assert model._audio_state_tracker.get_audio_items_for_response("response_1")
+
+        model._playback_tracker.on_play_ms("new_item", 0, 25)
+
+        assert model._audio_state_tracker.get_audio_items_for_response("response_1") == ()
+        assert model._pending_audio_response_retirements == {}
+
     @pytest.mark.asyncio
     async def test_default_playback_timer_completes_pending_response_audio_retirement(self, model):
         model._audio_state_tracker.set_audio_format("pcm16")
@@ -2111,6 +2211,892 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert "next user turn two" in sent_events[4].model_dump_json()
 
     @pytest.mark.asyncio
+    async def test_tool_output_waits_for_queued_guardrail_recovery(self, model, monkeypatch):
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+        await model._mark_response_created()
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool",
+                    call_id="call_1",
+                    arguments="{}",
+                ),
+                output="tool result",
+                start_response=True,
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert sent_events == []
+
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        assert [event.type for event in sent_events] == [
+            "conversation.item.create",
+            "response.create",
+        ]
+        assert "guardrail recovery" in sent_events[0].model_dump_json()
+        recovery_create_event_id = sent_events[1].event_id
+        assert recovery_create_event_id is not None
+
+        await model._mark_response_created(recovery_create_event_id)
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        assert [event.type for event in sent_events] == [
+            "conversation.item.create",
+            "response.create",
+            "conversation.item.create",
+            "response.create",
+        ]
+        assert sent_events[2].item.type == "function_call_output"
+        assert sent_events[2].item.call_id == "call_1"
+        assert sent_events[2].item.output == "tool result"
+
+    @pytest.mark.asyncio
+    async def test_tool_outputs_remain_paired_across_active_recovery(self, model, monkeypatch):
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+        await model._mark_response_created()
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool",
+                    call_id="call_1",
+                    arguments="{}",
+                ),
+                output="first result",
+                start_response=True,
+            )
+        )
+
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+        recovery_create_event_id = sent_events[1].event_id
+        assert recovery_create_event_id is not None
+        await model._mark_response_created(recovery_create_event_id)
+
+        await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool",
+                    call_id="call_2",
+                    arguments="{}",
+                ),
+                output="second result",
+                start_response=True,
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert [event.type for event in sent_events] == [
+            "conversation.item.create",
+            "response.create",
+        ]
+
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+        first_tool_create_event_id = sent_events[3].event_id
+        assert first_tool_create_event_id is not None
+        await model._mark_response_created(first_tool_create_event_id)
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        assert [event.type for event in sent_events] == [
+            "conversation.item.create",
+            "response.create",
+            "conversation.item.create",
+            "response.create",
+            "conversation.item.create",
+            "response.create",
+        ]
+        assert [sent_events[index].item.call_id for index in (2, 4)] == [
+            "call_1",
+            "call_2",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_tool_output_waits_for_sent_recovery_create_acceptance(self, model, monkeypatch):
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+        await model._mark_response_created()
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        recovery_create_event_id = sent_events[1].event_id
+        assert recovery_create_event_id is not None
+        completion = await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool",
+                    call_id="call_1",
+                    arguments="{}",
+                ),
+                output="tool result",
+                start_response=True,
+            )
+        )
+        assert completion is not None
+        await asyncio.sleep(0)
+
+        assert [event.type for event in sent_events] == [
+            "conversation.item.create",
+            "response.create",
+        ]
+
+        await model._mark_response_created(recovery_create_event_id)
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        assert [event.type for event in sent_events] == [
+            "conversation.item.create",
+            "response.create",
+            "conversation.item.create",
+            "response.create",
+        ]
+        tool_create_event_id = sent_events[3].event_id
+        assert tool_create_event_id is not None
+        await model._mark_response_created(tool_create_event_id)
+        await completion
+
+    @pytest.mark.asyncio
+    async def test_user_input_waits_for_sent_recovery_create_acceptance(self, model, monkeypatch):
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+        await model._mark_response_created()
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        recovery_create_event_id = sent_events[1].event_id
+        assert recovery_create_event_id is not None
+        await model._send_user_input(RealtimeModelSendUserInput(user_input="next turn"))
+        await asyncio.sleep(0)
+        assert len(sent_events) == 2
+
+        await model._mark_response_created(recovery_create_event_id)
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        assert [event.type for event in sent_events] == [
+            "conversation.item.create",
+            "response.create",
+            "conversation.item.create",
+            "response.create",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_deferred_tool_output_item_failure_propagates(self, model, monkeypatch):
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            if (
+                event.type == "conversation.item.create"
+                and event.item.type == "function_call_output"
+            ):
+                raise RuntimeError("tool output send failed")
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+        await model._mark_response_created()
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        completion = await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool",
+                    call_id="call_1",
+                    arguments="{}",
+                ),
+                output="tool result",
+                start_response=True,
+            )
+        )
+        assert completion is not None
+
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+        recovery_create_event_id = sent_events[1].event_id
+        assert recovery_create_event_id is not None
+        await model._mark_response_created(recovery_create_event_id)
+        await model._mark_response_done()
+
+        with pytest.raises(RuntimeError, match="tool output send failed"):
+            await completion
+
+        assert model._response_create_sequencer._pending_request_versions == set()
+        assert model._pending_response_create_event_id is None
+
+    @pytest.mark.asyncio
+    async def test_deferred_tool_response_create_failure_deletes_paired_output(
+        self, model, monkeypatch
+    ):
+        sent_events: list[Any] = []
+        response_create_count = 0
+
+        async def fake_send_raw(event):
+            nonlocal response_create_count
+            sent_events.append(event)
+            if event.type == "response.create":
+                response_create_count += 1
+                if response_create_count == 2:
+                    raise RuntimeError("tool response.create failed")
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+        await model._mark_response_created()
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        completion = await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool",
+                    call_id="call_1",
+                    arguments="{}",
+                ),
+                output="tool result",
+                start_response=True,
+            )
+        )
+        assert completion is not None
+
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+        recovery_create_event_id = sent_events[1].event_id
+        assert recovery_create_event_id is not None
+        await model._mark_response_created(recovery_create_event_id)
+        await model._mark_response_done()
+
+        with pytest.raises(RuntimeError, match="tool response.create failed"):
+            await completion
+
+        assert [event.type for event in sent_events][-3:] == [
+            "conversation.item.create",
+            "response.create",
+            "conversation.item.delete",
+        ]
+        tool_item_id = sent_events[-3].item.id
+        assert tool_item_id is not None
+        assert sent_events[-1].item_id == tool_item_id
+        assert model._pending_response_create_event_id is not None
+
+        await model._handle_ws_event(
+            {
+                "type": "conversation.item.deleted",
+                "event_id": "event_deleted_1",
+                "item_id": tool_item_id,
+            }
+        )
+
+        assert model._pending_response_create_event_id is None
+        assert model._response_create_sequencer._pending_request_versions == set()
+
+    @pytest.mark.asyncio
+    async def test_deferred_tool_output_waits_for_server_rejection_cleanup(
+        self, model, monkeypatch
+    ):
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+        await model._mark_response_created()
+
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        completion = await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool",
+                    call_id="call_1",
+                    arguments="{}",
+                ),
+                output="tool result",
+                start_response=True,
+            )
+        )
+        assert completion is not None
+
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+        recovery_create_event_id = sent_events[1].event_id
+        assert recovery_create_event_id is not None
+        await model._mark_response_created(recovery_create_event_id)
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        pending = model._response_create_sequencer.pending_response_create
+        assert pending is not None
+        assert pending.input_item_id is not None
+        assert completion.done() is False
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "event_err_1",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "bad_response_create",
+                    "message": "bad response.create",
+                    "event_id": pending.event_id,
+                },
+            }
+        )
+
+        assert completion.done() is False
+        assert sent_events[-1].type == "conversation.item.delete"
+
+        await model._handle_ws_event(
+            {
+                "type": "conversation.item.deleted",
+                "event_id": "event_deleted_1",
+                "item_id": pending.input_item_id,
+            }
+        )
+
+        with pytest.raises(RuntimeError, match="response.create was rejected"):
+            await completion
+        assert model._pending_response_create_event_id is None
+
+    @pytest.mark.asyncio
+    async def test_deferred_tool_output_local_failure_is_retryable_in_session(
+        self, model, monkeypatch
+    ):
+        sent_events: list[Any] = []
+        response_create_count = 0
+
+        async def fake_send_raw(event):
+            nonlocal response_create_count
+            sent_events.append(event)
+            if event.type == "response.create":
+                response_create_count += 1
+                if response_create_count == 2:
+                    raise RuntimeError("tool response.create failed")
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+        await model._mark_response_created()
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        tool_call = RealtimeModelToolCallEvent(
+            name="tool",
+            call_id="call_1",
+            arguments="{}",
+        )
+        await session._send_tool_output_completion(
+            _PendingToolOutput(
+                tool_call=tool_call,
+                output="tool result",
+                start_response=True,
+            )
+        )
+
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+        recovery_create_event_id = sent_events[1].event_id
+        assert recovery_create_event_id is not None
+        await model._mark_response_created(recovery_create_event_id)
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert session._stored_exception is None
+        assert tool_call.call_id in session._pending_tool_outputs
+        assert tool_call.call_id not in session._completed_tool_call_ids
+
+        pending = model._response_create_sequencer.pending_response_create
+        assert pending is not None
+        assert pending.input_item_id is not None
+        await model._handle_ws_event(
+            {
+                "type": "conversation.item.deleted",
+                "event_id": "event_deleted_1",
+                "item_id": pending.input_item_id,
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_deferred_tool_output_server_rejection_is_retryable_in_session(
+        self, model, monkeypatch
+    ):
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+        await model._mark_response_created()
+        await model._send_user_input(
+            RealtimeModelSendUserInput(
+                user_input="guardrail recovery",
+                response_create_id="recovery_1",
+            )
+        )
+        tool_call = RealtimeModelToolCallEvent(
+            name="tool",
+            call_id="call_1",
+            arguments="{}",
+        )
+        await session._send_tool_output_completion(
+            _PendingToolOutput(
+                tool_call=tool_call,
+                output="tool result",
+                start_response=True,
+            )
+        )
+
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+        recovery_create_event_id = sent_events[1].event_id
+        assert recovery_create_event_id is not None
+        await model._mark_response_created(recovery_create_event_id)
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        pending = model._response_create_sequencer.pending_response_create
+        assert pending is not None
+        assert pending.input_item_id is not None
+        assert tool_call.call_id in session._pending_tool_outputs
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "event_err_1",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "bad_response_create",
+                    "message": "bad response.create",
+                    "event_id": pending.event_id,
+                },
+            }
+        )
+        assert tool_call.call_id in session._pending_tool_outputs
+
+        await model._handle_ws_event(
+            {
+                "type": "conversation.item.deleted",
+                "event_id": "event_deleted_1",
+                "item_id": pending.input_item_id,
+            }
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert session._stored_exception is None
+        assert tool_call.call_id in session._pending_tool_outputs
+        assert tool_call.call_id not in session._completed_tool_call_ids
+
+    @pytest.mark.asyncio
+    async def test_ordinary_tool_output_server_rejection_is_retryable_in_session(
+        self, model, monkeypatch
+    ):
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+        tool_call = RealtimeModelToolCallEvent(
+            name="tool",
+            call_id="call_1",
+            arguments="{}",
+        )
+        await session._send_tool_output_completion(
+            _PendingToolOutput(
+                tool_call=tool_call,
+                output="tool result",
+                start_response=True,
+            )
+        )
+        await asyncio.sleep(0)
+
+        pending = model._response_create_sequencer.pending_response_create
+        assert pending is not None
+        assert tool_call.call_id in session._pending_tool_outputs
+        tool_item_id = pending.tool_inputs[0].item_id
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "event_err_1",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "bad_response_create",
+                    "message": "bad response.create",
+                    "event_id": pending.event_id,
+                },
+            }
+        )
+        await model._handle_ws_event(
+            {
+                "type": "conversation.item.deleted",
+                "event_id": "event_deleted_1",
+                "item_id": tool_item_id,
+            }
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert session._stored_exception is None
+        assert tool_call.call_id in session._pending_tool_outputs
+        assert tool_call.call_id not in session._completed_tool_call_ids
+
+    @pytest.mark.asyncio
+    async def test_ordinary_tool_output_waits_for_matching_response_created(
+        self, model, monkeypatch
+    ):
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        completion = await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool",
+                    call_id="call_1",
+                    arguments="{}",
+                ),
+                output="tool result",
+                start_response=True,
+            )
+        )
+        assert completion is not None
+        await asyncio.sleep(0)
+
+        pending = model._response_create_sequencer.pending_response_create
+        assert pending is not None
+        assert completion.done() is False
+        assert sent_events[-1].type == "response.create"
+        assert sent_events[-1].response is not None
+        assert pending.event_id in sent_events[-1].response.metadata.values()
+
+        await model._mark_response_created("unrelated_response_create")
+        assert completion.done() is False
+        assert model._pending_response_create_event_id == pending.event_id
+
+        await model._mark_response_created(pending.event_id)
+        await completion
+        assert model._pending_response_create_event_id is None
+
+    @pytest.mark.asyncio
+    async def test_ordinary_tool_output_server_rejection_waits_for_cleanup(
+        self, model, monkeypatch
+    ):
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        completion = await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool",
+                    call_id="call_1",
+                    arguments="{}",
+                ),
+                output="tool result",
+                start_response=True,
+            )
+        )
+        assert completion is not None
+        await asyncio.sleep(0)
+        pending = model._response_create_sequencer.pending_response_create
+        assert pending is not None
+        tool_item_id = pending.tool_inputs[0].item_id
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "event_err_1",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "bad_response_create",
+                    "message": "bad response.create",
+                    "event_id": pending.event_id,
+                },
+            }
+        )
+
+        assert completion.done() is False
+        assert sent_events[-1].type == "conversation.item.delete"
+        assert sent_events[-1].item_id == tool_item_id
+
+        retry_completion = await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool",
+                    call_id="call_1",
+                    arguments="{}",
+                ),
+                output="tool result",
+                start_response=True,
+            )
+        )
+        assert retry_completion is not None
+        assert [event.type for event in sent_events].count("conversation.item.create") == 1
+
+        await model._handle_ws_event(
+            {
+                "type": "conversation.item.deleted",
+                "event_id": "event_deleted_1",
+                "item_id": tool_item_id,
+            }
+        )
+        with pytest.raises(RuntimeError, match="response.create was rejected"):
+            await completion
+        await asyncio.sleep(0)
+        assert [event.type for event in sent_events][-2:] == [
+            "conversation.item.create",
+            "response.create",
+        ]
+        retry_pending_event_id = model._pending_response_create_event_id
+        assert retry_pending_event_id is not None
+        await model._mark_response_created(retry_pending_event_id)
+        await retry_completion
+
+    @pytest.mark.asyncio
+    async def test_ordinary_tool_output_local_create_failure_is_retryable(self, model, monkeypatch):
+        sent_events: list[Any] = []
+
+        async def fake_send_raw(event):
+            sent_events.append(event)
+            if event.type == "response.create":
+                raise RuntimeError("tool response.create failed")
+
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        completion = await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool",
+                    call_id="call_1",
+                    arguments="{}",
+                ),
+                output="tool result",
+                start_response=True,
+            )
+        )
+        assert completion is not None
+        await asyncio.sleep(0)
+
+        with pytest.raises(RuntimeError, match="tool response.create failed"):
+            await completion
+        assert [event.type for event in sent_events] == [
+            "conversation.item.create",
+            "response.create",
+            "conversation.item.delete",
+        ]
+        assert not any(
+            isinstance(call.args[0], RealtimeModelExceptionEvent)
+            for call in emit_event.call_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_coalesced_tool_output_failure_retires_covered_versions_before_retry(
+        self, model, monkeypatch
+    ):
+        sent_events: list[Any] = []
+        response_create_attempts = 0
+
+        async def fake_send_raw(event):
+            nonlocal response_create_attempts
+            sent_events.append(event)
+            if event.type == "response.create":
+                response_create_attempts += 1
+                if response_create_attempts == 1:
+                    raise RuntimeError("coalesced response.create failed")
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+        await model._mark_response_created()
+
+        first_completion = await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool_1",
+                    call_id="call_1",
+                    arguments="{}",
+                ),
+                output="first result",
+                start_response=True,
+            )
+        )
+        second_completion = await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool_2",
+                    call_id="call_2",
+                    arguments="{}",
+                ),
+                output="second result",
+                start_response=True,
+            )
+        )
+        assert first_completion is not None
+        assert second_completion is not None
+
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        completion_errors = await asyncio.gather(
+            first_completion,
+            second_completion,
+            return_exceptions=True,
+        )
+        assert all(
+            isinstance(error, RuntimeError) and str(error) == "coalesced response.create failed"
+            for error in completion_errors
+        )
+        pending = model._response_create_sequencer.pending_response_create
+        assert pending is not None
+        cleanup_item_ids = list(pending.cleanup_pending_item_ids)
+        assert len(cleanup_item_ids) == 2
+        assert response_create_attempts == 1
+
+        await model._handle_ws_event(
+            {
+                "type": "conversation.item.deleted",
+                "event_id": "event_deleted_1",
+                "item_id": cleanup_item_ids[0],
+            }
+        )
+        await asyncio.sleep(0)
+
+        assert model._pending_response_create_event_id == pending.event_id
+        assert response_create_attempts == 1
+
+        await model._handle_ws_event(
+            {
+                "type": "conversation.item.deleted",
+                "event_id": "event_deleted_2",
+                "item_id": cleanup_item_ids[1],
+            }
+        )
+        await asyncio.sleep(0)
+
+        sequencer = model._response_create_sequencer
+        assert model._pending_response_create_event_id is None
+        assert sequencer._pending_request_versions == set()
+        assert sequencer._manual_response_create_versions == set()
+        assert sequencer._paired_input_response_create_versions == set()
+        assert sequencer._tool_inputs_by_request_version == {}
+        assert response_create_attempts == 1
+
+        retry_first = await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool_1",
+                    call_id="call_1",
+                    arguments="{}",
+                ),
+                output="first result",
+                start_response=True,
+            )
+        )
+        retry_second = await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool_2",
+                    call_id="call_2",
+                    arguments="{}",
+                ),
+                output="second result",
+                start_response=True,
+            )
+        )
+        assert retry_first is not None
+        assert retry_second is not None
+        await asyncio.sleep(0)
+
+        retry_event_id = model._pending_response_create_event_id
+        assert retry_event_id is not None
+        assert response_create_attempts == 2
+        await model._mark_response_created(retry_event_id)
+        await asyncio.gather(retry_first, retry_second)
+
+    @pytest.mark.asyncio
     async def test_correlated_response_create_send_failure_emits_correlation(
         self, model, monkeypatch
     ):
@@ -2245,6 +3231,58 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
             "response.create",
         ]
         assert "second" in sent_events[0].model_dump_json()
+
+    @pytest.mark.asyncio
+    async def test_tool_output_send_failure_abandons_response_create_request(
+        self, model, monkeypatch
+    ):
+        sent_events: list[Any] = []
+        input_attempts = 0
+
+        async def fake_send_raw(event):
+            nonlocal input_attempts
+            if event.type == "conversation.item.create":
+                input_attempts += 1
+                if input_attempts == 1:
+                    raise RuntimeError("conversation.item.create failed")
+            sent_events.append(event)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        with pytest.raises(RuntimeError, match="conversation.item.create failed"):
+            await model._send_tool_output(
+                RealtimeModelSendToolOutput(
+                    tool_call=RealtimeModelToolCallEvent(
+                        name="tool",
+                        call_id="call_1",
+                        arguments="{}",
+                    ),
+                    output="first",
+                    start_response=True,
+                )
+            )
+
+        assert model._response_create_sequencer._pending_request_versions == set()
+
+        await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(
+                    name="tool",
+                    call_id="call_2",
+                    arguments="{}",
+                ),
+                output="second",
+                start_response=True,
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert [event.type for event in sent_events] == [
+            "conversation.item.create",
+            "response.create",
+        ]
+        assert sent_events[0].item.call_id == "call_2"
 
     @pytest.mark.asyncio
     async def test_send_user_input_defers_response_create_without_blocking_caller(
@@ -3098,6 +4136,19 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
         assert payload_types.count("response.create") == 1
         assert payload_types[-1] == "response.create"
+        pending_event_id = model._pending_response_create_event_id
+        assert pending_event_id is not None
+        first_completion = first_task.result()
+        second_completion = second_task.result()
+        assert first_completion is not None
+        assert second_completion is not None
+        assert first_completion.done() is False
+        assert second_completion.done() is False
+
+        await model._mark_response_created(pending_event_id)
+
+        assert first_completion.done() is True
+        assert second_completion.done() is True
 
     @pytest.mark.asyncio
     async def test_raw_response_create_is_sequenced_with_follow_up_user_input(

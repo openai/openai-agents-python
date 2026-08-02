@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import abc
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 from typing_extensions import NotRequired, TypedDict
 
@@ -12,7 +12,7 @@ from .config import (
     RealtimeSessionModelSettings,
 )
 from .model_events import RealtimeModelEvent
-from .model_inputs import RealtimeModelSendEvent
+from .model_inputs import RealtimeModelSendEvent, RealtimeModelSendToolOutput
 
 
 class RealtimePlaybackState(TypedDict):
@@ -183,6 +183,14 @@ class RealtimeModel(abc.ABC):
     async def send_event(self, event: RealtimeModelSendEvent) -> None:
         """Send an event to the model."""
         pass
+
+    async def _send_tool_output_with_completion(
+        self,
+        event: RealtimeModelSendToolOutput,
+    ) -> Awaitable[None] | None:
+        """Send tool output and return deferred transport completion when supported."""
+        await self.send_event(event)
+        return None
 
     def _retire_response_audio(self, response_id: str) -> None:
         """Release model-owned response audio indexes after session guardrails settle."""

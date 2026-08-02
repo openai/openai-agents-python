@@ -5,7 +5,7 @@ import dataclasses
 import inspect
 import json
 from collections import deque
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Sequence
 from functools import partial
 from typing import Any, cast
 
@@ -138,6 +138,8 @@ class _PendingToolOutput:
     start_response: bool
     tool_end_event: RealtimeToolEnd | None = None
     session_update: RealtimeModelSendSessionUpdate | None = None
+    completion_task: asyncio.Task[None] | None = None
+    response_request_id: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -365,7 +367,9 @@ class RealtimeSession(RealtimeModelListener):
     async def _send_response_request(
         self,
         event: RealtimeModelSendUserInput | RealtimeModelSendToolOutput,
-    ) -> None:
+        *,
+        pending_tool_output: _PendingToolOutput | None = None,
+    ) -> Awaitable[None] | None:
         response_create_id = (
             event.response_create_id if isinstance(event, RealtimeModelSendUserInput) else None
         )
@@ -375,11 +379,18 @@ class RealtimeSession(RealtimeModelListener):
         else:
             request_id = response_create_id
         self._pending_response_request_order.append(request_id)
+        if pending_tool_output is not None:
+            pending_tool_output.response_request_id = request_id
         try:
+            if isinstance(event, RealtimeModelSendToolOutput):
+                return await self._model._send_tool_output_with_completion(event)
             await self._model.send_event(event)
         except BaseException:
             self._discard_response_request(request_id)
+            if pending_tool_output is not None:
+                pending_tool_output.response_request_id = None
             raise
+        return None
 
     async def send_audio(self, audio: bytes, *, commit: bool = False) -> None:
         """Send a raw audio chunk to the model."""
@@ -862,32 +873,79 @@ class RealtimeSession(RealtimeModelListener):
         call_id = pending_output.tool_call.call_id
         self._pending_tool_outputs[call_id] = pending_output
         try:
-            await self._send_pending_tool_output(pending_output)
+            completion = await self._send_pending_tool_output(pending_output)
         except Exception as exc:
             if self._closing or self._closed:
                 self._pending_tool_outputs.pop(call_id, None)
                 return
             raise _PendingToolOutputSendError(call_id, exc) from exc
-        self._pending_tool_outputs.pop(call_id, None)
-
-    async def _send_pending_tool_output(self, pending_output: _PendingToolOutput) -> None:
-        if self._closing or self._closed:
+        if completion is not None:
+            completion_task = asyncio.create_task(
+                self._await_tool_output_completion(pending_output, completion)
+            )
+            pending_output.completion_task = completion_task
+            self._tool_call_tasks.add(completion_task)
+            completion_task.add_done_callback(self._on_tool_call_task_done)
             return
+        await self._finalize_pending_tool_output(pending_output, mark_completed=False)
+
+    async def _send_pending_tool_output(
+        self,
+        pending_output: _PendingToolOutput,
+    ) -> Awaitable[None] | None:
+        if self._closing or self._closed:
+            return None
         if pending_output.session_update is not None:
             await self._model.send_event(pending_output.session_update)
         if self._closing or self._closed:
-            return
+            return None
         tool_output_event = RealtimeModelSendToolOutput(
             tool_call=pending_output.tool_call,
             output=pending_output.output,
             start_response=pending_output.start_response,
         )
         if pending_output.start_response:
-            await self._send_response_request(tool_output_event)
+            return await self._send_response_request(
+                tool_output_event,
+                pending_tool_output=pending_output,
+            )
         else:
             await self._model.send_event(tool_output_event)
+        return None
+
+    async def _await_tool_output_completion(
+        self,
+        pending_output: _PendingToolOutput,
+        completion: Awaitable[None],
+    ) -> None:
+        try:
+            await completion
+        except asyncio.CancelledError:
+            pending_output.completion_task = None
+            raise
+        except BaseException as exc:
+            pending_output.completion_task = None
+            if pending_output.response_request_id is not None:
+                self._discard_response_request(pending_output.response_request_id)
+                pending_output.response_request_id = None
+            raise _PendingToolOutputSendError(pending_output.tool_call.call_id, exc) from exc
+        await self._finalize_pending_tool_output(pending_output, mark_completed=True)
+
+    async def _finalize_pending_tool_output(
+        self,
+        pending_output: _PendingToolOutput,
+        *,
+        mark_completed: bool,
+    ) -> None:
+        call_id = pending_output.tool_call.call_id
+        if self._pending_tool_outputs.get(call_id) is pending_output:
+            self._pending_tool_outputs.pop(call_id, None)
+        pending_output.completion_task = None
+        pending_output.response_request_id = None
         if self._closing or self._closed:
             return
+        if mark_completed:
+            self._completed_tool_call_ids.add(call_id)
         if pending_output.tool_end_event is not None:
             await self._put_event(pending_output.tool_end_event)
 
@@ -1204,7 +1262,16 @@ class RealtimeSession(RealtimeModelListener):
     def _begin_tool_call(self, call_id: str, *, from_pending_approval: bool) -> bool:
         if self._closing or self._closed:
             return False
-        if call_id in self._active_tool_call_ids or call_id in self._completed_tool_call_ids:
+        pending_output = self._pending_tool_outputs.get(call_id)
+        if (
+            pending_output is not None
+            and pending_output.completion_task is not None
+            and not pending_output.completion_task.done()
+        ):
+            return False
+        if call_id in self._active_tool_call_ids:
+            return False
+        if call_id in self._completed_tool_call_ids and pending_output is None:
             return False
         if not from_pending_approval and call_id in self._pending_tool_calls:
             return False
@@ -1213,7 +1280,12 @@ class RealtimeSession(RealtimeModelListener):
 
     def _finish_tool_call(self, call_id: str, *, mark_completed: bool) -> None:
         self._active_tool_call_ids.discard(call_id)
-        if mark_completed and not self._closing and not self._closed:
+        if (
+            mark_completed
+            and call_id not in self._pending_tool_outputs
+            and not self._closing
+            and not self._closed
+        ):
             self._completed_tool_call_ids.add(call_id)
 
     @classmethod
