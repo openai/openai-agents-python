@@ -18,6 +18,8 @@ One tool can have several related identifiers. They are not interchangeable.
 
 Do not collapse these layers into one string or introduce local rules that only one caller uses.
 
+Provider wire-name grammar and length limits remain provider-owned validation unless an SDK-owned routing invariant requires local enforcement. Follow [Model and Provider Boundaries](model-provider-boundaries.md#provider-validation-and-error-ownership) before adding name validation to shared tool types or canonical identity helpers.
+
 ## Canonical Helpers
 
 Use `src/agents/_tool_identity.py` as the single implementation layer. Important helpers include:

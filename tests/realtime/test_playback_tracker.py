@@ -96,7 +96,75 @@ class TestPlaybackTracker:
             if getattr(call.args[0], "type", None) == "conversation.item.truncate"
         ]
         assert truncate_events
-        assert truncate_events[0].audio_end_ms == 2000
+        # The truncation point stays within the audio the client actually received.
+        assert truncate_events[0].audio_end_ms == 1000
+
+    @pytest.mark.asyncio
+    async def test_interrupt_clamps_truncate_to_received_audio_while_response_ongoing(self, model):
+        """Default timing must not truncate past the audio the client received.
+
+        Without a custom playback tracker the elapsed time is wall clock since the first
+        audio delta, so it outgrows the received audio whenever the model pauses between
+        deltas. The Realtime API rejects a truncate whose ``audio_end_ms`` exceeds the
+        item's audio duration, so the value has to be clamped.
+        """
+        model._ongoing_response = True
+        model._send_raw_message = AsyncMock()
+        model._audio_state_tracker.set_audio_format("pcm16")
+
+        # 48_000 bytes of PCM16 at 24kHz equals ~1000ms of audio.
+        with patch("agents.realtime._default_tracker.time.monotonic", return_value=100.0):
+            model._audio_state_tracker.on_audio_delta("item_1", 0, b"a" * 48_000)
+
+        with patch("agents.realtime.openai_realtime.time.monotonic", return_value=105.0):
+            await model._send_interrupt(RealtimeModelSendInterrupt())
+
+        truncate_events = [
+            call.args[0]
+            for call in model._send_raw_message.await_args_list
+            if getattr(call.args[0], "type", None) == "conversation.item.truncate"
+        ]
+        assert truncate_events
+        assert truncate_events[0].audio_end_ms == 1000
+
+    @pytest.mark.asyncio
+    async def test_interrupt_matches_speech_started_truncation_point(self, model, monkeypatch):
+        """Explicit interrupts and VAD barge-in must truncate at the same point."""
+
+        async def truncate_ms_for(interrupt: bool) -> int:
+            fresh = OpenAIRealtimeWebSocketModel()
+            fresh._ongoing_response = True
+            send_raw = AsyncMock()
+            monkeypatch.setattr(fresh, "_send_raw_message", send_raw)
+            fresh._audio_state_tracker.set_audio_format("pcm16")
+
+            with patch("agents.realtime._default_tracker.time.monotonic", return_value=100.0):
+                fresh._audio_state_tracker.on_audio_delta("item_1", 0, b"a" * 48_000)
+
+            with patch("agents.realtime.openai_realtime.time.monotonic", return_value=105.0):
+                if interrupt:
+                    await fresh._send_interrupt(RealtimeModelSendInterrupt())
+                else:
+                    await fresh._handle_ws_event(
+                        {
+                            "type": "input_audio_buffer.speech_started",
+                            "event_id": "e1",
+                            "item_id": "item_1",
+                            "audio_start_ms": 0,
+                            "audio_end_ms": 0,
+                        }
+                    )
+
+            truncate_events = [
+                call.args[0]
+                for call in send_raw.await_args_list
+                if getattr(call.args[0], "type", None) == "conversation.item.truncate"
+            ]
+            assert truncate_events
+            audio_end_ms: int = truncate_events[0].audio_end_ms
+            return audio_end_ms
+
+        assert await truncate_ms_for(interrupt=True) == await truncate_ms_for(interrupt=False)
 
     def test_audio_delta_before_set_audio_format_does_not_raise(self):
         """ModelAudioTracker must tolerate audio deltas before a format is negotiated.

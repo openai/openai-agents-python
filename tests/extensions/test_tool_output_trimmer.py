@@ -423,6 +423,138 @@ class TestTrimming:
         # Schema-level prose is still trimmed.
         assert "description" not in trimmed_parameters
 
+    def test_keeps_definition_names_and_instance_data_in_schema(self) -> None:
+        """Name-keyed schema maps keep their keys; data-valued keywords stay verbatim.
+
+        ``properties`` is not the only map keyed by user-chosen names, and ``default`` /
+        ``const`` / ``enum`` hold instance data rather than subschemas. Trimming a prose
+        keyword out of either dangles a ``$ref`` or rewrites the tool's contract.
+        """
+        parameters = {
+            "type": "object",
+            "description": "schema prose " * 200,
+            "$defs": {
+                "description": {"type": "object", "properties": {"text": {"type": "string"}}},
+                "Priority": {"enum": ["low", "high"]},
+            },
+            "definitions": {"title": {"type": "string"}},
+            "patternProperties": {"title": {"type": "string"}},
+            "dependentSchemas": {"title": {"required": ["note"]}},
+            "dependentRequired": {"title": ["note"]},
+            "properties": {
+                "note": {"$ref": "#/$defs/description"},
+                "prio": {"$ref": "#/$defs/Priority"},
+                "opts": {
+                    "type": "object",
+                    "description": "options " * 200,
+                    "default": {"title": "Untitled", "description": "auto", "retries": 3},
+                },
+                "mode": {"const": {"title": "A", "kind": "fast"}},
+                "choice": {"enum": [{"title": "A", "id": 1}, {"title": "B", "id": 2}]},
+            },
+            "required": ["note"],
+        }
+        items = [
+            _user("q1"),
+            {"type": "tool_search_call", "call_id": "ts1", "arguments": {"query": "reports"}},
+            {
+                "type": "tool_search_output",
+                "call_id": "ts1",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "make_report",
+                        "description": "tool description " * 200,
+                        "parameters": parameters,
+                    }
+                ],
+            },
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(max_output_chars=400, preview_chars=60)
+        result = trimmer(_make_data(items))
+        trimmed_item_dict = cast(dict[str, Any], result.input[2])
+        trimmed = trimmed_item_dict["tools"][0]["parameters"]
+
+        # Every $ref still resolves — deleting a definition would silently break the schema.
+        assert sorted(trimmed["$defs"]) == ["Priority", "description"]
+        for name in ("note", "prio"):
+            target = trimmed["properties"][name]["$ref"].removeprefix("#/$defs/")
+            assert target in trimmed["$defs"]
+
+        # The other name-keyed maps keep their keys too.
+        assert sorted(trimmed["definitions"]) == ["title"]
+        assert sorted(trimmed["patternProperties"]) == ["title"]
+        assert sorted(trimmed["dependentSchemas"]) == ["title"]
+        assert trimmed["dependentRequired"] == {"title": ["note"]}
+
+        # Instance data is preserved byte for byte.
+        assert trimmed["properties"]["opts"]["default"] == {
+            "title": "Untitled",
+            "description": "auto",
+            "retries": 3,
+        }
+        assert trimmed["properties"]["mode"]["const"] == {"title": "A", "kind": "fast"}
+        assert trimmed["properties"]["choice"]["enum"] == [
+            {"title": "A", "id": 1},
+            {"title": "B", "id": 2},
+        ]
+
+        # Prose is still trimmed, at the schema level and inside a nested subschema.
+        assert "description" not in trimmed
+        assert "description" not in trimmed["properties"]["opts"]
+
+    def test_trims_prose_inside_genuine_subschema_keywords(self) -> None:
+        """Keywords whose value really is a subschema must keep getting trimmed."""
+        parameters = {
+            "type": "object",
+            "description": "schema prose " * 200,
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string", "description": "a tag " * 200},
+                },
+                "bag": {
+                    "type": "object",
+                    "propertyNames": {"pattern": "^x", "description": "a key " * 200},
+                },
+            },
+        }
+        items = [
+            _user("q1"),
+            {"type": "tool_search_call", "call_id": "ts1", "arguments": {"query": "tags"}},
+            {
+                "type": "tool_search_output",
+                "call_id": "ts1",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "tag_it",
+                        "description": "tool description " * 200,
+                        "parameters": parameters,
+                    }
+                ],
+            },
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(max_output_chars=400, preview_chars=60)
+        result = trimmer(_make_data(items))
+        trimmed_item_dict = cast(dict[str, Any], result.input[2])
+        trimmed = trimmed_item_dict["tools"][0]["parameters"]
+
+        assert trimmed["properties"]["tags"]["items"] == {"type": "string"}
+        assert trimmed["properties"]["bag"]["propertyNames"] == {"pattern": "^x"}
+
     def test_trims_legacy_tool_search_output_results(self) -> None:
         """Legacy tool_search_output snapshots with free-text results should still trim."""
         large = "x" * 2000

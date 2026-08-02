@@ -40,6 +40,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Prose keywords worth dropping from a replayed schema: they cost tokens but the model can
+# still call the tool without them.
+_PROSE_SCHEMA_KEYWORDS = frozenset({"description", "title", "$comment", "examples"})
+
+# Keywords whose value is a map keyed by *user-chosen names* — parameter names, definition
+# names, regexes — rather than by schema keywords. Their keys must survive even when they
+# spell one of the prose keywords above, so they are recursed into by value only.
+_NAME_KEYED_SCHEMA_MAPS = frozenset(
+    {
+        "properties",
+        "patternProperties",
+        "$defs",
+        "definitions",
+        "dependentSchemas",
+        "dependentRequired",
+    }
+)
+
+# Keywords whose value is instance *data* rather than a subschema. Nothing inside them is a
+# schema keyword, so they are copied through untouched.
+_DATA_SCHEMA_KEYWORDS = frozenset({"default", "const", "enum"})
+
 
 @dataclass
 class ToolOutputTrimmer:
@@ -289,15 +311,21 @@ class ToolOutputTrimmer:
         """Remove verbose prose from a JSON schema while preserving its structure."""
         trimmed_schema: dict[str, Any] = {}
         for key, value in schema.items():
-            # Keys of a "properties" mapping are parameter names, not schema keywords, so
-            # they must survive even when they collide with the prose keywords below.
-            if key == "properties" and isinstance(value, dict):
+            # A name-keyed map is keyed by parameter/definition names, not by schema
+            # keywords, so recurse into its values while keeping its keys verbatim.
+            # Dropping a key here would delete a declared parameter or dangle a $ref.
+            if key in _NAME_KEYED_SCHEMA_MAPS and isinstance(value, dict):
                 trimmed_schema[key] = {
                     name: self._trim_json_schema(sub) if isinstance(sub, dict) else sub
                     for name, sub in value.items()
                 }
                 continue
-            if key in {"description", "title", "$comment", "examples"}:
+            # These hold instance data. A "title" key inside a default value is part of the
+            # value, so trimming it would silently change the tool's contract.
+            if key in _DATA_SCHEMA_KEYWORDS:
+                trimmed_schema[key] = value
+                continue
+            if key in _PROSE_SCHEMA_KEYWORDS:
                 continue
             if isinstance(value, dict):
                 trimmed_schema[key] = self._trim_json_schema(value)
