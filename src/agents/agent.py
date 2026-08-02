@@ -119,6 +119,48 @@ def _validate_codex_tool_name_collisions(tools: list[Tool]) -> None:
         )
 
 
+def validate_derived_agent_name_collisions(
+    entries: list[tuple[str, str]],
+    *,
+    config_label: str,
+    name_label: str,
+    override_hint: str,
+) -> None:
+    """Reject distinct agents whose names normalize to the same derived tool name.
+
+    `transform_string_function_style()` is many-to-one -- case, whitespace, and punctuation all
+    collapse into the same output -- so two agents a user considers distinct can land on one
+    derived name. Dispatch then resolves last-wins and the earlier agent is advertised to the
+    model but can never be selected.
+
+    Entries are `(derived name, source agent name)`. Agents sharing both are the same target,
+    so only differing agent names collide.
+    """
+    owners: dict[str, str] = {}
+    for derived_name, agent_name in entries:
+        prior_agent_name = owners.setdefault(derived_name, agent_name)
+        if prior_agent_name != agent_name:
+            raise UserError(
+                f"Ambiguous {config_label} configuration: agents {prior_agent_name!r} and "
+                f"{agent_name!r} both derive the {name_label} `{derived_name}`. "
+                f"Pass an explicit `{override_hint}` to one of them."
+            )
+
+
+def _agent_tool_name_entries(tools: list[Tool]) -> list[tuple[str, str]]:
+    """Return `(tool name, source agent name)` for every `Agent.as_tool()` entry."""
+    entries: list[tuple[str, str]] = []
+    for tool in tools:
+        if not isinstance(tool, FunctionTool):
+            continue
+        origin = getattr(tool, "_tool_origin", None)
+        if origin is None or origin.type is not ToolOriginType.AGENT_AS_TOOL:
+            continue
+        if origin.agent_name:
+            entries.append((tool.name, origin.agent_name))
+    return entries
+
+
 class AgentToolStreamEvent(TypedDict):
     """Streaming event emitted when an agent is invoked as a tool."""
 
@@ -264,6 +306,12 @@ class AgentBase(Generic[TContext]):
         enabled: list[Tool] = [t for t, ok in zip(self.tools, results, strict=False) if ok]
         all_tools: list[Tool] = prune_orphaned_tool_search_tools([*mcp_tools, *enabled])
         _validate_codex_tool_name_collisions(all_tools)
+        validate_derived_agent_name_collisions(
+            _agent_tool_name_entries(all_tools),
+            config_label="agent tool",
+            name_label="agent tool name",
+            override_hint="tool_name=",
+        )
         return all_tools
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
-from ..agent import Agent
+from ..agent import Agent, validate_derived_agent_name_collisions
 from ..agent_output import AgentOutputSchema, AgentOutputSchemaBase
 from ..exceptions import UserError
 from ..handoffs import Handoff, handoff
@@ -113,6 +113,14 @@ async def get_handoffs(agent: Agent[Any], context_wrapper: RunContextWrapper[Any
 
     results = await gather_with_cancel(*(check_handoff_enabled(h) for h in handoffs))
     enabled: list[Handoff] = [h for h, ok in zip(handoffs, results, strict=False) if ok]
+    # Validate after `is_enabled` filtering, so agents whose derived names collide stay usable
+    # as long as only one of them is enabled per turn.
+    validate_derived_agent_name_collisions(
+        [(h.tool_name, h.agent_name) for h in enabled],
+        config_label="handoff",
+        name_label="handoff tool name",
+        override_hint="tool_name_override=",
+    )
     return enabled
 
 

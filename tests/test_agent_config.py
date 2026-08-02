@@ -4,7 +4,7 @@ import pytest
 from openai.types.shared import Reasoning
 from pydantic import BaseModel
 
-from agents import Agent, AgentOutputSchema, Handoff, RunContextWrapper, handoff
+from agents import Agent, AgentOutputSchema, Handoff, RunContextWrapper, UserError, handoff
 from agents.lifecycle import AgentHooksBase
 from agents.model_settings import ModelSettings
 from agents.retry import ModelRetryBackoffSettings
@@ -290,3 +290,108 @@ def test_agent_does_not_promote_model_settings_to_constructor(setting_name: str)
     arguments: dict[str, Any] = {setting_name: None}
     with pytest.raises(TypeError, match=f"unexpected keyword argument '{setting_name}'"):
         Agent(name="test", **arguments)
+
+
+@pytest.mark.asyncio
+async def test_handoffs_with_colliding_derived_names_raise():
+    # `transform_string_function_style` is many-to-one: case, whitespace, and punctuation all
+    # normalize away, so these three distinct agents land on one handoff tool name.
+    billing = Agent(name="Billing Agent")
+    billing_lower = Agent(name="billing agent")
+    billing_dotted = Agent(name="billing.agent")
+
+    assert (
+        handoff(billing).tool_name
+        == handoff(billing_lower).tool_name
+        == handoff(billing_dotted).tool_name
+    )
+
+    for other in (billing_lower, billing_dotted):
+        triage = Agent(name="Triage", handoffs=[billing, other])
+        with pytest.raises(UserError, match="transfer_to_billing_agent"):
+            await get_handoffs(triage, RunContextWrapper(None))
+
+
+@pytest.mark.asyncio
+async def test_handoff_collision_is_resolved_by_an_explicit_override():
+    billing = Agent(name="Billing Agent")
+    billing_lower = Agent(name="billing agent")
+
+    triage = Agent(
+        name="Triage",
+        handoffs=[billing, handoff(billing_lower, tool_name_override="transfer_to_billing_b2b")],
+    )
+    handoffs = await get_handoffs(triage, RunContextWrapper(None))
+
+    assert [h.tool_name for h in handoffs] == [
+        "transfer_to_billing_agent",
+        "transfer_to_billing_b2b",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handoff_collision_ignores_the_same_agent_listed_twice():
+    # Same target either way, so last-wins is harmless and must not raise.
+    billing = Agent(name="Billing Agent")
+
+    triage = Agent(name="Triage", handoffs=[billing, billing])
+    handoffs = await get_handoffs(triage, RunContextWrapper(None))
+
+    assert [h.tool_name for h in handoffs] == [
+        "transfer_to_billing_agent",
+        "transfer_to_billing_agent",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handoff_collision_allows_one_enabled_agent_per_turn():
+    billing = Agent(name="Billing Agent")
+    billing_lower = Agent(name="billing agent")
+
+    triage = Agent(
+        name="Triage",
+        handoffs=[handoff(billing, is_enabled=False), billing_lower],
+    )
+    handoffs = await get_handoffs(triage, RunContextWrapper(None))
+
+    assert [h.agent_name for h in handoffs] == ["billing agent"]
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_with_colliding_derived_names_raises():
+    # Case-only differences normalize silently -- `transform_string_function_style` does not even
+    # warn for them -- so this collision was previously invisible.
+    refund = Agent(name="Refund")
+    refund_lower = Agent(name="refund")
+
+    assert (
+        refund.as_tool(tool_name=None, tool_description="d").name
+        == refund_lower.as_tool(tool_name=None, tool_description="d").name
+    )
+
+    router = Agent(
+        name="Router",
+        tools=[
+            refund.as_tool(tool_name=None, tool_description="d"),
+            refund_lower.as_tool(tool_name=None, tool_description="d"),
+        ],
+    )
+    with pytest.raises(UserError, match="`refund`"):
+        await router.get_all_tools(RunContextWrapper(None))
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_collision_is_resolved_by_an_explicit_tool_name():
+    refund = Agent(name="Refund")
+    refund_lower = Agent(name="refund")
+
+    router = Agent(
+        name="Router",
+        tools=[
+            refund.as_tool(tool_name=None, tool_description="d"),
+            refund_lower.as_tool(tool_name="refund_legacy", tool_description="d"),
+        ],
+    )
+    tools = await router.get_all_tools(RunContextWrapper(None))
+
+    assert [t.name for t in tools] == ["refund", "refund_legacy"]
