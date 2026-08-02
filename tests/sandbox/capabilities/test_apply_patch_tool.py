@@ -178,6 +178,55 @@ class TestSandboxApplyPatchTool:
         assert session.rm_users == ["sandbox-user"]
 
     @pytest.mark.asyncio
+    async def test_editor_removes_moved_source_as_bound_user(self) -> None:
+        session = UserRecordingApplyPatchSession()
+        session.files[Path("/workspace/existing.txt")] = b"old\n"
+        tool = SandboxApplyPatchTool(session=session, user=User(name="sandbox-user"))
+
+        result = await cast(
+            Awaitable[ApplyPatchResult],
+            tool.editor.update_file(
+                ApplyPatchOperation(
+                    type="update_file",
+                    path="existing.txt",
+                    diff="@@\n-old\n+new\n",
+                    move_to="moved.txt",
+                )
+            ),
+        )
+
+        assert isinstance(result, ApplyPatchResult)
+        assert result.output == "Updated existing.txt\nMoved existing.txt to moved.txt"
+        assert session.read_users == ["sandbox-user"]
+        assert session.mkdir_users == ["sandbox-user"]
+        assert session.write_users == ["sandbox-user"]
+        # Removing the source path is part of the move, so it must run as the bound user too.
+        assert session.rm_users == ["sandbox-user"]
+        assert session.files[Path("/workspace/moved.txt")] == b"new\n"
+        assert Path("/workspace/existing.txt") not in session.files
+
+    @pytest.mark.asyncio
+    async def test_editor_move_to_same_path_does_not_remove_the_file(self) -> None:
+        session = UserRecordingApplyPatchSession()
+        session.files[Path("/workspace/existing.txt")] = b"old\n"
+        tool = SandboxApplyPatchTool(session=session, user=User(name="sandbox-user"))
+
+        await cast(
+            Awaitable[ApplyPatchResult],
+            tool.editor.update_file(
+                ApplyPatchOperation(
+                    type="update_file",
+                    path="existing.txt",
+                    diff="@@\n-old\n+new\n",
+                    move_to="existing.txt",
+                )
+            ),
+        )
+
+        assert session.rm_users == []
+        assert session.files[Path("/workspace/existing.txt")] == b"new\n"
+
+    @pytest.mark.asyncio
     async def test_custom_tool_input_create_update_move_delete(self) -> None:
         session = ApplyPatchSession()
         tool = SandboxApplyPatchTool(session=session)

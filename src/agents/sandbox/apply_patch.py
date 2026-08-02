@@ -97,7 +97,7 @@ class WorkspaceEditor:
             moved_destination = self._session.normalize_path(moved_relative_path)
             await self._write_text(moved_destination, updated_text)
             if moved_destination != destination:
-                await self._session.rm(destination)
+                await self._session.rm(destination, user=self._user)
             moved_display_path = moved_relative_path.as_posix()
             return ApplyPatchResult(
                 output=f"Updated {display_path}\nMoved {display_path} to {moved_display_path}"
