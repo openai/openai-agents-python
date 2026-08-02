@@ -432,7 +432,13 @@ async def _finalize_streamed_final_output(
     items: list[RunItem],
     response_id: str | None,
     store_setting: bool | None,
+    persist_before_output_guardrails: bool,
 ) -> None:
+    if persist_before_output_guardrails:
+        # A resumed approval has already committed the tool side effect, so keep its call/output
+        # pair even when an agent output guardrail blocks delivery of the final result.
+        await save_items(items, response_id, store_setting)
+
     output_guardrail_results = await _run_output_guardrails_for_stream(
         agent=agent,
         run_config=run_config,
@@ -444,7 +450,8 @@ async def _finalize_streamed_final_output(
     streamed_result.final_output = output
     streamed_result.is_complete = True
 
-    await save_items(items, response_id, store_setting)
+    if not persist_before_output_guardrails:
+        await save_items(items, response_id, store_setting)
 
     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
 
@@ -923,6 +930,7 @@ async def start_streaming(
                             items=list(turn_session_items),
                             response_id=turn_result.model_response.response_id,
                             store_setting=store_setting,
+                            persist_before_output_guardrails=True,
                         )
                         break
 
@@ -1236,6 +1244,7 @@ async def start_streaming(
                         items=turn_session_items,
                         response_id=turn_result.model_response.response_id,
                         store_setting=store_setting,
+                        persist_before_output_guardrails=False,
                     )
                     break
                 elif isinstance(turn_result.next_step, NextStepInterruption):

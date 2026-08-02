@@ -1985,6 +1985,96 @@ async def test_streaming_resume_with_session_does_not_duplicate_items():
     assert output_count == 1
 
 
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.parametrize("tripwire", [False, True], ids=["passes", "trips"])
+@pytest.mark.asyncio
+async def test_resumed_approved_tool_final_persists_call_output_before_output_guardrails(
+    mode: str,
+    tripwire: bool,
+) -> None:
+    guardrail_state = {"tripwire": tripwire}
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool() -> str:
+        return "approved-result"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=guardrail_state["tripwire"],
+        )
+
+    model = FakeModel()
+    model.set_next_output([get_function_tool_call("approval_tool", "{}", call_id="call-approved")])
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[approval_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = SimpleListSession()
+
+    async def run_once(input_value: Any) -> Any:
+        if mode == "non_streamed":
+            return await Runner.run(agent, input_value, session=session)
+        result = Runner.run_streamed(agent, input_value, session=session)
+        await consume_stream(result)
+        return result
+
+    first = await run_once("Use approval_tool")
+    assert first.interruptions
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    if tripwire:
+        with pytest.raises(OutputGuardrailTripwireTriggered):
+            await run_once(state)
+    else:
+        resumed = await run_once(state)
+        assert resumed.final_output == "approved-result"
+
+    saved_items = await session.get_items()
+    saved_types = [
+        item.get("type") or item.get("role") for item in saved_items if isinstance(item, dict)
+    ]
+    assert saved_types == ["user", "function_call", "function_call_output"]
+    saved_tool_items = [
+        item
+        for item in saved_items
+        if isinstance(item, dict) and item.get("type") in {"function_call", "function_call_output"}
+    ]
+    assert [(item.get("type"), item.get("call_id")) for item in saved_tool_items] == [
+        ("function_call", "call-approved"),
+        ("function_call_output", "call-approved"),
+    ]
+    assert saved_tool_items[1].get("output") == "approved-result"
+
+    if tripwire:
+        guardrail_state["tripwire"] = False
+        model.set_next_output([get_text_message("done")])
+        next_result = await run_once("Continue")
+        assert next_result.final_output == "done"
+
+        model_input = model.last_turn_args["input"]
+        assert isinstance(model_input, list)
+        replayed_tool_items = [
+            item
+            for item in model_input
+            if isinstance(item, dict)
+            and item.get("type") in {"function_call", "function_call_output"}
+        ]
+        assert [(item.get("type"), item.get("call_id")) for item in replayed_tool_items] == [
+            ("function_call", "call-approved"),
+            ("function_call_output", "call-approved"),
+        ]
+        assert replayed_tool_items[1].get("output") == "approved-result"
+
+
 @pytest.mark.asyncio
 async def test_streaming_resume_preserves_filtered_model_input_after_handoff():
     model = FakeModel()
