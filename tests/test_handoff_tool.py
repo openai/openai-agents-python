@@ -587,3 +587,18 @@ async def test_handoff_lenient_json_allows_type_coercion():
     assert result.name == "Alice"
     assert result.age == 25
     assert isinstance(result.age, int)
+
+
+@pytest.mark.parametrize("tool_name", ["my tool!", "выборка", "x" * 65])
+def test_handoff_rejects_invalid_explicit_tool_name(tool_name: str) -> None:
+    with pytest.raises(UserError, match="Invalid function tool name"):
+        handoff(Agent(name="test"), tool_name_override=tool_name)
+
+
+def test_handoff_shortens_over_long_derived_tool_name(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        obj = handoff(Agent(name="A" * 100))
+
+    assert len(obj.tool_name) == 64
+    assert obj.tool_name.startswith("transfer_to_a")
+    assert "exceeds the 64 character limit" in caplog.text

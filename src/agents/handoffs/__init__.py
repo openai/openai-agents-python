@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeAlias, cast, overload
 from pydantic import TypeAdapter
 from typing_extensions import TypeVar
 
+from .._tool_identity import validate_function_tool_name
 from ..exceptions import ModelBehaviorError, UserError
 from ..items import RunItem, TResponseInputItem
 from ..run_context import RunContextWrapper, TContext
@@ -168,6 +169,13 @@ class Handoff(Generic[TContext, TAgent]):
         default=None, init=False, repr=False
     )
     """Weak reference to the target agent when constructed via `handoff()`."""
+
+    def __post_init__(self) -> None:
+        # A handoff reaches the model as a function tool, so its name has the same API
+        # constraints. Validate here so an explicit tool_name_override is attributed to the
+        # handoff definition instead of surfacing later as an opaque provider-side 400.
+        # Names derived from the agent name arrive already sanitized.
+        validate_function_tool_name(self.tool_name)
 
     def get_transfer_message(self, agent: AgentBase[Any]) -> str:
         return json.dumps({"assistant": agent.name})
