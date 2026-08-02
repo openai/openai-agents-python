@@ -381,6 +381,20 @@ def function_schema(
     fields: dict[str, Any] = {}
 
     for name, param in filtered_params:
+        # Pydantic reserves leading-underscore attribute names for private attributes and refuses
+        # them as field names, so `create_model` below would fail with a NameError raised deep in
+        # pydantic internals. Detect it here so the error names the tool and the parameter. Only
+        # model-visible params are checked: a leading-underscore context param (e.g. `_ctx`) was
+        # already filtered out above and never becomes a field.
+        if name.startswith("_"):
+            suggestion = name.lstrip("_")
+            rename = f"Rename it to {suggestion!r}" if suggestion else "Rename it"
+            raise UserError(
+                f"Function tool {func_name!r} has a parameter named {name!r}. Tool parameter "
+                "names cannot start with an underscore, because they are exposed to the model as "
+                f"JSON schema properties. {rename}, or exclude it from the tool signature."
+            )
+
         ann = type_hints.get(name, param.annotation)
         default = param.default
 

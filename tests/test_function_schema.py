@@ -399,6 +399,59 @@ def test_run_context_in_non_first_position_raises_value_error():
         function_schema(func, use_docstring_info=False)
 
 
+def test_leading_underscore_param_raises_user_error():
+    # Pydantic cannot use a leading-underscore name as a field, so function_schema() should
+    # raise a UserError naming the tool and the parameter instead of letting a NameError
+    # escape from pydantic internals.
+    def read_config(_path: str, verbose: bool = False) -> str:
+        return _path
+
+    with pytest.raises(UserError) as exc_info:
+        function_schema(read_config, use_docstring_info=False)
+
+    message = str(exc_info.value)
+    assert "read_config" in message
+    assert "_path" in message
+    assert "'path'" in message
+
+
+def test_bare_underscore_param_raises_user_error():
+    # A bare `_` has no sensible rename target, so the message omits the suggestion but must
+    # still be a UserError rather than a pydantic NameError.
+    def ping(_: str) -> str:
+        return "pong"
+
+    with pytest.raises(UserError) as exc_info:
+        function_schema(ping, use_docstring_info=False)
+
+    assert "ping" in str(exc_info.value)
+
+
+def test_leading_underscore_var_args_raise_user_error():
+    # Variadic params become fields too, so `*_args` / `**_kwargs` hit the same pydantic limit.
+    def var_positional(*_args: int) -> int:
+        return 0
+
+    def var_keyword(**_kwargs: int) -> int:
+        return 0
+
+    for func in (var_positional, var_keyword):
+        with pytest.raises(UserError):
+            function_schema(func, use_docstring_info=False)
+
+
+def test_leading_underscore_context_param_is_allowed():
+    # `_ctx` is a common convention for an unused context param. It is filtered out before the
+    # pydantic model is built, so it must keep working.
+    def func(_ctx: RunContextWrapper, city: str) -> str:
+        return city
+
+    schema = function_schema(func, use_docstring_info=False)
+
+    assert schema.takes_context is True
+    assert set(schema.params_json_schema.get("properties", {}).keys()) == {"city"}
+
+
 def test_var_positional_tuple_annotation():
     # When a function has a var-positional parameter annotated with a tuple type,
     # function_schema() should convert it into a field with type List[<tuple-element>].
