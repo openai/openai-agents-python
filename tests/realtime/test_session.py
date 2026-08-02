@@ -1094,6 +1094,12 @@ class MockRealtimeModel(RealtimeModel):
         elif isinstance(event, RealtimeModelSendInterrupt):
             self.interrupts_called += 1
 
+    async def _send_event_if(self, event, send_if):
+        if not send_if():
+            return False
+        await self.send_event(event)
+        return True
+
     async def close(self):
         self.close_called = True
 
@@ -3909,6 +3915,49 @@ class TestGuardrailFunctionality:
         release_feedback_send.set()
         await self._wait_for_guardrail_tasks(session)
 
+        assert model.sent_messages == []
+
+    @pytest.mark.asyncio
+    async def test_output_text_guardrail_skips_feedback_without_atomic_model_send(
+        self, mock_agent, triggered_guardrail
+    ):
+        class CustomModelWithoutAtomicSend(MockRealtimeModel):
+            def __init__(self):
+                super().__init__()
+                self.feedback_send_started = False
+
+            async def send_event(self, event):
+                if isinstance(event, RealtimeModelSendUserInput):
+                    self.feedback_send_started = True
+                    await asyncio.sleep(0)
+                await super().send_event(event)
+
+            async def _send_event_if(self, event, send_if):
+                return await RealtimeModel._send_event_if(self, event, send_if)
+
+        model = CustomModelWithoutAtomicSend()
+        session = RealtimeSession(
+            model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [triggered_guardrail],
+                "guardrails_settings": {"debounce_text_length": 5},
+            },
+        )
+
+        await session.on_event(RealtimeModelTurnStartedEvent(response_id="response_1"))
+        await session.on_event(
+            RealtimeModelOutputTextDeltaEvent(
+                item_id="item_1",
+                delta="hello",
+                response_id="response_1",
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        assert any(isinstance(event, RealtimeModelSendInterrupt) for event in model.sent_events)
+        assert model.feedback_send_started is False
         assert model.sent_messages == []
 
     @pytest.mark.asyncio
