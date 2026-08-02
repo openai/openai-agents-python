@@ -13,10 +13,12 @@ from griffe import Docstring, DocstringSectionKind  # type: ignore[import-untype
 from pydantic import BaseModel, Field, create_model
 from pydantic.fields import FieldInfo
 
+from ._tool_identity import is_api_safe_function_tool_name
 from .exceptions import UserError
 from .run_context import RunContextWrapper
 from .strict_schema import ensure_strict_json_schema
 from .tool_context import ToolContext
+from .util._transforms import transform_string_function_style
 
 
 @dataclass
@@ -344,6 +346,12 @@ def function_schema(
 
     # Ensure name_override takes precedence even if docstring info is disabled.
     func_name = name_override or (doc_info.name if doc_info else func.__name__)
+
+    if name_override is None and not is_api_safe_function_tool_name(func_name):
+        # A name we derived ourselves (`<lambda>`, a unicode or over-long `__name__`) gets
+        # sanitized like other derived names. An explicit name_override is rejected instead,
+        # in FunctionTool.__post_init__, since the caller can fix it at the source.
+        func_name = transform_string_function_style(func_name)
 
     # 2. Inspect function signature and get type hints
     sig = inspect.signature(func)

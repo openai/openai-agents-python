@@ -18,16 +18,41 @@ FunctionToolLookupKey = (
 NamedToolLookupKey = FunctionToolLookupKey | str
 
 
+MAX_FUNCTION_TOOL_NAME_LENGTH = 64
+
+
+def is_api_safe_function_tool_name(name: str, *, allow_dots: bool = False) -> bool:
+    """Return True when a tool name matches the model API's function-name constraints."""
+    allowed_punctuation = {"_", "-", "."} if allow_dots else {"_", "-"}
+    return 1 <= len(name) <= MAX_FUNCTION_TOOL_NAME_LENGTH and all(
+        char.isascii() and (char.isalnum() or char in allowed_punctuation) for char in name
+    )
+
+
 def validate_function_tool_fallback_name(name: str) -> str:
     """Return an API-safe generated tool name or require an explicit override."""
-    if 1 <= len(name) <= 64 and all(
-        char.isascii() and (char.isalnum() or char in {"_", "-"}) for char in name
-    ):
+    if is_api_safe_function_tool_name(name):
         return name
     raise UserError(
         f"Cannot derive a function tool name from callable class {name!r}. Generated names must "
         "contain only ASCII letters, digits, underscores, or hyphens and be at most 64 "
         "characters. Pass name_override to function_tool()."
+    )
+
+
+def validate_function_tool_name(name: str) -> None:
+    """Reject a configured tool name the model API will not accept.
+
+    Dots are allowed here but not in `validate_function_tool_fallback_name`: a dotted name is
+    the supported wire shape for a qualified top-level tool (see `tool_qualified_name`), so it
+    is only ever legitimate when a caller asked for it explicitly.
+    """
+    if is_api_safe_function_tool_name(name, allow_dots=True):
+        return
+    raise UserError(
+        f"Invalid function tool name {name!r}. Tool names must contain only ASCII letters, "
+        "digits, underscores, hyphens, or dots, and be between 1 and "
+        f"{MAX_FUNCTION_TOOL_NAME_LENGTH} characters."
     )
 
 

@@ -41,3 +41,30 @@ def test_transform_string_function_style_does_not_warn_for_case_only_changes(
         assert transform_string_function_style(name) == transformed
 
     assert caplog.records == []
+
+
+def test_transform_string_function_style_shortens_over_long_names(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        transformed = transform_string_function_style("a" * 100)
+
+    assert len(transformed) == 64
+    assert transformed.startswith("a" * 55)
+    assert "exceeds the 64 character limit" in caplog.text
+
+
+def test_transform_string_function_style_shortening_is_deterministic_and_unique() -> None:
+    first = transform_string_function_style("a" * 100)
+    assert transform_string_function_style("a" * 100) == first
+    # Names sharing a 64-char prefix must not collide after shortening.
+    assert transform_string_function_style("a" * 100 + "b") != first
+
+
+def test_transform_string_function_style_leaves_names_at_the_limit_alone(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        assert transform_string_function_style("a" * 64) == "a" * 64
+
+    assert caplog.records == []

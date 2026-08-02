@@ -8,8 +8,11 @@ and tool-output trimmer code paths.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
+from agents import FunctionTool, function_tool
 from agents._tool_identity import (
     deserialize_function_tool_lookup_key,
     get_function_tool_lookup_key,
@@ -165,3 +168,62 @@ def test_validate_function_tool_namespace_shape_rejects_synthetic() -> None:
     # The reserved synthetic shape (name == namespace) is rejected.
     with pytest.raises(UserError, match="reserves the synthetic namespace"):
         validate_function_tool_namespace_shape("search", "search")
+
+
+class TestFunctionToolNameValidation:
+    """Explicit tool names are rejected; derived names are sanitized instead."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "my tool!",  # space and punctuation
+            "выборка",  # non-ASCII
+            "x" * 65,  # over the 64 character API limit
+        ],
+    )
+    def test_explicit_name_is_rejected(self, name: str) -> None:
+        with pytest.raises(UserError, match="Invalid function tool name"):
+
+            @function_tool(name_override=name)
+            def f(a: str) -> str:
+                """F."""
+                return a
+
+    def test_function_tool_dataclass_rejects_explicit_name(self) -> None:
+        async def on_invoke(ctx: Any, args: str) -> str:
+            return "ok"
+
+        with pytest.raises(UserError, match="Invalid function tool name"):
+            FunctionTool(
+                name="my tool!",
+                description="d",
+                params_json_schema={"type": "object", "properties": {}},
+                on_invoke_tool=on_invoke,
+            )
+
+    @pytest.mark.parametrize("name", ["search", "search-v2", "tools.search", "a" * 64])
+    def test_valid_explicit_names_pass(self, name: str) -> None:
+        @function_tool(name_override=name)
+        def f(a: str) -> str:
+            """F."""
+            return a
+
+        assert f.name == name
+
+    def test_derived_lambda_name_is_sanitized_not_rejected(self) -> None:
+        assert function_tool(lambda: "ok").name == "_lambda_"
+
+    def test_derived_over_long_name_is_shortened(self) -> None:
+        namespace: dict[str, Any] = {}
+        exec("def " + "b" * 100 + '(a: str) -> str:\n    """F."""\n    return a', namespace)
+
+        name = function_tool(namespace["b" * 100]).name
+        assert len(name) == 64
+        assert name.startswith("b" * 55)
+
+    def test_valid_derived_name_is_untouched(self) -> None:
+        def MyTool(a: str) -> str:  # noqa: N802 - case must survive sanitization
+            """F."""
+            return a
+
+        assert function_tool(MyTool).name == "MyTool"

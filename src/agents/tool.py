@@ -59,6 +59,7 @@ from ._tool_identity import (
     tool_qualified_name,
     validate_function_tool_fallback_name,
     validate_function_tool_lookup_configuration,
+    validate_function_tool_name,
     validate_function_tool_namespace_shape,
 )
 from .computer import AsyncComputer, Computer
@@ -577,6 +578,9 @@ class FunctionTool:
     __wrapped__ = _FunctionToolWrappedCallableDescriptor()
 
     def __post_init__(self):
+        # Validate before anything else so a name the API will reject is reported against the
+        # tool definition instead of surfacing later as an opaque provider-side 400.
+        validate_function_tool_name(self.name)
         self.allowed_callers = _normalize_tool_allowed_callers(
             self.allowed_callers,
             tool_name=self.qualified_name,
