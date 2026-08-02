@@ -249,16 +249,24 @@ class ModelSettings:
             and getattr(override, field.name, None) is not None
         }
 
-        # Handle extra_args merging specially - merge dictionaries instead of replacing.
-        if (override_fields is None or "extra_args" in override_fields) and (
-            self.extra_args is not None or override.extra_args is not None
+        # Handle dictionary fields merging - merge dictionaries instead of replacing.
+        for dict_field_name in (
+            "extra_args",
+            "extra_headers",
+            "extra_query",
+            "extra_body",
+            "metadata",
         ):
-            merged_args = {}
-            if self.extra_args:
-                merged_args.update(self.extra_args)
-            if override.extra_args:
-                merged_args.update(override.extra_args)
-            changes["extra_args"] = merged_args if merged_args else None
+            if override_fields is None or dict_field_name in override_fields:
+                self_val = getattr(self, dict_field_name, None)
+                override_val = getattr(override, dict_field_name, None)
+                if self_val is not None or override_val is not None:
+                    merged_dict = {}
+                    if self_val:
+                        merged_dict.update(self_val)
+                    if override_val:
+                        merged_dict.update(override_val)
+                    changes[dict_field_name] = merged_dict if merged_dict else None
 
         if (override_fields is None or "retry" in override_fields) and (
             self.retry is not None or override.retry is not None

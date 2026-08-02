@@ -256,6 +256,31 @@ def test_extra_args_resolve_both_none() -> None:
     assert resolved.top_p == 0.9
 
 
+def test_dictionary_fields_resolve() -> None:
+    """Test that dictionary fields (metadata, extra_headers, extra_query, extra_body)
+    are merged in resolve.
+    """
+    base_settings = ModelSettings(
+        metadata={"k1": "v1", "k2": "v2_base"},
+        extra_headers={"h1": "v1", "h2": "v2_base"},
+        extra_query={"q1": "v1", "q2": "v2_base"},
+        extra_body={"b1": "v1", "b2": "v2_base"},
+    )
+    override_settings = ModelSettings(
+        metadata={"k2": "v2_override", "k3": "v3"},
+        extra_headers={"h2": "v2_override", "h3": "v3"},
+        extra_query={"q2": "v2_override", "q3": "v3"},
+        extra_body={"b2": "v2_override", "b3": "v3"},
+    )
+
+    resolved = base_settings.resolve(override_settings)
+
+    assert resolved.metadata == {"k1": "v1", "k2": "v2_override", "k3": "v3"}
+    assert resolved.extra_headers == {"h1": "v1", "h2": "v2_override", "h3": "v3"}
+    assert resolved.extra_query == {"q1": "v1", "q2": "v2_override", "q3": "v3"}
+    assert resolved.extra_body == {"b1": "v1", "b2": "v2_override", "b3": "v3"}
+
+
 def test_pydantic_serialization() -> None:
     """Tests whether ModelSettings can be serialized with Pydantic."""
 
