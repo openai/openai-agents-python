@@ -76,6 +76,24 @@ def test_tool_call_output_item_mixed_list() -> None:
     assert items[2]["type"] == "input_file" and items[2]["file_data"] == "ZmlsZS1kYXRh"
 
 
+def test_tool_call_output_item_generator() -> None:
+    call = _make_tool_call()
+    outputs = (
+        item
+        for item in (
+            ToolOutputText(text="a"),
+            {"type": "image", "image_url": "http://example/img.png"},
+        )
+    )
+
+    payload = ItemHelpers.tool_call_output_item(call, outputs)
+
+    assert payload["output"] == [
+        {"type": "input_text", "text": "a"},
+        {"type": "input_image", "image_url": "http://example/img.png"},
+    ]
+
+
 def test_tool_call_output_item_image_forwards_file_id_and_detail() -> None:
     """Ensure image outputs forward provided file_id and detail fields."""
     call = _make_tool_call()

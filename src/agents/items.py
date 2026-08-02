@@ -3,7 +3,7 @@ from __future__ import annotations
 import abc
 import json
 import weakref
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar, cast
 
@@ -905,9 +905,15 @@ class ItemHelpers:
     ) -> ResponseFunctionCallOutputItemListParam | None:
         """Convert known structured tool outputs without stringifying other values."""
 
-        # If the output is either a single or list of the known structured output types, convert to
-        # ResponseFunctionCallOutputItemListParam.
-        if isinstance(output, list | tuple):
+        maybe_converted_output = cls._maybe_get_output_as_structured_function_output(output)
+        if maybe_converted_output is not None:
+            return [cls._convert_single_tool_output_pydantic_model(maybe_converted_output)]
+
+        # Convert iterables of known structured output types without treating strings, mappings,
+        # or unrelated Pydantic models as collections of output items.
+        if isinstance(output, Iterable) and not isinstance(
+            output, str | bytes | bytearray | Mapping | BaseModel
+        ):
             maybe_converted_output_list = [
                 cls._maybe_get_output_as_structured_function_output(item) for item in output
             ]
@@ -922,9 +928,6 @@ class ItemHelpers:
                 ]
             return None
 
-        maybe_converted_output = cls._maybe_get_output_as_structured_function_output(output)
-        if maybe_converted_output:
-            return [cls._convert_single_tool_output_pydantic_model(maybe_converted_output)]
         return None
 
     @classmethod
