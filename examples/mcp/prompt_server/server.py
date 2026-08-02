@@ -1,12 +1,12 @@
 import os
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 STREAMABLE_HTTP_HOST = os.getenv("STREAMABLE_HTTP_HOST", "127.0.0.1")
 STREAMABLE_HTTP_PORT = int(os.getenv("STREAMABLE_HTTP_PORT", "18080"))
 
 # Create server
-mcp = FastMCP("Prompt Server", host=STREAMABLE_HTTP_HOST, port=STREAMABLE_HTTP_PORT)
+mcp = MCPServer("Prompt Server")
 
 
 # Instruction-generating prompts (user-controlled)
@@ -39,4 +39,8 @@ Use the available tools to check current time if you need timestamps for your an
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    mcp.run(
+        transport="streamable-http",
+        host=STREAMABLE_HTTP_HOST,
+        port=STREAMABLE_HTTP_PORT,
+    )

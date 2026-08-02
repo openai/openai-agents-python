@@ -3,7 +3,6 @@ import time
 from typing import Any, cast
 
 import pytest
-from mcp import Tool as MCPTool
 from openai._models import construct_type
 from openai.types.responses import (
     ResponseCompletedEvent,
@@ -53,6 +52,7 @@ from agents.run_internal.streaming import stream_step_items_to_queue, stream_ste
 
 from .fake_model import FakeModel
 from .mcp.helpers import FakeMCPServer
+from .mcp.model_compat import Tool as MCPTool
 from .test_responses import get_function_tool_call, get_handoff_tool_call, get_text_message
 
 

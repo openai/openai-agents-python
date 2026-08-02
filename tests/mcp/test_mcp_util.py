@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 import pytest
 from inline_snapshot import snapshot
-from mcp.shared.exceptions import McpError
-from mcp.types import CallToolResult, ErrorData, ImageContent, TextContent, Tool as MCPTool
+from mcp import Tool as MCPToolType
+from mcp.types import CallToolResult as CallToolResultType, TextContent
 from pydantic import BaseModel, TypeAdapter
 
 import agents._debug as _debug
@@ -27,9 +27,11 @@ from agents.exceptions import (
     UserError,
 )
 from agents.mcp import MCPServer, MCPUtil
+from agents.mcp._compat import MCPError, tool_input_schema
 from agents.tool_context import ToolContext
 
 from .helpers import FakeMCPServer
+from .model_compat import CallToolResult, ImageContent, Tool as MCPTool, create_mcp_error
 
 
 class Foo(BaseModel):
@@ -668,7 +670,7 @@ async def test_to_function_tool_does_not_reuse_nested_static_mcp_meta():
             tool_name: str,
             arguments: dict[str, Any] | None,
             meta: dict[str, Any] | None = None,
-        ) -> CallToolResult:
+        ) -> CallToolResultType:
             if meta is not None:
                 meta["nested"]["headers"].append("mutated")
             return await super().call_tool(tool_name, arguments, meta=meta)
@@ -864,7 +866,7 @@ class McpErrorFakeMCPServer(FakeMCPServer):
         arguments: dict[str, Any] | None,
         meta: dict[str, Any] | None = None,
     ):
-        raise McpError(ErrorData(code=-32000, message="upstream said SECRET_MCP_123"))
+        raise create_mcp_error(-32000, "upstream said SECRET_MCP_123")
 
 
 @pytest.mark.asyncio
@@ -926,7 +928,7 @@ async def test_mcp_tool_returned_error_redacts_message_when_dont_log_tool_data(
     ctx = RunContextWrapper(context=None)
     tool = MCPTool(name="SECRET_MCP_TOOL_NAME", inputSchema={})
 
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
 
     assert "MCP tool returned an error" in caplog.text
@@ -947,7 +949,7 @@ async def test_mcp_tool_returned_error_includes_message_when_tool_logging_enable
     ctx = RunContextWrapper(context=None)
     tool = MCPTool(name="test_tool_1", inputSchema={})
 
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
 
     assert "SECRET_MCP_123" in caplog.text
@@ -1157,9 +1159,6 @@ async def test_mcp_invocation_mcp_error_reraises(caplog: pytest.LogCaptureFixtur
     """
     caplog.set_level(logging.DEBUG)
 
-    from mcp.shared.exceptions import McpError
-    from mcp.types import ErrorData
-
     class McpErrorFakeMCPServer(FakeMCPServer):
         async def call_tool(
             self,
@@ -1167,7 +1166,7 @@ async def test_mcp_invocation_mcp_error_reraises(caplog: pytest.LogCaptureFixtur
             arguments: dict[str, Any] | None,
             meta: dict[str, Any] | None = None,
         ):
-            raise McpError(ErrorData(code=-32000, message="upstream 422 Unprocessable Entity"))
+            raise create_mcp_error(-32000, "upstream 422 Unprocessable Entity")
 
     server = McpErrorFakeMCPServer()
     server.add_tool("search", {})
@@ -1176,7 +1175,7 @@ async def test_mcp_invocation_mcp_error_reraises(caplog: pytest.LogCaptureFixtur
     tool = MCPTool(name="search", inputSchema={})
 
     # invoke_mcp_tool itself should re-raise McpError
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
     # Warning (not error) should be logged before re-raising
@@ -1388,7 +1387,7 @@ async def test_to_function_tool_legacy_call_callable_policy_requires_approval():
     def require_approval(
         _run_context: RunContextWrapper[Any],
         _agent: Agent,
-        _tool: MCPTool,
+        _tool: MCPToolType,
     ) -> bool:
         return False
 
@@ -1412,7 +1411,7 @@ async def test_to_function_tool_callable_policy_uses_agent_and_tool():
     def require_approval(
         run_context: RunContextWrapper[Any],
         agent: Agent,
-        tool: MCPTool,
+        tool: MCPToolType,
     ) -> bool:
         captured["run_context"] = run_context
         captured["agent"] = agent
@@ -1448,7 +1447,7 @@ async def test_to_function_tool_async_callable_policy_is_awaited():
     async def require_approval(
         _run_context: RunContextWrapper[Any],
         _agent: Agent,
-        tool: MCPTool,
+        tool: MCPToolType,
     ) -> bool:
         await asyncio.sleep(0)
         return tool.name == "async_guarded_tool"
@@ -1841,7 +1840,7 @@ def test_to_function_tool_does_not_mutate_mcp_input_schema():
         "properties": {},
     }
     assert schema == {"type": "object", "description": "Test tool"}
-    assert tool.inputSchema == {"type": "object", "description": "Test tool"}
+    assert tool_input_schema(tool) == {"type": "object", "description": "Test tool"}
 
 
 def test_to_function_tool_failed_strict_conversion_keeps_original_schema():
@@ -1902,7 +1901,7 @@ class StructuredContentTestServer(FakeMCPServer):
         tool_name: str,
         arguments: dict[str, Any] | None,
         meta: dict[str, Any] | None = None,
-    ) -> CallToolResult:
+    ) -> CallToolResultType:
         """Return test result with specified content and structured content."""
         self.tool_calls.append(tool_name)
 

@@ -7,8 +7,6 @@ import json
 from typing import Any, cast
 
 import pytest
-from mcp.shared.exceptions import McpError
-from mcp.types import ErrorData
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from pydantic import BaseModel, Field
@@ -50,6 +48,7 @@ from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEven
 from agents.tool_context import ToolContext
 from tests.fake_model import FakeModel
 from tests.mcp.helpers import FakeMCPServer
+from tests.mcp.model_compat import create_mcp_error
 from tests.test_responses import get_function_tool_call, get_text_message
 from tests.utils.hitl import make_function_tool_call
 
@@ -2292,7 +2291,7 @@ async def test_agent_as_tool_streaming_settles_final_text_after_nested_mcp_failu
         ):
             self.tool_calls.append(tool_name)
             del arguments, meta
-            raise McpError(ErrorData(code=-32000, message="synthetic upstream 422"))
+            raise create_mcp_error(-32000, "synthetic upstream 422")
 
     nested_server: FakeMCPServer
     if server == "cancelled":

@@ -1,11 +1,11 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from mcp.types import ListToolsResult, Tool as MCPTool
 
 from agents.mcp import MCPServerStdio
 
 from .helpers import DummyStreamsContextManager, tee
+from .model_compat import ListToolsResult, Tool as MCPTool
 
 
 @pytest.mark.asyncio

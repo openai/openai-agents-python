@@ -1,7 +1,6 @@
 from typing import Any, cast
 
 import pytest
-from mcp import Tool as MCPTool
 from openai._models import construct_type
 from openai.types.responses import (
     ResponseApplyPatchToolCall,
@@ -45,6 +44,7 @@ from agents.run_internal import run_loop
 from agents.usage import Usage
 from tests.fake_model import FakeModel
 from tests.mcp.helpers import FakeMCPServer
+from tests.mcp.model_compat import Tool as MCPTool
 from tests.test_responses import get_function_tool_call
 from tests.utils.hitl import (
     RecordingEditor,

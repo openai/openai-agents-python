@@ -9,7 +9,6 @@ from mcp.types import (
     GetPromptResult,
     ListPromptsResult,
     ListResourcesResult,
-    ListResourceTemplatesResult,
     ReadResourceResult,
     Tool as MCPTool,
 )
@@ -18,6 +17,8 @@ from agents import _debug
 from agents.mcp import MCPServer, MCPServerManager, manager as manager_module
 from agents.mcp._logging import get_mcp_server_log_name
 from agents.run_context import RunContextWrapper
+
+from .model_compat import ListResourceTemplatesResult
 
 
 class TaskBoundServer(MCPServer):

@@ -1,13 +1,13 @@
 import os
 import random
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 SSE_HOST = os.getenv("SSE_HOST", "127.0.0.1")
 SSE_PORT = int(os.getenv("SSE_PORT", "8000"))
 
 # Create server
-mcp = FastMCP("Echo Server", host=SSE_HOST, port=SSE_PORT)
+mcp = MCPServer("Echo Server")
 
 
 @mcp.tool()
@@ -39,4 +39,4 @@ def get_current_weather(city: str) -> str:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="sse")
+    mcp.run(transport="sse", host=SSE_HOST, port=SSE_PORT)

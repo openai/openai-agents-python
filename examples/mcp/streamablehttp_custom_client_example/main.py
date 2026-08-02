@@ -12,7 +12,7 @@ import subprocess
 import time
 from typing import Any, cast
 
-import httpx
+import httpx2
 
 from agents import Agent, Runner, gen_trace_id, trace
 from agents.mcp import MCPServer, MCPServerStreamableHttp
@@ -38,9 +38,9 @@ STREAMABLE_HTTP_URL = f"http://{STREAMABLE_HTTP_HOST}:{STREAMABLE_HTTP_PORT}/mcp
 
 def create_custom_http_client(
     headers: dict[str, str] | None = None,
-    timeout: httpx.Timeout | None = None,
-    auth: httpx.Auth | None = None,
-) -> httpx.AsyncClient:
+    timeout: httpx2.Timeout | None = None,
+    auth: httpx2.Auth | None = None,
+) -> httpx2.AsyncClient:
     """Create a custom HTTP client with specific configurations.
 
     This function demonstrates how to configure:
@@ -55,14 +55,14 @@ def create_custom_http_client(
             "User-Agent": "OpenAI-Agents-MCP/1.0",
         }
     if timeout is None:
-        timeout = httpx.Timeout(60.0, read=120.0)
+        timeout = httpx2.Timeout(60.0, read=120.0)
     if auth is None:
         auth = None
-    return httpx.AsyncClient(
+    return httpx2.AsyncClient(
         # Disable SSL verification for testing (not recommended for production)
         verify=False,
         # Set custom timeout
-        timeout=httpx.Timeout(60.0, read=120.0),
+        timeout=httpx2.Timeout(60.0, read=120.0),
         # Add custom headers that will be sent with every request
         headers=headers,
     )

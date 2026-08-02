@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import asyncio
 import inspect
+import json
 import math
 import sys
 from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -17,16 +18,9 @@ import httpx
 if sys.version_info < (3, 11):
     from exceptiongroup import BaseExceptionGroup  # pyright: ignore[reportMissingImports]
 from anyio import ClosedResourceError
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
 from mcp.client.session import MessageHandlerFnT
 from mcp.client.sse import sse_client
-from mcp.client.streamable_http import (
-    GetSessionIdCallback,
-    StreamableHTTPTransport,
-    streamablehttp_client,
-)
-from mcp.shared.exceptions import McpError
 from mcp.shared.message import SessionMessage
 from mcp.types import (
     CallToolResult,
@@ -52,6 +46,30 @@ from ..logger import (
 from ..run_context import RunContextWrapper
 from ..tool import ToolErrorFunction
 from ..util._types import MaybeAwaitable
+from ._compat import (
+    HTTP_CONNECT_ERROR_TYPES,
+    HTTP_ERROR_TYPES,
+    HTTP_INVALID_URL_TYPES,
+    HTTP_REQUEST_ERROR_TYPES,
+    HTTP_STATUS_ERROR_TYPES,
+    HTTP_TIMEOUT_ERROR_TYPES,
+    MCP_HTTPX,
+    MCP_V2,
+    MCPError,
+    clear_result_next_cursor,
+    create_v2_client,
+    http_reason_phrase,
+    http_status_code,
+    is_http_connect_error,
+    is_http_request_error,
+    is_http_status_error,
+    is_http_timeout_error,
+    is_mcp_timeout_error,
+    resource_uri,
+    result_next_cursor,
+    streamable_http_client_v2,
+    tool_input_schema,
+)
 from ._logging import get_mcp_server_log_message, get_mcp_server_log_name
 from .util import (
     HttpClientFactory,
@@ -103,12 +121,19 @@ else:
 
 
 T = TypeVar("T")
+GetSessionIdCallback = Callable[[], str | None]
+
+_streamable_http_module = __import__(
+    "mcp.client.streamable_http", fromlist=["StreamableHTTPTransport"]
+)
+StreamableHTTPTransport = cast(Any, vars(_streamable_http_module)["StreamableHTTPTransport"])
+streamablehttp_client = vars(_streamable_http_module).get("streamablehttp_client")
 
 _SAFE_EXCEPTION_GROUP_MESSAGE = "MCP request failed with additional errors."
 _SAFE_EXCEPTION_MESSAGE = "An additional error occurred during the MCP request."
 
 
-def _client_session_read_timeout(timeout_seconds: float | None) -> timedelta | None:
+def _client_session_read_timeout(timeout_seconds: float | None) -> timedelta | float | None:
     """Convert an MCP read timeout while intentionally treating zero as no timeout."""
     if timeout_seconds is None:
         return None
@@ -132,21 +157,22 @@ def _client_session_read_timeout(timeout_seconds: float | None) -> timedelta | N
         raise ValueError(
             "client_session_timeout_seconds must fit in a datetime.timedelta."
         ) from error
-    return timeout
+    return timeout_seconds if MCP_V2 else timeout
 
 
 def _transport_error_urls_are_safe(
-    http_error: httpx.HTTPStatusError | httpx.RequestError,
+    http_error: Exception,
 ) -> bool:
     """Return whether one HTTPX exception contains only credential-safe URLs."""
     request_urls: list[str] = []
     try:
-        request_urls.append(str(http_error.request.url))
+        request_urls.append(str(cast(Any, http_error).request.url))
     except RuntimeError:
         pass
 
-    if isinstance(http_error, httpx.HTTPStatusError):
-        for response in [*http_error.response.history, http_error.response]:
+    if is_http_status_error(http_error):
+        original_response = cast(Any, http_error).response
+        for response in [*original_response.history, original_response]:
             try:
                 response_url = response.request.url
             except RuntimeError:
@@ -157,7 +183,7 @@ def _transport_error_urls_are_safe(
             if redirect_location is not None:
                 try:
                     request_urls.append(str(response_url.join(redirect_location)))
-                except (httpx.InvalidURL, ValueError):
+                except HTTP_INVALID_URL_TYPES + (ValueError,):
                     return False
 
     return all(get_mcp_server_log_name(url) == url for url in request_urls)
@@ -165,7 +191,7 @@ def _transport_error_urls_are_safe(
 
 def _safe_transport_cause(http_error: Exception) -> Exception | None:
     """Keep an unchained transport exception only when its HTTPX URLs are credential-safe."""
-    if not isinstance(http_error, httpx.HTTPStatusError | httpx.RequestError):
+    if not _is_http_transport_error(http_error):
         return http_error
 
     if not _transport_error_urls_are_safe(http_error):
@@ -186,8 +212,7 @@ def _first_unsafe_transport_error(http_errors: list[Exception]) -> Exception | N
         (
             error
             for error in http_errors
-            if isinstance(error, httpx.HTTPStatusError | httpx.RequestError)
-            and not _transport_error_urls_are_safe(error)
+            if _is_http_transport_error(error) and not _transport_error_urls_are_safe(error)
         ),
         None,
     )
@@ -200,7 +225,7 @@ def _first_unretainable_transport_error(http_errors: list[Exception]) -> Excepti
 
 def _is_http_transport_error(error: BaseException) -> bool:
     """Return whether an exception is an HTTPX transport error."""
-    return isinstance(error, httpx.HTTPStatusError | httpx.RequestError)
+    return is_http_status_error(error) or is_http_request_error(error)
 
 
 def _credential_safe_exception_group(error_group: BaseExceptionGroup) -> BaseExceptionGroup:
@@ -245,11 +270,11 @@ def _log_transport_warning(message: str, http_error: Exception) -> None:
 
 def _get_cleanup_transport_error_message(http_error: Exception) -> str:
     """Return the cleanup warning message for an HTTPX transport failure."""
-    if isinstance(http_error, httpx.HTTPStatusError):
+    if is_http_status_error(http_error):
         return "HTTP error during cleanup of MCP server"
-    if isinstance(http_error, httpx.ConnectError):
+    if is_http_connect_error(http_error):
         return "Connection error during cleanup of MCP server"
-    if isinstance(http_error, httpx.TimeoutException):
+    if is_http_timeout_error(http_error):
         return "Timeout error during cleanup of MCP server"
     return "Request error during cleanup of MCP server"
 
@@ -261,10 +286,20 @@ def _log_cleanup_transport_warning(message: str) -> None:
 
 def _create_default_streamable_http_client(
     headers: dict[str, str] | None = None,
-    timeout: httpx.Timeout | None = None,
-    auth: httpx.Auth | None = None,
-) -> httpx.AsyncClient:
+    timeout: Any = None,
+    auth: Any = None,
+) -> Any:
     kwargs: dict[str, Any] = {"follow_redirects": False}
+    if MCP_V2:
+        _validate_v2_http_auth(auth)
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        if headers is not None:
+            kwargs["headers"] = headers
+        if auth is not None:
+            kwargs["auth"] = auth
+        return MCP_HTTPX.AsyncClient(**kwargs)
+
     if timeout is not None:
         kwargs["timeout"] = timeout
     if headers is not None:
@@ -274,7 +309,103 @@ def _create_default_streamable_http_client(
     return httpx.AsyncClient(**kwargs)
 
 
-class _InitializedNotificationTolerantStreamableHTTPTransport(StreamableHTTPTransport):
+def _validate_v2_http_auth(auth: Any) -> None:
+    if auth is None or isinstance(auth, MCP_HTTPX.Auth):
+        return
+    raise UserError(
+        "MCP Python SDK v2 requires auth to be an httpx2.Auth instance. "
+        "Use httpx2 authentication, configure an Authorization header, or pin mcp<2."
+    )
+
+
+def _validated_v2_http_client_factory(factory: Callable[..., Any]) -> Callable[..., Any]:
+    def create_client(
+        headers: dict[str, str] | None = None,
+        timeout: Any = None,
+        auth: Any = None,
+    ) -> Any:
+        _validate_v2_http_auth(auth)
+        client = factory(headers=headers, timeout=timeout, auth=auth)
+        if not isinstance(client, MCP_HTTPX.AsyncClient):
+            raise UserError(
+                "MCP Python SDK v2 requires httpx_client_factory to return an "
+                "httpx2.AsyncClient. Use an httpx2 factory or pin mcp<2."
+            )
+        return client
+
+    return create_client
+
+
+def _jsonrpc_request_method(request: Any) -> str | None:
+    try:
+        payload = json.loads(request.content)
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    method = payload.get("method")
+    return method if isinstance(method, str) else None
+
+
+def _configure_v2_session_id_hook(
+    client: Any,
+    *,
+    on_session_id: Callable[[str], None] | None,
+) -> None:
+    async def handle_response(response: Any) -> None:
+        method = _jsonrpc_request_method(response.request)
+        if (
+            on_session_id is not None
+            and method == "initialize"
+            and 200 <= response.status_code < 300
+        ):
+            session_id = response.headers.get("mcp-session-id")
+            if session_id:
+                on_session_id(session_id)
+
+    client.event_hooks.setdefault("response", []).insert(0, handle_response)
+
+
+@asynccontextmanager
+async def _streamablehttp_client_v2(
+    url: str,
+    *,
+    headers: dict[str, str] | None,
+    timeout: float | timedelta,  # noqa: ASYNC109
+    sse_read_timeout: float | timedelta,
+    terminate_on_close: bool,
+    httpx_client_factory: Callable[..., Any],
+    auth: Any,
+    on_session_id: Callable[[str], None] | None,
+) -> AsyncGenerator[MCPStreamTransport, None]:
+    timeout_seconds = timeout.total_seconds() if isinstance(timeout, timedelta) else timeout
+    sse_read_timeout_seconds = (
+        sse_read_timeout.total_seconds()
+        if isinstance(sse_read_timeout, timedelta)
+        else sse_read_timeout
+    )
+    factory = _validated_v2_http_client_factory(httpx_client_factory)
+    client = factory(
+        headers=headers,
+        timeout=MCP_HTTPX.Timeout(timeout_seconds, read=sse_read_timeout_seconds),
+        auth=auth,
+    )
+    _configure_v2_session_id_hook(
+        client,
+        on_session_id=on_session_id,
+    )
+    async with client:
+        async with streamable_http_client_v2(
+            url,
+            http_client=client,
+            terminate_on_close=terminate_on_close,
+        ) as streams:
+            yield streams
+
+
+class _InitializedNotificationTolerantStreamableHTTPTransport(
+    StreamableHTTPTransport  # type: ignore[misc, valid-type]
+):
     async def _handle_post_request(self, ctx: Any) -> None:
         message = ctx.session_message.message
         if not self._is_initialized_notification(message):
@@ -283,7 +414,7 @@ class _InitializedNotificationTolerantStreamableHTTPTransport(StreamableHTTPTran
 
         try:
             await super()._handle_post_request(ctx)
-        except httpx.HTTPError as exc:
+        except HTTP_ERROR_TYPES as exc:
             _log_transport_warning(
                 "Ignoring initialized notification HTTP failure",
                 exc,
@@ -302,7 +433,7 @@ async def _streamablehttp_client_with_transport(
     terminate_on_close: bool = True,
     httpx_client_factory: HttpClientFactory = _create_default_streamable_http_client,
     auth: httpx.Auth | None = None,
-    transport_factory: Callable[[str], StreamableHTTPTransport] = StreamableHTTPTransport,
+    transport_factory: Callable[[str], Any] = StreamableHTTPTransport,
 ) -> AsyncGenerator[MCPStreamTransport, None]:
     timeout_seconds = timeout.total_seconds() if isinstance(timeout, timedelta) else timeout
     sse_read_timeout_seconds = (
@@ -361,6 +492,12 @@ async def _streamablehttp_client_with_transport(
                 await write_stream.aclose()
 
 
+def _require_streamablehttp_client_v1() -> Callable[..., Any]:
+    if streamablehttp_client is None:  # pragma: no cover - guarded by MCP major
+        raise RuntimeError("The legacy streamable HTTP client requires MCP Python SDK v1.")
+    return cast(Callable[..., Any], streamablehttp_client)
+
+
 class _SharedSessionRequestNeedsIsolation(Exception):
     """Raised when a shared-session request should be retried on an isolated session."""
 
@@ -379,17 +516,7 @@ if TYPE_CHECKING:
     from ..agent import AgentBase
 
 
-MCPStreamTransport = (
-    tuple[
-        MemoryObjectReceiveStream[SessionMessage | Exception],
-        MemoryObjectSendStream[SessionMessage],
-    ]
-    | tuple[
-        MemoryObjectReceiveStream[SessionMessage | Exception],
-        MemoryObjectSendStream[SessionMessage],
-        GetSessionIdCallback | None,
-    ]
-)
+MCPStreamTransport = tuple[Any, Any] | tuple[Any, Any, GetSessionIdCallback | None]
 
 
 class MCPServer(abc.ABC):
@@ -506,14 +633,15 @@ class MCPServer(abc.ABC):
 
         Args:
             cursor: An opaque pagination cursor returned in a previous
-                :class:`~mcp.types.ListResourcesResult` as ``nextCursor``.  Pass it
-                here to fetch the next page of results.  ``None`` fetches the first
-                page.
+                :class:`~mcp.types.ListResourcesResult` as ``next_cursor`` under
+                MCP v2 or ``nextCursor`` under MCP v1.  Pass it here to fetch the
+                next page of results.  ``None`` fetches the first page.
 
         Returns a :class:`~mcp.types.ListResourcesResult`.  When the result contains
-        a ``nextCursor`` field, call this method again with that cursor to retrieve
-        the next page.  Subclasses that do not support resources may leave this
-        unimplemented; it will raise :exc:`NotImplementedError` at call time.
+        a ``next_cursor`` field under MCP v2 or ``nextCursor`` under MCP v1, call
+        this method again with that cursor to retrieve the next page.  Subclasses
+        that do not support resources may leave this unimplemented; it will raise
+        :exc:`NotImplementedError` at call time.
         """
         raise NotImplementedError(
             f"MCP server '{self._error_name}' does not support list_resources. "
@@ -527,15 +655,15 @@ class MCPServer(abc.ABC):
 
         Args:
             cursor: An opaque pagination cursor returned in a previous
-                :class:`~mcp.types.ListResourceTemplatesResult` as ``nextCursor``.
-                Pass it here to fetch the next page of results.  ``None`` fetches
-                the first page.
+                :class:`~mcp.types.ListResourceTemplatesResult` as ``next_cursor``
+                under MCP v2 or ``nextCursor`` under MCP v1.  Pass it here to fetch
+                the next page of results.  ``None`` fetches the first page.
 
         Returns a :class:`~mcp.types.ListResourceTemplatesResult`.  When the result
-        contains a ``nextCursor`` field, call this method again with that cursor to
-        retrieve the next page.  Subclasses that do not support resource templates
-        may leave this unimplemented; it will raise :exc:`NotImplementedError` at
-        call time.
+        contains a ``next_cursor`` field under MCP v2 or ``nextCursor`` under MCP
+        v1, call this method again with that cursor to retrieve the next page.
+        Subclasses that do not support resource templates may leave this
+        unimplemented; it will raise :exc:`NotImplementedError` at call time.
         """
         raise NotImplementedError(
             f"MCP server '{self._error_name}' does not support list_resource_templates. "
@@ -793,6 +921,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self.tool_filter = tool_filter
         self._serialize_session_requests = False
         self._get_session_id: GetSessionIdCallback | None = None
+        self._v2_session_id: str | None = None
 
     async def _maybe_serialize_request(self, func: Callable[[], Awaitable[T]]) -> T:
         if not self._serialize_session_requests:
@@ -927,7 +1056,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     def _extract_http_errors_from_exception(self, e: BaseException) -> list[Exception]:
         """Extract all HTTP errors from an exception or nested ExceptionGroup."""
-        if isinstance(e, httpx.HTTPStatusError | httpx.RequestError):
+        if _is_http_transport_error(e):
+            assert isinstance(e, Exception)
             return [e]
 
         if isinstance(e, BaseExceptionGroup):
@@ -947,16 +1077,16 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             return unsafe_http_error
 
         candidates = error.exceptions if isinstance(error, BaseExceptionGroup) else (error,)
-        for error_type in (
-            httpx.HTTPStatusError,
-            httpx.ConnectError,
-            httpx.TimeoutException,
+        for error_types in (
+            HTTP_STATUS_ERROR_TYPES,
+            HTTP_CONNECT_ERROR_TYPES,
+            HTTP_TIMEOUT_ERROR_TYPES,
         ):
             selected_http_error = next(
                 (
                     candidate
                     for candidate in reversed(candidates)
-                    if isinstance(candidate, Exception) and isinstance(candidate, error_type)
+                    if isinstance(candidate, Exception) and isinstance(candidate, error_types)
                 ),
                 None,
             )
@@ -973,18 +1103,18 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     ) -> UserError:
         """Build a UserError from safe HTTP diagnostics."""
         error_message = f"Failed to connect to MCP server '{self._error_name}': "
-        if isinstance(http_error, httpx.HTTPStatusError):
-            error_message += f"HTTP error {http_error.response.status_code}"
+        if is_http_status_error(http_error):
+            error_message += f"HTTP error {http_status_code(http_error)}"
             if include_http_reason_phrase:
-                error_message += f" ({http_error.response.reason_phrase})"
+                error_message += f" ({http_reason_phrase(http_error)})"
 
-        elif isinstance(http_error, httpx.ConnectError):
+        elif is_http_connect_error(http_error):
             error_message += "Could not reach the server."
 
-        elif isinstance(http_error, httpx.TimeoutException):
+        elif is_http_timeout_error(http_error):
             error_message += "Connection timeout."
 
-        elif isinstance(http_error, httpx.RequestError):
+        elif is_http_request_error(http_error):
             error_message += "Request failed."
 
         return UserError(error_message)
@@ -1003,11 +1133,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     ) -> UserError:
         """Build a credential-safe error for an MCP request operation."""
         error_message = f"Failed to {operation} on MCP server '{self._error_name}': "
-        if isinstance(http_error, httpx.HTTPStatusError):
-            error_message += f"HTTP error {http_error.response.status_code}"
-        elif isinstance(http_error, httpx.ConnectError):
+        if is_http_status_error(http_error):
+            error_message += f"HTTP error {http_status_code(http_error)}"
+        elif is_http_connect_error(http_error):
             error_message += "Connection lost. The server may have disconnected."
-        elif isinstance(http_error, httpx.TimeoutException):
+        elif is_http_timeout_error(http_error):
             error_message += "Connection timeout."
         else:
             error_message += "Request failed."
@@ -1023,7 +1153,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         base_error_group: BaseExceptionGroup | None = None
         try:
             return await func()
-        except (httpx.HTTPStatusError, httpx.RequestError) as http_error:
+        except HTTP_STATUS_ERROR_TYPES + HTTP_REQUEST_ERROR_TYPES as http_error:
             transport_error = self._user_error_for_request_operation(operation, http_error)
         except BaseExceptionGroup as error_group:
             http_errors = self._extract_http_errors_from_exception(error_group)
@@ -1066,6 +1196,34 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 backoff = self.retry_backoff_seconds_base * (2 ** (attempts - 1))
                 await asyncio.sleep(backoff)
 
+    @asynccontextmanager
+    async def _client_session_context(self, read_timeout: timedelta | float | None):
+        """Create one initialized or discovered client session for the installed MCP major."""
+        async with AsyncExitStack() as exit_stack:
+            if MCP_V2:
+                v2_timeout = cast(float | None, read_timeout)
+                client = create_v2_client(
+                    self.create_streams(),
+                    read_timeout_seconds=v2_timeout,
+                    message_handler=self.message_handler,
+                )
+                connected_client = await exit_stack.enter_async_context(client)
+                yield connected_client.session
+                return
+
+            transport = await exit_stack.enter_async_context(self.create_streams())
+            read, write, *rest = transport
+            session = await exit_stack.enter_async_context(
+                cast(Any, ClientSession)(
+                    read,
+                    write,
+                    cast(timedelta | None, read_timeout),
+                    message_handler=self.message_handler,
+                )
+            )
+            await session.initialize()
+            yield session
+
     async def connect(self):
         """Connect to the server."""
         read_timeout = _client_session_read_timeout(self.client_session_timeout_seconds)
@@ -1075,24 +1233,25 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         connection_exception: BaseException | None = None
         cleanup_failure: BaseException | None = None
         try:
-            transport = await self.exit_stack.enter_async_context(self.create_streams())
-            # streamablehttp_client returns (read, write, get_session_id)
-            # sse_client returns (read, write)
-
-            read, write, *rest = transport
-            # Capture the session-id callback when present (streamablehttp_client only).
-            self._get_session_id = rest[0] if rest and callable(rest[0]) else None
-
-            session = await self.exit_stack.enter_async_context(
-                ClientSession(
-                    read,
-                    write,
-                    read_timeout,
-                    message_handler=self.message_handler,
+            if MCP_V2:
+                session = await self.exit_stack.enter_async_context(
+                    self._client_session_context(read_timeout)
                 )
-            )
-            server_result = await session.initialize()
-            self.server_initialize_result = server_result
+                self.server_initialize_result = getattr(session, "initialize_result", None)
+            else:
+                v1_read_timeout = cast(timedelta | None, read_timeout)
+                transport = await self.exit_stack.enter_async_context(self.create_streams())
+                read, write, *rest = transport
+                self._get_session_id = rest[0] if rest and callable(rest[0]) else None
+                session = await self.exit_stack.enter_async_context(
+                    cast(Any, ClientSession)(
+                        read,
+                        write,
+                        v1_read_timeout,
+                        message_handler=self.message_handler,
+                    )
+                )
+                self.server_initialize_result = await session.initialize()
             self.session = session
             connection_succeeded = True
         except BaseException as e:
@@ -1106,9 +1265,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     unsafe_http_error = _first_unretainable_transport_error(http_errors)
                     http_error = unsafe_http_error or http_errors[0]
                     connection_cause = _safe_transport_cause(http_error)
-                    maps_safe_error = isinstance(
-                        http_error,
-                        httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException,
+                    maps_safe_error = (
+                        is_http_status_error(http_error)
+                        or is_http_connect_error(http_error)
+                        or is_http_timeout_error(http_error)
                     )
                     if connection_cause is not None and not maps_safe_error:
                         connection_exception = e
@@ -1191,7 +1351,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                         result = await self._list_tools_page(session, cursor)
                         tools.extend(result.tools)
                         seen_cursors.add(cursor)
-                        next_cursor = result.nextCursor
+                        next_cursor = result_next_cursor(result)
                         if next_cursor is None:
                             return True
                         if next_cursor in seen_cursors:
@@ -1237,23 +1397,23 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             if self.tool_filter is not None:
                 filtered_tools = await self._apply_tool_filter(filtered_tools, run_context, agent)
             return filtered_tools
-        except httpx.HTTPStatusError as e:
-            status_code = e.response.status_code
+        except HTTP_STATUS_ERROR_TYPES as e:
+            status_code = http_status_code(e)
             transport_error = UserError(
                 f"Failed to list tools from MCP server '{self._error_name}': "
                 f"HTTP error {status_code}"
             )
             transport_cause = _safe_transport_cause(e)
-        except httpx.RequestError as e:
+        except HTTP_REQUEST_ERROR_TYPES as e:
             transport_cause = _safe_transport_cause(e)
-            if transport_cause is not None and not isinstance(e, httpx.ConnectError):
+            if transport_cause is not None and not is_http_connect_error(e):
                 raise
-            if isinstance(e, httpx.ConnectError):
+            if is_http_connect_error(e):
                 transport_error = UserError(
                     f"Failed to list tools from MCP server '{self._error_name}': Connection lost. "
                     f"The server may have disconnected."
                 )
-            elif isinstance(e, httpx.TimeoutException):
+            elif is_http_timeout_error(e):
                 transport_error = UserError(
                     f"Failed to list tools from MCP server '{self._error_name}': "
                     "Connection timeout."
@@ -1290,26 +1450,26 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 )
             return await self._run_with_retries(
                 lambda: self._maybe_serialize_request(
-                    lambda: session.call_tool(tool_name, arguments, meta=meta)
+                    lambda: cast(Any, session).call_tool(tool_name, arguments, meta=meta)
                 )
             )
-        except httpx.HTTPStatusError as e:
-            status_code = e.response.status_code
+        except HTTP_STATUS_ERROR_TYPES as e:
+            status_code = http_status_code(e)
             transport_error = UserError(
                 f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
                 f"HTTP error {status_code}"
             )
             transport_cause = _safe_transport_cause(e)
-        except httpx.RequestError as e:
+        except HTTP_REQUEST_ERROR_TYPES as e:
             transport_cause = _safe_transport_cause(e)
-            if transport_cause is not None and not isinstance(e, httpx.ConnectError):
+            if transport_cause is not None and not is_http_connect_error(e):
                 raise
-            if isinstance(e, httpx.ConnectError):
+            if is_http_connect_error(e):
                 transport_error = UserError(
                     f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
                     "Connection lost. The server may have disconnected."
                 )
-            elif isinstance(e, httpx.TimeoutException):
+            elif is_http_timeout_error(e):
                 transport_error = UserError(
                     f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
                     "Connection timeout."
@@ -1331,10 +1491,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             return
 
         tool = next((item for item in self._tools_list if item.name == tool_name), None)
-        if tool is None or not isinstance(tool.inputSchema, dict):
+        if tool is None or not isinstance(tool_input_schema(tool), dict):
             return
 
-        raw_required = tool.inputSchema.get("required")
+        raw_required = tool_input_schema(tool).get("required")
         if not isinstance(raw_required, list) or not raw_required:
             return
 
@@ -1366,11 +1526,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         session = self.session
         assert session is not None
         result = await self._list_prompts_page(session)
-        if result.nextCursor is None:
+        if result_next_cursor(result) is None:
             return result
 
         prompts = list(result.prompts)
-        cursor: str | None = result.nextCursor
+        cursor: str | None = result_next_cursor(result)
         seen_cursors: set[str | None] = {None}
         pagination_failure: BaseException | None = None
         repeated_cursor = False
@@ -1391,7 +1551,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 break
             prompts.extend(page.prompts)
             seen_cursors.add(cursor)
-            next_cursor = page.nextCursor
+            next_cursor = result_next_cursor(page)
             if next_cursor is not None and next_cursor in seen_cursors:
                 repeated_cursor = True
                 break
@@ -1410,7 +1570,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 f"MCP server '{self._error_name}' returned a repeated cursor while listing prompts."
             ) from None
 
-        return result.model_copy(update={"prompts": prompts, "nextCursor": None})
+        return cast(ListPromptsResult, clear_result_next_cursor(result, prompts=prompts))
 
     async def get_prompt(
         self, name: str, arguments: dict[str, Any] | None = None
@@ -1433,7 +1593,15 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         assert session is not None
         return await self._run_request_with_transport_error_redaction(
             "list resources",
-            lambda: self._maybe_serialize_request(lambda: session.list_resources(cursor)),
+            lambda: self._maybe_serialize_request(
+                lambda: (
+                    session.list_resources()
+                    if cursor is None
+                    else session.list_resources(params=PaginatedRequestParams(cursor=cursor))
+                )
+                if MCP_V2
+                else cast(Any, session).list_resources(cursor)
+            ),
         )
 
     async def list_resource_templates(
@@ -1446,7 +1614,17 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         assert session is not None
         return await self._run_request_with_transport_error_redaction(
             "list resource templates",
-            lambda: self._maybe_serialize_request(lambda: session.list_resource_templates(cursor)),
+            lambda: self._maybe_serialize_request(
+                lambda: (
+                    session.list_resource_templates()
+                    if cursor is None
+                    else session.list_resource_templates(
+                        params=PaginatedRequestParams(cursor=cursor)
+                    )
+                )
+                if MCP_V2
+                else cast(Any, session).list_resource_templates(cursor)
+            ),
         )
 
     async def read_resource(self, uri: str) -> ReadResourceResult:
@@ -1460,11 +1638,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
         session = self.session
         assert session is not None
-        from pydantic import AnyUrl
-
         return await self._run_request_with_transport_error_redaction(
             "read resource",
-            lambda: self._maybe_serialize_request(lambda: session.read_resource(AnyUrl(uri))),
+            lambda: self._maybe_serialize_request(
+                lambda: cast(Any, session).read_resource(resource_uri(uri))
+            ),
         )
 
     async def cleanup(self):
@@ -1485,7 +1663,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     e,
                 )
                 raise
-            except (BaseExceptionGroup, httpx.HTTPStatusError, httpx.RequestError) as e:
+            except (  # type: ignore[misc]
+                BaseExceptionGroup,
+                *HTTP_STATUS_ERROR_TYPES,
+                *HTTP_REQUEST_ERROR_TYPES,
+            ) as e:
                 selected_http_error = self._select_cleanup_transport_error(e)
                 if selected_http_error is not None:
                     if is_failed_connection_cleanup:
@@ -1500,7 +1682,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                                 _get_cleanup_transport_error_message(selected_http_error), self
                             )
                         )
-                elif isinstance(e, httpx.RequestError):
+                elif is_http_request_error(e):
                     _log_cleanup_transport_warning(
                         get_mcp_server_log_message(_get_cleanup_transport_error_message(e), self)
                     )
@@ -1559,6 +1741,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             finally:
                 self.session = None
                 self._get_session_id = None
+                self._v2_session_id = None
 
             if cleanup_error is not None:
                 self._raise_mapped_transport_error(cleanup_error, None)
@@ -1709,15 +1892,16 @@ class MCPServerSseParams(TypedDict):
     sse_read_timeout: NotRequired[float]
     """The timeout for the SSE connection, in seconds. Defaults to 5 minutes."""
 
-    auth: NotRequired[httpx.Auth | None]
-    """Optional httpx authentication handler (e.g. ``httpx.BasicAuth``, a custom
-    ``httpx.Auth`` subclass for OAuth token refresh, etc.).  When provided, it is
-    passed directly to the underlying ``httpx.AsyncClient`` used by the SSE transport.
+    auth: NotRequired[Any]
+    """Optional authentication handler for the installed MCP SDK's HTTP stack.
+
+    Use ``httpx.Auth`` with MCP v1 or ``httpx2.Auth`` with MCP v2.
     """
 
     httpx_client_factory: NotRequired[HttpClientFactory]
-    """Custom HTTP client factory for configuring httpx.AsyncClient behavior (e.g.
-    to set custom SSL certificates, proxies, or other transport options).
+    """Custom HTTP client factory for the installed MCP SDK's HTTP stack.
+
+    Return ``httpx.AsyncClient`` with MCP v1 or ``httpx2.AsyncClient`` with MCP v2.
     """
 
 
@@ -1814,6 +1998,16 @@ class MCPServerSse(_MCPServerWithClientSession):
             "timeout": self.params.get("timeout", 5),
             "sse_read_timeout": self.params.get("sse_read_timeout", 60 * 5),
         }
+        if MCP_V2:
+            _validate_v2_http_auth(self.params.get("auth"))
+            factory = (
+                self.params.get("httpx_client_factory") or _create_default_streamable_http_client
+            )
+            kwargs["httpx_client_factory"] = _validated_v2_http_client_factory(factory)
+            if "auth" in self.params:
+                kwargs["auth"] = self.params["auth"]
+            return sse_client(**kwargs)
+
         if "auth" in self.params:
             kwargs["auth"] = self.params["auth"]
         kwargs["httpx_client_factory"] = (
@@ -1846,13 +2040,15 @@ class MCPServerStreamableHttpParams(TypedDict):
     """Terminate on close"""
 
     httpx_client_factory: NotRequired[HttpClientFactory]
-    """Custom HTTP client factory for configuring httpx.AsyncClient behavior."""
+    """Custom HTTP client factory for the installed MCP SDK's HTTP stack.
 
-    auth: NotRequired[httpx.Auth | None]
-    """Optional httpx authentication handler (e.g. ``httpx.BasicAuth``, a custom
-    ``httpx.Auth`` subclass for OAuth token refresh, etc.).  When provided, it is
-    passed directly to the underlying ``httpx.AsyncClient`` used by the Streamable HTTP
-    transport.
+    Return ``httpx.AsyncClient`` with MCP v1 or ``httpx2.AsyncClient`` with MCP v2.
+    """
+
+    auth: NotRequired[Any]
+    """Optional authentication handler for the installed MCP SDK's HTTP stack.
+
+    Use ``httpx.Auth`` with MCP v1 or ``httpx2.Auth`` with MCP v2.
     """
 
     ignore_initialized_notification_failure: NotRequired[bool]
@@ -1860,7 +2056,9 @@ class MCPServerStreamableHttpParams(TypedDict):
     ``notifications/initialized`` POST.
 
     Defaults to ``False``. When set to ``True``, initialized-notification failures are
-    logged and ignored so subsequent requests on the same transport can continue.
+    logged and ignored so subsequent requests on the same transport can continue. This
+    option requires MCP Python SDK v1; MCP v2 rejects it before connecting because its
+    public transport API does not expose these failures.
     """
 
 
@@ -1961,6 +2159,30 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             "terminate_on_close": self.params.get("terminate_on_close", True),
         }
         httpx_client_factory = self.params.get("httpx_client_factory")
+        if MCP_V2:
+            if self.params.get("ignore_initialized_notification_failure", False):
+                raise UserError(
+                    "ignore_initialized_notification_failure is not supported with MCP Python "
+                    "SDK v2 because its public transport API does not expose initialized-"
+                    "notification failures. Leave it disabled or pin mcp<2."
+                )
+            _validate_v2_http_auth(self.params.get("auth"))
+            on_session_id: Callable[[str], None] | None = None
+            if self.session is None:
+                self._v2_session_id = None
+
+                def capture_session_id(session_id: str) -> None:
+                    self._v2_session_id = session_id
+
+                on_session_id = capture_session_id
+                self._get_session_id = lambda: self._v2_session_id
+            return _streamablehttp_client_v2(
+                **kwargs,
+                httpx_client_factory=httpx_client_factory or _create_default_streamable_http_client,
+                auth=self.params.get("auth"),
+                on_session_id=on_session_id,
+            )
+
         if self.params.get("ignore_initialized_notification_failure", False):
             return _streamablehttp_client_with_transport(
                 **kwargs,
@@ -1973,23 +2195,15 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         )
         if "auth" in self.params:
             kwargs["auth"] = self.params["auth"]
-        return streamablehttp_client(**kwargs)
+        return cast(
+            AbstractAsyncContextManager[MCPStreamTransport],
+            _require_streamablehttp_client_v1()(**kwargs),
+        )
 
     @asynccontextmanager
     async def _isolated_client_session(self):
         read_timeout = _client_session_read_timeout(self.client_session_timeout_seconds)
-        async with AsyncExitStack() as exit_stack:
-            transport = await exit_stack.enter_async_context(self.create_streams())
-            read, write, *_ = transport
-            session = await exit_stack.enter_async_context(
-                ClientSession(
-                    read,
-                    write,
-                    read_timeout,
-                    message_handler=self.message_handler,
-                )
-            )
-            await session.initialize()
+        async with self._client_session_context(read_timeout) as session:
             yield session
 
     async def _call_tool_with_session(
@@ -2001,21 +2215,20 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
     ) -> CallToolResult:
         if meta is None:
             return await session.call_tool(tool_name, arguments)
-        return await session.call_tool(tool_name, arguments, meta=meta)
+        return cast(
+            CallToolResult,
+            await cast(Any, session).call_tool(tool_name, arguments, meta=meta),
+        )
 
     def _should_retry_in_isolated_session(self, exc: BaseException) -> bool:
-        if isinstance(
-            exc,
-            asyncio.CancelledError
-            | ClosedResourceError
-            | httpx.ConnectError
-            | httpx.TimeoutException,
-        ):
+        if isinstance(exc, asyncio.CancelledError | ClosedResourceError):
             return True
-        if isinstance(exc, httpx.HTTPStatusError):
-            return exc.response.status_code >= 500
-        if isinstance(exc, McpError):
-            return exc.error.code == httpx.codes.REQUEST_TIMEOUT
+        if is_http_connect_error(exc) or is_http_timeout_error(exc):
+            return True
+        if is_http_status_error(exc):
+            return http_status_code(exc) >= 500
+        if isinstance(exc, MCPError):
+            return is_mcp_timeout_error(exc)
         if isinstance(exc, BaseExceptionGroup):
             return bool(exc.exceptions) and all(
                 self._should_retry_in_isolated_session(inner) for inner in exc.exceptions
@@ -2140,23 +2353,23 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                     backoffs_taken += 1
                     await asyncio.sleep(backoff)
                 first_attempt = False
-        except httpx.HTTPStatusError as e:
-            status_code = e.response.status_code
+        except HTTP_STATUS_ERROR_TYPES as e:
+            status_code = http_status_code(e)
             transport_error = UserError(
                 f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
                 f"HTTP error {status_code}"
             )
             transport_cause = _safe_transport_cause(e)
-        except httpx.RequestError as e:
+        except HTTP_REQUEST_ERROR_TYPES as e:
             transport_cause = _safe_transport_cause(e)
-            if transport_cause is not None and not isinstance(e, httpx.ConnectError):
+            if transport_cause is not None and not is_http_connect_error(e):
                 raise
-            if isinstance(e, httpx.ConnectError):
+            if is_http_connect_error(e):
                 transport_error = UserError(
                     f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
                     "Connection lost. The server may have disconnected."
                 )
-            elif isinstance(e, httpx.TimeoutException):
+            elif is_http_timeout_error(e):
                 transport_error = UserError(
                     f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
                     "Connection timeout."
@@ -2174,23 +2387,23 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             unsafe_http_error = _first_unretainable_transport_error(http_errors)
             http_error = unsafe_http_error or http_errors[0]
             transport_cause = _safe_transport_cause(http_error)
-            if isinstance(http_error, httpx.HTTPStatusError):
-                status_code = http_error.response.status_code
+            if is_http_status_error(http_error):
+                status_code = http_status_code(http_error)
                 transport_error = UserError(
                     f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
                     f"HTTP error {status_code}"
                 )
-            elif isinstance(http_error, httpx.ConnectError):
+            elif is_http_connect_error(http_error):
                 transport_error = UserError(
                     f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
                     "Connection lost. The server may have disconnected."
                 )
-            elif isinstance(http_error, httpx.TimeoutException):
+            elif is_http_timeout_error(http_error):
                 transport_error = UserError(
                     f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
                     "Connection timeout."
                 )
-            elif isinstance(http_error, httpx.RequestError):
+            elif is_http_request_error(http_error):
                 if transport_cause is not None:
                     raise
                 transport_error = UserError(
@@ -2214,13 +2427,13 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
 
     @property
     def session_id(self) -> str | None:
-        """The MCP session ID assigned by the server, or None if not yet connected
-        or if the server did not issue a session ID.
+        """The legacy MCP session ID assigned by the server, if one is available.
 
-        The session ID is stable for the lifetime of this server instance's connection.
-        You can persist it and pass it back via the Mcp-Session-Id request header
-        (params["headers"]) on a new MCPServerStreamableHttp instance to resume
-        the same server-side session across process restarts or stateless workers.
+        MCP 2026-07-28 does not use protocol sessions, so this property returns None for a
+        modern connection. It also returns None before connection or when a legacy server does
+        not issue a session ID. A legacy session ID is stable for this instance's connection and
+        can be passed through the Mcp-Session-Id request header when reconnecting to a server that
+        supports legacy session resumption.
 
         Example::
 

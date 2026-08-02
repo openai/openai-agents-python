@@ -7,7 +7,6 @@ from collections.abc import Sequence
 from typing import Any, TypeVar, cast
 
 import pytest
-from mcp import Tool as MCPTool
 from openai.types.responses.response_output_item import McpCall, McpListTools, McpListToolsTool
 from pydantic import BaseModel
 
@@ -35,6 +34,7 @@ from agents.run_internal.run_loop import get_output_schema
 from agents.run_internal.tool_execution import execute_function_tool_calls
 from tests.fake_model import FakeModel
 from tests.mcp.helpers import FakeMCPServer
+from tests.mcp.model_compat import Tool as MCPTool
 from tests.test_responses import get_function_tool_call, get_text_message
 from tests.utils.factories import make_run_state, make_tool_call, roundtrip_state
 

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agents.mcp import MCPServerStreamableHttp
+from agents.mcp._compat import MCP_V2
 
 
 class TestStreamableHttpSessionId:
@@ -53,6 +54,7 @@ class TestStreamableHttpSessionId:
         assert server.session_id == "session-2"
 
     @pytest.mark.asyncio
+    @pytest.mark.skipif(MCP_V2, reason="MCP v2 session IDs are captured by HTTP response hooks")
     async def test_connect_captures_get_session_id_callback(self):
         """connect() should capture the third element of the transport tuple as _get_session_id."""
         server = MCPServerStreamableHttp(params={"url": "http://localhost:9999/mcp"})

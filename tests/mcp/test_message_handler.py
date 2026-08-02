@@ -1,22 +1,18 @@
 from __future__ import annotations
 
 import contextlib
-from typing import Union
+from typing import Any
 
 import anyio
 import pytest
 from mcp.client.session import MessageHandlerFnT
 from mcp.shared.message import SessionMessage
-from mcp.shared.session import RequestResponder
 from mcp.types import (
-    ClientResult,
     Implementation,
-    InitializeResult,
     ServerCapabilities,
-    ServerNotification,
-    ServerRequest,
 )
 
+from agents.mcp._compat import MCP_V2
 from agents.mcp.server import (
     MCPServerSse,
     MCPServerStdio,
@@ -24,9 +20,9 @@ from agents.mcp.server import (
     _MCPServerWithClientSession,
 )
 
-HandlerMessage = Union[  # noqa: UP007
-    RequestResponder[ServerRequest, ClientResult], ServerNotification, Exception
-]
+from .model_compat import InitializeResult
+
+HandlerMessage = Any
 
 
 class _StubClientSession:
@@ -87,6 +83,7 @@ class _MessageHandlerTestServer(_MCPServerWithClientSession):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(MCP_V2, reason="MCP v2 message handling is owned by the high-level client")
 async def test_client_session_receives_message_handler(monkeypatch):
     captured: dict[str, object] = {}
 

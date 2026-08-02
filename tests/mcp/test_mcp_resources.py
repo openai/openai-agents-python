@@ -5,15 +5,19 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from mcp.types import (
     ListResourcesResult,
-    ListResourceTemplatesResult,
+    PaginatedRequestParams,
     ReadResourceResult,
+)
+
+from agents.mcp import MCPServerStreamableHttp
+from agents.mcp._compat import MCP_V2, resource_uri
+
+from .model_compat import (
+    ListResourceTemplatesResult,
     Resource,
     ResourceTemplate,
     TextResourceContents,
 )
-from pydantic import AnyUrl
-
-from agents.mcp import MCPServerStreamableHttp
 
 
 @pytest.fixture
@@ -54,7 +58,7 @@ async def test_list_resources_returns_result(server: MCPServerStreamableHttp):
     mock_session = MagicMock()
     expected = ListResourcesResult(
         resources=[
-            Resource(uri=AnyUrl("file:///readme.md"), name="readme.md", mimeType="text/markdown"),
+            Resource(uri="file:///readme.md", name="readme.md", mimeType="text/markdown"),
         ]
     )
     mock_session.list_resources = AsyncMock(return_value=expected)
@@ -63,7 +67,10 @@ async def test_list_resources_returns_result(server: MCPServerStreamableHttp):
     result = await server.list_resources()
 
     assert result is expected
-    mock_session.list_resources.assert_awaited_once_with(None)
+    if MCP_V2:
+        mock_session.list_resources.assert_awaited_once_with()
+    else:
+        mock_session.list_resources.assert_awaited_once_with(None)
 
 
 @pytest.mark.asyncio
@@ -77,7 +84,12 @@ async def test_list_resources_forwards_cursor(server: MCPServerStreamableHttp):
     result = await server.list_resources(cursor="tok_abc")
 
     assert result is page2
-    mock_session.list_resources.assert_awaited_once_with("tok_abc")
+    if MCP_V2:
+        mock_session.list_resources.assert_awaited_once_with(
+            params=PaginatedRequestParams(cursor="tok_abc")
+        )
+    else:
+        mock_session.list_resources.assert_awaited_once_with("tok_abc")
 
 
 @pytest.mark.asyncio
@@ -95,7 +107,10 @@ async def test_list_resource_templates_returns_result(server: MCPServerStreamabl
     result = await server.list_resource_templates()
 
     assert result is expected
-    mock_session.list_resource_templates.assert_awaited_once_with(None)
+    if MCP_V2:
+        mock_session.list_resource_templates.assert_awaited_once_with()
+    else:
+        mock_session.list_resource_templates.assert_awaited_once_with(None)
 
 
 @pytest.mark.asyncio
@@ -109,7 +124,12 @@ async def test_list_resource_templates_forwards_cursor(server: MCPServerStreamab
     result = await server.list_resource_templates(cursor="tok_xyz")
 
     assert result is page2
-    mock_session.list_resource_templates.assert_awaited_once_with("tok_xyz")
+    if MCP_V2:
+        mock_session.list_resource_templates.assert_awaited_once_with(
+            params=PaginatedRequestParams(cursor="tok_xyz")
+        )
+    else:
+        mock_session.list_resource_templates.assert_awaited_once_with("tok_xyz")
 
 
 @pytest.mark.asyncio
@@ -119,7 +139,7 @@ async def test_read_resource_returns_result(server: MCPServerStreamableHttp):
     uri = "file:///readme.md"
     expected = ReadResourceResult(
         contents=[
-            TextResourceContents(uri=AnyUrl(uri), text="# Hello", mimeType="text/markdown"),
+            TextResourceContents(uri=uri, text="# Hello", mimeType="text/markdown"),
         ]
     )
     mock_session.read_resource = AsyncMock(return_value=expected)
@@ -128,7 +148,7 @@ async def test_read_resource_returns_result(server: MCPServerStreamableHttp):
     result = await server.read_resource(uri)
 
     assert result is expected
-    mock_session.read_resource.assert_awaited_once_with(AnyUrl(uri))
+    mock_session.read_resource.assert_awaited_once_with(resource_uri(uri))
 
 
 @pytest.mark.asyncio

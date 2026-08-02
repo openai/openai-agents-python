@@ -8,7 +8,10 @@ import httpx
 import pytest
 
 from agents.mcp import MCPServerSse, MCPServerStreamableHttp
+from agents.mcp._compat import MCP_V2
 from agents.mcp.server import _create_default_streamable_http_client
+
+pytestmark = pytest.mark.skipif(MCP_V2, reason="These assertions cover the MCP v1 HTTP stack")
 
 
 class TestMCPServerSseAuthAndFactory:

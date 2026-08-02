@@ -6,20 +6,19 @@ from typing import cast
 import httpx
 import pytest
 from anyio import ClosedResourceError
-from mcp import ClientSession, Tool as MCPTool
-from mcp.shared.exceptions import McpError
+from mcp import ClientSession
 from mcp.types import (
     CallToolResult,
-    ErrorData,
     GetPromptResult,
-    ListPromptsResult,
-    ListToolsResult,
     PaginatedRequestParams,
     Prompt,
 )
 
 from agents.exceptions import UserError
+from agents.mcp._compat import mcp_request_timeout_code
 from agents.mcp.server import MCPServerStreamableHttp, _MCPServerWithClientSession
+
+from .model_compat import ListPromptsResult, ListToolsResult, Tool as MCPTool, create_mcp_error
 
 if sys.version_info < (3, 11):
     from exceptiongroup import BaseExceptionGroup  # pyright: ignore[reportMissingImports]
@@ -359,9 +358,7 @@ class McpRequestTimeoutSession:
 
     async def call_tool(self, tool_name, arguments, meta=None):
         self.call_tool_attempts += 1
-        raise McpError(
-            ErrorData(code=httpx.codes.REQUEST_TIMEOUT, message=self.message),
-        )
+        raise create_mcp_error(mcp_request_timeout_code(), self.message)
 
 
 class IsolatedRetrySession:

@@ -10,14 +10,22 @@ import httpx
 import pytest
 from anyio import create_memory_object_stream
 from mcp.shared.message import SessionMessage
-from mcp.types import JSONRPCMessage, JSONRPCNotification, JSONRPCRequest
+from mcp.types import JSONRPCNotification, JSONRPCRequest
 
 from agents import _debug
 from agents.mcp import MCPServerStreamableHttp
+from agents.mcp._compat import MCP_V2
 from agents.mcp.server import (
     _create_default_streamable_http_client,
     _InitializedNotificationTolerantStreamableHTTPTransport,
     _streamablehttp_client_with_transport,
+)
+
+from .model_compat import JSONRPCMessage
+
+pytestmark = pytest.mark.skipif(
+    MCP_V2,
+    reason="These assertions cover MCP v1 streamable HTTP transport internals",
 )
 
 

@@ -1,13 +1,14 @@
 from typing import Any
 
 import pytest
-from mcp.types import ListResourcesResult, ListResourceTemplatesResult, ReadResourceResult
+from mcp.types import ListResourcesResult, ReadResourceResult
 
 from agents import Agent, Runner
 from agents.mcp import MCPServer, MCPToolMetaResolver
 
 from ..fake_model import FakeModel
 from ..test_responses import get_text_message
+from .model_compat import ListResourceTemplatesResult
 
 
 class FakeMCPPromptServer(MCPServer):

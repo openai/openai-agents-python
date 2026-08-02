@@ -8,10 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from mcp.types import ListPromptsResult, ListToolsResult
 
 from agents import Agent, _debug
 from agents.exceptions import UserError
+from agents.mcp._compat import MCP_V2
 from agents.mcp.server import (
     MCPServerSse,
     MCPServerStreamableHttp,
@@ -19,6 +19,8 @@ from agents.mcp.server import (
     _MCPServerWithClientSession,
 )
 from agents.run_context import RunContextWrapper
+
+from .model_compat import ListPromptsResult, ListToolsResult
 
 # Handle Python version compatibility for ExceptionGroups
 if sys.version_info < (3, 11):
@@ -184,7 +186,8 @@ def test_client_session_read_timeout_treats_zero_as_disabled(
 
 @pytest.mark.parametrize("timeout_seconds", [0.000001, 2.5])
 def test_client_session_read_timeout_preserves_positive_value(timeout_seconds: float) -> None:
-    assert _client_session_read_timeout(timeout_seconds) == timedelta(seconds=timeout_seconds)
+    expected = timeout_seconds if MCP_V2 else timedelta(seconds=timeout_seconds)
+    assert _client_session_read_timeout(timeout_seconds) == expected
 
 
 @pytest.mark.parametrize(

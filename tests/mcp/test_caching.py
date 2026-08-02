@@ -1,13 +1,14 @@
 from unittest.mock import AsyncMock, call, patch
 
 import pytest
-from mcp.types import ListToolsResult, PaginatedRequestParams, Tool as MCPTool
+from mcp.types import PaginatedRequestParams
 
 from agents import Agent
 from agents.mcp import MCPServerStdio
 from agents.run_context import RunContextWrapper
 
 from .helpers import DummyStreamsContextManager, tee
+from .model_compat import ListToolsResult, Tool as MCPTool
 
 
 @pytest.mark.asyncio

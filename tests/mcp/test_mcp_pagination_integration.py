@@ -7,6 +7,7 @@ import pytest
 
 from agents import Agent, Runner
 from agents.mcp import MCPServerStdio
+from agents.mcp._compat import MCP_V2, result_next_cursor
 
 from ..fake_model import FakeModel
 from ..test_responses import get_function_tool_call, get_text_message
@@ -30,14 +31,20 @@ async def test_stdio_server_auto_paginates_tools_and_prompts():
     async with create_paginated_server() as server:
         tools = await server.list_tools()
         prompts = await server.list_prompts()
+        protocol_version = getattr(server.session, "protocol_version", None)
+        initialize_result = server.server_initialize_result
 
     assert [tool.name for tool in tools] == ["first_page_tool", "second_page_tool"]
     assert [prompt.name for prompt in prompts.prompts] == [
         "first_page_prompt",
         "second_page_prompt",
     ]
-    assert prompts.nextCursor is None
-    assert prompts.meta == {"page": "first"}
+    assert result_next_cursor(prompts) is None
+    assert prompts.meta is not None
+    assert prompts.meta["page"] == "first"
+    if MCP_V2:
+        assert protocol_version == "2026-07-28"
+        assert initialize_result is None
 
 
 @pytest.mark.asyncio

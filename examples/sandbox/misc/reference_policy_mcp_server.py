@@ -1,6 +1,6 @@
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-mcp = FastMCP("Reference Policy Server")
+mcp = MCPServer("Reference Policy Server")
 
 
 @mcp.tool()

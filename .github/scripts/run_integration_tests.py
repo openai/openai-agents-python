@@ -24,6 +24,7 @@ OPTIONAL_EXTRAS = (
 )
 PROFILES = (
     "packaging",
+    "mcp-v1",
     "core",
     "providers",
     "realtime",
@@ -78,7 +79,12 @@ def _any_llm_provider_extras(
 
 
 def create_environment(
-    name: str, distribution: Path, *, extras: bool = False, optional_extra: str | None = None
+    name: str,
+    distribution: Path,
+    *,
+    extras: bool = False,
+    optional_extra: str | None = None,
+    additional_requirements: tuple[str, ...] = (),
 ) -> Path:
     environment = WORKSPACE / name
     venv_command = ["uv", "venv", "--clear", str(environment)]
@@ -88,7 +94,13 @@ def create_environment(
     python = environment / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
     selected_extra = EXTRAS if extras else optional_extra
     requirement = f"{distribution}[{selected_extra}]" if selected_extra else str(distribution)
-    requirements = [requirement, "pytest", "pytest-asyncio", "pytest-timeout"]
+    requirements = [
+        requirement,
+        "pytest",
+        "pytest-asyncio",
+        "pytest-timeout",
+        *additional_requirements,
+    ]
     external_providers_enabled = os.environ.get(
         "OPENAI_AGENTS_INTEGRATION_EXTERNAL_PROVIDERS", ""
     ).lower() in {"1", "true", "yes"}
@@ -126,6 +138,7 @@ def run_suite(
     *,
     selection: str,
     environment_kind: str,
+    additional_env: dict[str, str] | None = None,
 ) -> None:
     child_env = dict(os.environ)
     child_env.pop("PYTHONPATH", None)
@@ -147,6 +160,8 @@ def run_suite(
     child_env["OPENAI_AGENTS_INTEGRATION_WHEEL"] = str(wheel)
     child_env["OPENAI_AGENTS_INTEGRATION_SDIST"] = str(sdist)
     child_env["OPENAI_AGENTS_INTEGRATION_ENVIRONMENT"] = environment_kind
+    if additional_env:
+        child_env.update(additional_env)
     if environment_kind.startswith("extra-"):
         child_env["OPENAI_AGENTS_INTEGRATION_EXTRA"] = environment_kind.removeprefix("extra-")
     if not os.environ.get("OPENAI_AGENTS_INTEGRATION_ENABLE_TRACING"):
@@ -181,6 +196,23 @@ def main() -> None:
         os.environ["OPENAI_AGENTS_INTEGRATION_DIRECT_PROVIDERS"] = "1"
     wheel, sdist = build_distributions()
     print(f"[integration] wheel={wheel.name} sdist={sdist.name} profile={args.profile}")
+
+    if args.profile == "mcp-v1":
+        for mcp_version in ("1.19.0", "1.29.0"):
+            environment_kind = f"mcp-v1-{mcp_version}"
+            python = create_environment(
+                environment_kind,
+                wheel,
+                additional_requirements=(f"mcp=={mcp_version}",),
+            )
+            run_suite(
+                python,
+                wheel,
+                sdist,
+                selection="mcp_compat",
+                environment_kind=environment_kind,
+                additional_env={"OPENAI_AGENTS_INTEGRATION_MCP_VERSION": mcp_version},
+            )
 
     if args.profile in {"packaging", "core", "hosted", "full", "release", "nightly", "manual"}:
         python = create_environment("core", wheel)
