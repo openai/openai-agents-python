@@ -5,7 +5,6 @@ import sys
 import textwrap
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -615,26 +614,12 @@ def test_batch_trace_processor_shutdown_without_timeout_preserves_export_retries
 
 @pytest.mark.serial
 def test_tracing_atexit_cleanup_timeout_preserves_process_exit_code_on_504() -> None:
-    request_seen = threading.Event()
-
-    class Always504Handler(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            request_seen.set()
-            self.send_response(504)
-            self.end_headers()
-            self.wfile.write(b"gateway timeout")
-
-        def log_message(self, format: str, *args: Any) -> None:
-            return
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Always504Handler)
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
-
     script = textwrap.dedent(
-        f"""
+        """
         import sys
+        import threading
         import time
+        from unittest.mock import patch
 
         from agents.tracing import custom_span, trace
         from agents.tracing.processors import BackendSpanExporter, BatchTraceProcessor
@@ -643,13 +628,29 @@ def test_tracing_atexit_cleanup_timeout_preserves_process_exit_code_on_504() -> 
 
         tracing_setup._DEFAULT_SHUTDOWN_TIMEOUT = 0.2
 
-        exporter = BackendSpanExporter(
-            api_key="test_key",
-            endpoint="http://127.0.0.1:{server.server_port}/traces/ingest",
-            max_retries=100,
-            base_delay=10.0,
-            max_delay=10.0,
-        )
+        class Always504Response:
+            status_code = 504
+            text = "gateway timeout"
+
+        class Always504Client:
+            def __init__(self):
+                self.request_seen = threading.Event()
+
+            def post(self, **kwargs):
+                self.request_seen.set()
+                return Always504Response()
+
+            def close(self):
+                pass
+
+        client = Always504Client()
+        with patch("agents.tracing.processors.httpx.Client", return_value=client):
+            exporter = BackendSpanExporter(
+                api_key="test_key",
+                max_retries=100,
+                base_delay=10.0,
+                max_delay=10.0,
+            )
         processor = BatchTraceProcessor(
             exporter=exporter,
             max_queue_size=1,
@@ -667,7 +668,7 @@ def test_tracing_atexit_cleanup_timeout_preserves_process_exit_code_on_504() -> 
                 return original_shutdown(*args, **kwargs)
             finally:
                 print(
-                    f"shutdown_elapsed={{time.monotonic() - shutdown_started:.6f}}",
+                    f"shutdown_elapsed={time.monotonic() - shutdown_started:.6f}",
                     flush=True,
                 )
 
@@ -678,24 +679,19 @@ def test_tracing_atexit_cleanup_timeout_preserves_process_exit_code_on_504() -> 
             with custom_span("probe-span"):
                 pass
 
-        time.sleep(0.3)
+        assert client.request_seen.wait(timeout=5.0)
         sys.exit(7)
         """
     )
 
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c", script],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10.0,
-        )
-    finally:
-        server.shutdown()
-        server.server_close()
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10.0,
+    )
 
-    assert request_seen.is_set()
     assert result.returncode == 7
     shutdown_elapsed_prefix = "shutdown_elapsed="
     shutdown_elapsed_lines = [
