@@ -71,11 +71,10 @@ class OpenAIConversationsSession(SessionABC):
         self._session_id = value
 
     async def _get_session_id(self) -> str:
-        if self._session_id is None:
-            async with self._session_id_lock:
-                if self._session_id is None:
-                    self._session_id = await start_openai_conversations_session(self._openai_client)
-        return self._session_id
+        async with self._session_id_lock:
+            if self._session_id is None:
+                self._session_id = await start_openai_conversations_session(self._openai_client)
+            return self._session_id
 
     async def _clear_session_id(self) -> None:
         self._session_id = None
@@ -130,12 +129,10 @@ class OpenAIConversationsSession(SessionABC):
 
     async def clear_session(self) -> None:
         async with self._session_id_lock:
-            session_id = self._session_id
+            if self._session_id is None:
+                return
+
+            await self._openai_client.conversations.delete(
+                conversation_id=self._session_id,
+            )
             self._session_id = None
-
-        if session_id is None:
-            return
-
-        await self._openai_client.conversations.delete(
-            conversation_id=session_id,
-        )
