@@ -72,6 +72,7 @@ from .model import RealtimeModel, RealtimeModelConfig, RealtimeModelListener
 from .model_events import (
     RealtimeModelEvent,
     RealtimeModelInputAudioTranscriptionCompletedEvent,
+    RealtimeModelOutputTextDeltaEvent,
     RealtimeModelToolCallEvent,
     RealtimeModelUsageEvent,
 )
@@ -228,6 +229,8 @@ class RealtimeSession(RealtimeModelListener):
         self._interrupted_response_ids: set[str] = set()
         self._item_transcripts: dict[str, str] = {}  # item_id -> accumulated transcript
         self._item_guardrail_run_counts: dict[str, int] = {}  # item_id -> run count
+        self._latest_output_response_generation = 0
+        self._active_output_response_generation: int | None = None
         self._debounce_text_length = self._run_config.get("guardrails_settings", {}).get(
             "debounce_text_length", 100
         )
@@ -423,13 +426,12 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
         elif event.type == "transcript_delta":
-            # Accumulate transcript text for guardrail debouncing per item_id
             item_id = event.item_id
-            if item_id not in self._item_transcripts:
-                self._item_transcripts[item_id] = ""
-                self._item_guardrail_run_counts[item_id] = 0
-
-            self._item_transcripts[item_id] += event.delta
+            self._record_output_guardrail_delta(
+                item_id,
+                event.delta,
+                event.response_id,
+            )
             self._history = self._get_new_history(
                 self._history,
                 AssistantMessageItem(
@@ -437,16 +439,18 @@ class RealtimeSession(RealtimeModelListener):
                     content=[AssistantAudio(transcript=self._item_transcripts[item_id])],
                 ),
             )
-
-            # Check if we should run guardrails based on debounce threshold
-            current_length = len(self._item_transcripts[item_id])
-            threshold = self._debounce_text_length
-            next_run_threshold = (self._item_guardrail_run_counts[item_id] + 1) * threshold
-
-            if current_length >= next_run_threshold:
-                self._item_guardrail_run_counts[item_id] += 1
-                # Pass response_id so we can ensure only a single interrupt per response
-                self._enqueue_guardrail_task(self._item_transcripts[item_id], event.response_id)
+        elif event.type == "output_text_delta":
+            assert isinstance(event, RealtimeModelOutputTextDeltaEvent)
+            if self._active_output_response_generation is None:
+                self._latest_output_response_generation += 1
+                self._active_output_response_generation = self._latest_output_response_generation
+            self._record_output_guardrail_delta(
+                event.item_id,
+                event.delta,
+                event.response_id,
+                agent_snapshot=self._current_agent,
+                output_response_generation=self._active_output_response_generation,
+            )
         elif event.type == "item_updated":
             is_new = not any(item.item_id == event.item.item_id for item in self._history)
 
@@ -519,6 +523,8 @@ class RealtimeSession(RealtimeModelListener):
         elif event.type == "connection_status":
             pass
         elif event.type == "turn_started":
+            self._latest_output_response_generation += 1
+            self._active_output_response_generation = self._latest_output_response_generation
             await self._put_event(
                 RealtimeAgentStartEvent(
                     agent=self._current_agent,
@@ -532,6 +538,7 @@ class RealtimeSession(RealtimeModelListener):
             # Clear guardrail state for next turn
             self._item_transcripts.clear()
             self._item_guardrail_run_counts.clear()
+            self._active_output_response_generation = None
 
             await self._put_event(
                 RealtimeAgentEndEvent(
@@ -1300,12 +1307,20 @@ class RealtimeSession(RealtimeModelListener):
         # Otherwise, add it to the end
         return old_history + [event]
 
-    async def _run_output_guardrails(self, text: str, response_id: str) -> bool:
+    async def _run_output_guardrails(
+        self,
+        text: str,
+        response_id: str,
+        *,
+        agent_snapshot: RealtimeAgent[Any] | None = None,
+        output_response_generation: int | None = None,
+    ) -> bool:
         """Run output guardrails on the given text. Returns True if any guardrail was triggered."""
         if self._closing or self._closed:
             return False
 
-        combined_guardrails = self._current_agent.output_guardrails + self._run_config.get(
+        source_agent = agent_snapshot or self._current_agent
+        combined_guardrails = source_agent.output_guardrails + self._run_config.get(
             "output_guardrails", []
         )
         seen_ids: set[int] = set()
@@ -1327,7 +1342,7 @@ class RealtimeSession(RealtimeModelListener):
                 result = await guardrail.run(
                     # TODO (rm) Remove this cast, it's wrong
                     self._context_wrapper,
-                    cast(Agent[Any], self._current_agent),
+                    cast(Agent[Any], source_agent),
                     text,
                 )
                 if self._closing or self._closed:
@@ -1364,28 +1379,91 @@ class RealtimeSession(RealtimeModelListener):
             # Interrupt the model
             if self._closing or self._closed:
                 return False
-            await self._model.send_event(RealtimeModelSendInterrupt(force_response_cancel=True))
+            if output_response_generation is None:
+                await self._model.send_event(RealtimeModelSendInterrupt(force_response_cancel=True))
+            else:
+                if output_response_generation != self._latest_output_response_generation:
+                    return True
+                if output_response_generation == self._active_output_response_generation:
+                    await self._model.send_event(
+                        RealtimeModelSendInterrupt(
+                            force_response_cancel=True,
+                            response_id=response_id,
+                            cancel_response_only=True,
+                        )
+                    )
 
             # Send guardrail triggered message
             if self._closing or self._closed:
                 return False
+            if (
+                output_response_generation is not None
+                and output_response_generation != self._latest_output_response_generation
+            ):
+                return True
             guardrail_names = [result.guardrail.get_name() for result in triggered_results]
-            await self._model.send_event(
-                RealtimeModelSendUserInput(
-                    user_input=f"guardrail triggered: {', '.join(guardrail_names)}"
-                )
+            feedback_event = RealtimeModelSendUserInput(
+                user_input=f"guardrail triggered: {', '.join(guardrail_names)}"
             )
+            if output_response_generation is None:
+                await self._model.send_event(feedback_event)
+            else:
+                await self._model._send_event_if(
+                    feedback_event,
+                    lambda: (output_response_generation == self._latest_output_response_generation),
+                )
 
             return True
 
         return False
 
-    def _enqueue_guardrail_task(self, text: str, response_id: str) -> None:
+    def _record_output_guardrail_delta(
+        self,
+        item_id: str,
+        delta: str,
+        response_id: str,
+        *,
+        agent_snapshot: RealtimeAgent[Any] | None = None,
+        output_response_generation: int | None = None,
+    ) -> None:
+        if item_id not in self._item_transcripts:
+            self._item_transcripts[item_id] = ""
+            self._item_guardrail_run_counts[item_id] = 0
+
+        self._item_transcripts[item_id] += delta
+        current_length = len(self._item_transcripts[item_id])
+        threshold = self._debounce_text_length
+        next_run_threshold = (self._item_guardrail_run_counts[item_id] + 1) * threshold
+
+        if current_length >= next_run_threshold:
+            self._item_guardrail_run_counts[item_id] += 1
+            self._enqueue_guardrail_task(
+                self._item_transcripts[item_id],
+                response_id,
+                agent_snapshot=agent_snapshot,
+                output_response_generation=output_response_generation,
+            )
+
+    def _enqueue_guardrail_task(
+        self,
+        text: str,
+        response_id: str,
+        *,
+        agent_snapshot: RealtimeAgent[Any] | None = None,
+        output_response_generation: int | None = None,
+    ) -> None:
         # Runs the guardrails in a separate task to avoid blocking the main loop
         if self._closing or self._closed:
             return
 
-        task = asyncio.create_task(self._run_output_guardrails(text, response_id))
+        task = asyncio.create_task(
+            self._run_output_guardrails(
+                text,
+                response_id,
+                agent_snapshot=agent_snapshot,
+                output_response_generation=output_response_generation,
+            )
+        )
         self._guardrail_tasks.add(task)
 
         # Add callback to remove completed tasks and handle exceptions

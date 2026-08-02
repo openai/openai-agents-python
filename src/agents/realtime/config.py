@@ -228,8 +228,8 @@ class RealtimeGuardrailsSettings(TypedDict):
 
     debounce_text_length: NotRequired[int]
     """
-    The minimum number of characters to accumulate before running guardrails on transcript
-    deltas. Defaults to 100. Guardrails run every time the accumulated text reaches
+    The minimum number of characters to accumulate before running guardrails on output text or
+    transcript deltas. Defaults to 100. Guardrails run every time the accumulated text reaches
     1x, 2x, 3x, etc. times this threshold.
     """
 

@@ -171,6 +171,15 @@ class RealtimeModel(abc.ABC):
         """Send an event to the model."""
         pass
 
+    async def _send_event_if(
+        self, event: RealtimeModelSendEvent, send_if: Callable[[], bool]
+    ) -> bool:
+        """Send an event only while a caller-owned precondition remains true."""
+        if not send_if():
+            return False
+        await self.send_event(event)
+        return True
+
     @abc.abstractmethod
     async def close(self) -> None:
         """Close the session."""

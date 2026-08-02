@@ -107,6 +107,17 @@ class RealtimeModelTranscriptDeltaEvent:
 
 
 @dataclass
+class RealtimeModelOutputTextDeltaEvent:
+    """Partial text output update."""
+
+    item_id: str
+    delta: str
+    response_id: str
+
+    type: Literal["output_text_delta"] = "output_text_delta"
+
+
+@dataclass
 class RealtimeModelItemUpdatedEvent:
     """Item added to the history or updated."""
 
@@ -138,6 +149,9 @@ class RealtimeModelTurnStartedEvent:
     """Triggered when the model starts generating a response for a turn."""
 
     type: Literal["turn_started"] = "turn_started"
+
+    response_id: str | None = None
+    """The response ID, when provided by the model transport."""
 
 
 @dataclass
@@ -228,6 +242,7 @@ RealtimeModelEvent: TypeAlias = (
     | RealtimeModelInputAudioTimeoutTriggeredEvent
     | RealtimeModelInputAudioTranscriptionCompletedEvent
     | RealtimeModelTranscriptDeltaEvent
+    | RealtimeModelOutputTextDeltaEvent
     | RealtimeModelItemUpdatedEvent
     | RealtimeModelItemDeletedEvent
     | RealtimeModelConnectionStatusEvent
