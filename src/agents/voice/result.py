@@ -319,28 +319,24 @@ class StreamedAudioResult:
     async def stream(self) -> AsyncIterator[VoiceStreamEvent]:
         """Stream the events and audio data as they're generated."""
         saw_session_end = False
-        while True:
-            try:
-                event = await self._queue.get()
-            except asyncio.CancelledError:
-                await self._cleanup_tasks()
-                raise
-            if isinstance(event, VoiceStreamEventError):
-                self._stored_exception = event.error
-                log_model_and_tool_action_error(
-                    logger, "Error processing voice output", event.error
-                )
-                break
-            if event is None:
-                break
-            yield event
-            if event.type == "voice_stream_event_lifecycle" and event.event == "session_ended":
-                saw_session_end = True
-                break
-
-        # On the normal completion path, let the producer task finish gracefully so any active
-        # trace context can emit `trace_end` before we run cleanup.
         try:
+            while True:
+                event = await self._queue.get()
+                if isinstance(event, VoiceStreamEventError):
+                    self._stored_exception = event.error
+                    log_model_and_tool_action_error(
+                        logger, "Error processing voice output", event.error
+                    )
+                    break
+                if event is None:
+                    break
+                yield event
+                if event.type == "voice_stream_event_lifecycle" and event.event == "session_ended":
+                    saw_session_end = True
+                    break
+
+            # On the normal completion path, let the producer task finish gracefully so any
+            # active trace context can emit `trace_end` before we run cleanup.
             if (
                 saw_session_end
                 and self.text_generation_task is not None
@@ -350,6 +346,8 @@ class StreamedAudioResult:
 
             self._check_errors()
         finally:
+            # Clean up on every exit path, including when the consumer stops iterating
+            # early, which finalizes the generator and throws GeneratorExit at the yield.
             await self._cleanup_tasks()
 
         if self._stored_exception:

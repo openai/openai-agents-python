@@ -334,6 +334,72 @@ async def test_voice_pipeline_awaits_task_cleanup_after_tts_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_streamed_audio_result_cleans_up_producer_on_early_exit() -> None:
+    """A consumer that stops iterating early must not leak the producer tasks."""
+
+    segment_started = asyncio.Event()
+    segment_stopped = asyncio.Event()
+
+    class SlowTTS(FakeTTS):
+        async def run(self, text: str, settings: TTSModelSettings):
+            del text, settings
+            segment_started.set()
+            yield np.zeros(2, dtype=np.int16).tobytes()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                segment_stopped.set()
+
+    def split_immediately(text: str) -> tuple[str, str]:
+        return text, ""
+
+    pipeline = VoicePipeline(
+        workflow=FakeWorkflow([["first", "second"]]),
+        stt_model=FakeSTT(["user input"]),
+        tts_model=SlowTTS(),
+        config=VoicePipelineConfig(
+            tts_settings=TTSModelSettings(
+                text_splitter=split_immediately,
+                buffer_size=1,
+            )
+        ),
+    )
+    result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
+
+    async for _event in result.stream():
+        if segment_started.is_set():
+            break
+
+    # Breaking out of `async for` finalizes the generator asynchronously, so the deferred
+    # aclose() runs _cleanup_tasks on a later loop tick. Wait for the producer shutdown.
+    producer_tasks = [
+        task
+        for task in [*result._tasks, result._dispatcher_task, result.text_generation_task]
+        if task is not None
+    ]
+
+    async def wait_for_cleanup() -> None:
+        while not (
+            segment_stopped.is_set()
+            and all(task.done() for task in producer_tasks)
+            and result._tracing_span is None
+        ):
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_cleanup(), timeout=5.0)
+
+    # Finalizing the generator must cancel the mid-flight producer tasks rather than
+    # leaving them running, and finish the active trace span.
+    assert segment_stopped.is_set()
+    assert all(task.done() for task in producer_tasks)
+    assert result._dispatcher_task is not None
+    assert result._dispatcher_task.done()
+    assert result._tracing_span is None
+    assert result.text_generation_task is not None
+    assert result.text_generation_task.done()
+
+
+@pytest.mark.asyncio
 async def test_streamed_audio_dispatcher_blocks_until_work_is_available() -> None:
     """The dispatcher must block while idle without losing a pre-wait notification."""
 
