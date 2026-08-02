@@ -1921,6 +1921,100 @@ async def test_input_guardrail_tripwire_does_not_save_assistant_message_to_sessi
 
 
 @pytest.mark.asyncio
+async def test_output_guardrail_tripwire_does_not_save_assistant_message_to_session():
+    # The blocked message must not stay in the session store, or the next turn replays the
+    # very output the guardrail rejected. `Runner.run_streamed` already behaves this way.
+    async def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    session = SimpleListSession()
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("should_not_be_saved")])
+
+    agent = Agent(
+        name="test",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        await Runner.run(agent, input="user_message", session=session)
+
+    items = await session.get_items()
+
+    assert len(items) == 1
+    first_item = cast(dict[str, Any], items[0])
+    assert first_item.get("role") == "user"
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_tripwire_keeps_tool_items_in_session():
+    # Only the rejected assistant message is withheld. Tool calls and their outputs really
+    # happened, so dropping them would leave the model unable to see completed side effects.
+    async def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    session = SimpleListSession()
+
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("foo", "{}")],
+            [get_text_message("should_not_be_saved")],
+        ]
+    )
+
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("foo", "tool_result")],
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        await Runner.run(agent, input="user_message", session=session)
+
+    items = await session.get_items()
+
+    types = [cast(dict[str, Any], item).get("type") for item in items]
+    assert types == [None, "function_call", "function_call_output"]
+    assert cast(dict[str, Any], items[0]).get("role") == "user"
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_pass_still_saves_assistant_message_to_session():
+    # Control for the two tests above: without a tripwire the message is persisted as before.
+    async def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    session = SimpleListSession()
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("saved")])
+
+    agent = Agent(
+        name="test",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    await Runner.run(agent, input="user_message", session=session)
+
+    items = await session.get_items()
+
+    assert len(items) == 2
+    assert cast(dict[str, Any], items[0]).get("role") == "user"
+    assert cast(dict[str, Any], items[1]).get("role") == "assistant"
+
+
+@pytest.mark.asyncio
 async def test_prepare_input_with_session_keeps_function_call_outputs():
     history_item = cast(
         TResponseInputItem,

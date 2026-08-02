@@ -200,6 +200,39 @@ def _sandbox_memory_input(
     return copy_input_items(original_input)
 
 
+async def _save_turn_items(
+    *,
+    session: Session | None,
+    run_state: RunState[Any] | None,
+    items: list[RunItem],
+    resumed: bool,
+    response_id: str | None,
+    store: bool | None,
+) -> None:
+    """Persist a turn's items, tracking the persisted count while a turn is being resumed."""
+    logger.debug("Persisting turn items (types=%s)", [item.type for item in items])
+    if resumed and run_state is not None:
+        saved_count = await save_result_to_session(
+            session,
+            [],
+            items,
+            None,
+            response_id=response_id,
+            reasoning_item_id_policy=run_state._reasoning_item_id_policy,
+            store=store,
+        )
+        run_state._current_turn_persisted_item_count += saved_count
+    else:
+        await save_result_to_session(
+            session,
+            [],
+            items,
+            run_state,
+            response_id=response_id,
+            store=store,
+        )
+
+
 class Runner:
     @classmethod
     async def run(
@@ -1377,6 +1410,11 @@ class AgentRunner:
                     tool_output_guardrail_results.extend(turn_result.tool_output_guardrail_results)
 
                     items_to_save_turn = list(turn_session_items)
+                    # A final-output turn defers its save until the output guardrails have
+                    # passed, so a tripwire does not leave the blocked message in the session
+                    # store. The streaming loop already works this way.
+                    deferred_turn_items: list[RunItem] | None = None
+                    deferred_turn_resumed = False
                     if not isinstance(turn_result.next_step, NextStepInterruption):
                         # When resuming a turn we have already persisted the tool_call items;
                         if (
@@ -1419,29 +1457,15 @@ class AgentRunner:
                                 ):
                                     items_to_save_turn.append(item)
                             if items_to_save_turn:
-                                logger.debug(
-                                    "Persisting turn items (types=%s)",
-                                    [item.type for item in items_to_save_turn],
-                                )
-                                if is_resumed_state and run_state is not None:
-                                    saved_count = await save_result_to_session(
-                                        session,
-                                        [],
-                                        items_to_save_turn,
-                                        None,
-                                        response_id=turn_result.model_response.response_id,
-                                        reasoning_item_id_policy=(
-                                            run_state._reasoning_item_id_policy
-                                        ),
-                                        store=store_setting,
-                                    )
-                                    run_state._current_turn_persisted_item_count += saved_count
+                                if isinstance(turn_result.next_step, NextStepFinalOutput):
+                                    deferred_turn_items = items_to_save_turn
+                                    deferred_turn_resumed = is_resumed_state
                                 else:
-                                    await save_result_to_session(
-                                        session,
-                                        [],
-                                        items_to_save_turn,
-                                        run_state,
+                                    await _save_turn_items(
+                                        session=session,
+                                        run_state=run_state,
+                                        items=items_to_save_turn,
+                                        resumed=is_resumed_state,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
                                     )
@@ -1460,6 +1484,18 @@ class AgentRunner:
                                 context_wrapper,
                                 output_guardrail_results,
                             )
+
+                            # The guardrails passed, so the turn's items can now be persisted.
+                            if deferred_turn_items is not None:
+                                await _save_turn_items(
+                                    session=session,
+                                    run_state=run_state,
+                                    items=deferred_turn_items,
+                                    resumed=deferred_turn_resumed,
+                                    response_id=turn_result.model_response.response_id,
+                                    store=store_setting,
+                                )
+                                deferred_turn_items = None
 
                             # Ensure starting_input is not None and not RunState
                             final_output_result_input: str | list[TResponseInputItem] = (
