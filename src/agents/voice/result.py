@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from ..exceptions import UserError
@@ -316,7 +316,7 @@ class StreamedAudioResult:
                     self._stored_exception = task.exception()
                     break
 
-    async def stream(self) -> AsyncIterator[VoiceStreamEvent]:
+    async def stream(self) -> AsyncGenerator[VoiceStreamEvent, None]:
         """Stream the events and audio data as they're generated."""
         saw_session_end = False
         try:
@@ -330,24 +330,32 @@ class StreamedAudioResult:
                     break
                 if event is None:
                     break
-                yield event
+                # Record the terminal event before yielding it, so that a consumer that
+                # stops iterating immediately after receiving `session_ended` (which
+                # finalizes the generator and throws GeneratorExit at the yield below)
+                # still completes the producer through the graceful path below.
                 if event.type == "voice_stream_event_lifecycle" and event.event == "session_ended":
                     saw_session_end = True
+                yield event
+                if saw_session_end:
                     break
 
-            # On the normal completion path, let the producer task finish gracefully so any
-            # active trace context can emit `trace_end` before we run cleanup.
+            self._check_errors()
+        finally:
+            # On the normal completion path and on the early-exit path, let the producer
+            # task finish gracefully so any active trace context can emit `trace_end`
+            # before we run cleanup. The producer may already have failed, in which case
+            # its error is re-raised here; swallow it so cleanup always runs.
             if (
                 saw_session_end
                 and self.text_generation_task is not None
                 and not self.text_generation_task.done()
             ):
-                await asyncio.shield(self.text_generation_task)
+                try:
+                    await asyncio.shield(self.text_generation_task)
+                except BaseException:
+                    pass
 
-            self._check_errors()
-        finally:
-            # Clean up on every exit path, including when the consumer stops iterating
-            # early, which finalizes the generator and throws GeneratorExit at the yield.
             await self._cleanup_tasks()
 
         if self._stored_exception:

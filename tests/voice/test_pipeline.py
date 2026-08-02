@@ -400,6 +400,51 @@ async def test_streamed_audio_result_cleans_up_producer_on_early_exit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_streamed_audio_result_finishes_producer_when_closed_on_session_end() -> None:
+    """Closing the consumer after receiving `session_ended` must finish the producer and
+    the trace gracefully, not cancel the text-generation task."""
+
+    result = StreamedAudioResult(
+        FakeTTS(),
+        TTSModelSettings(),
+        VoicePipelineConfig(),
+    )
+
+    release_producer = asyncio.Event()
+    producer_started = asyncio.Event()
+    producer_finished = asyncio.Event()
+
+    async def produce_text() -> None:
+        producer_started.set()
+        try:
+            await release_producer.wait()
+        finally:
+            producer_finished.set()
+
+    text_generation_task = asyncio.create_task(produce_text())
+    result._set_task(text_generation_task)
+    await producer_started.wait()
+
+    await result._start_turn()
+    await result._queue.put(VoiceStreamEventLifecycle(event="session_ended"))
+
+    stream = result.stream()
+    async for event in stream:
+        if event.type == "voice_stream_event_lifecycle" and event.event == "session_ended":
+            break
+
+    # The producer is still in flight, so closing the generator must drive it to completion
+    # through the graceful shielded path rather than cancelling it.
+    release_producer.set()
+    await stream.aclose()
+
+    await producer_finished.wait()
+    assert not text_generation_task.cancelled()
+    assert text_generation_task.done()
+    assert result._tracing_span is None
+
+
+@pytest.mark.asyncio
 async def test_streamed_audio_dispatcher_blocks_until_work_is_available() -> None:
     """The dispatcher must block while idle without losing a pre-wait notification."""
 
