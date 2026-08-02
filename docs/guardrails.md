@@ -68,6 +68,8 @@ If the input or output fails the guardrail, the Guardrail can signal this with a
 
 The exception's `guardrail_result` identifies the guardrail that triggered the tripwire. For an input tripwire raised by the runner, `exception.run_data.input_guardrail_results` contains every input guardrail result completed before the run stopped, including the result that triggered the tripwire. The streamed result exposes the same accumulated results through `input_guardrail_results` after `stream_events()` raises. `run_data` can be `None` when an exception is raised outside a runner-managed execution path.
 
+`run_data` also carries `tool_input_guardrail_results` and `tool_output_guardrail_results`, so tool guardrail results collected before the run failed remain available on any exception raised by the runner — including failures unrelated to guardrails, such as `MaxTurnsExceeded`.
+
 ## Implementing a guardrail
 
 You need to provide a function that receives input, and returns a [`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput]. In this example, we'll do this by running an Agent under the hood.

@@ -1601,6 +1601,8 @@ class AgentRunner:
                         context_wrapper=context_wrapper,
                         input_guardrail_results=input_guardrail_results,
                         output_guardrail_results=output_guardrail_results,
+                        tool_input_guardrail_results=tool_input_guardrail_results,
+                        tool_output_guardrail_results=tool_output_guardrail_results,
                     )
                 raise
             finally:

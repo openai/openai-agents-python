@@ -84,6 +84,8 @@ RunErrorDetails:
 - 0 raw response(s)
 - 0 input guardrail result(s)
 - 0 output guardrail result(s)
+- 0 tool input guardrail result(s)
+- 0 tool output guardrail result(s)
 (See `RunErrorDetails` for more details)\
 """)
 

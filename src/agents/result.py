@@ -877,6 +877,8 @@ class RunResultStreaming(RunResultBase):
             context_wrapper=self.context_wrapper,
             input_guardrail_results=self.input_guardrail_results,
             output_guardrail_results=self.output_guardrail_results,
+            tool_input_guardrail_results=self.tool_input_guardrail_results,
+            tool_output_guardrail_results=self.tool_output_guardrail_results,
         )
 
     def _check_errors(self):
