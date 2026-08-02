@@ -1140,6 +1140,16 @@ async def start_streaming(
                 streamed_result.raw_responses = streamed_result.raw_responses + [
                     turn_result.model_response
                 ]
+                # Mirror the non-streaming loop, which extends the run-wide tool guardrail lists
+                # from every turn result so the run result reports the guardrails that ran.
+                streamed_result.tool_input_guardrail_results = (
+                    streamed_result.tool_input_guardrail_results
+                    + turn_result.tool_input_guardrail_results
+                )
+                streamed_result.tool_output_guardrail_results = (
+                    streamed_result.tool_output_guardrail_results
+                    + turn_result.tool_output_guardrail_results
+                )
                 input_before_turn_rewrite = streamed_result.input
                 streamed_result.input = turn_result.original_input
                 if isinstance(turn_result.next_step, NextStepHandoff):
