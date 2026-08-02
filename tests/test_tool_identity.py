@@ -8,9 +8,13 @@ and tool-output trimmer code paths.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
+from agents import function_tool
 from agents._tool_identity import (
+    build_function_tool_lookup_map,
     deserialize_function_tool_lookup_key,
     get_function_tool_lookup_key,
     get_tool_call_name,
@@ -21,6 +25,7 @@ from agents._tool_identity import (
     serialize_function_tool_lookup_key,
     tool_qualified_name,
     tool_trace_name,
+    validate_function_tool_lookup_configuration,
 )
 from agents.exceptions import UserError
 
@@ -165,3 +170,80 @@ def test_validate_function_tool_namespace_shape_rejects_synthetic() -> None:
     # The reserved synthetic shape (name == namespace) is rejected.
     with pytest.raises(UserError, match="reserves the synthetic namespace"):
         validate_function_tool_namespace_shape("search", "search")
+
+
+class TestDuplicateFunctionToolNames:
+    """Two visible tools resolving to the same public name are ambiguous on the wire."""
+
+    @staticmethod
+    def _tool(name: str, *, defer_loading: bool = False) -> Any:
+        @function_tool(name_override=name, defer_loading=defer_loading)
+        def f(x: str) -> str:
+            """F."""
+            return name
+
+        return f
+
+    def test_duplicate_bare_names_raise(self) -> None:
+        tools = [self._tool("lookup"), self._tool("lookup")]
+        with pytest.raises(UserError, match="`lookup` is used by multiple tools"):
+            validate_function_tool_lookup_configuration(tools)
+
+    def test_duplicate_bare_names_raise_when_building_lookup_map(self) -> None:
+        tools = [self._tool("lookup"), self._tool("lookup")]
+        with pytest.raises(UserError, match="`lookup` is used by multiple tools"):
+            build_function_tool_lookup_map(tools)
+
+    def test_distinct_names_are_accepted(self) -> None:
+        validate_function_tool_lookup_configuration([self._tool("a"), self._tool("b")])
+
+    def test_deferred_tool_may_share_a_name_with_a_visible_tool(self) -> None:
+        # These occupy different lookup keys and the deferred one is not advertised alongside
+        # the visible one, so this stays a supported configuration.
+        validate_function_tool_lookup_configuration(
+            [self._tool("lookup"), self._tool("lookup", defer_loading=True)]
+        )
+        validate_function_tool_lookup_configuration(
+            [self._tool("lookup", defer_loading=True), self._tool("lookup")]
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_get_all_tools_rejects_duplicate_names_before_the_model_call() -> None:
+    from agents import Agent
+    from agents.run_context import RunContextWrapper
+
+    @function_tool(name_override="lookup")
+    def a(x: str) -> str:
+        """A."""
+        return "a"
+
+    @function_tool(name_override="lookup")
+    def b(x: str) -> str:
+        """B."""
+        return "b"
+
+    agent = Agent(name="TestAgent", tools=[a, b])
+    with pytest.raises(UserError, match="`lookup` is used by multiple tools"):
+        await agent.get_all_tools(RunContextWrapper(None))
+
+
+@pytest.mark.asyncio
+async def test_agent_get_all_tools_allows_duplicates_when_only_one_is_enabled() -> None:
+    # `is_enabled` filtering runs first, so toggling between same-named tools stays valid.
+    from agents import Agent
+    from agents.run_context import RunContextWrapper
+
+    @function_tool(name_override="lookup", is_enabled=False)
+    def a(x: str) -> str:
+        """A."""
+        return "a"
+
+    @function_tool(name_override="lookup")
+    def b(x: str) -> str:
+        """B."""
+        return "b"
+
+    agent = Agent(name="TestAgent", tools=[a, b])
+    tools = await agent.get_all_tools(RunContextWrapper(None))
+    assert [t.name for t in tools] == ["lookup"]

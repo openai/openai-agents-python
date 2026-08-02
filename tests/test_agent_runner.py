@@ -5266,7 +5266,7 @@ async def test_deferred_collision_rejection_prefers_explicit_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_approved_tools_uses_last_duplicate_top_level_function():
+async def test_execute_approved_tools_rejects_duplicate_top_level_function():
     first_calls: list[str] = []
     second_calls: list[str] = []
 
@@ -5286,17 +5286,16 @@ async def test_execute_approved_tools_uses_last_duplicate_top_level_function():
     assert isinstance(tool_call, ResponseFunctionToolCall)
     approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
 
-    generated_items = await run_execute_approved_tools(
-        agent=agent,
-        approval_item=approval_item,
-        approve=True,
-    )
+    # The duplicate used to resolve last-wins, permanently shadowing `first_tool`.
+    with pytest.raises(UserError, match="`lookup_account` is used by multiple tools"):
+        await run_execute_approved_tools(
+            agent=agent,
+            approval_item=approval_item,
+            approve=True,
+        )
 
-    assert len(generated_items) == 1
-    assert isinstance(generated_items[0], ToolCallOutputItem)
-    assert generated_items[0].output == "second"
     assert first_calls == []
-    assert second_calls == ["second"]
+    assert second_calls == []
 
 
 @pytest.mark.asyncio

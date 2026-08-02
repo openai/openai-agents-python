@@ -352,7 +352,21 @@ def validate_function_tool_lookup_configuration(tools: Sequence[Any]) -> None:
 
         prior_namespace = get_explicit_function_tool_namespace(prior_owner)
         if explicit_namespace is None and prior_namespace is None:
-            continue
+            # A deferred top-level tool dispatches through its own synthetic lookup key and is
+            # not advertised next to visible tools, so sharing a bare name with one is not
+            # ambiguous. Duplicates among deferred tools are caught by the check above.
+            if is_deferred_top_level_function_tool(tool) or is_deferred_top_level_function_tool(
+                prior_owner
+            ):
+                continue
+            # Two visible tools sharing a name. Dispatch would resolve last-wins and the earlier
+            # tool would be permanently unreachable, so reject it the way duplicate MCP and
+            # Codex tool names already are.
+            raise UserError(
+                "Ambiguous function tool configuration: the tool name "
+                f"`{qualified_name}` is used by multiple tools. "
+                "Pass a unique `name_override=` to one of them to avoid ambiguous dispatch."
+            )
 
         raise UserError(
             "Ambiguous function tool configuration: the qualified name "

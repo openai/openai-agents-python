@@ -11,7 +11,10 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from typing_extensions import NotRequired, TypedDict
 
-from ._tool_identity import get_function_tool_approval_keys
+from ._tool_identity import (
+    get_function_tool_approval_keys,
+    validate_function_tool_lookup_configuration,
+)
 from .agent_output import AgentOutputSchemaBase
 from .agent_tool_input import (
     AgentAsToolInput,
@@ -264,6 +267,10 @@ class AgentBase(Generic[TContext]):
         enabled: list[Tool] = [t for t, ok in zip(self.tools, results, strict=False) if ok]
         all_tools: list[Tool] = prune_orphaned_tool_search_tools([*mcp_tools, *enabled])
         _validate_codex_tool_name_collisions(all_tools)
+        # Validate here, after `is_enabled` filtering, so the error surfaces before the model
+        # call for every provider. Dispatch-time callers of `build_function_tool_lookup_map`
+        # only reach this check after the request has already been sent.
+        validate_function_tool_lookup_configuration(all_tools)
         return all_tools
 
 
