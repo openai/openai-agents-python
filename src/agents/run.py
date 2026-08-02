@@ -1699,6 +1699,10 @@ class AgentRunner:
                 default_loop = policy.new_event_loop()
                 policy.set_event_loop(default_loop)
 
+        if default_loop.is_closed():
+            default_loop = policy.new_event_loop()
+            policy.set_event_loop(default_loop)
+
         # We intentionally leave the default loop open even if we had to create one above. Session
         # instances and other helpers stash loop-bound primitives between calls and expect to find
         # the same default loop every time run_sync is invoked on this thread.
