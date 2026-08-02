@@ -275,17 +275,28 @@ class TestOpenAIConversationsSessionBasicOperations:
         assert session._session_id is None
 
     @pytest.mark.asyncio
-    async def test_clear_session_creates_session_id_first(self, mock_openai_client):
-        """Test that clear_session creates session_id if it doesn't exist."""
+    async def test_clear_session_uninitialized_does_not_create_session(self, mock_openai_client):
+        """Test that clear_session on an uninitialized session does not call create or delete."""
         session = OpenAIConversationsSession(openai_client=mock_openai_client)
 
         await session.clear_session()
 
-        # Should create conversation first, then delete it
-        mock_openai_client.conversations.create.assert_called_once_with(items=[])
-        mock_openai_client.conversations.delete.assert_called_once_with(
-            conversation_id="test_conversation_id"
-        )
+        mock_openai_client.conversations.create.assert_not_called()
+        mock_openai_client.conversations.delete.assert_not_called()
+        assert session._session_id is None
+
+    @pytest.mark.asyncio
+    async def test_clear_session_uninitialized_no_api_calls_on_create_failure(
+        self, mock_openai_client
+    ):
+        """Test that clear_session on an uninitialized session succeeds even if create raises."""
+        mock_openai_client.conversations.create.side_effect = RuntimeError("API connection error")
+        session = OpenAIConversationsSession(openai_client=mock_openai_client)
+
+        await session.clear_session()
+
+        mock_openai_client.conversations.create.assert_not_called()
+        mock_openai_client.conversations.delete.assert_not_called()
         assert session._session_id is None
 
 
