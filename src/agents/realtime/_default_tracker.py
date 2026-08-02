@@ -67,6 +67,14 @@ class ModelAudioTracker:
         if self._last_audio_item in interrupted_items:
             self._last_audio_item = None
 
+    def on_response_done(self, response_id: str) -> None:
+        """Release response-scoped indexes after guardrails and playback settle."""
+        self._audio_items_by_response_id.pop(response_id, None)
+
+    def clear_response_indexes(self) -> None:
+        """Release every response-scoped index when the model connection closes."""
+        self._audio_items_by_response_id.clear()
+
     def get_state(self, item_id: str, item_content_index: int) -> ModelAudioState | None:
         """Called when the model wants to get the current playback state."""
         return self._states.get((item_id, item_content_index))

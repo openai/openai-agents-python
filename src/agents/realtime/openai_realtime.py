@@ -622,6 +622,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._current_item_id: str | None = None
         self._audio_state_tracker: ModelAudioTracker = ModelAudioTracker()
         self._interrupted_audio_response_ids: set[str] = set()
+        self._pending_audio_response_retirements: dict[str, asyncio.TimerHandle | None] = {}
         self._response_create_sequencer = _ResponseCreateSequencer()
         self._tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None = None
         self._playback_tracker: RealtimePlaybackTracker | None = None
@@ -869,7 +870,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
     async def _release_response_waiters(self) -> None:
         # Connection teardown means no response.done will arrive, so local
         # response sequencing must be released explicitly.
-        self._interrupted_audio_response_ids.clear()
+        self._clear_response_audio_indexes()
         await self._response_create_sequencer.release_waiters()
 
     async def _reserve_response_create_request(self, *, manual: bool = False) -> int:
@@ -1276,9 +1277,12 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     errors.append(("cancel_response", exc))
 
         if len(errors) == 1:
+            self._retire_inactive_response_audio()
             raise errors[0][1]
         if errors:
+            self._retire_inactive_response_audio()
             raise _RealtimeInterruptError(errors) from errors[0][1]
+        self._retire_inactive_response_audio()
 
     async def _send_session_update(self, event: RealtimeModelSendSessionUpdate) -> None:
         """Send a session update to the model."""
@@ -1299,6 +1303,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             audio_bytes,
             response_id=parsed.response_id,
         )
+        self._retire_inactive_response_audio()
 
         await self._emit_event(
             RealtimeModelAudioEvent(
@@ -1359,19 +1364,99 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def close(self) -> None:
         """Close the session."""
-        await self._cancel_response_create_tasks()
-        if self._websocket:
-            await self._websocket.close()
-            self._websocket = None
-        if self._websocket_task:
-            self._websocket_task.cancel()
-            try:
-                await self._websocket_task
-            except asyncio.CancelledError:
-                pass
-            self._websocket_task = None
-        else:
-            await self._release_response_waiters()
+        try:
+            await self._cancel_response_create_tasks()
+            if self._websocket:
+                await self._websocket.close()
+                self._websocket = None
+            if self._websocket_task:
+                self._websocket_task.cancel()
+                try:
+                    await self._websocket_task
+                except asyncio.CancelledError:
+                    pass
+                self._websocket_task = None
+            else:
+                await self._release_response_waiters()
+        finally:
+            self._clear_response_audio_indexes()
+
+    def _retire_response_audio(self, response_id: str) -> None:
+        self._interrupted_audio_response_ids.discard(response_id)
+        if self._playback_tracker is not None:
+            self._playback_tracker._add_progress_listener(self._retire_inactive_response_audio)
+        self._pending_audio_response_retirements.setdefault(response_id, None)
+        self._retire_inactive_response_audio()
+
+    def _retire_inactive_response_audio(self) -> None:
+        playback_state = self._get_playback_state()
+        current_item_id = playback_state.get("current_item_id")
+        current_content_index = playback_state.get("current_item_content_index") or 0
+        current_item = (
+            (current_item_id, current_content_index) if current_item_id is not None else None
+        )
+        elapsed_ms = playback_state.get("elapsed_ms")
+
+        for response_id in list(self._pending_audio_response_retirements):
+            response_items = self._audio_state_tracker.get_audio_items_for_response(response_id)
+            if not response_items or current_item not in response_items:
+                self._complete_response_audio_retirement(response_id)
+                continue
+
+            audio_limits = self._get_audio_limits(*current_item)
+            if audio_limits is None or elapsed_ms is None:
+                continue
+            audio_length_ms, _ = audio_limits
+            if elapsed_ms >= audio_length_ms:
+                self._complete_response_audio_retirement(response_id)
+                continue
+
+            if self._playback_tracker is None:
+                self._schedule_response_audio_retirement(
+                    response_id,
+                    audio_length_ms - elapsed_ms,
+                )
+
+    def _schedule_response_audio_retirement(self, response_id: str, remaining_ms: float) -> None:
+        if self._pending_audio_response_retirements.get(response_id) is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._pending_audio_response_retirements[response_id] = loop.call_later(
+            max(remaining_ms / 1000, 0.001),
+            self._on_response_audio_retirement_timer,
+            response_id,
+        )
+
+    def _on_response_audio_retirement_timer(self, response_id: str) -> None:
+        if response_id not in self._pending_audio_response_retirements:
+            return
+        self._pending_audio_response_retirements[response_id] = None
+        self._retire_inactive_response_audio()
+
+    def _complete_response_audio_retirement(self, response_id: str) -> None:
+        handle = self._pending_audio_response_retirements.pop(response_id, None)
+        if handle is not None:
+            handle.cancel()
+        self._interrupted_audio_response_ids.discard(response_id)
+        self._audio_state_tracker.on_response_done(response_id)
+        self._remove_playback_progress_listener_if_idle()
+
+    def _remove_playback_progress_listener_if_idle(self) -> None:
+        if self._pending_audio_response_retirements or self._playback_tracker is None:
+            return
+        self._playback_tracker._remove_progress_listener(self._retire_inactive_response_audio)
+
+    def _clear_response_audio_indexes(self) -> None:
+        self._interrupted_audio_response_ids.clear()
+        for handle in self._pending_audio_response_retirements.values():
+            if handle is not None:
+                handle.cancel()
+        self._pending_audio_response_retirements.clear()
+        self._audio_state_tracker.clear_response_indexes()
+        self._remove_playback_progress_listener_if_idle()
 
     async def _cancel_response(self, *, response_id: str | None = None) -> None:
         if not await self._response_create_sequencer.begin_cancel_response():
@@ -1530,6 +1615,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 self._audio_state_tracker.on_interrupted()
                 if self._playback_tracker:
                     self._playback_tracker.on_interrupted()
+                self._retire_inactive_response_audio()
 
                 # If server isn't configured to auto‑interrupt/cancel, cancel the
                 # response to prevent further audio.

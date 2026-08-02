@@ -256,6 +256,8 @@ class RealtimeSession(RealtimeModelListener):
         )
 
         self._guardrail_tasks: set[asyncio.Task[Any]] = set()
+        self._guardrail_tasks_by_response_id: dict[str, set[asyncio.Task[Any]]] = {}
+        self._responses_awaiting_guardrail_cleanup: set[str] = set()
         self._tool_call_tasks: set[asyncio.Task[Any]] = set()
         self._async_tool_calls: bool = bool(self._run_config.get("async_tool_calls", True))
 
@@ -593,6 +595,10 @@ class RealtimeSession(RealtimeModelListener):
             assert isinstance(event, RealtimeModelUsageEvent)
             self._context_wrapper.usage.add(event.usage)
         elif event.type == "turn_ended":
+            response_id = event.response_id or self._active_output_response_id
+            if response_id is not None:
+                self._finish_response_guardrail_lifecycle(response_id)
+
             # Clear guardrail state for next turn
             self._active_output_response_id = None
             if event.response_id is None:
@@ -1664,18 +1670,34 @@ class RealtimeSession(RealtimeModelListener):
             )
         )
         self._guardrail_tasks.add(task)
+        self._guardrail_tasks_by_response_id.setdefault(response_id, set()).add(task)
 
         # Add callback to remove completed tasks and handle exceptions
-        task.add_done_callback(self._on_guardrail_task_done)
+        task.add_done_callback(partial(self._on_guardrail_task_done, response_id=response_id))
 
-    def _on_guardrail_task_done(self, task: asyncio.Task[Any]) -> None:
+    def _on_guardrail_task_done(self, task: asyncio.Task[Any], *, response_id: str) -> None:
         """Handle completion of a guardrail task."""
         # Remove from tracking set
         self._guardrail_tasks.discard(task)
+        response_tasks = self._guardrail_tasks_by_response_id.get(response_id)
+        if response_tasks is not None:
+            response_tasks.discard(task)
+            if not response_tasks:
+                self._guardrail_tasks_by_response_id.pop(response_id, None)
+
+        should_retire_response_audio = (
+            response_id in self._responses_awaiting_guardrail_cleanup
+            and response_id not in self._guardrail_tasks_by_response_id
+        )
+        if should_retire_response_audio:
+            self._responses_awaiting_guardrail_cleanup.discard(response_id)
 
         if self._closing or self._closed:
             self._consume_task_result(task)
             return
+
+        if should_retire_response_audio:
+            self._retire_response_audio(response_id)
 
         # Check for exceptions and propagate as events
         if not task.cancelled():
@@ -1688,6 +1710,25 @@ class RealtimeSession(RealtimeModelListener):
                         error={"message": f"Guardrail task failed: {str(exception)}"},
                     )
                 )
+
+    def _finish_response_guardrail_lifecycle(self, response_id: str) -> None:
+        if response_id in self._guardrail_tasks_by_response_id:
+            self._responses_awaiting_guardrail_cleanup.add(response_id)
+            return
+        self._retire_response_audio(response_id)
+
+    def _retire_response_audio(self, response_id: str) -> None:
+        try:
+            self._model._retire_response_audio(response_id)
+        except Exception as exception:
+            self._put_event_nowait(
+                RealtimeError(
+                    info=self._event_info,
+                    error={"message": f"Response audio cleanup failed: {exception}"},
+                )
+            )
+        finally:
+            self._interrupted_response_ids.discard(response_id)
 
     def _enqueue_tool_call_task(
         self,
@@ -1802,6 +1843,22 @@ class RealtimeSession(RealtimeModelListener):
         for _ in range(self._event_iterator_waiters):
             self._event_queue.put_nowait(_REALTIME_SESSION_CLOSED_SENTINEL)
 
+    def _clear_response_bookkeeping(self) -> None:
+        self._interrupted_response_ids.clear()
+        self._active_output_response_id = None
+        self._response_agent_snapshots.clear()
+        self._unscoped_response_agent_snapshot = None
+        self._item_transcripts.clear()
+        self._item_guardrail_run_counts.clear()
+        self._pending_guardrail_recovery_ids.clear()
+        self._pending_guardrail_recovery_order.clear()
+        self._pending_response_request_order.clear()
+        self._active_guardrail_recovery_response_ids.clear()
+        self._legacy_guardrail_recovery_turn_active = False
+        self._legacy_guardrail_recovery_response_id = None
+        self._guardrail_tasks_by_response_id.clear()
+        self._responses_awaiting_guardrail_cleanup.clear()
+
     async def _cleanup(self) -> None:
         """Clean up all resources and mark session as closed."""
         if self._closed:
@@ -1813,6 +1870,7 @@ class RealtimeSession(RealtimeModelListener):
 
         # Account for session-owned background work before closing its transport.
         await self._cancel_background_tasks()
+        self._clear_response_bookkeeping()
 
         # Close the model connection
         await self._model.close()

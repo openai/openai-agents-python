@@ -341,6 +341,53 @@ async def test_concurrent_close_callers_share_failure_and_retry():
 
 
 @pytest.mark.asyncio
+async def test_close_clears_response_bookkeeping_when_model_close_fails():
+    class FailingCloseModel(_DummyModel):
+        async def close(self):
+            raise RuntimeError("close failed")
+
+    session = RealtimeSession(
+        FailingCloseModel(),
+        RealtimeAgent(name="agent"),
+        None,
+    )
+    response_id = "response_1"
+    request_id = "request_1"
+    session._interrupted_response_ids.add(response_id)
+    session._active_output_response_id = response_id
+    session._response_agent_snapshots[response_id] = session._current_agent
+    session._unscoped_response_agent_snapshot = session._current_agent
+    session._item_transcripts["item_1"] = "partial"
+    session._item_guardrail_run_counts["item_1"] = 1
+    session._pending_guardrail_recovery_ids.add(request_id)
+    session._pending_guardrail_recovery_order.append(request_id)
+    session._pending_response_request_order.append(request_id)
+    session._active_guardrail_recovery_response_ids.add(response_id)
+    session._legacy_guardrail_recovery_turn_active = True
+    session._legacy_guardrail_recovery_response_id = response_id
+    session._guardrail_tasks_by_response_id[response_id] = set()
+    session._responses_awaiting_guardrail_cleanup.add(response_id)
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        await session.close()
+
+    assert not session._interrupted_response_ids
+    assert session._active_output_response_id is None
+    assert not session._response_agent_snapshots
+    assert session._unscoped_response_agent_snapshot is None
+    assert not session._item_transcripts
+    assert not session._item_guardrail_run_counts
+    assert not session._pending_guardrail_recovery_ids
+    assert not session._pending_guardrail_recovery_order
+    assert not session._pending_response_request_order
+    assert not session._active_guardrail_recovery_response_ids
+    assert not session._legacy_guardrail_recovery_turn_active
+    assert session._legacy_guardrail_recovery_response_id is None
+    assert not session._guardrail_tasks_by_response_id
+    assert not session._responses_awaiting_guardrail_cleanup
+
+
+@pytest.mark.asyncio
 async def test_cancelling_one_close_waiter_does_not_cancel_cleanup():
     class BlockingCloseModel(_DummyModel):
         def __init__(self) -> None:
@@ -713,7 +760,7 @@ async def test_on_guardrail_task_done_emits_error_event():
     except Exception:  # noqa: S110
         pass
 
-    session._on_guardrail_task_done(task)
+    session._on_guardrail_task_done(task, response_id="response_1")
 
     err = session._event_queue.get_nowait()
     assert isinstance(err, RealtimeError)
@@ -1066,6 +1113,7 @@ class MockRealtimeModel(RealtimeModel):
         self.sent_audio = []
         self.sent_tool_outputs = []
         self.interrupts_called = 0
+        self.retired_audio_response_ids = []
 
     async def connect(self, options=None):
         self.connect_called = True
@@ -1099,6 +1147,9 @@ class MockRealtimeModel(RealtimeModel):
 
     async def close(self):
         self.close_called = True
+
+    def _retire_response_audio(self, response_id: str) -> None:
+        self.retired_audio_response_ids.append(response_id)
 
 
 @pytest.fixture
@@ -4000,6 +4051,193 @@ class TestGuardrailFunctionality:
         ]
         assert len(guardrail_events) == 1
         assert guardrail_events[0].message == "blocked"
+
+    @pytest.mark.asyncio
+    async def test_response_audio_cleanup_waits_for_delayed_guardrail(self, mock_agent):
+        guardrail_started = asyncio.Event()
+        release_guardrail = asyncio.Event()
+        operations: list[str] = []
+
+        class TrackingModel(MockRealtimeModel):
+            async def send_event(self, event):
+                await super().send_event(event)
+                if isinstance(event, RealtimeModelSendInterrupt):
+                    operations.append("interrupt")
+
+            def _retire_response_audio(self, response_id: str) -> None:
+                super()._retire_response_audio(response_id)
+                operations.append("retire")
+
+        async def delayed_guardrail(_context, _agent, _output):
+            guardrail_started.set()
+            await release_guardrail.wait()
+            return GuardrailFunctionOutput(output_info={}, tripwire_triggered=True)
+
+        model = TrackingModel()
+        session = RealtimeSession(
+            model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [
+                    OutputGuardrail(
+                        guardrail_function=delayed_guardrail,
+                        name="delayed_guardrail",
+                    )
+                ],
+                "guardrails_settings": {"debounce_text_length": 5},
+            },
+        )
+
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="blocked",
+            )
+        )
+        await asyncio.wait_for(guardrail_started.wait(), timeout=1)
+        await session.on_event(RealtimeModelTurnEndedEvent(response_id="response_1"))
+        await asyncio.sleep(0)
+
+        assert operations == []
+        assert model.retired_audio_response_ids == []
+
+        release_guardrail.set()
+        await self._wait_for_guardrail_tasks(session)
+
+        assert operations == ["interrupt", "retire"]
+        assert model.retired_audio_response_ids == ["response_1"]
+        assert session._interrupted_response_ids == set()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tripwire_triggered", [False, True])
+    async def test_legacy_turn_end_retires_audio_after_delayed_guardrail(
+        self,
+        mock_agent,
+        tripwire_triggered,
+    ):
+        guardrail_started = asyncio.Event()
+        release_guardrail = asyncio.Event()
+
+        async def delayed_guardrail(_context, _agent, _output):
+            guardrail_started.set()
+            await release_guardrail.wait()
+            return GuardrailFunctionOutput(
+                output_info={},
+                tripwire_triggered=tripwire_triggered,
+            )
+
+        model = MockRealtimeModel()
+        session = RealtimeSession(
+            model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [
+                    OutputGuardrail(
+                        guardrail_function=delayed_guardrail,
+                        name="delayed_guardrail",
+                    )
+                ],
+                "guardrails_settings": {"debounce_text_length": 5},
+            },
+        )
+
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1",
+                response_id="response_1",
+                delta="blocked",
+            )
+        )
+        await asyncio.wait_for(guardrail_started.wait(), timeout=1)
+
+        await session.on_event(RealtimeModelTurnEndedEvent())
+        await asyncio.sleep(0)
+
+        assert model.retired_audio_response_ids == []
+
+        release_guardrail.set()
+        await self._wait_for_guardrail_tasks(session)
+
+        assert model.retired_audio_response_ids == ["response_1"]
+        assert model.interrupts_called == int(tripwire_triggered)
+        assert session._interrupted_response_ids == set()
+        assert session._guardrail_tasks_by_response_id == {}
+        assert session._responses_awaiting_guardrail_cleanup == set()
+
+    @pytest.mark.asyncio
+    async def test_response_audio_cleanup_runs_immediately_without_guardrail_tasks(
+        self, mock_model, mock_agent
+    ):
+        session = RealtimeSession(mock_model, mock_agent, None)
+
+        await session.on_event(RealtimeModelTurnEndedEvent(response_id="response_1"))
+
+        assert mock_model.retired_audio_response_ids == ["response_1"]
+
+    @pytest.mark.asyncio
+    async def test_repeated_guardrail_trips_release_session_response_suppression(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [triggered_guardrail],
+                "guardrails_settings": {"debounce_text_length": 5},
+            },
+        )
+
+        for response_number in range(20):
+            response_id = f"response_{response_number}"
+            await session.on_event(
+                RealtimeModelTranscriptDeltaEvent(
+                    item_id=f"item_{response_number}",
+                    response_id=response_id,
+                    delta="blocked",
+                )
+            )
+            await self._wait_for_guardrail_tasks(session)
+            await session.on_event(RealtimeModelTurnEndedEvent(response_id=response_id))
+
+        assert session._interrupted_response_ids == set()
+        assert mock_model.retired_audio_response_ids == [
+            f"response_{response_number}" for response_number in range(20)
+        ]
+
+    @pytest.mark.asyncio
+    async def test_close_clears_unsettled_session_response_suppression(
+        self, mock_model, mock_agent
+    ):
+        session = RealtimeSession(mock_model, mock_agent, None)
+        session._interrupted_response_ids.add("response_1")
+
+        await session.close()
+
+        assert session._interrupted_response_ids == set()
+
+    @pytest.mark.asyncio
+    async def test_response_audio_cleanup_error_still_releases_session_suppression(
+        self, mock_agent
+    ):
+        class FailingRetirementModel(MockRealtimeModel):
+            def _retire_response_audio(self, response_id: str) -> None:
+                raise RuntimeError(f"failed to retire {response_id}")
+
+        session = RealtimeSession(FailingRetirementModel(), mock_agent, None)
+        session._interrupted_response_ids.add("response_1")
+
+        session._retire_response_audio("response_1")
+
+        assert session._interrupted_response_ids == set()
+        queued_event = await session._event_queue.get()
+        assert isinstance(queued_event, RealtimeError)
+        assert queued_event.error == {
+            "message": "Response audio cleanup failed: failed to retire response_1"
+        }
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("output_kind", ["text", "audio"])
