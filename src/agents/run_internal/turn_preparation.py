@@ -126,9 +126,14 @@ def get_output_schema(agent: Agent[Any]) -> AgentOutputSchemaBase | None:
     if agent.output_type is None or agent.output_type is str:
         return None
     elif isinstance(agent.output_type, AgentOutputSchemaBase):
+        if agent.output_type.is_plain_text():
+            return None
         return agent.output_type
 
-    return AgentOutputSchema(agent.output_type)
+    schema = AgentOutputSchema(agent.output_type)
+    if schema.is_plain_text():
+        return None
+    return schema
 
 
 def get_model(agent: Agent[Any], run_config: RunConfig) -> Model:

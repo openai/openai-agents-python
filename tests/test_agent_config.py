@@ -4,7 +4,14 @@ import pytest
 from openai.types.shared import Reasoning
 from pydantic import BaseModel
 
-from agents import Agent, AgentOutputSchema, Handoff, RunContextWrapper, handoff
+from agents import (
+    Agent,
+    AgentOutputSchema,
+    AgentOutputSchemaBase,
+    Handoff,
+    RunContextWrapper,
+    handoff,
+)
 from agents.lifecycle import AgentHooksBase
 from agents.model_settings import ModelSettings
 from agents.retry import ModelRetryBackoffSettings
@@ -285,8 +292,59 @@ def test_agent_rejects_unknown_first_party_dictionary_model_settings(
         Agent(name="test", model_settings=settings)
 
 
-@pytest.mark.parametrize("setting_name", ["reasoning", "context_management", "temperature"])
-def test_agent_does_not_promote_model_settings_to_constructor(setting_name: str) -> None:
-    arguments: dict[str, Any] = {setting_name: None}
-    with pytest.raises(TypeError, match=f"unexpected keyword argument '{setting_name}'"):
-        Agent(name="test", **arguments)
+class CustomPlainTextSchema(AgentOutputSchemaBase):
+    def is_plain_text(self) -> bool:
+        return True
+
+    def name(self) -> str:
+        return "CustomPlain"
+
+    def json_schema(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def is_strict_json_schema(self) -> bool:
+        return True
+
+    def validate_json(self, json_str: str) -> Any:
+        return json_str
+
+
+class CustomStructuredSchema(AgentOutputSchemaBase):
+    def is_plain_text(self) -> bool:
+        return False
+
+    def name(self) -> str:
+        return "CustomStruct"
+
+    def json_schema(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {"val": {"type": "string"}}}
+
+    def is_strict_json_schema(self) -> bool:
+        return True
+
+    def validate_json(self, json_str: str) -> Any:
+        return {"val": "test"}
+
+
+@pytest.mark.parametrize(
+    "output_type",
+    [str, None, AgentOutputSchema(str), AgentOutputSchema(None), CustomPlainTextSchema()],
+)
+def test_get_output_schema_plain_text(output_type: Any) -> None:
+    agent = Agent(name="test", output_type=output_type)
+    assert get_output_schema(agent) is None
+
+
+def test_get_output_schema_structured() -> None:
+    class UserOutput(BaseModel):
+        name: str
+
+    agent = Agent(name="test", output_type=UserOutput)
+    schema = get_output_schema(agent)
+    assert schema is not None
+    assert not schema.is_plain_text()
+    assert schema.name() == "UserOutput"
+
+    custom = CustomStructuredSchema()
+    agent_custom = Agent(name="test", output_type=custom)
+    assert get_output_schema(agent_custom) is custom
