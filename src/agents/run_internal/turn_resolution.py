@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Container, Mapping, Sequence
 from typing import Any, Literal, cast
 
 from openai.types.responses import (
@@ -174,12 +174,23 @@ __all__ = [
     "execute_final_output",
     "execute_handoffs",
     "check_for_final_output_from_tools",
+    "is_handoff_tool_call",
     "process_model_response",
     "execute_tools_and_side_effects",
     "resolve_interrupted_turn",
     "get_single_step_result_from_response",
     "run_final_output_hooks",
 ]
+
+
+def is_handoff_tool_call(output: Any, handoff_tool_names: Container[str]) -> bool:
+    """Return whether a model output item routes to a handoff instead of a tool.
+
+    Namespaced calls never resolve to a handoff, so only bare names are matched.
+    """
+    if not isinstance(output, ResponseFunctionToolCall):
+        return False
+    return get_tool_call_qualified_name(output) == output.name and output.name in handoff_tool_names
 
 
 async def _maybe_finalize_from_tool_results(
@@ -2339,7 +2350,7 @@ def process_model_response(
         tools_used.append(get_tool_call_trace_name(output) or output.name)
         qualified_output_name = get_tool_call_qualified_name(output)
 
-        if qualified_output_name == output.name and output.name in handoff_map:
+        if is_handoff_tool_call(output, handoff_map):
             ensure_tool_caller_allowed(
                 tool_call=output,
                 allowed_callers=None,
