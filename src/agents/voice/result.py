@@ -354,12 +354,10 @@ class StreamedAudioResult:
             try:
                 try:
                     # Let the producer finish gracefully after terminal event delivery so any
-                    # active trace context can emit `trace_end` before cleanup.
-                    if (
-                        saw_session_end
-                        and self.text_generation_task is not None
-                        and not self.text_generation_task.done()
-                    ):
+                    # active trace context can emit `trace_end` before cleanup. Await it even
+                    # when it already finished so an already-raised producer/TTS failure is
+                    # surfaced here instead of being swallowed by cleanup's return_exceptions.
+                    if saw_session_end and self.text_generation_task is not None:
                         await asyncio.shield(self.text_generation_task)
                 finally:
                     await self._cleanup_tasks()

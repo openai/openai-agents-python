@@ -334,6 +334,40 @@ async def test_streamed_audio_result_surfaces_producer_error_on_close_after_sess
         await asyncio.gather(close_task, producer_task, return_exceptions=True)
 
 
+@pytest.mark.asyncio
+async def test_streamed_audio_result_surfaces_failed_producer_already_done_on_close() -> None:
+    """Closing the consumer right after `session_ended` must surface a producer error that
+    already raised before close, not report a clean close."""
+
+    result = StreamedAudioResult(
+        FakeTTS(),
+        TTSModelSettings(),
+        VoicePipelineConfig(),
+    )
+    producer_error = RuntimeError("producer-failed-before-terminal-close")
+
+    async def produce_session() -> None:
+        raise producer_error
+
+    producer_task = asyncio.create_task(produce_session())
+    result._set_task(producer_task)
+    await asyncio.sleep(0)
+    assert producer_task.done()
+    await result._queue.put(VoiceStreamEventLifecycle(event="session_ended"))
+
+    stream = cast(AsyncGenerator[VoiceStreamEvent, None], result.stream())
+    event = await anext(stream)
+    assert isinstance(event, VoiceStreamEventLifecycle)
+    assert event.event == "session_ended"
+
+    # The producer already finished with an error, so the shield await must re-raise it out of
+    # aclose() instead of the GeneratorExit reporting a clean close.
+    with pytest.raises(RuntimeError, match="producer-failed-before-terminal-close"):
+        await stream.aclose()
+
+    await asyncio.gather(producer_task, return_exceptions=True)
+
+
 def test_voice_pipeline_config_normalizes_dictionary_settings() -> None:
     config = VoicePipelineConfig(
         stt_settings={"language": "ja", "temperature": 0.0},
