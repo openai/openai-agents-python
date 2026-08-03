@@ -123,9 +123,6 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         self._tracing_span.start()
 
     def _end_turn(self, _transcript: str) -> None:
-        if len(_transcript) < 1:
-            return
-
         if self._tracing_span:
             # Only encode audio if tracing is enabled AND buffer is not empty
             if self._trace_include_sensitive_audio_data and self._turn_audio_buffer:
@@ -306,77 +303,113 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             raise
 
     def _check_errors(self) -> None:
-        if self._connection_task and self._connection_task.done():
+        if (
+            self._connection_task
+            and self._connection_task.done()
+            and not self._connection_task.cancelled()
+        ):
             exc = self._connection_task.exception()
             if exc and isinstance(exc, Exception):
                 self._stored_exception = exc
 
-        if self._process_events_task and self._process_events_task.done():
+        if (
+            self._process_events_task
+            and self._process_events_task.done()
+            and not self._process_events_task.cancelled()
+        ):
             exc = self._process_events_task.exception()
             if exc and isinstance(exc, Exception):
                 self._stored_exception = exc
 
-        if self._stream_audio_task and self._stream_audio_task.done():
+        if (
+            self._stream_audio_task
+            and self._stream_audio_task.done()
+            and not self._stream_audio_task.cancelled()
+        ):
             exc = self._stream_audio_task.exception()
             if exc and isinstance(exc, Exception):
                 self._stored_exception = exc
 
-        if self._listener_task and self._listener_task.done():
+        if (
+            self._listener_task
+            and self._listener_task.done()
+            and not self._listener_task.cancelled()
+        ):
             exc = self._listener_task.exception()
             if exc and isinstance(exc, Exception):
                 self._stored_exception = exc
 
-    def _cleanup_tasks(self) -> None:
-        if self._listener_task and not self._listener_task.done():
-            self._listener_task.cancel()
+    async def _cleanup_tasks(self) -> None:
+        owned_tasks = [
+            task
+            for task in (
+                self._listener_task,
+                self._process_events_task,
+                self._stream_audio_task,
+                self._connection_task,
+            )
+            if task is not None and task is not asyncio.current_task()
+        ]
+        for task in owned_tasks:
+            if not task.done():
+                task.cancel()
 
-        if self._process_events_task and not self._process_events_task.done():
-            self._process_events_task.cancel()
-
-        if self._stream_audio_task and not self._stream_audio_task.done():
-            self._stream_audio_task.cancel()
-
-        if self._connection_task and not self._connection_task.done():
-            self._connection_task.cancel()
+        if owned_tasks:
+            await asyncio.gather(*owned_tasks, return_exceptions=True)
 
     async def transcribe_turns(self) -> AsyncIterator[str]:
         self._connection_task = asyncio.create_task(self._process_websocket_connection())
 
-        while True:
-            try:
+        primary_exception_active = False
+        try:
+            while True:
                 turn = await self._output_queue.get()
-            except asyncio.CancelledError:
-                if self._tracing_span:
-                    self._end_turn("")
-                if self._websocket:
-                    await self._websocket.close()
-                raise
-
-            if (
-                turn is None
-                or isinstance(turn, ErrorSentinel)
-                or isinstance(turn, SessionCompleteSentinel)
-            ):
-                self._output_queue.task_done()
-                break
-            yield turn
-            self._output_queue.task_done()
-
-        if self._tracing_span:
-            self._end_turn("")
-
-        if self._websocket:
-            await self._websocket.close()
+                if (
+                    turn is None
+                    or isinstance(turn, ErrorSentinel)
+                    or isinstance(turn, SessionCompleteSentinel)
+                ):
+                    self._output_queue.task_done()
+                    break
+                try:
+                    yield turn
+                finally:
+                    self._output_queue.task_done()
+        except BaseException:
+            primary_exception_active = True
+            raise
+        finally:
+            try:
+                await self.close()
+            except BaseException as cleanup_exception:
+                # Cancellation must always propagate, even while preserving a primary consumer
+                # exception, so callers that cancel or time out STT cleanup observe the
+                # cancellation instead of a successful close.
+                if isinstance(cleanup_exception, asyncio.CancelledError) or (
+                    not primary_exception_active
+                ):
+                    raise
+                try:
+                    logger.warning(
+                        "STT session cleanup failed while preserving the consumer exception"
+                    )
+                except Exception:
+                    # Logging must not replace the original consumer exception.
+                    pass
 
         self._check_errors()
         if self._stored_exception:
             raise self._stored_exception
 
     async def close(self) -> None:
-        if self._websocket:
-            await self._websocket.close()
-
-        self._cleanup_tasks()
+        try:
+            if self._websocket:
+                await self._websocket.close()
+        finally:
+            try:
+                await self._cleanup_tasks()
+            finally:
+                self._end_turn("")
 
 
 class OpenAISTTModel(STTModel):

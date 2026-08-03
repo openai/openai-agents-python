@@ -7,7 +7,11 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ..exceptions import UserError
-from ..logger import log_model_action_error, log_model_and_tool_action_error, logger
+from ..logger import (
+    log_model_action_error,
+    log_model_and_tool_action_error,
+    logger,
+)
 from ..tracing import Span, SpeechGroupSpanData, speech_group_span, speech_span
 from ..tracing.util import time_iso
 from ..util._error_tracing import get_trace_error
@@ -289,7 +293,7 @@ class StreamedAudioResult:
             tasks.append(self._dispatcher_task)
         await asyncio.gather(*tasks)
 
-    async def _cleanup_tasks(self):
+    async def _cleanup_tasks(self) -> None:
         current_task = asyncio.current_task()
         tasks: list[asyncio.Task[Any]] = []
         seen: set[asyncio.Task[Any]] = set()
@@ -311,7 +315,7 @@ class StreamedAudioResult:
 
     def _check_errors(self):
         for task in self._tasks:
-            if task.done():
+            if task.done() and not task.cancelled():
                 if task.exception():
                     self._stored_exception = task.exception()
                     break
@@ -319,38 +323,67 @@ class StreamedAudioResult:
     async def stream(self) -> AsyncIterator[VoiceStreamEvent]:
         """Stream the events and audio data as they're generated."""
         saw_session_end = False
-        while True:
-            try:
-                event = await self._queue.get()
-            except asyncio.CancelledError:
-                await self._cleanup_tasks()
-                raise
-            if isinstance(event, VoiceStreamEventError):
-                self._stored_exception = event.error
-                log_model_and_tool_action_error(
-                    logger, "Error processing voice output", event.error
-                )
-                break
-            if event is None:
-                break
-            yield event
-            if event.type == "voice_stream_event_lifecycle" and event.event == "session_ended":
-                saw_session_end = True
-                break
-
-        # On the normal completion path, let the producer task finish gracefully so any active
-        # trace context can emit `trace_end` before we run cleanup.
+        primary_exception: BaseException | None = None
         try:
-            if (
-                saw_session_end
-                and self.text_generation_task is not None
-                and not self.text_generation_task.done()
-            ):
-                await asyncio.shield(self.text_generation_task)
+            while True:
+                event = await self._queue.get()
+                if isinstance(event, VoiceStreamEventError):
+                    self._stored_exception = event.error
+                    log_model_and_tool_action_error(
+                        logger, "Error processing voice output", event.error
+                    )
+                    break
+                if event is None:
+                    break
+                is_session_end = (
+                    event.type == "voice_stream_event_lifecycle" and event.event == "session_ended"
+                )
+                if is_session_end:
+                    saw_session_end = True
+                yield event
+                if is_session_end:
+                    break
 
             self._check_errors()
+            if self._stored_exception:
+                raise self._stored_exception
+        except BaseException as exc:
+            primary_exception = exc
+            raise
         finally:
-            await self._cleanup_tasks()
+            try:
+                try:
+                    # Let the producer finish gracefully after terminal event delivery so any
+                    # active trace context can emit `trace_end` before cleanup.
+                    if (
+                        saw_session_end
+                        and self.text_generation_task is not None
+                        and not self.text_generation_task.done()
+                    ):
+                        await asyncio.shield(self.text_generation_task)
+                finally:
+                    await self._cleanup_tasks()
+            except BaseException as cleanup_exception:
+                # Cancellation must always propagate, even while preserving a primary consumer
+                # exception, so callers that cancel or time out stream cleanup observe the
+                # cancellation instead of a successful close.
+                if isinstance(cleanup_exception, asyncio.CancelledError) or (
+                    primary_exception is None
+                ):
+                    raise
+                # When the consumer closes right after a delivered terminal event, the
+                # injected GeneratorExit must not hide a producer/task error that surfaces
+                # during finalization; the caller observes `stream()`'s real outcome.
+                if isinstance(primary_exception, GeneratorExit) and saw_session_end:
+                    raise
+                try:
+                    logger.warning(
+                        "Voice stream cleanup failed while preserving the consumer exception"
+                    )
+                except Exception:
+                    # Logging must not replace the original consumer exception.
+                    pass
 
+        self._check_errors()
         if self._stored_exception:
             raise self._stored_exception
