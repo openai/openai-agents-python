@@ -446,31 +446,60 @@ async def _run_output_guardrails_for_stream(
 
 _SIDE_EFFECT_ITEM_TYPES = frozenset({"tool_call_item", "tool_call_output_item"})
 
-# Not side effects themselves, but part of the replay context a retained tool call needs: a
-# reasoning model requires the reasoning item that preceded a function call to accompany it in the
-# next request, so dropping it here would leave the call unreplayable.
-_SIDE_EFFECT_CONTEXT_ITEM_TYPES = frozenset({"reasoning_item"})
+
+def _reasoning_indexes_tied_to_retained_items(
+    items: list[RunItem],
+    retained_indexes: set[int],
+) -> set[int]:
+    """Indexes of the reasoning items whose tied item is being retained.
+
+    Applies the same association rule as
+    ``agents.run_internal.items._drop_reasoning_items_preceding_dropped_calls``: a reasoning item
+    is tied to the next *non-reasoning* model-emitted item. Keeping a group whose following item is
+    dropped would leave a dangling reasoning item, which the Responses API rejects on the next
+    request (``reasoning was provided without its required following item``); dropping a group
+    whose following item is retained would strip the context that call needs to be replayed.
+
+    A trailing reasoning group - one with no following non-reasoning item at all - is not tied to
+    anything retained, so it is dropped. Note this is stricter than the reference, which keeps such
+    a group because the item it belongs to may still arrive later in a longer history; here the
+    turn is complete, so there is nothing left to tie it to.
+    """
+    tied: set[int] = set()
+    for index in range(len(items) - 1, -1, -1):
+        if items[index].type != "reasoning_item":
+            continue
+        for next_index in range(index + 1, len(items)):
+            if items[next_index].type == "reasoning_item":
+                continue
+            if next_index in retained_indexes:
+                tied.add(index)
+            break
+    return tied
 
 
 def _retained_items_for_blocked_output(items: list[RunItem]) -> list[RunItem]:
     """Pick out the items of a final turn to keep when its output is not deliverable.
 
     A tool that already ran has to stay in the session, together with the context needed to replay
-    its call. Everything else - the assistant message the guardrail rejected above all - is dropped.
+    its call. Everything else - the assistant message the guardrail rejected above all - is dropped,
+    including the reasoning that belongs to the rejected message rather than to a retained call.
 
-    The two sets are enumerated rather than derived, so an item type added later is *discarded*
-    here by default and has to be classified deliberately. A record of a side effect that goes
-    unclassified is a bug, so the safer default is the one that surfaces as a missing item rather
-    than as a rejected message quietly reaching the session.
+    ``_SIDE_EFFECT_ITEM_TYPES`` is enumerated rather than derived, so an item type added later is
+    *discarded* here by default and has to be classified deliberately. A record of a side effect
+    that goes unclassified is a bug, so the safer default is the one that surfaces as a missing item
+    rather than as a rejected message quietly reaching the session.
     """
-    if not any(item.type in _SIDE_EFFECT_ITEM_TYPES for item in items):
+    retained_indexes = {
+        index for index, item in enumerate(items) if item.type in _SIDE_EFFECT_ITEM_TYPES
+    }
+    if not retained_indexes:
         return []
-    # Filtered in a single pass so the retained items keep the model's own order.
-    return [
-        item
-        for item in items
-        if item.type in _SIDE_EFFECT_ITEM_TYPES or item.type in _SIDE_EFFECT_CONTEXT_ITEM_TYPES
-    ]
+    # Reasoning items are not side effects themselves, but a reasoning model requires the reasoning
+    # item tied to a function call to accompany it in the next request.
+    retained_indexes |= _reasoning_indexes_tied_to_retained_items(items, retained_indexes)
+    # Indexed rather than filtered by type so the retained items keep the model's own order.
+    return [item for index, item in enumerate(items) if index in retained_indexes]
 
 
 async def _finalize_streamed_final_output(

@@ -2369,6 +2369,96 @@ async def test_blocked_tool_final_keeps_reasoning_context_with_the_committed_cal
 
 
 @pytest.mark.asyncio
+async def test_blocked_tool_final_drops_reasoning_tied_to_the_rejected_message() -> None:
+    """Only the reasoning tied to a retained call survives; the message's reasoning goes with it.
+
+    The turn is `reasoning_for_message -> message -> reasoning_for_call -> function_call`. A
+    reasoning item belongs to the next non-reasoning item, so retaining every reasoning item
+    whenever the turn happens to contain a tool call would leave the rejected message's reasoning
+    dangling in the next request.
+
+    Streamed only: on a tripwire the non-streamed path persists the whole turn - the rejected
+    message included - which predates this change and is a separate bug (see the PR discussion).
+    """
+    mode = "streamed"
+
+    @function_tool(name_override="commit_tool")
+    def commit_tool() -> str:
+        return "committed-result"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    model = FakeModel()
+    model.set_next_output(
+        [
+            ResponseReasoningItem(
+                id="rs_rejected",
+                summary=[Summary(text="drafting the message", type="summary_text")],
+                type="reasoning",
+            ),
+            get_text_message("rejected-preamble"),
+            ResponseReasoningItem(
+                id="rs_committed",
+                summary=[Summary(text="deciding to call the tool", type="summary_text")],
+                type="reasoning",
+            ),
+            get_function_tool_call("commit_tool", "{}", call_id="call-reasoned"),
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[commit_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = SimpleListSession()
+
+    async def run_once(input_value: Any) -> Any:
+        if mode == "non_streamed":
+            return await Runner.run(agent, input_value, session=session)
+        result = Runner.run_streamed(agent, input_value, session=session)
+        await consume_stream(result)
+        return result
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        await run_once("Use commit_tool")
+
+    saved_items = await session.get_items()
+    saved = [item.get("type") or item.get("role") for item in saved_items if isinstance(item, dict)]
+    assert saved == ["user", "reasoning", "function_call", "function_call_output"]
+
+    saved_reasoning_ids = [
+        item.get("id") for item in saved_items if isinstance(item, dict) and item.get("id")
+    ]
+    assert "rs_committed" in saved_reasoning_ids
+    assert "rs_rejected" not in saved_reasoning_ids, (
+        "reasoning tied to the rejected message must not be persisted"
+    )
+
+    # ...and the surviving group still replays in order, with no dangling reasoning item.
+    agent.output_guardrails = []
+    model.set_next_output([get_text_message("done")])
+    followup = await run_once("Continue")
+    assert followup.final_output == "done"
+
+    model_input = model.last_turn_args["input"]
+    assert isinstance(model_input, list)
+    replayed = [
+        item.get("type")
+        for item in model_input
+        if isinstance(item, dict)
+        and item.get("type") in {"reasoning", "message", "function_call", "function_call_output"}
+    ]
+    assert replayed == ["reasoning", "function_call", "function_call_output"]
+
+
+@pytest.mark.asyncio
 async def test_streaming_resume_preserves_filtered_model_input_after_handoff():
     model = FakeModel()
 
