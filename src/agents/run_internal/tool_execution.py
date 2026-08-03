@@ -1457,6 +1457,8 @@ class _FunctionToolBatchExecutor:
         context_wrapper: RunContextWrapper[Any],
         config: RunConfig,
         isolate_parallel_failures: bool | None,
+        tool_input_guardrail_results: list[ToolInputGuardrailResult] | None = None,
+        tool_output_guardrail_results: list[ToolOutputGuardrailResult] | None = None,
     ) -> None:
         self.execution_agent = bindings.execution_agent
         self.public_agent = bindings.public_agent
@@ -1467,8 +1469,14 @@ class _FunctionToolBatchExecutor:
         self.isolate_parallel_failures = (
             len(tool_runs) > 1 if isolate_parallel_failures is None else isolate_parallel_failures
         )
-        self.tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
-        self.tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
+        # The caller may own these lists so results collected before a cancellation
+        # remain readable after this executor's task is gone.
+        self.tool_input_guardrail_results: list[ToolInputGuardrailResult] = (
+            [] if tool_input_guardrail_results is None else tool_input_guardrail_results
+        )
+        self.tool_output_guardrail_results: list[ToolOutputGuardrailResult] = (
+            [] if tool_output_guardrail_results is None else tool_output_guardrail_results
+        )
         self.tool_state_scope_id = get_agent_tool_state_scope(context_wrapper)
         self.task_states: dict[asyncio.Task[Any], _FunctionToolTaskState] = {}
         self.teardown_cancelled_tasks: set[asyncio.Task[Any]] = set()
@@ -2133,10 +2141,17 @@ async def execute_function_tool_calls(
     context_wrapper: RunContextWrapper[Any],
     config: RunConfig,
     isolate_parallel_failures: bool | None = None,
+    tool_input_guardrail_results: list[ToolInputGuardrailResult] | None = None,
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult] | None = None,
 ) -> tuple[
     list[FunctionToolResult], list[ToolInputGuardrailResult], list[ToolOutputGuardrailResult]
 ]:
-    """Execute function tool calls with approvals, guardrails, and hooks."""
+    """Execute function tool calls with approvals, guardrails, and hooks.
+
+    Pass ``tool_input_guardrail_results`` / ``tool_output_guardrail_results`` to accumulate
+    into lists the caller owns; results collected before a cancellation then stay readable
+    even though the returned tuple never arrives.
+    """
     return await _FunctionToolBatchExecutor(
         bindings=bindings,
         tool_runs=tool_runs,
@@ -2144,6 +2159,8 @@ async def execute_function_tool_calls(
         context_wrapper=context_wrapper,
         config=config,
         isolate_parallel_failures=isolate_parallel_failures,
+        tool_input_guardrail_results=tool_input_guardrail_results,
+        tool_output_guardrail_results=tool_output_guardrail_results,
     ).execute()
 
 

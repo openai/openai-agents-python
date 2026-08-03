@@ -4,10 +4,16 @@ import asyncio
 from typing import Any
 
 import pytest
+from openai.types.responses.response_output_item import LocalShellCall, LocalShellCallAction
 
 from agents import (
     Agent,
+    GuardrailFunctionOutput,
+    InputGuardrail,
+    InputGuardrailTripwireTriggered,
+    LocalShellTool,
     MaxTurnsExceeded,
+    ModelBehaviorError,
     Runner,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrail,
@@ -23,7 +29,7 @@ from agents.tool_context import ToolContext
 from agents.tool_guardrails import tool_input_guardrail, tool_output_guardrail
 
 from .fake_model import FakeModel
-from .test_responses import get_function_tool_call
+from .test_responses import get_function_tool_call, get_text_message
 
 
 def get_mock_tool_context(tool_arguments: str = '{"param": "value"}') -> ToolContext:
@@ -797,6 +803,122 @@ async def test_tool_tripwire_reports_earlier_turns_and_triggering_result(streami
     run_data = exc_info.value.run_data
     assert run_data is not None
     assert _names(run_data.tool_output_guardrail_results) == ["output_rejects", "output_raises"]
+
+
+def _looping_tool_input_guardrail() -> ToolInputGuardrail[Any]:
+    """A rejecting input guardrail that records how many times it ran."""
+
+    async def reject(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.reject_content(
+            message="blocked by policy", output_info="input_rejected"
+        )
+
+    return ToolInputGuardrail(guardrail_function=reject, name="input_rejects")
+
+
+@pytest.mark.asyncio
+async def test_sibling_tool_failure_reports_function_tool_guardrail_results():
+    """A non-function tool raising must not drop guardrails the function side already ran."""
+
+    @function_tool
+    def guarded(query: str) -> str:
+        return "tool output"
+
+    guarded.tool_input_guardrails = [_looping_tool_input_guardrail()]
+
+    def failing_executor(request: Any) -> str:
+        raise ModelBehaviorError("sibling shell tool exploded")
+
+    shell_tool = LocalShellTool(executor=failing_executor)
+    shell_call = LocalShellCall(
+        id="lsh_sibling",
+        action=LocalShellCallAction(
+            command=["bash", "-c", "echo hi"],
+            env={},
+            type="exec",
+            timeout_ms=1000,
+            working_directory="/tmp",
+        ),
+        call_id="call_shell_sibling",
+        status="completed",
+        type="local_shell_call",
+    )
+
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call("guarded", '{"query": "secret"}'),
+                shell_call,
+            ],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="mixed_tools", model=model, tools=[guarded, shell_tool])
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await Runner.run(agent, "go")
+
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _names(run_data.tool_input_guardrail_results) == ["input_rejects"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_parallel_input_tripwire_reports_tool_guardrail_results(streaming: bool):
+    """A parallel input tripwire must report tool guardrails the overlapped turn ran."""
+    guardrail_runs = 0
+
+    async def reject(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        nonlocal guardrail_runs
+        guardrail_runs += 1
+        return ToolGuardrailFunctionOutput.reject_content(
+            message="blocked by policy", output_info="input_rejected"
+        )
+
+    @function_tool
+    def guarded(query: str) -> str:
+        return "tool output"
+
+    guarded.tool_input_guardrails = [
+        ToolInputGuardrail(guardrail_function=reject, name="input_rejects")
+    ]
+
+    async def trip_after_tool_turn(
+        ctx: Any, agent: Any, agent_input: Any
+    ) -> GuardrailFunctionOutput:
+        # Overlap the model turn so its tool guardrail runs before the tripwire.
+        await asyncio.sleep(0.2)
+        return GuardrailFunctionOutput(output_info="tripped", tripwire_triggered=True)
+
+    parallel_guardrail = InputGuardrail(
+        guardrail_function=trip_after_tool_turn, name="slow_tripwire"
+    )
+    parallel_guardrail.run_in_parallel = True
+
+    model = FakeModel()
+    call = [get_function_tool_call("guarded", '{"query": "secret"}')]
+    model.add_multiple_turn_outputs([call, call, [get_text_message("done")]])
+    agent = Agent(
+        name="parallel_guardrail_agent",
+        model=model,
+        tools=[guarded],
+        input_guardrails=[parallel_guardrail],
+    )
+
+    with pytest.raises(InputGuardrailTripwireTriggered) as exc_info:
+        if streaming:
+            streamed = Runner.run_streamed(agent, "go")
+            async for _ in streamed.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go")
+
+    assert guardrail_runs >= 1, "the tool guardrail never ran, so the test proves nothing"
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _names(run_data.tool_input_guardrail_results) == ["input_rejects"] * guardrail_runs
 
 
 if __name__ == "__main__":

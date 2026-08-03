@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import warnings
+from collections.abc import Sequence
 from typing import Any, cast
 
 from typing_extensions import Unpack
@@ -17,6 +18,7 @@ from .exceptions import (
     MaxTurnsExceeded,
     RunErrorDetails,
     UserError,
+    _record_tool_guardrail_partials,
     _tool_input_guardrail_partials,
     _tool_output_guardrail_partials,
 )
@@ -172,6 +174,32 @@ def get_default_agent_runner() -> AgentRunner:
     """
     global DEFAULT_AGENT_RUNNER
     return DEFAULT_AGENT_RUNNER
+
+
+def _record_parallel_model_task_guardrail_partials(
+    error: BaseException,
+    model_outcome: Sequence[Any],
+) -> None:
+    """Carry a discarded parallel model turn's tool guardrail results onto ``error``.
+
+    When a parallel input guardrail trips, the overlapped model task's ``SingleStepResult``
+    is thrown away even though its tool guardrails may already have run.  Read them from a
+    completed result, or -- if the task was cancelled mid-turn -- from the partials the
+    function-tool executor recorded on its exception.
+    """
+    for outcome in model_outcome:
+        if isinstance(outcome, BaseException):
+            _record_tool_guardrail_partials(
+                error,
+                tool_input_guardrail_results=_tool_input_guardrail_partials(outcome),
+                tool_output_guardrail_results=_tool_output_guardrail_partials(outcome),
+            )
+            continue
+        _record_tool_guardrail_partials(
+            error,
+            tool_input_guardrail_results=getattr(outcome, "tool_input_guardrail_results", []),
+            tool_output_guardrail_results=getattr(outcome, "tool_output_guardrail_results", []),
+        )
 
 
 def _sandbox_memory_rollout_id(
@@ -1288,11 +1316,22 @@ class AgentRunner:
                                         guardrail_task,
                                         model_task,
                                     )
-                                except InputGuardrailTripwireTriggered:
+                                except InputGuardrailTripwireTriggered as tripwire_exc:
                                     if should_cancel_parallel_model_task_on_input_guardrail_trip():
                                         if not model_task.done():
                                             model_task.cancel()
-                                        await asyncio.gather(model_task, return_exceptions=True)
+                                        model_outcome: Sequence[Any] = await asyncio.gather(
+                                            model_task, return_exceptions=True
+                                        )
+                                    else:
+                                        model_outcome = ()
+                                    # The model turn overlapped this guardrail and may have run
+                                    # tool guardrails before being cancelled or completing. Its
+                                    # SingleStepResult is discarded here, so carry those results
+                                    # onto the tripwire or they never reach RunErrorDetails.
+                                    _record_parallel_model_task_guardrail_partials(
+                                        tripwire_exc, model_outcome
+                                    )
                                     session_input_items_for_persistence = (
                                         await persist_session_items_for_guardrail_trip(
                                             session,

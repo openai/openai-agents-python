@@ -12,7 +12,10 @@ from openai.types.responses.response_input_param import McpApprovalResponse
 
 from .._tool_identity import get_function_tool_lookup_key_for_call, get_tool_call_namespace
 from ..agent import Agent
-from ..exceptions import UserError
+from ..exceptions import (
+    UserError,
+    _record_tool_guardrail_partials,
+)
 from ..items import (
     ItemHelpers,
     MCPApprovalResponseItem,
@@ -573,58 +576,77 @@ async def _execute_tool_plan(
         )
     )
     if parallel:
-        (
-            (function_results, tool_input_guardrail_results, tool_output_guardrail_results),
-            computer_results,
-            custom_tool_results,
-            shell_results,
-            apply_patch_results,
-            local_shell_results,
-        ) = await asyncio.gather(
-            execute_function_tool_calls(
-                bindings=bindings,
-                tool_runs=plan.function_runs,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-                isolate_parallel_failures=isolate_function_tool_failures,
-            ),
-            execute_computer_actions(
-                public_agent=public_agent,
-                actions=plan.computer_actions,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-            ),
-            execute_custom_tool_calls(
-                public_agent=public_agent,
-                calls=plan.custom_tool_calls,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-            ),
-            execute_shell_calls(
-                public_agent=public_agent,
-                calls=plan.shell_calls,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-            ),
-            execute_apply_patch_calls(
-                public_agent=public_agent,
-                calls=plan.apply_patch_calls,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-            ),
-            execute_local_shell_calls(
-                public_agent=public_agent,
-                calls=plan.local_shell_calls,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-            ),
-        )
+        # Owned here rather than by the executor: if a sibling tool raises, the
+        # function-tool side is cancelled mid-flight and never returns its tuple, but the
+        # guardrails that already ran must still reach RunErrorDetails.
+        function_tool_input_results: list[ToolInputGuardrailResult] = []
+        function_tool_output_results: list[ToolOutputGuardrailResult] = []
+        try:
+            (
+                (function_results, tool_input_guardrail_results, tool_output_guardrail_results),
+                computer_results,
+                custom_tool_results,
+                shell_results,
+                apply_patch_results,
+                local_shell_results,
+            ) = await asyncio.gather(
+                execute_function_tool_calls(
+                    bindings=bindings,
+                    tool_runs=plan.function_runs,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    config=run_config,
+                    isolate_parallel_failures=isolate_function_tool_failures,
+                    tool_input_guardrail_results=function_tool_input_results,
+                    tool_output_guardrail_results=function_tool_output_results,
+                ),
+                execute_computer_actions(
+                    public_agent=public_agent,
+                    actions=plan.computer_actions,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    config=run_config,
+                ),
+                execute_custom_tool_calls(
+                    public_agent=public_agent,
+                    calls=plan.custom_tool_calls,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    config=run_config,
+                ),
+                execute_shell_calls(
+                    public_agent=public_agent,
+                    calls=plan.shell_calls,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    config=run_config,
+                ),
+                execute_apply_patch_calls(
+                    public_agent=public_agent,
+                    calls=plan.apply_patch_calls,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    config=run_config,
+                ),
+                execute_local_shell_calls(
+                    public_agent=public_agent,
+                    calls=plan.local_shell_calls,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    config=run_config,
+                ),
+            )
+        except BaseException as exc:
+            # A non-function tool raising does not pass through the function-tool
+            # executor's own recording path, so copy across whatever ran before the
+            # cancellation. _record_tool_guardrail_partials de-dupes by identity, so this
+            # is safe when the function side already recorded the same results itself.
+            _record_tool_guardrail_partials(
+                exc,
+                tool_input_guardrail_results=function_tool_input_results,
+                tool_output_guardrail_results=function_tool_output_results,
+            )
+            raise
     else:
         (
             function_results,
