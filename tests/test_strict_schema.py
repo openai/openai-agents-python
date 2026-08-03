@@ -45,6 +45,105 @@ def test_object_without_additional_properties():
     assert result["properties"]["a"] == {"type": "string"}
 
 
+def test_typeless_root_is_normalized_to_object():
+    result = ensure_strict_json_schema({"properties": {"a": {"type": "string"}}})
+
+    assert result == {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "additionalProperties": False,
+        "required": ["a"],
+    }
+
+
+def test_nullable_object_root_errors():
+    with pytest.raises(UserError, match="root of a strict JSON schema"):
+        ensure_strict_json_schema(
+            {"type": ["object", "null"], "properties": {"a": {"type": "string"}}}
+        )
+
+
+def test_open_map_root_errors():
+    with pytest.raises(UserError):
+        ensure_strict_json_schema({"additionalProperties": {"type": "string"}})
+
+
+def test_nested_typeless_open_map_errors():
+    with pytest.raises(UserError):
+        ensure_strict_json_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "metadata": {"additionalProperties": {"type": "string"}},
+                },
+            }
+        )
+
+
+@pytest.mark.parametrize("union_keyword", ["anyOf", "oneOf"])
+def test_union_root_errors(union_keyword):
+    with pytest.raises(UserError, match="root of a strict JSON schema"):
+        ensure_strict_json_schema(
+            {
+                union_keyword: [
+                    {"properties": {"a": {"type": "string"}}},
+                    {"type": "null"},
+                ]
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("schema", "path"),
+    [
+        (
+            {"type": "object", "properties": {"config": {"properties": {}}}},
+            ("properties", "config"),
+        ),
+        (
+            {"type": "array", "items": {"properties": {}}},
+            ("items",),
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {"value": {"anyOf": [{"properties": {}}, {"type": "null"}]}},
+            },
+            ("properties", "value", "anyOf", 0),
+        ),
+    ],
+    ids=["property", "array-item", "any-of"],
+)
+def test_nested_typeless_objects_get_additional_properties(schema, path):
+    node = ensure_strict_json_schema(schema)
+    for key in path:
+        node = node[key]
+
+    assert node["type"] == "object"
+    assert node["additionalProperties"] is False
+
+
+def test_nested_nullable_object_preserves_type_union():
+    result = ensure_strict_json_schema(
+        {
+            "type": "object",
+            "properties": {
+                "config": {
+                    "type": ["object", "null"],
+                    "properties": {"key": {"type": "string"}},
+                }
+            },
+        }
+    )
+
+    assert result["properties"]["config"] == {
+        "type": ["object", "null"],
+        "properties": {"key": {"type": "string"}},
+        "additionalProperties": False,
+        "required": ["key"],
+    }
+
+
 def test_object_with_true_additional_properties():
     # If additionalProperties is explicitly set to True for an object, a UserError should be raised.
     schema = {
@@ -54,6 +153,31 @@ def test_object_with_true_additional_properties():
     }
     with pytest.raises(UserError):
         ensure_strict_json_schema(schema)
+
+
+def test_typeless_object_with_additional_properties_errors():
+    schema = {
+        "properties": {"a": {"type": "number"}},
+        "additionalProperties": True,
+    }
+    with pytest.raises(UserError):
+        ensure_strict_json_schema(schema)
+
+
+def test_explicit_non_object_with_properties_is_not_closed():
+    schema = {
+        "type": "string",
+        "properties": {},
+        "required": [],
+        "additionalProperties": True,
+    }
+
+    assert ensure_strict_json_schema(schema) == {
+        "type": "string",
+        "properties": {},
+        "required": [],
+        "additionalProperties": True,
+    }
 
 
 def test_object_with_empty_dict_additional_properties():
@@ -106,20 +230,26 @@ def test_array_items_processing_and_default_removal():
 def test_anyOf_processing():
     # Test that anyOf schemas are processed.
     schema = {
-        "anyOf": [
-            {"type": "object", "properties": {"a": {"type": "string"}}},
-            {"type": "number", "default": None},
-        ]
+        "type": "object",
+        "properties": {
+            "value": {
+                "anyOf": [
+                    {"type": "object", "properties": {"a": {"type": "string"}}},
+                    {"type": "number", "default": None},
+                ]
+            }
+        },
     }
     result = ensure_strict_json_schema(schema)
+    variants = result["properties"]["value"]["anyOf"]
     # For the first variant: object type should get additionalProperties and required keys set.
-    variant0 = result["anyOf"][0]
+    variant0 = variants[0]
     assert variant0["type"] == "object"
     assert variant0["additionalProperties"] is False
     assert variant0["required"] == ["a"]
 
     # For the second variant: the "default": None should be removed.
-    variant1 = result["anyOf"][1]
+    variant1 = variants[1]
     assert variant1["type"] == "number"
     assert "default" not in variant1
 
@@ -138,6 +268,17 @@ def test_allOf_single_entry_merging():
     assert result["required"] == ["a"]
     assert "a" in result["properties"]
     assert result["properties"]["a"]["type"] == "boolean"
+
+
+@pytest.mark.parametrize("additional_properties", [True, {}], ids=["true", "schema"])
+def test_allOf_single_entry_cannot_overwrite_strict_object(additional_properties):
+    schema = {
+        "properties": {"a": {"type": "string"}},
+        "allOf": [{"additionalProperties": additional_properties}],
+    }
+
+    with pytest.raises(UserError):
+        ensure_strict_json_schema(schema)
 
 
 def test_default_removal_on_non_object():

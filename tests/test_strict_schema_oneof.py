@@ -135,26 +135,44 @@ def test_discriminated_union_with_pydantic():
 def test_oneof_merged_with_existing_anyof():
     schema = {
         "type": "object",
-        "anyOf": [{"type": "string"}],
-        "oneOf": [{"type": "integer"}, {"type": "boolean"}],
+        "properties": {
+            "value": {
+                "anyOf": [{"type": "string"}],
+                "oneOf": [{"type": "integer"}, {"type": "boolean"}],
+            }
+        },
     }
 
     result = ensure_strict_json_schema(schema)
 
     expected = {
         "type": "object",
-        "anyOf": [{"type": "string"}, {"type": "integer"}, {"type": "boolean"}],
+        "properties": {
+            "value": {
+                "anyOf": [
+                    {"type": "string"},
+                    {"type": "integer"},
+                    {"type": "boolean"},
+                ]
+            }
+        },
         "additionalProperties": False,
+        "required": ["value"],
     }
     assert result == expected
 
 
 def test_discriminator_preserved():
     schema = {
-        "oneOf": [{"$ref": "#/$defs/TypeA"}, {"$ref": "#/$defs/TypeB"}],
-        "discriminator": {
-            "propertyName": "type",
-            "mapping": {"a": "#/$defs/TypeA", "b": "#/$defs/TypeB"},
+        "type": "object",
+        "properties": {
+            "value": {
+                "oneOf": [{"$ref": "#/$defs/TypeA"}, {"$ref": "#/$defs/TypeB"}],
+                "discriminator": {
+                    "propertyName": "type",
+                    "mapping": {"a": "#/$defs/TypeA", "b": "#/$defs/TypeB"},
+                },
+            }
         },
         "$defs": {
             "TypeA": {
@@ -171,10 +189,15 @@ def test_discriminator_preserved():
     result = ensure_strict_json_schema(schema)
 
     expected = {
-        "anyOf": [{"$ref": "#/$defs/TypeA"}, {"$ref": "#/$defs/TypeB"}],
-        "discriminator": {
-            "propertyName": "type",
-            "mapping": {"a": "#/$defs/TypeA", "b": "#/$defs/TypeB"},
+        "type": "object",
+        "properties": {
+            "value": {
+                "anyOf": [{"$ref": "#/$defs/TypeA"}, {"$ref": "#/$defs/TypeB"}],
+                "discriminator": {
+                    "propertyName": "type",
+                    "mapping": {"a": "#/$defs/TypeA", "b": "#/$defs/TypeB"},
+                },
+            }
         },
         "$defs": {
             "TypeA": {
@@ -190,6 +213,8 @@ def test_discriminator_preserved():
                 "required": ["type", "value_b"],
             },
         },
+        "additionalProperties": False,
+        "required": ["value"],
     }
     assert result == expected
 

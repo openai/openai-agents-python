@@ -332,6 +332,83 @@ def test_func_schema_is_strict():
     )
 
 
+def test_manual_function_tool_normalizes_typeless_object_schemas():
+    async def run_function(ctx: ToolContext[Any], args: str) -> str:
+        return args
+
+    tool = FunctionTool(
+        name="test",
+        description="Processes nested data",
+        params_json_schema={
+            "properties": {
+                "config": {"properties": {"key": {"type": "string"}}},
+                "optional": {
+                    "type": ["object", "null"],
+                    "properties": {"value": {"type": "integer"}},
+                },
+            }
+        },
+        on_invoke_tool=run_function,
+    )
+
+    assert tool.strict_json_schema is True
+    assert tool.params_json_schema == {
+        "type": "object",
+        "properties": {
+            "config": {
+                "type": "object",
+                "properties": {"key": {"type": "string"}},
+                "additionalProperties": False,
+                "required": ["key"],
+            },
+            "optional": {
+                "type": ["object", "null"],
+                "properties": {"value": {"type": "integer"}},
+                "additionalProperties": False,
+                "required": ["value"],
+            },
+        },
+        "additionalProperties": False,
+        "required": ["config", "optional"],
+    }
+
+
+def test_manual_function_tool_rejects_root_union():
+    async def run_function(ctx: ToolContext[Any], args: str) -> str:
+        return args
+
+    with pytest.raises(UserError, match="root of a strict JSON schema"):
+        FunctionTool(
+            name="test",
+            description="Processes nullable data",
+            params_json_schema={
+                "anyOf": [
+                    {"properties": {"value": {"type": "string"}}},
+                    {"type": "null"},
+                ]
+            },
+            on_invoke_tool=run_function,
+        )
+
+
+def test_manual_function_tool_rejects_nested_typeless_open_map():
+    async def run_function(ctx: ToolContext[Any], args: str) -> str:
+        return args
+
+    with pytest.raises(UserError, match="additionalProperties"):
+        FunctionTool(
+            name="test",
+            description="Processes metadata",
+            params_json_schema={
+                "type": "object",
+                "properties": {
+                    "metadata": {"additionalProperties": {"type": "string"}},
+                },
+            },
+            on_invoke_tool=run_function,
+        )
+
+
 @pytest.mark.asyncio
 async def test_manual_function_tool_creation_works():
     def do_some_work(data: str) -> str:

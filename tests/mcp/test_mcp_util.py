@@ -1852,7 +1852,7 @@ def test_to_function_tool_failed_strict_conversion_keeps_original_schema():
     schema = {
         "type": "object",
         "properties": {
-            "x": {"type": "object", "additionalProperties": True},
+            "x": {"additionalProperties": True},
         },
     }
     tool = MCPTool(name="test_tool", inputSchema=schema)
@@ -1863,9 +1863,24 @@ def test_to_function_tool_failed_strict_conversion_keeps_original_schema():
     assert function_tool.params_json_schema == {
         "type": "object",
         "properties": {
-            "x": {"type": "object", "additionalProperties": True},
+            "x": {"additionalProperties": True},
         },
     }
+
+
+def test_to_function_tool_nullable_root_falls_back_to_non_strict():
+    schema = {
+        "anyOf": [
+            {"type": "object", "properties": {"value": {"type": "string"}}},
+            {"type": "null"},
+        ]
+    }
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema == {**schema, "properties": {}}
 
 
 class StructuredContentTestServer(FakeMCPServer):
