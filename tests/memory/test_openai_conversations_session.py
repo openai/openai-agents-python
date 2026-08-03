@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -275,18 +276,106 @@ class TestOpenAIConversationsSessionBasicOperations:
         assert session._session_id is None
 
     @pytest.mark.asyncio
-    async def test_clear_session_creates_session_id_first(self, mock_openai_client):
-        """Test that clear_session creates session_id if it doesn't exist."""
+    async def test_clear_session_uninitialized_does_not_create_session(self, mock_openai_client):
+        """Test that clear_session on an uninitialized session does not call create or delete."""
         session = OpenAIConversationsSession(openai_client=mock_openai_client)
 
         await session.clear_session()
 
-        # Should create conversation first, then delete it
-        mock_openai_client.conversations.create.assert_called_once_with(items=[])
-        mock_openai_client.conversations.delete.assert_called_once_with(
-            conversation_id="test_conversation_id"
-        )
+        mock_openai_client.conversations.create.assert_not_called()
+        mock_openai_client.conversations.delete.assert_not_called()
         assert session._session_id is None
+
+    @pytest.mark.asyncio
+    async def test_clear_session_uninitialized_no_api_calls_on_create_failure(
+        self, mock_openai_client
+    ):
+        """Test that clear_session on an uninitialized session succeeds even if create raises."""
+        mock_openai_client.conversations.create.side_effect = RuntimeError("API connection error")
+        session = OpenAIConversationsSession(openai_client=mock_openai_client)
+
+        await session.clear_session()
+
+        mock_openai_client.conversations.create.assert_not_called()
+        mock_openai_client.conversations.delete.assert_not_called()
+        assert session._session_id is None
+
+    @pytest.mark.asyncio
+    async def test_clear_session_failed_delete_retains_session_id(self, mock_openai_client):
+        """Test that a failed delete retains the session ID for potential retries."""
+        mock_openai_client.conversations.delete.side_effect = RuntimeError("Delete failed")
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+
+        with pytest.raises(RuntimeError, match="Delete failed"):
+            await session.clear_session()
+
+        assert session._session_id == "test_id"
+
+    @pytest.mark.asyncio
+    async def test_clear_session_retry_after_failed_delete(self, mock_openai_client):
+        """Test that retrying clear_session after a failed delete targets the same ID
+        without calling create.
+        """
+        mock_openai_client.conversations.delete.side_effect = [
+            RuntimeError("Transient delete error"),
+            None,
+        ]
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+
+        with pytest.raises(RuntimeError, match="Transient delete error"):
+            await session.clear_session()
+
+        assert session._session_id == "test_id"
+
+        # Retry clear_session
+        await session.clear_session()
+
+        mock_openai_client.conversations.create.assert_not_called()
+        assert mock_openai_client.conversations.delete.call_count == 2
+        mock_openai_client.conversations.delete.assert_called_with(conversation_id="test_id")
+        assert session._session_id is None
+
+    @pytest.mark.asyncio
+    async def test_clear_session_concurrent_get_does_not_clobber_new_session_id(
+        self, mock_openai_client
+    ):
+        """Test that a concurrent _get_session_id during clear_session waits for lock
+        and preserves new ID.
+        """
+
+        session = OpenAIConversationsSession(
+            conversation_id="old_id", openai_client=mock_openai_client
+        )
+        mock_openai_client.conversations.create.return_value = MagicMock(id="new_id")
+
+        delete_started = asyncio.Event()
+        allow_delete_finish = asyncio.Event()
+
+        async def slow_delete(*args: Any, **kwargs: Any) -> Any:
+            delete_started.set()
+            await allow_delete_finish.wait()
+            return None
+
+        mock_openai_client.conversations.delete.side_effect = slow_delete
+
+        clear_task = asyncio.create_task(session.clear_session())
+        await delete_started.wait()
+
+        # Concurrently attempt _get_session_id() while clear_session is deleting
+        get_task = asyncio.create_task(session._get_session_id())
+
+        # Allow delete to complete
+        allow_delete_finish.set()
+        await clear_task
+        new_id = await get_task
+
+        assert new_id == "new_id"
+        assert session._session_id == "new_id"
+        mock_openai_client.conversations.create.assert_called_once_with(items=[])
 
 
 class TestOpenAIConversationsSessionRunnerIntegration:

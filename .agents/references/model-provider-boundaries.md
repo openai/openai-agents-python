@@ -31,6 +31,14 @@ Do not infer that a feature available in one adapter is supported by every `Mode
 
 Validate capabilities at the adapter boundary where the resolved model and complete request are known. Avoid public flags that appear accepted by the SDK but are silently dropped before the provider request.
 
+## Provider Validation and Error Ownership
+
+Do not duplicate provider-side request validation in the SDK merely to fail earlier. When the provider already rejects an invalid value with an actionable error, preserve that single source of truth instead of copying provider grammar, length limits, enum membership, or other request constraints into SDK runtime code. Duplicated validation can drift as provider contracts evolve, can reject values accepted by another provider, and can turn a provider-neutral SDK type into an accidental provider-specific contract.
+
+Add SDK-side validation only when it enforces an SDK-owned invariant or prevents a concrete risk that provider validation cannot address. Examples include ambiguous local routing, collisions before request serialization, invalid persisted state, unsafe local side effects, or a provider error that cannot identify the offending SDK input. A generic preference for earlier failure or a different error message is not sufficient.
+
+When local validation is justified and the constraint is provider-specific, keep it at the owning adapter boundary and derive it from an authoritative provider contract. Do not apply it to shared `Model` interfaces, provider-neutral tool types, or third-party adapters. Tests should distinguish the SDK-owned invariant from values that are intentionally left for the provider to validate.
+
 ## Provider Data and Terminal Semantics
 
 - Preserve provider-supplied string IDs, request IDs, usage, and opaque provider data when the public SDK contract exposes them.
@@ -55,11 +63,12 @@ Validate capabilities at the adapter boundary where the resolved model and compl
 ## Review Checklist
 
 1. Identify which adapter owns the feature and how unsupported adapters behave.
-2. Verify model and implicit-settings resolution when run config overrides the agent.
-3. Compare HTTP/websocket and streaming/non-streaming terminal behavior when applicable.
-4. Preserve request IDs, usage, provider data, and error semantics through normalization.
-5. Prove retries are safe for the request's state ownership and side effects.
-6. Test transport reuse, cross-loop access, closed-loop pruning, and provider shutdown when persistent connections are involved.
+2. Before adding validation, determine whether it protects an SDK-owned invariant or only duplicates an actionable provider error.
+3. Verify model and implicit-settings resolution when run config overrides the agent.
+4. Compare HTTP/websocket and streaming/non-streaming terminal behavior when applicable.
+5. Preserve request IDs, usage, provider data, and error semantics through normalization.
+6. Prove retries are safe for the request's state ownership and side effects.
+7. Test transport reuse, cross-loop access, closed-loop pruning, and provider shutdown when persistent connections are involved.
 
 ## Sources
 

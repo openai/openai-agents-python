@@ -436,3 +436,62 @@ async def test_async_sqlite_session_pop_item_same_timestamp_returns_latest():
         assert _item_ids(remaining) == ["rs_pop_same_ts"]
 
         await session.close()
+
+
+async def test_async_sqlite_session_closed_operations_raise_runtime_error():
+    """Operations on a closed session must fail instead of reopening the database."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "closed_state.db"
+        session = AsyncSQLiteSession("closed_state_test", db_path)
+        await session.add_items([{"role": "user", "content": "before close"}])
+        await session.close()
+
+        with pytest.raises(RuntimeError, match="AsyncSQLiteSession is closed"):
+            await session.get_items()
+
+        with pytest.raises(RuntimeError, match="AsyncSQLiteSession is closed"):
+            await session.add_items([{"role": "user", "content": "after close"}])
+
+        with pytest.raises(RuntimeError, match="AsyncSQLiteSession is closed"):
+            await session.pop_item()
+
+        with pytest.raises(RuntimeError, match="AsyncSQLiteSession is closed"):
+            await session.clear_session()
+
+
+async def test_async_sqlite_session_closed_rejects_empty_add_items():
+    """add_items([]) must not bypass the closed check through the empty-list fast path."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "closed_empty_add.db"
+        session = AsyncSQLiteSession("closed_empty_add_test", db_path)
+        await session.close()
+
+        with pytest.raises(RuntimeError, match="AsyncSQLiteSession is closed"):
+            await session.add_items([])
+
+
+async def test_async_sqlite_session_close_before_use_is_terminal():
+    """close() before the connection is opened must still make the session terminal."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "close_before_use.db"
+        session = AsyncSQLiteSession("close_before_use_test", db_path)
+        await session.close()
+
+        with pytest.raises(RuntimeError, match="AsyncSQLiteSession is closed"):
+            await session.get_items()
+
+
+async def test_async_sqlite_session_close_is_idempotent():
+    """Repeated and concurrent close() calls must remain safe no-ops."""
+    import asyncio
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "close_idempotent.db"
+        session = AsyncSQLiteSession("close_idempotent_test", db_path)
+        await session.add_items([{"role": "user", "content": "before close"}])
+
+        await asyncio.gather(session.close(), session.close())
+        await session.close()
+
+        with pytest.raises(RuntimeError, match="AsyncSQLiteSession is closed"):
+            await session.get_items()
