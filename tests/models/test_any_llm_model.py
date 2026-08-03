@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 import types as pytypes
@@ -14,9 +15,10 @@ from openai.types.chat import (
     ChatCompletionMessageFunctionToolCall,
 )
 from openai.types.chat.chat_completion import Choice
-from openai.types.chat.chat_completion_chunk import ChoiceDelta
+from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice, ChoiceDelta
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 from openai.types.responses import Response, ResponseCompletedEvent, ResponseOutputMessage
+from openai.types.responses.response_created_event import ResponseCreatedEvent
 from openai.types.responses.response_error_event import ResponseErrorEvent
 from openai.types.responses.response_failed_event import ResponseFailedEvent
 from openai.types.responses.response_incomplete_event import ResponseIncompleteEvent
@@ -1127,3 +1129,343 @@ async def test_any_llm_chat_omits_logprobs_when_top_logprobs_unset(monkeypatch) 
     )
 
     assert "logprobs" not in provider.chat_calls[0]
+
+
+class _ClosableStream:
+    """Minimal async iterator that records how often the provider stream was closed."""
+
+    def __init__(self, chunks: list[Any]) -> None:
+        self._chunks = list(chunks)
+        self.aclose_calls = 0
+
+    def __aiter__(self) -> _ClosableStream:
+        return self
+
+    async def __anext__(self) -> Any:
+        if not self._chunks:
+            raise StopAsyncIteration
+        return self._chunks.pop(0)
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+
+
+class _FailingCloseStream(_ClosableStream):
+    """Raises from `aclose` after recording the cleanup attempt."""
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+        raise RuntimeError("close-failure")
+
+
+class _BlockingStream(_ClosableStream):
+    """Blocks forever after its chunks are exhausted so the consumer can be cancelled."""
+
+    def __init__(self, chunks: list[Any], blocked: asyncio.Event) -> None:
+        super().__init__(chunks)
+        self._blocked = blocked
+
+    async def __anext__(self) -> Any:
+        if self._chunks:
+            return self._chunks.pop(0)
+        self._blocked.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+class _SlowCloseStream(_BlockingStream):
+    """Blocks in `aclose` until released, mirroring a close that waits on transport I/O."""
+
+    def __init__(self, chunks: list[Any], blocked: asyncio.Event, release: asyncio.Event) -> None:
+        super().__init__(chunks, blocked)
+        self._release = release
+        self.aclose_completed = 0
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+        await self._release.wait()
+        self.aclose_completed += 1
+
+
+def _chat_chunk(text: str) -> ChatCompletionChunk:
+    return ChatCompletionChunk(
+        id="chunk_123",
+        created=0,
+        model="fake-model",
+        object="chat.completion.chunk",
+        choices=[ChunkChoice(index=0, delta=ChoiceDelta(content=text))],
+    )
+
+
+def _completed_event() -> ResponseCompletedEvent:
+    return ResponseCompletedEvent(
+        type="response.completed",
+        response=_response("Hello"),
+        sequence_number=1,
+    )
+
+
+def _stream_events(model: Any) -> Any:
+    return model.stream_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+
+def _chat_model_with_stream(monkeypatch, stream: _ClosableStream) -> Any:
+    """Build an AnyLLMModel whose Chat Completions path yields one completed event."""
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=stream)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+
+    async def fake_handle_stream(response, chunk_stream, model=None):
+        async for _chunk in chunk_stream:
+            pass
+        yield _completed_event()
+
+    monkeypatch.setattr(module.ChatCmplStreamHandler, "handle_stream", fake_handle_stream)
+    return module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+
+
+def _responses_model_with_stream(monkeypatch, stream: _ClosableStream) -> Any:
+    provider = FakeAnyLLMProvider(supports_responses=True, responses_response=stream)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    return module.AnyLLMModel(model="openai/gpt-5.4-mini")
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_stream_ignores_close_failure_after_terminal_event(monkeypatch) -> None:
+    """A completed Chat Completions response stays successful when provider cleanup fails."""
+    stream = _FailingCloseStream([_chat_chunk("Hello")])
+    model = _chat_model_with_stream(monkeypatch, stream)
+
+    events = [event async for event in _stream_events(model)]
+
+    assert [event.type for event in events] == ["response.completed"]
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_stream_ignores_close_failure_when_closed_at_terminal_event(
+    monkeypatch,
+) -> None:
+    """Terminal state must be recorded before the completed event is yielded."""
+    stream = _FailingCloseStream([_chat_chunk("Hello")])
+    model = _chat_model_with_stream(monkeypatch, stream)
+    stream_agen = cast(Any, _stream_events(model))
+
+    async for event in stream_agen:
+        if event.type == "response.completed":
+            break
+    await stream_agen.aclose()
+
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_stream_closes_provider_stream_after_cancellation(monkeypatch) -> None:
+    """Cancelling the consumer must still release the provider stream."""
+    blocked = asyncio.Event()
+    stream = _BlockingStream([_chat_chunk("He")], blocked)
+    model = _chat_model_with_stream(monkeypatch, stream)
+    stream_agen = cast(Any, _stream_events(model))
+
+    async def consume() -> None:
+        async for _event in stream_agen:
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(blocked.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        task.cancel()
+
+    await stream_agen.aclose()
+
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_stream_does_not_block_cancellation_on_slow_close(monkeypatch) -> None:
+    """A provider close that waits on transport I/O must not delay cancellation."""
+    blocked = asyncio.Event()
+    release = asyncio.Event()
+    stream = _SlowCloseStream([_chat_chunk("He")], blocked, release)
+    model = _chat_model_with_stream(monkeypatch, stream)
+    stream_agen = cast(Any, _stream_events(model))
+
+    async def consume() -> None:
+        async for _event in stream_agen:
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(blocked.wait(), timeout=5)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        assert stream.aclose_calls == 1
+        assert stream.aclose_completed == 0
+
+        release.set()
+        for _ in range(200):
+            if stream.aclose_completed == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert stream.aclose_completed == 1
+    finally:
+        release.set()
+        task.cancel()
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_stream_propagates_close_failure_before_terminal_event(
+    monkeypatch,
+) -> None:
+    """Cleanup failures before completion stay observable by the caller."""
+    stream = _FailingCloseStream([_chat_chunk("Hello")])
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=stream)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+
+    async def fake_handle_stream(response, chunk_stream, model=None):
+        yield ResponseCreatedEvent(
+            type="response.created",
+            response=_response("partial"),
+            sequence_number=0,
+        )
+        async for _chunk in chunk_stream:
+            pass
+        yield _completed_event()
+
+    monkeypatch.setattr(module.ChatCmplStreamHandler, "handle_stream", fake_handle_stream)
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+    stream_agen = cast(Any, _stream_events(model))
+
+    first_event = await anext(stream_agen)
+    assert first_event.type == "response.created"
+
+    with pytest.raises(RuntimeError, match="close-failure"):
+        await stream_agen.aclose()
+
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_stream_ignores_close_failure_after_terminal_event(
+    monkeypatch,
+) -> None:
+    """A completed Responses stream stays successful when provider cleanup fails."""
+    stream = _FailingCloseStream([_completed_event()])
+    model = _responses_model_with_stream(monkeypatch, stream)
+
+    events = [event async for event in _stream_events(model)]
+
+    assert [event.type for event in events] == ["response.completed"]
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_stream_ignores_close_failure_after_terminal_failure(
+    monkeypatch,
+) -> None:
+    """A cleanup failure must not replace the terminal failure the caller should see."""
+    stream = _FailingCloseStream(
+        [
+            ResponseFailedEvent(
+                type="response.failed",
+                response=_response("partial", response_id="resp-terminal"),
+                sequence_number=1,
+            )
+        ]
+    )
+    model = _responses_model_with_stream(monkeypatch, stream)
+
+    with pytest.raises(ModelBehaviorError, match="response.failed"):
+        async for _event in _stream_events(model):
+            pass
+
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_stream_propagates_close_failure_before_terminal_event(
+    monkeypatch,
+) -> None:
+    """Cleanup failures before completion stay observable by the caller."""
+    stream = _FailingCloseStream(
+        [
+            ResponseCreatedEvent(
+                type="response.created",
+                response=_response("partial"),
+                sequence_number=0,
+            ),
+            _completed_event(),
+        ]
+    )
+    model = _responses_model_with_stream(monkeypatch, stream)
+    stream_agen = cast(Any, _stream_events(model))
+
+    first_event = await anext(stream_agen)
+    assert first_event.type == "response.created"
+
+    with pytest.raises(RuntimeError, match="close-failure"):
+        await stream_agen.aclose()
+
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_stream_closes_provider_stream_after_cancellation(
+    monkeypatch,
+) -> None:
+    """Cancelling the consumer must still release the provider Responses stream."""
+    blocked = asyncio.Event()
+    stream = _BlockingStream(
+        [
+            ResponseCreatedEvent(
+                type="response.created",
+                response=_response("partial"),
+                sequence_number=0,
+            )
+        ],
+        blocked,
+    )
+    model = _responses_model_with_stream(monkeypatch, stream)
+    stream_agen = cast(Any, _stream_events(model))
+
+    async def consume() -> None:
+        async for _event in stream_agen:
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(blocked.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        task.cancel()
+
+    await stream_agen.aclose()
+
+    assert stream.aclose_calls == 1

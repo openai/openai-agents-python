@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import importlib
 import inspect
 import json
 import time
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable
 from copy import copy
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
@@ -26,7 +28,7 @@ from ...agent_output import AgentOutputSchemaBase
 from ...exceptions import ModelBehaviorError, UserError
 from ...handoffs import Handoff
 from ...items import ItemHelpers, ModelResponse, TResponseInputItem, TResponseStreamEvent
-from ...logger import logger
+from ...logger import log_model_action_debug, logger
 from ...model_settings import ModelSettings
 from ...models._openai_retry import get_openai_retry_advice
 from ...models._response_terminal import (
@@ -305,8 +307,29 @@ class AnyLLMModel(Model):
         conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
+        # `aclosing` forwards an early `aclose()` on this generator to the delegate, so the
+        # delegate's cleanup runs deterministically instead of waiting for garbage collection.
         if self._selected_api() == "responses":
-            async for chunk in self._stream_response_via_responses(
+            async with contextlib.aclosing(
+                self._stream_response_via_responses(
+                    system_instructions=system_instructions,
+                    input=input,
+                    model_settings=model_settings,
+                    tools=tools,
+                    output_schema=output_schema,
+                    handoffs=handoffs,
+                    tracing=tracing,
+                    previous_response_id=previous_response_id,
+                    conversation_id=conversation_id,
+                    prompt=prompt,
+                )
+            ) as responses_stream:
+                async for chunk in responses_stream:
+                    yield chunk
+            return
+
+        async with contextlib.aclosing(
+            self._stream_response_via_chat(
                 system_instructions=system_instructions,
                 input=input,
                 model_settings=model_settings,
@@ -314,24 +337,11 @@ class AnyLLMModel(Model):
                 output_schema=output_schema,
                 handoffs=handoffs,
                 tracing=tracing,
-                previous_response_id=previous_response_id,
-                conversation_id=conversation_id,
                 prompt=prompt,
-            ):
+            )
+        ) as chat_stream:
+            async for chunk in chat_stream:
                 yield chunk
-            return
-
-        async for chunk in self._stream_response_via_chat(
-            system_instructions=system_instructions,
-            input=input,
-            model_settings=model_settings,
-            tools=tools,
-            output_schema=output_schema,
-            handoffs=handoffs,
-            tracing=tracing,
-            prompt=prompt,
-        ):
-            yield chunk
 
     async def _get_response_via_responses(
         self,
@@ -410,7 +420,7 @@ class AnyLLMModel(Model):
         previous_response_id: str | None,
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
-    ) -> AsyncIterator[ResponseStreamEvent]:
+    ) -> AsyncGenerator[ResponseStreamEvent, None]:
         with response_span(disabled=tracing.is_disabled()) as span_response:
             stream = await self._fetch_responses_response(
                 system_instructions=system_instructions,
@@ -427,6 +437,8 @@ class AnyLLMModel(Model):
 
             final_response: Response | None = None
             terminal_failure_error: ModelBehaviorError | None = None
+            yielded_terminal_event = False
+            close_stream_in_background = False
             try:
                 async for chunk in stream:
                     chunk_type = getattr(chunk, "type", None)
@@ -443,9 +455,32 @@ class AnyLLMModel(Model):
                             cast(str, chunk_type),
                             chunk,
                         )
+                    if chunk_type in {
+                        "response.completed",
+                        "response.failed",
+                        "response.incomplete",
+                        "error",
+                        "response.error",
+                    }:
+                        yielded_terminal_event = True
                     yield chunk
+            except asyncio.CancelledError:
+                close_stream_in_background = True
+                self._schedule_async_iterator_close(stream)
+                raise
             finally:
-                await self._maybe_aclose(stream)
+                if not close_stream_in_background:
+                    try:
+                        await self._maybe_aclose(stream)
+                    except Exception as exc:
+                        if yielded_terminal_event:
+                            log_model_action_debug(
+                                logger,
+                                "Ignoring stream cleanup error after terminal event",
+                                exc,
+                            )
+                        else:
+                            raise
 
             if terminal_failure_error is not None:
                 raise terminal_failure_error
@@ -567,7 +602,7 @@ class AnyLLMModel(Model):
         handoffs: list[Handoff],
         tracing: ModelTracing,
         prompt: ResponsePromptParam | None,
-    ) -> AsyncIterator[TResponseStreamEvent]:
+    ) -> AsyncGenerator[TResponseStreamEvent, None]:
         with generation_span(
             model=str(self.model),
             model_config=model_config_for_trace(
@@ -591,17 +626,38 @@ class AnyLLMModel(Model):
             )
 
             final_response: Response | None = None
+            yielded_terminal_event = False
+            close_stream_in_background = False
             try:
                 async for chunk in ChatCmplStreamHandler.handle_stream(
                     response,
                     cast(Any, self._normalize_chat_stream(stream)),
                     model=self.model,
                 ):
-                    yield chunk
+                    # Record terminal state before yielding so a consumer that stops at the
+                    # completed event still leaves the tracing data and cleanup policy correct.
                     if chunk.type == "response.completed":
                         final_response = chunk.response
+                        yielded_terminal_event = True
+
+                    yield chunk
+            except asyncio.CancelledError:
+                close_stream_in_background = True
+                self._schedule_async_iterator_close(stream)
+                raise
             finally:
-                await self._maybe_aclose(stream)
+                if not close_stream_in_background:
+                    try:
+                        await self._maybe_aclose(stream)
+                    except Exception as exc:
+                        if yielded_terminal_event:
+                            log_model_action_debug(
+                                logger,
+                                "Ignoring stream cleanup error after terminal event",
+                                exc,
+                            )
+                        else:
+                            raise
 
             if tracing.include_data() and final_response:
                 span_generation.span_data.output = [final_response.model_dump()]
@@ -1099,6 +1155,21 @@ class AnyLLMModel(Model):
             result = close()
             if inspect.isawaitable(result):
                 await result
+
+    def _schedule_async_iterator_close(self, iterator: Any) -> None:
+        task = asyncio.create_task(self._maybe_aclose(iterator))
+        task.add_done_callback(self._consume_background_cleanup_task_result)
+
+    @staticmethod
+    def _consume_background_cleanup_task_result(task: asyncio.Task[Any]) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            log_model_action_debug(
+                logger, "Background stream cleanup failed after cancellation", exc
+            )
 
     def _build_chat_extra_kwargs(self, model_settings: ModelSettings) -> dict[str, Any]:
         extra_kwargs: dict[str, Any] = {}
