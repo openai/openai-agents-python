@@ -421,6 +421,25 @@ class MongoDBSession(SessionABC):
             self._release_attempt = Future()
             return True, None
 
+    @staticmethod
+    async def _await_client_release(pending: Future[None]) -> None:
+        """Await another caller's in-flight release without being able to abort it.
+
+        The attempt is shared, so cancelling this coroutine must not cancel it:
+        :func:`asyncio.wrap_future` forwards cancellation to the wrapped
+        ``concurrent.futures.Future``, which would leave the releasing caller unable
+        to publish its outcome.  :func:`asyncio.shield` keeps the wrapper alive, and
+        the done callback discards the eventual outcome so an abandoned wrapper
+        holding an exception does not log "exception was never retrieved".
+        """
+        wrapper = asyncio.wrap_future(pending)
+        try:
+            await asyncio.shield(wrapper)
+        except asyncio.CancelledError:
+            if not wrapper.done():
+                wrapper.add_done_callback(lambda f: f.cancelled() or f.exception())
+            raise
+
     def _finish_client_release(self, error: BaseException | None) -> None:
         """Publish the outcome of a release attempt and free the claim.
 
@@ -463,7 +482,7 @@ class MongoDBSession(SessionABC):
             if pending is not None:
                 # Await the in-flight release rather than returning early, so a
                 # failed cleanup surfaces here too instead of looking successful.
-                await asyncio.wrap_future(pending)
+                await self._await_client_release(pending)
             return
 
         error: BaseException | None = None

@@ -879,6 +879,35 @@ async def test_concurrent_close_observes_a_failed_release() -> None:
     assert attempts == 2
 
 
+async def test_cancelled_waiter_does_not_break_the_in_flight_release() -> None:
+    """Cancelling a waiting close() must not abort the release it is waiting on."""
+    s, fake_client = _make_owned_session("close-cancelled-waiter")
+    original_close = fake_client.close
+
+    async def _slow_close() -> None:
+        await asyncio.sleep(0.2)
+        await original_close()
+
+    fake_client.close = _slow_close  # type: ignore[method-assign]
+
+    releaser = asyncio.create_task(s.close())
+    await asyncio.sleep(0.02)  # let the releaser claim the release
+    waiter = asyncio.create_task(s.close())
+    await asyncio.sleep(0.02)  # let the waiter block on the shared attempt
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    # The release owner must still finish and publish its outcome.
+    await releaser
+    assert fake_client._closed
+
+    # And the session is still consistent afterwards.
+    await s.close()
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await s.get_items()
+
+
 async def test_concurrent_close_across_event_loops_releases_client_once() -> None:
     """Two loops closing the same session must not both release the owned client."""
     s, fake_client = _make_owned_session("close-two-loops")
