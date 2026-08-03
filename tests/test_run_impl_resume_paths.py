@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Any, cast
 
@@ -7,6 +8,7 @@ from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessa
 import agents.run as run_module
 from agents import Agent, Runner, function_tool
 from agents.agent import ToolsToFinalOutputResult
+from agents.agent_output import AgentOutputSchema
 from agents.items import (
     MessageOutputItem,
     ModelResponse,
@@ -21,6 +23,7 @@ from agents.run_internal import run_loop, turn_resolution
 from agents.run_internal.agent_bindings import bind_public_agent
 from agents.run_internal.run_loop import (
     NextStepFinalOutput,
+    NextStepHandoff,
     NextStepInterruption,
     NextStepRunAgain,
     ProcessedResponse,
@@ -230,6 +233,122 @@ async def test_resumed_run_again_resets_persisted_count(monkeypatch) -> None:
         for item in session.saved_items
     ]
     assert "function_call" in saved_types
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("continuation", ["run_again", "handoff"])
+async def test_resumed_stream_waits_for_event_consumption_before_continuing(
+    monkeypatch: pytest.MonkeyPatch,
+    continuation: str,
+) -> None:
+    agent = Agent(name="resume-agent")
+    delegate = Agent(name="delegate", output_type=int)
+    state: RunState[dict[str, str]] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=2,
+    )
+    state._current_step = NextStepInterruption(interruptions=[])
+    state._model_responses = [
+        ModelResponse(output=[], usage=Usage(), response_id="resp_1"),
+    ]
+    state._last_processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    tool_output_item = ToolCallOutputItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call_output",
+            "call_id": "call-resume",
+            "output": "ok",
+        },
+        output="ok",
+    )
+    next_step = NextStepHandoff(delegate) if continuation == "handoff" else NextStepRunAgain()
+    allow_resume_resolution = asyncio.Event()
+
+    async def fake_resolve_interrupted_turn(**_kwargs: object) -> SingleStepResult:
+        await allow_resume_resolution.wait()
+        return SingleStepResult(
+            original_input="input",
+            model_response=ModelResponse(output=[], usage=Usage(), response_id="resp_resume"),
+            pre_step_items=[],
+            new_step_items=[tool_output_item],
+            next_step=next_step,
+            tool_input_guardrail_results=[],
+            tool_output_guardrail_results=[],
+        )
+
+    next_model_turn_started = asyncio.Event()
+    allow_model_turn_to_finish = asyncio.Event()
+
+    async def fake_run_single_turn_streamed(*_args: object, **_kwargs: object) -> SingleStepResult:
+        next_model_turn_started.set()
+        await allow_model_turn_to_finish.wait()
+        return SingleStepResult(
+            original_input="input",
+            model_response=ModelResponse(output=[], usage=Usage(), response_id="unexpected"),
+            pre_step_items=[],
+            new_step_items=[],
+            next_step=NextStepFinalOutput("unexpected"),
+            tool_input_guardrail_results=[],
+            tool_output_guardrail_results=[],
+        )
+
+    monkeypatch.setattr(run_loop, "resolve_interrupted_turn", fake_resolve_interrupted_turn)
+    monkeypatch.setattr(run_loop, "run_single_turn_streamed", fake_run_single_turn_streamed)
+
+    result = Runner.run_streamed(agent, state)
+    consumer_active = asyncio.Event()
+    consumer_suspended = asyncio.Event()
+    release_consumer = asyncio.Event()
+    cancel_called = asyncio.Event()
+
+    async def consume_events() -> None:
+        async for event in result.stream_events():
+            if event.type == "agent_updated_stream_event":
+                consumer_active.set()
+            if event.type == "run_item_stream_event" and event.name == "tool_output":
+                consumer_suspended.set()
+                await release_consumer.wait()
+                result.cancel(mode="after_turn")
+                cancel_called.set()
+
+    consumer_task = asyncio.create_task(consume_events())
+    await asyncio.wait_for(consumer_active.wait(), timeout=1)
+    allow_resume_resolution.set()
+    await asyncio.wait_for(consumer_suspended.wait(), timeout=1)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert not next_model_turn_started.is_set()
+
+    release_consumer.set()
+    await asyncio.wait_for(cancel_called.wait(), timeout=1)
+    allow_model_turn_to_finish.set()
+    await asyncio.wait_for(consumer_task, timeout=1)
+
+    assert not next_model_turn_started.is_set()
+    assert result.final_output is None
+    expected_agent = delegate if continuation == "handoff" else agent
+    assert result.current_agent is expected_agent
+    assert result.last_agent is expected_agent
+    assert result.to_state()._current_agent is expected_agent
+    if continuation == "handoff":
+        assert result._current_agent_output_schema is not None
+        assert isinstance(result._current_agent_output_schema, AgentOutputSchema)
+        assert result._current_agent_output_schema.output_type is int
 
 
 @pytest.mark.parametrize(

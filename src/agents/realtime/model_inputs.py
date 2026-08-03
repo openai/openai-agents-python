@@ -98,6 +98,15 @@ class RealtimeModelSendInterrupt:
     force_response_cancel: bool = False
     """Force sending a response.cancel event even if automatic cancellation is enabled."""
 
+    response_id: str | None = None
+    """Limit response cancellation to this response ID, when supported by the model.
+
+    Audio playback is still interrupted unless `cancel_response_only` is set.
+    """
+
+    cancel_response_only: bool = False
+    """Cancel only `response_id` without interrupting audio playback."""
+
 
 @dataclass
 class RealtimeModelSendSessionUpdate:

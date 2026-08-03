@@ -268,7 +268,7 @@ Bare `RealtimeAgent` handoffs are auto-wrapped, and `realtime_handoff(...)` lets
 
 ### Guardrails
 
-Realtime agents support output guardrails on agent responses and input guardrails on function-tool calls. Output guardrails run on debounced transcript accumulation rather than on every partial token, and they emit `guardrail_tripped` instead of raising an exception.
+Realtime agents support output guardrails on agent responses and input guardrails on function-tool calls. Output guardrails run on debounced accumulation of output-text and audio-transcript deltas rather than on every partial delta, and they emit `guardrail_tripped` instead of raising an exception.
 
 ```python
 from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
@@ -288,7 +288,9 @@ agent = RealtimeAgent(
 )
 ```
 
-When a realtime output guardrail trips, the session interrupts the active response, forces `response.cancel`, emits `guardrail_tripped`, and sends a follow-up user message that names the triggered guardrail so the model can produce a replacement response. Your audio player should still listen for `audio_interrupted` and stop local playback immediately, because guardrails run on debounced transcript text and some audio may already be buffered when the tripwire fires.
+When a realtime output guardrail trips on an audio transcript, the session interrupts the active response, forces `response.cancel`, emits `guardrail_tripped`, and sends a follow-up user message that names the triggered guardrail so the model can produce a replacement response. Your audio player should still listen for `audio_interrupted` and stop local playback immediately, because some audio may already be buffered when the tripwire fires. For text-only output, the session instead sends a response-scoped `response.cancel`; it does not emit `audio_interrupted` because there is no audio playback to stop. The same `guardrail_tripped` event and follow-up user message are emitted for the text-only path when using the built-in OpenAI Realtime models.
+
+Custom `RealtimeModel` transports must override `RealtimeModel.send_event_if()` to support the text-only recovery message. The implementation must recheck or serialize the supplied condition at the transport's actual event commit boundary. The default implementation safely skips the recovery message because checking the condition before awaiting `send_event()` would allow a newer response to start before the message is committed; response cancellation and the `guardrail_tripped` event still occur.
 
 ## SIP and telephony
 
