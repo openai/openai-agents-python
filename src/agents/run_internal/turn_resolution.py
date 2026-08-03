@@ -562,8 +562,10 @@ async def execute_handoffs(
             ),
         )
 
-        input_filter = handoff.input_filter or (
-            run_config.handoff_input_filter if run_config else None
+        input_filter = (
+            handoff.input_filter
+            if handoff.input_filter is not None
+            else run_config.handoff_input_filter
         )
         handoff_nest_setting = handoff.nest_handoff_history
         should_nest_history = (
@@ -583,7 +585,7 @@ async def execute_handoffs(
         handoff_input_data: HandoffInputData | None = None
         session_step_items: list[RunItem] | None = None
         nested_history_owned_items: list[NestedHistoryOwnedItem] | None = None
-        if input_filter or should_nest_history:
+        if input_filter is not None or should_nest_history:
             handoff_input_data = HandoffInputData(
                 input_history=tuple(original_input)
                 if isinstance(original_input, list)
@@ -593,7 +595,7 @@ async def execute_handoffs(
                 run_context=context_wrapper,
             )
 
-        if input_filter and handoff_input_data is not None:
+        if input_filter is not None and handoff_input_data is not None:
             filter_name = getattr(input_filter, "__qualname__", repr(input_filter))
             from_agent = getattr(public_agent, "name", public_agent.__class__.__name__)
             to_agent = getattr(new_agent, "name", new_agent.__class__.__name__)

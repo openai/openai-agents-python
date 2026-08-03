@@ -1833,6 +1833,52 @@ async def test_opt_in_handoff_history_nested_and_filters_respected():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+async def test_falsey_per_handoff_input_filter_takes_precedence(streamed: bool) -> None:
+    triage_model = FakeModel()
+    delegate_model = FakeModel()
+    delegate = Agent(name="delegate", model=delegate_model)
+
+    class FalseyInputFilter:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def __bool__(self) -> bool:
+            return False
+
+        def __call__(self, data: HandoffInputData) -> HandoffInputData:
+            self.call_count += 1
+            return data
+
+    per_handoff_filter = FalseyInputFilter()
+
+    def global_filter(_data: HandoffInputData) -> HandoffInputData:
+        raise AssertionError("The run-level filter must not replace the per-handoff filter")
+
+    triage = Agent(
+        name="triage",
+        model=triage_model,
+        handoffs=[handoff(delegate, input_filter=per_handoff_filter)],
+    )
+    triage_model.add_multiple_turn_outputs([[get_handoff_tool_call(delegate)]])
+    delegate_model.add_multiple_turn_outputs([[get_text_message("done")]])
+
+    result = await _run_agent_with_optional_streaming(
+        triage,
+        input="user_message",
+        streamed=streamed,
+        run_config=RunConfig(
+            handoff_input_filter=global_filter,
+            nest_handoff_history=True,
+        ),
+    )
+
+    assert result.final_output == "done"
+    assert result.input == "user_message"
+    assert per_handoff_filter.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_opt_in_handoff_history_accumulates_across_multiple_handoffs():
     triage_model = FakeModel()
     delegate_model = FakeModel()
