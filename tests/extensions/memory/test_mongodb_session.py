@@ -8,6 +8,7 @@ dependency-free while exercising the full session logic.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 from collections import defaultdict
@@ -727,6 +728,119 @@ async def test_close_owned_client_is_closed() -> None:
 
         await s.close()
         assert fake_client._closed
+
+
+async def test_closed_operations_raise_runtime_error() -> None:
+    """Operations on a closed session must fail instead of using a closed client."""
+    MongoDBSession._init_state.clear()
+    fake_client = FakeAsyncMongoClient()
+    with patch(
+        "agents.extensions.memory.mongodb_session.AsyncMongoClient",
+        return_value=fake_client,
+    ):
+        s = MongoDBSession.from_uri("closed-state", uri="mongodb://localhost:27017", database="t")
+
+    await s.add_items([{"role": "user", "content": "before close"}])
+    await s.close()
+
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await s.get_items()
+
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await s.add_items([{"role": "user", "content": "after close"}])
+
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await s.pop_item()
+
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await s.clear_session()
+
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await s.ping()
+
+
+async def test_closed_rejects_empty_add_items() -> None:
+    """add_items([]) must not bypass the closed check through the empty-list fast path."""
+    s = _make_session("closed-empty-add")
+    await s.close()
+
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await s.add_items([])
+
+
+async def test_closed_rejects_non_positive_limit_get_items() -> None:
+    """get_items(limit=0) must not bypass the closed check through the early return."""
+    s = _make_session("closed-zero-limit")
+    await s.close()
+
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await s.get_items(limit=0)
+
+
+async def test_close_before_use_is_terminal() -> None:
+    """close() before any command is issued must still make the session terminal."""
+    s = _make_session("close-before-use")
+    await s.close()
+
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await s.get_items()
+
+
+async def test_close_is_idempotent_and_closes_owned_client_once() -> None:
+    """Repeated and concurrent close() calls must remain safe no-ops."""
+    MongoDBSession._init_state.clear()
+    fake_client = FakeAsyncMongoClient()
+    close_calls = 0
+    original_close = fake_client.close
+
+    async def _counting_close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        await original_close()
+
+    fake_client.close = _counting_close  # type: ignore[method-assign]
+
+    with patch(
+        "agents.extensions.memory.mongodb_session.AsyncMongoClient",
+        return_value=fake_client,
+    ):
+        s = MongoDBSession.from_uri("close-twice", uri="mongodb://localhost:27017", database="t")
+
+    await s.add_items([{"role": "user", "content": "before close"}])
+
+    await asyncio.gather(s.close(), s.close())
+    await s.close()
+
+    assert fake_client._closed
+    assert close_calls == 1
+
+
+async def test_close_injected_client_still_makes_session_terminal() -> None:
+    """An injected client is left open, but the session itself must still be terminal."""
+    MongoDBSession._init_state.clear()
+    client = FakeAsyncMongoClient()
+    s = MongoDBSession("injected", client=client, database="agents_test")  # type: ignore[arg-type]
+    await s.add_items([{"role": "user", "content": "before close"}])
+
+    await s.close()
+
+    assert not client._closed
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await s.get_items()
+
+    # The caller still owns the client and can keep using it through a new session.
+    other = MongoDBSession("injected", client=client, database="agents_test")  # type: ignore[arg-type]
+    assert len(await other.get_items()) == 1
+
+
+async def test_operations_unaffected_before_close(session: MongoDBSession) -> None:
+    """Negative control: the closed check must not disturb normal operation."""
+    await session.add_items([{"role": "user", "content": "hello"}])
+    assert len(await session.get_items()) == 1
+    assert await session.ping() is True
+    assert await session.pop_item() is not None
+    await session.clear_session()
+    assert await session.get_items() == []
 
 
 # ---------------------------------------------------------------------------

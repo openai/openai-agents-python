@@ -139,6 +139,7 @@ class MongoDBSession(SessionABC):
         )
         self._client = client
         self._owns_client = False
+        self._closed = False
 
         client.append_metadata(_DRIVER_INFO)
 
@@ -227,6 +228,7 @@ class MongoDBSession(SessionABC):
         round-trip is issued.  The threading-lock-guarded boolean prevents that
         extra round-trip after the first call completes.
         """
+        self._check_not_closed()
         if self._is_init_done():
             return
 
@@ -255,6 +257,11 @@ class MongoDBSession(SessionABC):
     # Session protocol implementation
     # ------------------------------------------------------------------
 
+    def _check_not_closed(self) -> None:
+        """Raise if the session has already been closed."""
+        if self._closed:
+            raise RuntimeError("MongoDBSession is closed")
+
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
@@ -268,6 +275,7 @@ class MongoDBSession(SessionABC):
         Returns:
             List of input items representing the conversation history.
         """
+        self._check_not_closed()
         await self._ensure_indexes()
 
         session_limit = resolve_session_limit(limit, self.session_settings)
@@ -312,6 +320,7 @@ class MongoDBSession(SessionABC):
         Args:
             items: List of input items to append to the session.
         """
+        self._check_not_closed()
         if not items:
             return
 
@@ -387,8 +396,15 @@ class MongoDBSession(SessionABC):
         Only closes the client if this session owns it (i.e. it was created
         via :meth:`from_uri`).  If the client was injected externally the
         caller is responsible for managing its lifecycle.
+
+        The session becomes terminal from the first close attempt: subsequent
+        operations raise ``RuntimeError`` rather than issuing commands against a
+        closed client.  Repeated calls are safe no-ops, and an injected client is
+        still left untouched.
         """
-        if self._owns_client:
+        already_closed = self._closed
+        self._closed = True
+        if self._owns_client and not already_closed:
             await self._client.close()
 
     async def ping(self) -> bool:
@@ -396,7 +412,11 @@ class MongoDBSession(SessionABC):
 
         Returns:
             ``True`` if the server is reachable, ``False`` otherwise.
+
+        Raises:
+            RuntimeError: If the session has been closed.
         """
+        self._check_not_closed()
         try:
             await self._client.admin.command("ping")
             return True
