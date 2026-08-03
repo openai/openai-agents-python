@@ -203,3 +203,90 @@ async def test_call_model_input_filter_prefers_latest_duplicate_outputs_streamed
     ]
     assert len(outputs) == 1
     assert outputs[0]["output"] == "new-value"
+
+
+def _duplicate_tool_call_input() -> list[TResponseInputItem]:
+    return [
+        cast(
+            TResponseInputItem,
+            {
+                "type": "function_call",
+                "call_id": "ordered-call",
+                "name": "tool_ordered",
+                "arguments": "{}",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call_output", "call_id": "ordered-call", "output": "result"},
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "function_call",
+                "call_id": "ordered-call",
+                "name": "tool_ordered",
+                "arguments": "{}",
+            },
+        ),
+    ]
+
+
+def _sent_item_types(sent_input: Any) -> list[str | None]:
+    return [
+        cast(dict[str, Any], item).get("type")
+        for item in sent_input
+        if isinstance(item, dict) and item.get("type") is not None
+    ]
+
+
+@pytest.mark.asyncio
+async def test_call_model_input_filter_keeps_duplicate_item_order_non_streamed() -> None:
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+    model.set_next_output([get_text_message("ok")])
+
+    def filter_fn(data: CallModelData[Any]) -> ModelInputData:
+        return ModelInputData(
+            input=list(data.model_data.input) + _duplicate_tool_call_input(),
+            instructions=data.model_data.instructions,
+        )
+
+    await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(call_model_input_filter=filter_fn),
+    )
+
+    # Collapsing the repeated call must not move it behind its output; the Responses API
+    # rejects a function_call_output whose function_call has not been sent yet.
+    assert _sent_item_types(model.last_turn_args["input"]) == [
+        "function_call",
+        "function_call_output",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_call_model_input_filter_keeps_duplicate_item_order_streamed() -> None:
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+    model.set_next_output([get_text_message("ok")])
+
+    async def filter_fn(data: CallModelData[Any]) -> ModelInputData:
+        return ModelInputData(
+            input=list(data.model_data.input) + _duplicate_tool_call_input(),
+            instructions=data.model_data.instructions,
+        )
+
+    result = Runner.run_streamed(
+        agent,
+        input="start",
+        run_config=RunConfig(call_model_input_filter=filter_fn),
+    )
+    async for _ in result.stream_events():
+        pass
+
+    assert _sent_item_types(model.last_turn_args["input"]) == [
+        "function_call",
+        "function_call_output",
+    ]

@@ -728,10 +728,26 @@ def deduplicate_input_items(items: Sequence[TResponseInputItem]) -> list[TRespon
 def deduplicate_input_items_preferring_latest(
     items: Sequence[TResponseInputItem],
 ) -> list[TResponseInputItem]:
-    """Deduplicate by stable identifiers while keeping the latest occurrence."""
-    # deduplicate_input_items keeps the first item per dedupe key. Reverse twice so that
-    # the latest item in the original order wins for duplicate IDs/call_ids.
-    return list(reversed(deduplicate_input_items(list(reversed(items)))))
+    """Deduplicate by stable identifiers, keeping the latest value at the earliest position.
+
+    Duplicates collapse onto the first occurrence of their dedupe key so the caller's item
+    order is preserved, while the last occurrence supplies the value. Relocating an item to
+    the position of its final duplicate would move a `function_call` behind its
+    `function_call_output`, which the Responses API rejects.
+    """
+    latest_by_key: dict[str, TResponseInputItem] = {}
+    for item in items:
+        dedupe_key = _dedupe_key(item)
+        if dedupe_key is not None:
+            latest_by_key[dedupe_key] = item
+
+    # deduplicate_input_items keeps the first item per dedupe key, which is what preserves the
+    # caller's order; swapping in the latest value per surviving key is all this adds.
+    deduplicated: list[TResponseInputItem] = []
+    for item in deduplicate_input_items(items):
+        dedupe_key = _dedupe_key(item)
+        deduplicated.append(item if dedupe_key is None else latest_by_key[dedupe_key])
+    return deduplicated
 
 
 def function_tool_error_output(

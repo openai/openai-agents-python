@@ -1001,3 +1001,69 @@ def test_run_result_to_input_list_preserves_tool_search_items() -> None:
 def test_coerce_tool_search_output_raw_item_rejects_legacy_type() -> None:
     with pytest.raises(AgentsException, match="Unexpected tool search output item type"):
         coerce_tool_search_output_raw_item({"type": "tool_search_result", "results": []})
+
+
+def test_deduplicate_input_items_preferring_latest_keeps_original_order() -> None:
+    call = cast(
+        TResponseInputItem,
+        {"type": "function_call", "call_id": "call-1", "name": "tool", "arguments": "{}"},
+    )
+    output = cast(
+        TResponseInputItem,
+        {"type": "function_call_output", "call_id": "call-1", "output": "result"},
+    )
+    message = cast(TResponseInputItem, {"role": "assistant", "content": "ack"})
+    repeated_call = cast(
+        TResponseInputItem,
+        {"type": "function_call", "call_id": "call-1", "name": "tool", "arguments": "{}"},
+    )
+
+    deduplicated = run_items.deduplicate_input_items_preferring_latest(
+        [call, output, message, repeated_call]
+    )
+
+    # The repeated call collapses onto the first occurrence, so the call still precedes its
+    # output. Relocating it to the end would produce an item order the Responses API rejects.
+    assert [cast(dict[str, Any], item).get("type") for item in deduplicated] == [
+        "function_call",
+        "function_call_output",
+        None,
+    ]
+    assert cast(dict[str, Any], deduplicated[2])["role"] == "assistant"
+
+
+def test_deduplicate_input_items_preferring_latest_uses_latest_value_at_first_position() -> None:
+    old_output = cast(
+        TResponseInputItem,
+        {"type": "function_call_output", "call_id": "call-1", "output": "old"},
+    )
+    message = cast(TResponseInputItem, {"role": "user", "content": "next"})
+    new_output = cast(
+        TResponseInputItem,
+        {"type": "function_call_output", "call_id": "call-1", "output": "new"},
+    )
+
+    deduplicated = run_items.deduplicate_input_items_preferring_latest(
+        [old_output, message, new_output]
+    )
+
+    assert len(deduplicated) == 2
+    assert cast(dict[str, Any], deduplicated[0])["output"] == "new"
+    assert cast(dict[str, Any], deduplicated[1])["content"] == "next"
+
+
+def test_deduplicate_input_items_preferring_latest_leaves_unique_items_untouched() -> None:
+    items = [
+        cast(TResponseInputItem, {"role": "user", "content": "hi"}),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call", "call_id": "call-1", "name": "tool", "arguments": "{}"},
+        ),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call_output", "call_id": "call-1", "output": "result"},
+        ),
+        cast(TResponseInputItem, {"role": "user", "content": "hi"}),
+    ]
+
+    assert run_items.deduplicate_input_items_preferring_latest(items) == items
