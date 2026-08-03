@@ -231,6 +231,8 @@ class RealtimeSession(RealtimeModelListener):
         self._item_guardrail_run_counts: dict[str, int] = {}  # item_id -> run count
         self._latest_output_response_generation = 0
         self._active_output_response_generation: int | None = None
+        self._active_output_response_id: str | None = None
+        self._active_output_response_agent: RealtimeAgent[Any] | None = None
         self._debounce_text_length = self._run_config.get("guardrails_settings", {}).get(
             "debounce_text_length", 100
         )
@@ -444,11 +446,13 @@ class RealtimeSession(RealtimeModelListener):
             if self._active_output_response_generation is None:
                 self._latest_output_response_generation += 1
                 self._active_output_response_generation = self._latest_output_response_generation
+                self._active_output_response_id = event.response_id
+                self._active_output_response_agent = self._current_agent
             self._record_output_guardrail_delta(
                 event.item_id,
                 event.delta,
                 event.response_id,
-                agent_snapshot=self._current_agent,
+                agent_snapshot=self._active_output_response_agent,
                 output_response_generation=self._active_output_response_generation,
             )
         elif event.type == "item_updated":
@@ -523,8 +527,16 @@ class RealtimeSession(RealtimeModelListener):
         elif event.type == "connection_status":
             pass
         elif event.type == "turn_started":
-            self._latest_output_response_generation += 1
-            self._active_output_response_generation = self._latest_output_response_generation
+            is_late_start_for_active_response = (
+                event.response_id is not None
+                and event.response_id == self._active_output_response_id
+                and self._active_output_response_generation is not None
+            )
+            if not is_late_start_for_active_response:
+                self._latest_output_response_generation += 1
+                self._active_output_response_generation = self._latest_output_response_generation
+                self._active_output_response_id = event.response_id
+                self._active_output_response_agent = self._current_agent
             await self._put_event(
                 RealtimeAgentStartEvent(
                     agent=self._current_agent,
@@ -539,6 +551,8 @@ class RealtimeSession(RealtimeModelListener):
             self._item_transcripts.clear()
             self._item_guardrail_run_counts.clear()
             self._active_output_response_generation = None
+            self._active_output_response_id = None
+            self._active_output_response_agent = None
 
             await self._put_event(
                 RealtimeAgentEndEvent(
@@ -1408,7 +1422,7 @@ class RealtimeSession(RealtimeModelListener):
             if output_response_generation is None:
                 await self._model.send_event(feedback_event)
             else:
-                await self._model._send_event_if(
+                await self._model.send_event_if(
                     feedback_event,
                     lambda: (output_response_generation == self._latest_output_response_generation),
                 )

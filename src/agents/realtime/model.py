@@ -171,14 +171,18 @@ class RealtimeModel(abc.ABC):
         """Send an event to the model."""
         pass
 
-    async def _send_event_if(
+    async def send_event_if(
         self, event: RealtimeModelSendEvent, send_if: Callable[[], bool]
     ) -> bool:
-        """Send an event only if the transport can commit it while the precondition is true.
+        """Conditionally send an event at the transport's commit boundary.
 
-        Transports that support conditional sends must override this method and recheck or
-        serialize ``send_if`` at their actual event commit boundary. The default declines the send
-        because ``send_event`` may yield after a separate precondition check.
+        Custom transports that support conditional sends must override this method and recheck or
+        serialize ``send_if`` at their actual event commit boundary. The default returns ``False``
+        without calling ``send_event`` because a separate check before that await is not atomic.
+
+        Returns:
+            ``True`` if the event was committed, or ``False`` if the condition became false or the
+            transport does not implement conditional sends.
         """
         return False
 

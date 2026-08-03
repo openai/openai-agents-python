@@ -729,12 +729,12 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             assert_never(event)
             raise ValueError(f"Unknown event type: {type(event)}")
 
-    async def _send_event_if(
+    async def send_event_if(
         self, event: RealtimeModelSendEvent, send_if: Callable[[], bool]
     ) -> bool:
         if isinstance(event, RealtimeModelSendUserInput):
             return await self._send_user_input(event, send_if=send_if)
-        return await super()._send_event_if(event, send_if)
+        return await super().send_event_if(event, send_if)
 
     async def _send_raw_message(self, event: OpenAIRealtimeClientEvent) -> None:
         """Send a raw message to the model."""
@@ -1103,17 +1103,16 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             await self._release_response_waiters()
 
     async def _cancel_response(self, *, response_id: str | None = None) -> None:
-        if response_id is not None:
-            await self._send_raw_message(
-                OpenAIResponseCancelEvent(type="response.cancel", response_id=response_id)
-            )
-            return
-
         if not await self._response_create_sequencer.begin_cancel_response():
             return
 
+        cancel_event = (
+            OpenAIResponseCancelEvent(type="response.cancel")
+            if response_id is None
+            else OpenAIResponseCancelEvent(type="response.cancel", response_id=response_id)
+        )
         try:
-            await self._send_raw_message(OpenAIResponseCancelEvent(type="response.cancel"))
+            await self._send_raw_message(cancel_event)
         except Exception:
             await self._set_response_control("free")
             raise
