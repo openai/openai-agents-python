@@ -149,7 +149,12 @@ class Converter:
 
             # Store thinking blocks for Anthropic compatibility
             if hasattr(message, "thinking_blocks") and message.thinking_blocks:
-                # Store thinking text in content and signature in encrypted_content
+                # Store thinking text in content and signature in encrypted_content.
+                # The two lists are replayed positionally, so a signature is recorded for
+                # every content entry -- an empty string when the block has none. Appending
+                # only the signatures that exist would shift each later signature onto the
+                # preceding thinking block, and Anthropic verifies a signature against the
+                # thinking text it was issued for.
                 reasoning_item.content = []
                 signatures: list[str] = []
                 for block in message.thinking_blocks:
@@ -159,12 +164,11 @@ class Converter:
                             reasoning_item.content.append(
                                 Content(text=thinking_text, type="reasoning_text")
                             )
-                        # Store the signature if present
-                        if signature := block.get("signature"):
-                            signatures.append(signature)
+                            # Store the signature if present, keeping the slot either way.
+                            signatures.append(block.get("signature") or "")
 
-                # Store the signatures in encrypted_content with newline delimiter
-                if signatures:
+                # Store the signatures in encrypted_content with newline delimiter.
+                if any(signatures):
                     reasoning_item.encrypted_content = "\n".join(signatures)
 
             items.append(reasoning_item)
@@ -820,8 +824,12 @@ class Converter:
                 ):
                     signatures = encrypted_content.split("\n") if encrypted_content else []
 
-                    # Reconstruct thinking blocks from content and signature
+                    # Reconstruct thinking blocks from content and signature. Signatures are
+                    # matched to reasoning text by position, so a missing trailing entry or an
+                    # empty placeholder leaves that block unsigned instead of consuming the
+                    # signature that belongs to a later block.
                     reconstructed_thinking_blocks = []
+                    reasoning_text_index = 0
                     for content_item in content_items:
                         if (
                             isinstance(content_item, dict)
@@ -831,9 +839,15 @@ class Converter:
                                 "type": "thinking",
                                 "thinking": content_item.get("text", ""),
                             }
+                            signature = (
+                                signatures[reasoning_text_index]
+                                if reasoning_text_index < len(signatures)
+                                else ""
+                            )
+                            reasoning_text_index += 1
                             # Add signatures if available
-                            if signatures:
-                                thinking_block["signature"] = signatures.pop(0)
+                            if signature:
+                                thinking_block["signature"] = signature
                             reconstructed_thinking_blocks.append(thinking_block)
 
                     # Store thinking blocks as pending for the next assistant message

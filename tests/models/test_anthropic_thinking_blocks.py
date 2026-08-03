@@ -464,3 +464,172 @@ def test_thinking_blocks_do_not_leak_across_an_intervening_user_turn():
     assistant_messages = [msg for msg in messages if msg.get("role") == "assistant"]
     assert len(assistant_messages) == 1
     assert assistant_messages[0].get("content") == "an answer"
+
+
+def _replayed_thinking_blocks(
+    thinking_blocks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Round-trip thinking blocks through the converter and return what Claude would receive."""
+    message = InternalChatCompletionMessage(
+        role="assistant",
+        content="visible answer",
+        reasoning_content="reasoning",
+        thinking_blocks=thinking_blocks,
+    )
+    output_items = Converter.message_to_output_items(message)
+    items_as_dicts: list[dict[str, Any]] = [item.model_dump() for item in output_items]
+    messages = Converter.items_to_messages(
+        items_as_dicts,  # type: ignore[arg-type]
+        model="anthropic/claude-4-opus",
+        preserve_thinking_blocks=True,
+    )
+
+    assistant_messages = [msg for msg in messages if msg.get("role") == "assistant"]
+    assert len(assistant_messages) == 1
+    content = assistant_messages[0].get("content")
+    assert isinstance(content, list)
+    blocks = cast(list[dict[str, Any]], content)
+    return [block for block in blocks if block.get("type") == "thinking"]
+
+
+def test_unsigned_thinking_block_does_not_steal_a_later_signature():
+    """An unsigned block must not consume the next block's signature.
+
+    LiteLLM types the Anthropic thinking signature as optional, so a block can carry
+    thinking text without one. Thinking text and signatures are replayed as two parallel
+    lists, so recording only the signatures that exist shifts every later signature onto
+    the preceding block. Anthropic verifies a signature against the thinking text it was
+    issued for, so a shifted signature is rejected.
+    """
+    replayed = _replayed_thinking_blocks(
+        [
+            {"type": "thinking", "thinking": "unsigned step"},
+            {"type": "thinking", "thinking": "signed step", "signature": "SecondSignature"},
+        ]
+    )
+
+    assert [block.get("thinking") for block in replayed] == ["unsigned step", "signed step"]
+    assert "signature" not in replayed[0], (
+        "An unsigned thinking block must stay unsigned rather than take the next block's signature"
+    )
+    assert replayed[1].get("signature") == "SecondSignature", (
+        "A signature must be replayed on the thinking block it was issued for"
+    )
+
+
+def test_trailing_unsigned_thinking_block_keeps_earlier_signature_in_place():
+    """A trailing unsigned block must not disturb the signature that precedes it."""
+    replayed = _replayed_thinking_blocks(
+        [
+            {"type": "thinking", "thinking": "signed step", "signature": "FirstSignature"},
+            {"type": "thinking", "thinking": "unsigned step"},
+        ]
+    )
+
+    assert [block.get("thinking") for block in replayed] == ["signed step", "unsigned step"]
+    assert replayed[0].get("signature") == "FirstSignature"
+    assert "signature" not in replayed[1]
+
+
+def test_signature_without_thinking_text_does_not_shift_later_signatures():
+    """A block with a signature but no text contributes no content, so it takes no slot.
+
+    Its signature cannot be replayed -- Anthropic verifies a signature against the
+    thinking text it was issued for, and there is no text here -- so it must be dropped
+    rather than attached to the next block.
+    """
+    replayed = _replayed_thinking_blocks(
+        [
+            {"type": "thinking", "thinking": "", "signature": "OrphanSignature"},
+            {"type": "thinking", "thinking": "real step", "signature": "RealSignature"},
+        ]
+    )
+
+    assert [block.get("thinking") for block in replayed] == ["real step"]
+    assert replayed[0].get("signature") == "RealSignature"
+
+
+def test_redacted_thinking_block_does_not_shift_signatures():
+    """LiteLLM puts redacted_thinking blocks in the same list; they carry neither field."""
+    replayed = _replayed_thinking_blocks(
+        [
+            {"type": "redacted_thinking", "data": "encrypted-blob"},
+            {"type": "thinking", "thinking": "real step", "signature": "RealSignature"},
+        ]
+    )
+
+    assert [block.get("thinking") for block in replayed] == ["real step"]
+    assert replayed[0].get("signature") == "RealSignature"
+
+
+def test_fully_unsigned_thinking_blocks_leave_encrypted_content_unset():
+    """Placeholder slots must not fabricate an encrypted_content value."""
+    message = InternalChatCompletionMessage(
+        role="assistant",
+        content="visible answer",
+        reasoning_content="reasoning",
+        thinking_blocks=[
+            {"type": "thinking", "thinking": "first step"},
+            {"type": "thinking", "thinking": "second step"},
+        ],
+    )
+
+    reasoning_items = [
+        item for item in Converter.message_to_output_items(message) if item.type == "reasoning"
+    ]
+    assert len(reasoning_items) == 1
+    assert reasoning_items[0].encrypted_content is None
+
+    replayed = _replayed_thinking_blocks(
+        [
+            {"type": "thinking", "thinking": "first step"},
+            {"type": "thinking", "thinking": "second step"},
+        ]
+    )
+    assert [block.get("thinking") for block in replayed] == ["first step", "second step"]
+    assert all("signature" not in block for block in replayed)
+
+
+def test_legacy_encrypted_content_still_pairs_signatures_by_position():
+    """History written before placeholder slots existed must keep replaying correctly.
+
+    A stored item whose signature count matches its reasoning_text count is the shape the
+    previous implementation always wrote for fully signed responses, so it must pair the
+    same way after the change.
+    """
+    stored_history: list[dict[str, Any]] = [
+        {
+            "id": "reasoning_legacy",
+            "type": "reasoning",
+            "summary": [],
+            "content": [
+                {"type": "reasoning_text", "text": "first step"},
+                {"type": "reasoning_text", "text": "second step"},
+            ],
+            "encrypted_content": "LegacySignature1\nLegacySignature2",
+        },
+        {
+            "id": "msg_legacy",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "an answer", "annotations": []}],
+        },
+    ]
+
+    messages = Converter.items_to_messages(
+        stored_history,  # type: ignore[arg-type]
+        model="anthropic/claude-4-opus",
+        preserve_thinking_blocks=True,
+    )
+
+    assistant_messages = [msg for msg in messages if msg.get("role") == "assistant"]
+    assert len(assistant_messages) == 1
+    content = assistant_messages[0].get("content")
+    assert isinstance(content, list)
+    thinking = [block for block in content if block.get("type") == "thinking"]
+
+    assert thinking == [
+        {"type": "thinking", "thinking": "first step", "signature": "LegacySignature1"},
+        {"type": "thinking", "thinking": "second step", "signature": "LegacySignature2"},
+    ]
