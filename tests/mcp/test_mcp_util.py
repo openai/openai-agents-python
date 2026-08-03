@@ -1883,6 +1883,62 @@ def test_to_function_tool_nullable_root_falls_back_to_non_strict():
     assert function_tool.params_json_schema == {**schema, "properties": {}}
 
 
+@pytest.mark.parametrize(
+    ("shape", "schema"),
+    [
+        ("scalar", {"type": "string"}),
+        ("array", {"type": "array", "items": {"type": "string"}}),
+        ("integer", {"type": "integer"}),
+    ],
+)
+def test_to_function_tool_non_object_root_falls_back_to_non_strict(
+    shape: str, schema: dict[str, Any]
+):
+    """A non-object ``inputSchema`` root cannot be strict, so it must use the fallback.
+
+    Sibling of ``test_to_function_tool_nullable_root_falls_back_to_non_strict``. Strict mode
+    requires ``additionalProperties: false`` on the root, and only object nodes get it, so a
+    scalar or array root has nothing to offer. Two things previously went wrong here and
+    neither raised, so the documented non-strict fallback never fired:
+
+    * ``properties: {}`` was injected unconditionally, and strict conversion treats any node
+      carrying ``properties`` as an object -- so a *string* schema got the strict ``required``
+      rewrite while ``additionalProperties`` was still skipped. That is the exact mismatch
+      #4114 described, re-created by this function's own pre-processing.
+    * The tool was then served with ``strict: true``, which the provider rejects with an
+      opaque 400.
+    """
+    tool = MCPTool(name="test_tool", inputSchema=dict(schema))
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False, shape
+    # The original schema is served unchanged: no injected `properties`, and in particular no
+    # `required` rewrite applied to a non-object schema.
+    assert function_tool.params_json_schema == schema, shape
+    assert "required" not in function_tool.params_json_schema, shape
+
+
+def test_to_function_tool_object_root_without_properties_stays_strict():
+    """The injection must still happen for object roots, which is what it exists for.
+
+    Guards the narrowing above: MCP allows an object ``inputSchema`` with no ``properties``,
+    and the OpenAI schema requires the key, so that case must keep being filled in and must
+    still convert to a closed strict object.
+    """
+    tool = MCPTool(name="test_tool", inputSchema={"type": "object"})
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is True
+    assert function_tool.params_json_schema == {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+        "required": [],
+    }
+
+
 class StructuredContentTestServer(FakeMCPServer):
     """Test server that allows setting both content and structured content for testing."""
 

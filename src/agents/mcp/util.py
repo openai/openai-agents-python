@@ -535,7 +535,18 @@ class MCPUtil:
         schema, is_strict = copy.deepcopy(tool.inputSchema), False
 
         # MCP spec doesn't require the inputSchema to have `properties`, but OpenAI spec does.
-        if "properties" not in schema:
+        # Only inject it on schemas that are actually objects. `properties` is meaningless on a
+        # scalar or array schema, and injecting it there makes the schema incoherent: strict
+        # conversion treats any node carrying `properties` as an object and rewrites `required`,
+        # while `additionalProperties: false` is still skipped because the declared type is not
+        # `object`. That is exactly the mismatch #4114 described, and the tool would then be
+        # served with `strict: true` and rejected by the provider - without the non-strict
+        # fallback below firing, because nothing raised.
+        declared_type = schema.get("type")
+        is_object_schema = declared_type == "object" or (
+            isinstance(declared_type, list) and "object" in declared_type
+        )
+        if "properties" not in schema and (declared_type is None or is_object_schema):
             schema["properties"] = {}
 
         if convert_schemas_to_strict:
@@ -545,13 +556,34 @@ class MCPUtil:
             # non-strict. Convert a separate copy so the non-strict fallback keeps
             # the original schema intact.
             try:
-                schema = ensure_strict_json_schema(copy.deepcopy(schema))
-                is_strict = True
+                converted = ensure_strict_json_schema(copy.deepcopy(schema))
             except Exception as e:
                 if _debug.DONT_LOG_TOOL_DATA:
                     logger.info("Error converting MCP schema to strict mode")
                 else:
                     logger.info("Error converting MCP schema to strict mode: %s", e)
+            else:
+                # Conversion can succeed without producing a schema the provider will accept as
+                # strict: `ensure_strict_json_schema` closes object nodes, but a root that is not
+                # an object (a scalar or array `inputSchema`) is returned unchanged and has no
+                # `additionalProperties: false` to offer. Serving that with `strict: true` earns
+                # an opaque provider 400, so treat "converted but not a closed object root" the
+                # same as a conversion failure and use the documented non-strict fallback.
+                if converted.get("type") == "object" and (
+                    converted.get("additionalProperties") is False
+                ):
+                    schema = converted
+                    is_strict = True
+                elif _debug.DONT_LOG_TOOL_DATA:
+                    logger.info(
+                        "MCP tool schema is not a strict-capable object; serving it as non-strict"
+                    )
+                else:
+                    logger.info(
+                        "MCP tool %s has a non-object schema root (%r); serving it as non-strict",
+                        tool.name,
+                        converted.get("type"),
+                    )
 
         needs_approval: (
             bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
