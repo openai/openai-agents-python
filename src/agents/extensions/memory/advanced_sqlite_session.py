@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+import time
 from contextlib import closing
 from pathlib import Path
 from typing import Any, cast
@@ -812,16 +813,16 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         Args:
             turn_number: The branch turn number of the user message to branch from
-            branch_name: Optional name for the branch (auto-generated if None)
+            branch_name: Optional name for the branch. Must not name an existing branch.
+                Auto-generated as a unique id if None.
 
         Returns:
             The branch_id of the newly created branch
 
         Raises:
-            ValueError: If turn doesn't exist or doesn't contain a user message
+            ValueError: If turn doesn't exist, doesn't contain a user message, or
+                `branch_name` names a branch that already exists
         """
-        import time
-
         # Capture the generation before any DB work so a clear that commits
         # while this branch is being created cannot be overwritten by the
         # pointer update below.
@@ -859,13 +860,11 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         turn_content = await asyncio.to_thread(_validate_turn)
 
-        # Generate branch name if not provided
-        if branch_name is None:
-            timestamp = int(time.time())
-            branch_name = f"branch_from_turn_{turn_number}_{timestamp}"
-
-        # Copy messages before the branch point to the new branch
-        await self._copy_messages_to_new_branch(branch_name, turn_number)
+        # Copy messages before the branch point to the new branch. The target branch id is
+        # resolved inside that call, under the same connection lock that performs the copy,
+        # so a generated id cannot collide with an existing branch and an explicit id cannot
+        # silently append the copied history to one.
+        branch_name = await self._copy_messages_to_new_branch(branch_name, turn_number)
 
         # Switch to new branch under the lock; skipped if a clear_session has
         # committed since `generation` was captured (its reset to 'main' wins),
@@ -1087,18 +1086,65 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         return await asyncio.to_thread(_list_branches_sync)
 
-    async def _copy_messages_to_new_branch(self, new_branch_id: str, from_turn_number: int) -> None:
+    def _branch_id_exists(self, cursor: sqlite3.Cursor, branch_id: str) -> bool:
+        """Report whether any message is already recorded under this branch id."""
+        cursor.execute(
+            """
+            SELECT 1 FROM message_structure
+            WHERE session_id = ? AND branch_id = ?
+            LIMIT 1
+            """,
+            (self.session_id, branch_id),
+        )
+        return cursor.fetchone() is not None
+
+    def _generate_branch_id(self, cursor: sqlite3.Cursor, from_turn_number: int) -> str:
+        """Build a branch id that no existing branch is using.
+
+        The base name only has one-second resolution, so branching twice from the same turn
+        within the same second would otherwise reuse an id.
+        """
+        base_branch_id = f"branch_from_turn_{from_turn_number}_{int(time.time())}"
+        branch_id = base_branch_id
+        suffix = 1
+        while self._branch_id_exists(cursor, branch_id):
+            suffix += 1
+            branch_id = f"{base_branch_id}_{suffix}"
+        return branch_id
+
+    async def _copy_messages_to_new_branch(
+        self, new_branch_id: str | None, from_turn_number: int
+    ) -> str:
         """Copy messages before the branch point to the new branch.
 
         Args:
-            new_branch_id: The ID of the new branch to copy messages to.
+            new_branch_id: The ID of the new branch to copy messages to, or None to
+                generate an unused one.
             from_turn_number: The turn number to copy messages up to (exclusive).
+
+        Returns:
+            The branch ID the messages were copied to.
+
+        Raises:
+            ValueError: If `new_branch_id` is already in use by another branch.
         """
 
-        def _copy_sync():
+        def _copy_sync() -> str:
             """Synchronous helper to copy messages to new branch."""
             with self._locked_connection() as conn:
                 with closing(conn.cursor()) as cursor:
+                    # Resolve the target branch id before any write so the existence check and
+                    # the inserts below cannot be separated by a concurrent branch creation.
+                    if new_branch_id is None:
+                        branch_id = self._generate_branch_id(cursor, from_turn_number)
+                    else:
+                        branch_id = new_branch_id
+                        if self._branch_id_exists(cursor, branch_id):
+                            raise ValueError(
+                                f"Branch '{branch_id}' already exists. Branch IDs must be "
+                                "unique; use switch_to_branch() to continue an existing branch."
+                            )
+
                     # Get all messages before the branch point
                     cursor.execute(
                         """
@@ -1146,7 +1192,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                                 (
                                     self.session_id,
                                     msg_id,  # Same message_id (sharing the actual message data)
-                                    new_branch_id,
+                                    branch_id,
                                     msg_type,
                                     seq_start + i + 1,  # New sequence number
                                     user_turn,  # Keep same global turn number
@@ -1166,8 +1212,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                         )
 
                     conn.commit()
+                    return branch_id
 
-        await asyncio.to_thread(_copy_sync)
+        return await asyncio.to_thread(_copy_sync)
 
     async def get_conversation_turns(self, branch_id: str | None = None) -> list[dict[str, Any]]:
         """Get user turns with content for easy browsing and branching decisions.

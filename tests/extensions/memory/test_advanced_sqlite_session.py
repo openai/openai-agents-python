@@ -6,6 +6,7 @@ import json
 import logging
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import Mock, patch
@@ -2587,5 +2588,161 @@ async def test_clear_session_rolls_back_on_failure_after_earlier_delete(usage_da
         assert _count_rows(session, "message_structure") == 0
         assert _count_rows(session, "turn_usage") == 0
         assert await session.get_items() == []
+    finally:
+        session.close()
+
+
+def _branch_test_items() -> list[TResponseInputItem]:
+    """Three user turns, each with an assistant reply, for branch-creation tests."""
+    return [
+        {"role": "user", "content": "Turn one question"},
+        {"role": "assistant", "content": "Turn one answer"},
+        {"role": "user", "content": "Turn two question"},
+        {"role": "assistant", "content": "Turn two answer"},
+        {"role": "user", "content": "Turn three question"},
+        {"role": "assistant", "content": "Turn three answer"},
+    ]
+
+
+async def test_create_branch_rejects_an_existing_branch_id():
+    """An explicit branch id that is already in use must not be written into."""
+    session = AdvancedSQLiteSession(
+        session_id="branch_existing_id",
+        create_tables=True,
+    )
+    items = _branch_test_items()
+
+    try:
+        await session.add_items(items)
+        await session.create_branch_from_turn(3, "existing_branch")
+        branch_items_before = await session.get_items()
+        await session.switch_to_branch("main")
+
+        with pytest.raises(ValueError, match="already exists"):
+            await session.create_branch_from_turn(2, "existing_branch")
+
+        # The rejected call must leave both branches and the current pointer untouched.
+        assert session._current_branch_id == "main"
+        assert await session.get_items(branch_id="main") == items
+        assert await session.get_items(branch_id="existing_branch") == branch_items_before
+    finally:
+        session.close()
+
+
+async def test_create_branch_rejects_the_main_branch_id():
+    """Branching into 'main' must not duplicate the base conversation into itself."""
+    session = AdvancedSQLiteSession(
+        session_id="branch_into_main",
+        create_tables=True,
+    )
+    items = _branch_test_items()
+
+    try:
+        await session.add_items(items)
+
+        with pytest.raises(ValueError, match="already exists"):
+            await session.create_branch_from_turn(2, "main")
+
+        assert await session.get_items(branch_id="main") == items
+        assert [branch["branch_id"] for branch in await session.list_branches()] == ["main"]
+    finally:
+        session.close()
+
+
+async def test_generated_branch_ids_stay_unique_within_the_same_second(monkeypatch):
+    """The generated default name must not collide when the clock has not ticked."""
+    monkeypatch.setattr(time, "time", lambda: 1_700_000_000.0)
+    session = AdvancedSQLiteSession(
+        session_id="branch_generated_collision",
+        create_tables=True,
+    )
+    items = _branch_test_items()
+
+    try:
+        await session.add_items(items)
+
+        first_branch = await session.create_branch_from_turn(3)
+        first_items = await session.get_items()
+        assert first_items == items[:4]
+
+        await session.switch_to_branch("main")
+        second_branch = await session.create_branch_from_turn(3)
+
+        assert second_branch != first_branch
+        assert session._current_branch_id == second_branch
+        # Each branch holds one copy of the pre-branch history, not a merged pair.
+        assert await session.get_items() == items[:4]
+        assert await session.get_items(branch_id=first_branch) == first_items
+        assert await session.get_items(branch_id="main") == items
+        assert sorted(branch["branch_id"] for branch in await session.list_branches()) == sorted(
+            ["main", first_branch, second_branch]
+        )
+    finally:
+        session.close()
+
+
+async def test_generated_branch_ids_stay_unique_across_many_calls(monkeypatch):
+    """Repeated same-second branching keeps generating fresh ids."""
+    monkeypatch.setattr(time, "time", lambda: 1_700_000_000.0)
+    session = AdvancedSQLiteSession(
+        session_id="branch_generated_repeated",
+        create_tables=True,
+    )
+    items = _branch_test_items()
+
+    try:
+        await session.add_items(items)
+
+        branch_ids: list[str] = []
+        for _ in range(3):
+            await session.switch_to_branch("main")
+            branch_ids.append(await session.create_branch_from_turn(3))
+
+        assert len(set(branch_ids)) == 3
+        for branch_id in branch_ids:
+            assert await session.get_items(branch_id=branch_id) == items[:4]
+        assert await session.get_items(branch_id="main") == items
+    finally:
+        session.close()
+
+
+async def test_create_branch_from_content_rejects_an_existing_branch_id():
+    """create_branch_from_content inherits the branch-id uniqueness contract."""
+    session = AdvancedSQLiteSession(
+        session_id="branch_from_content_existing",
+        create_tables=True,
+    )
+    items = _branch_test_items()
+
+    try:
+        await session.add_items(items)
+        await session.create_branch_from_turn(3, "content_branch")
+        await session.switch_to_branch("main")
+
+        with pytest.raises(ValueError, match="already exists"):
+            await session.create_branch_from_content("Turn two", "content_branch")
+
+        assert await session.get_items(branch_id="main") == items
+    finally:
+        session.close()
+
+
+async def test_create_branch_from_the_first_turn_still_succeeds():
+    """Branching from turn 1 copies nothing and must remain allowed."""
+    session = AdvancedSQLiteSession(
+        session_id="branch_first_turn",
+        create_tables=True,
+    )
+    items = _branch_test_items()
+
+    try:
+        await session.add_items(items)
+
+        branch_id = await session.create_branch_from_turn(1, "empty_branch")
+
+        assert branch_id == "empty_branch"
+        assert session._current_branch_id == "empty_branch"
+        assert await session.get_items() == []
+        assert await session.get_items(branch_id="main") == items
     finally:
         session.close()
