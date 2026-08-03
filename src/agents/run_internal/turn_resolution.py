@@ -99,6 +99,7 @@ from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResul
 from ..tracing import SpanError, handoff_span
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
+from ..util._asyncio_tasks import gather_with_cancel
 from .agent_bindings import AgentBindings
 from .error_handlers import (
     build_run_error_data,
@@ -311,7 +312,7 @@ async def run_final_output_hooks(
         turn_input=context_wrapper.turn_input,
     )
 
-    await asyncio.gather(
+    await gather_with_cancel(
         hooks.on_agent_end(agent_hook_context, agent, final_output),
         agent.hooks.on_end(agent_hook_context, agent, final_output)
         if agent.hooks
@@ -534,7 +535,7 @@ async def execute_handoffs(
             )
         )
 
-        await asyncio.gather(
+        await gather_with_cancel(
             hooks.on_handoff(
                 context=context_wrapper,
                 from_agent=public_agent,

@@ -5,7 +5,6 @@ functions and approval plumbing live in tool_execution.py.
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import dataclasses
 import inspect
@@ -40,6 +39,7 @@ from ..tool_context import ToolContext
 from ..tracing import SpanError
 from ..util import _coro
 from ..util._approvals import evaluate_needs_approval_setting
+from ..util._asyncio_tasks import gather_with_cancel
 from ..util._custom_data import maybe_extract_custom_data
 from .items import apply_patch_rejection_item, shell_rejection_item
 from .tool_execution import (
@@ -126,7 +126,7 @@ class ComputerAction:
                 tool=action.computer_tool, run_context=context_wrapper
             )
             agent_hooks = agent.hooks
-            await asyncio.gather(
+            await gather_with_cancel(
                 hooks.on_tool_start(context_wrapper, agent, action.computer_tool),
                 (
                     agent_hooks.on_tool_start(context_wrapper, agent, action.computer_tool)
@@ -177,7 +177,7 @@ class ComputerAction:
                 ),
             )
 
-            await asyncio.gather(
+            await gather_with_cancel(
                 hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),
                 (
                     agent_hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output)
@@ -393,7 +393,7 @@ class LocalShellAction:
     ) -> RunItem:
         """Run a local shell tool call and wrap the result as a ToolCallOutputItem."""
         agent_hooks = agent.hooks
-        await asyncio.gather(
+        await gather_with_cancel(
             hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool),
             (
                 agent_hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool)
@@ -409,7 +409,7 @@ class LocalShellAction:
         output = call.local_shell_tool.executor(request)
         result = await output if inspect.isawaitable(output) else output
 
-        await asyncio.gather(
+        await gather_with_cancel(
             hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result),
             (
                 agent_hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result)
@@ -486,7 +486,7 @@ class ShellAction:
                 if approval_status is not True:
                     return approval_item
 
-            await asyncio.gather(
+            await gather_with_cancel(
                 hooks.on_tool_start(context_wrapper, agent, shell_tool),
                 (
                     agent_hooks.on_tool_start(context_wrapper, agent, shell_tool)
@@ -560,7 +560,7 @@ class ShellAction:
                     output_text = output_text[:max_output_length]
                 log_tool_action_error("Shell executor failed", exc)
 
-            await asyncio.gather(
+            await gather_with_cancel(
                 hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text),
                 (
                     agent_hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text)
@@ -685,7 +685,7 @@ class CustomToolAction:
                 if approval_status is not True:
                     return approval_item
 
-            await asyncio.gather(
+            await gather_with_cancel(
                 hooks.on_tool_start(tool_context, agent, custom_tool),
                 (
                     agent_hooks.on_tool_start(tool_context, agent, custom_tool)
@@ -732,7 +732,7 @@ class CustomToolAction:
                 ),
             )
 
-            await asyncio.gather(
+            await gather_with_cancel(
                 hooks.on_tool_end(tool_context, agent, custom_tool, output_text),
                 (
                     agent_hooks.on_tool_end(tool_context, agent, custom_tool, output_text)
@@ -867,7 +867,7 @@ class ApplyPatchAction:
                 if approval_status is not True:
                     return approval_item
 
-            await asyncio.gather(
+            await gather_with_cancel(
                 hooks.on_tool_start(context_wrapper, agent, apply_patch_tool),
                 (
                     agent_hooks.on_tool_start(context_wrapper, agent, apply_patch_tool)
@@ -944,7 +944,7 @@ class ApplyPatchAction:
                 ),
             )
 
-            await asyncio.gather(
+            await gather_with_cancel(
                 hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text),
                 (
                     agent_hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text)

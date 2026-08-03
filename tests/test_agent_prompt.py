@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+from typing import Any
+
 import pytest
 from openai import omit
 
 from agents import Agent, Prompt, RunConfig, RunContextWrapper, Runner
 from agents.models.interface import Model, ModelProvider
 from agents.models.openai_responses import OpenAIResponsesModel
+from agents.prompts import GenerateDynamicPromptData
 
 from .fake_model import FakeModel, get_response_obj
 from .test_responses import get_text_message
@@ -142,3 +146,84 @@ async def test_agent_prompt_with_default_model_omits_model_and_tools_parameters(
     assert called_kwargs["prompt"] == expected_prompt
     assert called_kwargs["model"] is omit
     assert called_kwargs["tools"] is omit
+
+
+@pytest.mark.asyncio
+async def test_run_cancels_sibling_instructions_when_prompt_resolution_fails() -> None:
+    """A failing prompt callable must not leave the instructions callable running.
+
+    `get_system_prompt` and `get_prompt` are both user-supplied callables gathered
+    concurrently. The realtime path already gathers `get_system_prompt` with
+    `gather_with_cancel` (see `openai_realtime.py`), so a failure there cancels its
+    siblings; the run path gathered the same call with a bare `asyncio.gather`, which
+    propagates the first exception while the sibling keeps running detached.
+    """
+    slow_started = asyncio.Event()
+    slow_cancelled = asyncio.Event()
+    slow_finished = asyncio.Event()
+
+    async def slow_instructions(_ctx: RunContextWrapper[Any], _agent: Agent[Any]) -> str:
+        slow_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            slow_cancelled.set()
+            raise
+        finally:
+            slow_finished.set()
+        return "unreachable"
+
+    async def failing_prompt(_data: GenerateDynamicPromptData) -> Prompt:
+        await slow_started.wait()
+        raise RuntimeError("prompt resolution failed")
+
+    agent = Agent(
+        name="prompt-agent",
+        model=FakeModel(),
+        instructions=slow_instructions,
+        prompt=failing_prompt,
+    )
+
+    with pytest.raises(RuntimeError, match="prompt resolution failed"):
+        await Runner.run(agent, input="hi")
+
+    assert slow_cancelled.is_set()
+    assert slow_finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_run_streamed_cancels_sibling_instructions_when_prompt_resolution_fails() -> None:
+    """Same invariant on the streamed loop, which resolves the pair separately."""
+    slow_started = asyncio.Event()
+    slow_cancelled = asyncio.Event()
+    slow_finished = asyncio.Event()
+
+    async def slow_instructions(_ctx: RunContextWrapper[Any], _agent: Agent[Any]) -> str:
+        slow_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            slow_cancelled.set()
+            raise
+        finally:
+            slow_finished.set()
+        return "unreachable"
+
+    async def failing_prompt(_data: GenerateDynamicPromptData) -> Prompt:
+        await slow_started.wait()
+        raise RuntimeError("prompt resolution failed")
+
+    agent = Agent(
+        name="prompt-agent",
+        model=FakeModel(),
+        instructions=slow_instructions,
+        prompt=failing_prompt,
+    )
+
+    with pytest.raises(RuntimeError, match="prompt resolution failed"):
+        result = Runner.run_streamed(agent, input="hi")
+        async for _event in result.stream_events():
+            pass
+
+    assert slow_cancelled.is_set()
+    assert slow_finished.is_set()

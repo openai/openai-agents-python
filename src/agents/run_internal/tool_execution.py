@@ -602,7 +602,7 @@ async def initialize_computer_tools(
         tool for tool in computer_tools if _computer_tool_uses_run_scoped_initializer(tool)
     }
 
-    resolved_computers = await asyncio.gather(
+    resolved_computers = await gather_with_cancel(
         *(resolve_computer(tool=tool, run_context=context_wrapper) for tool in computer_tools)
     )
     resolved_by_tool = dict(zip(computer_tools, resolved_computers, strict=True))
@@ -1847,7 +1847,7 @@ class _FunctionToolBatchExecutor:
             self.schema_bypassed_tool_runs.add(id(task_state.tool_run))
             return rejected_message
 
-        await asyncio.gather(
+        await gather_with_cancel(
             self.hooks.on_tool_start(tool_context, self.public_agent, func_tool),
             (
                 agent_hooks.on_tool_start(tool_context, self.public_agent, func_tool)
@@ -1963,7 +1963,7 @@ class _FunctionToolBatchExecutor:
         if custom_data:
             self.custom_data_by_tool_run[id(task_state.tool_run)] = custom_data
 
-        await asyncio.gather(
+        await gather_with_cancel(
             self.hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result),
             (
                 agent_hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result)
