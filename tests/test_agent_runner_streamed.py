@@ -1825,11 +1825,11 @@ async def test_streaming_events():
     # Now lets check the events
 
     expected_item_type_map = {
-        # 3 tool_call_item events:
+        # 2 tool_call_item events:
         #   1. get_function_tool_call("foo", ...)
-        #   2. get_handoff_tool_call(agent_1) because handoffs are implemented via tool calls too
-        #   3. get_function_tool_call("bar", ...)
-        "tool_call": 3,
+        #   2. get_function_tool_call("bar", ...)
+        # get_handoff_tool_call(agent_1) is only reported as a handoff_call_item.
+        "tool_call": 2,
         # Only 2 outputs, handoff tool call doesn't have corresponding tool_call_output event
         "tool_call_output": 2,
         "message": 2,  # get_text_message("a_message") + get_final_output_message(...)

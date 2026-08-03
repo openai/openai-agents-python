@@ -204,6 +204,7 @@ from .turn_resolution import (
     execute_handoffs,
     execute_tools_and_side_effects,
     get_single_step_result_from_response,
+    is_handoff_tool_call,
     process_model_response,
     resolve_interrupted_turn,
     run_final_output_hooks,
@@ -1517,6 +1518,7 @@ async def run_single_turn_streamed(
         if isinstance(tool, FunctionTool):
             continue
         tool_map[tool_name] = tool
+    handoff_tool_names = {handoff.tool_name for handoff in handoffs}
     model = get_model(execution_agent, run_config)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(execution_agent, run_config)
@@ -1731,7 +1733,11 @@ async def run_single_turn_streamed(
             elif isinstance(output_item, McpListTools):
                 hosted_mcp_tool_metadata.update(collect_mcp_list_tools_metadata([output_item]))
 
-            elif isinstance(output_item, TOOL_CALL_TYPES):
+            elif isinstance(output_item, TOOL_CALL_TYPES) and not is_handoff_tool_call(
+                output_item, handoff_tool_names
+            ):
+                # Handoff calls are streamed as `handoff_requested` once the turn is processed,
+                # so emitting them here too would duplicate the item under a second event name.
                 output_call_id: str | None = getattr(
                     output_item, "call_id", getattr(output_item, "id", None)
                 )

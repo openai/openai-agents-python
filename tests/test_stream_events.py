@@ -543,3 +543,99 @@ async def test_stream_events_emit_tool_search_items() -> None:
         name == "tool_search_output_created" and isinstance(item, ToolSearchOutputItem)
         for name, item in seen_events
     )
+
+
+@pytest.mark.asyncio
+async def test_streamed_handoff_call_is_not_emitted_as_tool_called():
+    """A handoff call streams only as `handoff_requested`, never also as `tool_called`."""
+    english_agent = Agent(name="EnglishAgent", model=FakeModel())
+
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_handoff_tool_call(english_agent)],
+            [get_text_message("Done")],
+        ]
+    )
+    triage_agent = Agent(name="TriageAgent", handoffs=[english_agent], model=model)
+
+    result = Runner.run_streamed(triage_agent, input="Start")
+
+    item_events = [
+        (event.name, event.item)
+        async for event in result.stream_events()
+        if event.type == "run_item_stream_event"
+    ]
+
+    handoff_events = [
+        (name, item) for name, item in item_events if isinstance(item, HandoffCallItem)
+    ]
+    assert len(handoff_events) == 1
+    assert handoff_events[0][0] == "handoff_requested"
+
+    assert [name for name, _ in item_events if name == "tool_called"] == []
+    assert not any(isinstance(item, ToolCallItem) for _, item in item_events)
+
+
+@pytest.mark.asyncio
+async def test_streamed_tool_call_alongside_handoff_still_emits_tool_called():
+    """A real tool call in the same turn as a handoff keeps its `tool_called` event."""
+    english_agent = Agent(name="EnglishAgent", model=FakeModel())
+
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call("foo", '{"a": "b"}', call_id="tool_call"),
+                get_handoff_tool_call(english_agent),
+            ],
+            [get_text_message("Done")],
+        ]
+    )
+    triage_agent = Agent(
+        name="TriageAgent",
+        handoffs=[handoff(english_agent, input_filter=remove_all_tools)],
+        tools=[foo],
+        model=model,
+    )
+
+    result = Runner.run_streamed(triage_agent, input="Start")
+
+    item_events = [
+        (event.name, event.item)
+        async for event in result.stream_events()
+        if event.type == "run_item_stream_event"
+    ]
+
+    tool_called_items = [item for name, item in item_events if name == "tool_called"]
+    assert len(tool_called_items) == 1
+    assert cast(ToolCallItem, tool_called_items[0]).call_id == "tool_call"
+
+    assert [name for name, item in item_events if isinstance(item, HandoffCallItem)] == [
+        "handoff_requested"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_streamed_handoff_item_events_match_new_items():
+    """Streamed run item events stay in sync with the items recorded on the result."""
+    english_agent = Agent(name="EnglishAgent", model=FakeModel())
+
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_text_message("Transferring"), get_handoff_tool_call(english_agent)],
+            [get_text_message("Done")],
+        ]
+    )
+    triage_agent = Agent(name="TriageAgent", handoffs=[english_agent], model=model)
+
+    result = Runner.run_streamed(triage_agent, input="Start")
+
+    streamed_item_types = [
+        event.item.type
+        async for event in result.stream_events()
+        if event.type == "run_item_stream_event"
+    ]
+
+    assert sorted(streamed_item_types) == sorted(item.type for item in result.new_items)

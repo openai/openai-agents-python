@@ -232,6 +232,58 @@ def _duplicate_tool_call_input() -> list[TResponseInputItem]:
     ]
 
 
+def _duplicate_tool_output_input() -> list[TResponseInputItem]:
+    return [
+        cast(
+            TResponseInputItem,
+            {"type": "function_call_output", "call_id": "ordered-output", "output": "old"},
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "function_call",
+                "call_id": "ordered-output",
+                "name": "tool_ordered",
+                "arguments": "{}",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call_output", "call_id": "ordered-output", "output": "new"},
+        ),
+    ]
+
+
+def _duplicate_reasoning_input() -> list[TResponseInputItem]:
+    return [
+        cast(
+            TResponseInputItem,
+            {
+                "type": "reasoning",
+                "id": "ordered-reasoning",
+                "summary": [{"type": "summary_text", "text": "old"}],
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "function_call",
+                "call_id": "reasoning-call",
+                "name": "tool_ordered",
+                "arguments": "{}",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "reasoning",
+                "id": "ordered-reasoning",
+                "summary": [{"type": "summary_text", "text": "new"}],
+            },
+        ),
+    ]
+
+
 def _sent_item_types(sent_input: Any) -> list[str | None]:
     return [
         cast(dict[str, Any], item).get("type")
@@ -290,3 +342,84 @@ async def test_call_model_input_filter_keeps_duplicate_item_order_streamed() -> 
         "function_call",
         "function_call_output",
     ]
+
+
+@pytest.mark.asyncio
+async def test_call_model_input_filter_keeps_duplicate_output_order_non_streamed() -> None:
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+    model.set_next_output([get_text_message("ok")])
+
+    def filter_fn(data: CallModelData[Any]) -> ModelInputData:
+        return ModelInputData(
+            input=list(data.model_data.input) + _duplicate_tool_output_input(),
+            instructions=data.model_data.instructions,
+        )
+
+    await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(call_model_input_filter=filter_fn),
+    )
+
+    assert _sent_item_types(model.last_turn_args["input"]) == [
+        "function_call",
+        "function_call_output",
+    ]
+    assert model.last_turn_args["input"][-1]["output"] == "new"
+
+
+@pytest.mark.asyncio
+async def test_call_model_input_filter_keeps_duplicate_output_order_streamed() -> None:
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+    model.set_next_output([get_text_message("ok")])
+
+    async def filter_fn(data: CallModelData[Any]) -> ModelInputData:
+        return ModelInputData(
+            input=list(data.model_data.input) + _duplicate_tool_output_input(),
+            instructions=data.model_data.instructions,
+        )
+
+    result = Runner.run_streamed(
+        agent,
+        input="start",
+        run_config=RunConfig(call_model_input_filter=filter_fn),
+    )
+    async for _ in result.stream_events():
+        pass
+
+    assert _sent_item_types(model.last_turn_args["input"]) == [
+        "function_call",
+        "function_call_output",
+    ]
+    assert model.last_turn_args["input"][-1]["output"] == "new"
+
+
+@pytest.mark.asyncio
+async def test_call_model_input_filter_keeps_reasoning_before_required_follower() -> None:
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+    model.set_next_output([get_text_message("ok")])
+
+    def filter_fn(data: CallModelData[Any]) -> ModelInputData:
+        return ModelInputData(
+            input=list(data.model_data.input) + _duplicate_reasoning_input(),
+            instructions=data.model_data.instructions,
+        )
+
+    await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(call_model_input_filter=filter_fn),
+    )
+
+    assert _sent_item_types(model.last_turn_args["input"]) == [
+        "reasoning",
+        "function_call",
+    ]
+    reasoning_items = [
+        item for item in model.last_turn_args["input"] if item.get("type") == "reasoning"
+    ]
+    assert len(reasoning_items) == 1
+    assert reasoning_items[0]["summary"] == [{"type": "summary_text", "text": "new"}]
