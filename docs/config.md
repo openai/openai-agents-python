@@ -39,6 +39,8 @@ export OPENAI_BASE_URL="https://your-openai-compatible-endpoint.example/v1"
 export OPENAI_WEBSOCKET_BASE_URL="wss://your-openai-compatible-endpoint.example/v1"
 ```
 
+> **Tip:** The same `base_url` / `OPENAI_BASE_URL` pattern works with OpenAI-compatible multi-model gateways — for example [DaoXE](https://daoxe.com/?utm_source=github&utm_medium=organic&utm_campaign=openai-agents-python&utm_content=config) at `https://api.daoxe.com/v1`.
+
 Finally, you can also customize the OpenAI API that is used. By default, we use the OpenAI Responses API. You can override this to use the Chat Completions API by using the [set_default_openai_api()][agents.set_default_openai_api] function.
 
 ```python
