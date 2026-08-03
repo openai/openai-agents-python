@@ -414,6 +414,12 @@ async def _run_output_guardrails_for_stream(
         raise
 
 
+# Only the model's own output for the final turn waits for the output-guardrail verdict.
+# This is an allow-list on purpose: a future item type that records something the run
+# already did defaults to "persist" rather than silently inheriting "discard".
+_DEFERRED_FINAL_OUTPUT_ITEM_TYPES = frozenset({"message_output_item", "reasoning_item"})
+
+
 async def _finalize_streamed_final_output(
     *,
     streamed_result: RunResultStreaming,
@@ -426,6 +432,15 @@ async def _finalize_streamed_final_output(
     response_id: str | None,
     store_setting: bool | None,
 ) -> None:
+    # Tool calls and their outputs record side effects that already happened, so they persist
+    # before the guardrails can raise. Only the model's own output waits for a clean verdict.
+    side_effect_items = [
+        item for item in items if item.type not in _DEFERRED_FINAL_OUTPUT_ITEM_TYPES
+    ]
+    deferred_items = [item for item in items if item.type in _DEFERRED_FINAL_OUTPUT_ITEM_TYPES]
+    if side_effect_items:
+        await save_items(side_effect_items, response_id, store_setting)
+
     output_guardrail_results = await _run_output_guardrails_for_stream(
         agent=agent,
         run_config=run_config,
@@ -437,7 +452,8 @@ async def _finalize_streamed_final_output(
     streamed_result.final_output = output
     streamed_result.is_complete = True
 
-    await save_items(items, response_id, store_setting)
+    if deferred_items:
+        await save_items(deferred_items, response_id, store_setting)
 
     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
 

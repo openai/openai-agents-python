@@ -3566,6 +3566,156 @@ async def test_output_guardrail_tripwire_keeps_prior_tool_turn_in_session():
     )
 
 
+def _tripwire_guardrail() -> OutputGuardrail[Any]:
+    def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    return OutputGuardrail(guardrail_function=guardrail_function)
+
+
+def _tool_final_output_agent(
+    model: FakeModel,
+    tool_use_behavior: Any,
+) -> tuple[Agent[Any], list[str]]:
+    calls: list[str] = []
+
+    @function_tool
+    def charge(a: str) -> str:
+        calls.append(a)
+        return f"charged:{a}"
+
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[charge],
+        tool_use_behavior=tool_use_behavior,
+        output_guardrails=[_tripwire_guardrail()],
+    )
+    return agent, calls
+
+
+def _stop_at_charge(
+    context: RunContextWrapper[Any],
+    results: list[Any],
+) -> ToolsToFinalOutputResult:
+    return ToolsToFinalOutputResult(is_final_output=True, final_output=results[0].output)
+
+
+TOOL_FINAL_OUTPUT_BEHAVIORS: list[Any] = [
+    "stop_on_first_tool",
+    {"stop_at_tool_names": ["charge"]},
+    _stop_at_charge,
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_use_behavior", TOOL_FINAL_OUTPUT_BEHAVIORS)
+async def test_output_guardrail_tripwire_keeps_same_turn_tool_items(tool_use_behavior: Any):
+    """A tool that already ran stays in the session even when it ends the run and is rejected.
+
+    ``tool_use_behavior`` settings that stop on a tool make the tool turn the final-output turn,
+    so deferring the whole turn would discard the record of a side effect that already happened.
+    """
+
+    session = SimpleListSession()
+    model = FakeModel()
+    model.set_next_output([get_function_tool_call("charge", json.dumps({"a": "b"}))])
+    agent, calls = _tool_final_output_agent(model, tool_use_behavior)
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        await Runner.run(agent, input="user_message", session=session)
+
+    assert calls == ["b"], "the tool must have run for this scenario to be meaningful"
+    item_types = [cast(dict[str, Any], item).get("type") for item in await session.get_items()]
+    assert "function_call" in item_types
+    assert "function_call_output" in item_types
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_use_behavior", TOOL_FINAL_OUTPUT_BEHAVIORS)
+async def test_output_guardrail_tripwire_keeps_same_turn_tool_items_streamed(
+    tool_use_behavior: Any,
+):
+    """The streamed path keeps the same-turn tool record, matching the non-streamed path."""
+
+    session = SimpleListSession()
+    model = FakeModel()
+    model.set_next_output([get_function_tool_call("charge", json.dumps({"a": "b"}))])
+    agent, calls = _tool_final_output_agent(model, tool_use_behavior)
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        streamed = Runner.run_streamed(agent, input="user_message", session=session)
+        async for _ in streamed.stream_events():
+            pass
+
+    assert calls == ["b"]
+    item_types = [cast(dict[str, Any], item).get("type") for item in await session.get_items()]
+    assert "function_call" in item_types
+    assert "function_call_output" in item_types
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_output_guardrail_tripwire_splits_mixed_final_turn(streamed: bool):
+    """A final turn carrying both a message and a tool call is split, not kept or dropped whole.
+
+    Deciding per turn instead of per item would either discard the executed tool or persist the
+    rejected message; only a per-item split satisfies both halves.
+    """
+
+    session = SimpleListSession()
+    model = FakeModel()
+    model.set_next_output(
+        [
+            get_text_message("chatty_preamble"),
+            get_function_tool_call("charge", json.dumps({"a": "b"})),
+        ]
+    )
+    agent, calls = _tool_final_output_agent(model, "stop_on_first_tool")
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        if streamed:
+            streamed_result = Runner.run_streamed(agent, input="user_message", session=session)
+            async for _ in streamed_result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, input="user_message", session=session)
+
+    assert calls == ["b"]
+    items = await session.get_items()
+    item_types = [cast(dict[str, Any], item).get("type") for item in items]
+    assert "function_call" in item_types
+    assert "function_call_output" in item_types
+    assert not any(cast(dict[str, Any], item).get("role") == "assistant" for item in items)
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_tripwire_still_drops_rejected_message_on_tool_final_turn():
+    """Only side-effect records survive the tripwire; model output is still withheld."""
+
+    session = SimpleListSession()
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("charge", json.dumps({"a": "b"}))],
+            [get_text_message("should_not_be_saved")],
+        ]
+    )
+    agent, _calls = _tool_final_output_agent(model, "run_llm_again")
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        await Runner.run(agent, input="user_message", session=session)
+
+    items = await session.get_items()
+    assert not any(
+        cast(dict[str, Any], item).get("role") == "assistant"
+        and cast(dict[str, Any], item).get("type") == "message"
+        for item in items
+    )
+
+
 @pytest.mark.asyncio
 async def test_resumed_final_output_persists_after_passing_output_guardrail():
     """Resumed runs with a positive persisted count still save accepted finals."""

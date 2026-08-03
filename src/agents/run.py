@@ -446,6 +446,12 @@ class Runner:
         )
 
 
+# Only the model's own output for the final turn waits for the output-guardrail verdict.
+# This is an allow-list on purpose: a future item type that records something the run
+# already did defaults to "persist" rather than silently inheriting "discard".
+_DEFERRED_FINAL_OUTPUT_ITEM_TYPES = frozenset({"message_output_item", "reasoning_item"})
+
+
 class AgentRunner:
     """
     WARNING: this class is experimental and not part of the public API
@@ -919,15 +925,27 @@ class AgentRunner:
                                     session_items=session_items,
                                 )
 
+                            # A resumed turn that ends the run carries the same obligation as a
+                            # fresh one: side-effect records persist now, model output waits for
+                            # the guardrail verdict below.
+                            resumed_items_now = (
+                                [
+                                    item
+                                    for item in turn_session_items
+                                    if item.type not in _DEFERRED_FINAL_OUTPUT_ITEM_TYPES
+                                ]
+                                if isinstance(turn_result.next_step, NextStepFinalOutput)
+                                else turn_session_items
+                            )
                             if (
                                 session_persistence_enabled
-                                and turn_session_items
+                                and resumed_items_now
                                 and run_state is not None
                             ):
                                 run_state._current_turn_persisted_item_count = (
                                     await save_resumed_turn_items(
                                         session=session,
-                                        items=turn_session_items,
+                                        items=resumed_items_now,
                                         persisted_count=(
                                             run_state._current_turn_persisted_item_count
                                         ),
@@ -1414,21 +1432,35 @@ class AgentRunner:
                                     )
                                 ):
                                     items_to_save_turn.append(item)
-                            # Defer final-output persistence until after output guardrails
-                            # succeed so a tripwire does not leave rejected assistant output
-                            # in the session (matches the streamed path).
-                            if items_to_save_turn and not isinstance(
-                                turn_result.next_step, NextStepFinalOutput
-                            ):
+                            # Defer only the model's own output until after output guardrails
+                            # succeed, so a tripwire does not leave rejected assistant output in
+                            # the session. Tool calls and their outputs record side effects that
+                            # already happened, so they persist now even on a final-output turn
+                            # (tool_use_behavior="stop_on_first_tool" ends the run on such a turn).
+                            if isinstance(turn_result.next_step, NextStepFinalOutput):
+                                items_now_turn = [
+                                    item
+                                    for item in items_to_save_turn
+                                    if item.type not in _DEFERRED_FINAL_OUTPUT_ITEM_TYPES
+                                ]
+                                deferred_items_turn = [
+                                    item
+                                    for item in items_to_save_turn
+                                    if item.type in _DEFERRED_FINAL_OUTPUT_ITEM_TYPES
+                                ]
+                            else:
+                                items_now_turn = items_to_save_turn
+                                deferred_items_turn = []
+                            if items_now_turn:
                                 logger.debug(
                                     "Persisting turn items (types=%s)",
-                                    [item.type for item in items_to_save_turn],
+                                    [item.type for item in items_now_turn],
                                 )
                                 if is_resumed_state and run_state is not None:
                                     saved_count = await save_result_to_session(
                                         session,
                                         [],
-                                        items_to_save_turn,
+                                        items_now_turn,
                                         None,
                                         response_id=turn_result.model_response.response_id,
                                         reasoning_item_id_policy=(
@@ -1441,7 +1473,7 @@ class AgentRunner:
                                     await save_result_to_session(
                                         session,
                                         [],
-                                        items_to_save_turn,
+                                        items_now_turn,
                                         run_state,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
@@ -1491,7 +1523,7 @@ class AgentRunner:
                                 )
                             if (
                                 session_persistence_enabled
-                                and items_to_save_turn
+                                and deferred_items_turn
                                 and not input_guardrails_triggered(input_guardrail_results)
                             ):
                                 # When earlier items from this turn were already persisted
@@ -1505,7 +1537,7 @@ class AgentRunner:
                                     run_state._current_turn_persisted_item_count = (
                                         await save_resumed_turn_items(
                                             session=session,
-                                            items=items_to_save_turn,
+                                            items=deferred_items_turn,
                                             persisted_count=(
                                                 run_state._current_turn_persisted_item_count
                                             ),
@@ -1525,7 +1557,7 @@ class AgentRunner:
                                         run_state=run_state,
                                         session_persistence_enabled=session_persistence_enabled,
                                         input_guardrail_results=input_guardrail_results,
-                                        items=items_to_save_turn,
+                                        items=deferred_items_turn,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
                                     )
