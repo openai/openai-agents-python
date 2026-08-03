@@ -1109,6 +1109,66 @@ async def test_streamed_parallel_tripwire_details_refresh_after_the_turn_settles
     )
 
 
+@pytest.mark.parametrize("streaming", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_parallel_guardrail_raising_reports_guardrails_from_the_discarded_turn(
+    streaming: bool,
+):
+    """A parallel guardrail that *raises* discards the turn just like a tripwire does.
+
+    Only the tripwire branch harvested the overlapped turn, so a guardrail that failed outright
+    reported no tool guardrail results even though the turn had already run them.
+    """
+    state = {"runs": 0}
+
+    async def allow(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        state["runs"] += 1
+        return ToolGuardrailFunctionOutput.allow(output_info="allowed")
+
+    @function_tool
+    async def guarded(query: str) -> str:
+        return "tool output"
+
+    guarded.tool_input_guardrails = [
+        ToolInputGuardrail(guardrail_function=allow, name="input_allows")
+    ]
+
+    async def raise_mid_run(ctx: Any, agent: Any, agent_input: Any) -> GuardrailFunctionOutput:
+        # Long enough for the overlapped turn to run the tool and its guardrail first.
+        await asyncio.sleep(0.4)
+        raise ModelBehaviorError("guardrail failed")
+
+    parallel_guardrail = InputGuardrail(guardrail_function=raise_mid_run, name="raising_guardrail")
+    parallel_guardrail.run_in_parallel = True
+
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("guarded", '{"query": "secret"}')],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="raising_guardrail_agent",
+        model=model,
+        tools=[guarded],
+        input_guardrails=[parallel_guardrail],
+    )
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        if streaming:
+            streamed = Runner.run_streamed(agent, "go")
+            async for _ in streamed.stream_events():
+                await asyncio.sleep(0)
+        else:
+            await Runner.run(agent, "go")
+
+    assert state["runs"] >= 1, "the tool guardrail never ran, so the test proves nothing"
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _names(run_data.tool_input_guardrail_results) == ["input_allows"] * state["runs"]
+
+
 if __name__ == "__main__":
     # Run a simple test to verify functionality
     async def main():

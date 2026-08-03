@@ -204,10 +204,15 @@ def _record_parallel_model_task_guardrail_partials(
 ) -> None:
     """Carry a discarded parallel model turn's tool guardrail results onto ``error``.
 
-    When a parallel input guardrail trips, the overlapped model task's ``SingleStepResult``
-    is thrown away even though its tool guardrails may already have run.  Read them from a
-    completed result, or -- if the task was cancelled mid-turn -- from the partials captured
-    inside the task.
+    When a parallel input guardrail trips -- or fails outright by raising -- the overlapped model
+    task's ``SingleStepResult`` is thrown away even though its tool guardrails may already have
+    run.  Read them from a completed result, or -- if the task was cancelled mid-turn -- from the
+    partials captured inside the task.
+
+    ``model_outcome`` is the ``asyncio.gather(..., return_exceptions=True)`` sequence, so it may
+    also hold the guardrail task's own outcome; entries with nothing to contribute are no-ops, and
+    results are deduplicated by identity, so an exception that already carries its partials is not
+    double-counted.
     """
     _record_tool_guardrail_partials(
         error,
@@ -1384,7 +1389,7 @@ class AgentRunner:
                                         )
                                     )
                                     raise
-                                except BaseException:
+                                except BaseException as failure_exc:
                                     # A non-tripwire failure (the model turn raising, or a
                                     # guardrail raising a non-tripwire error) propagates from
                                     # gather without cancelling the sibling task. Cancel and drain
@@ -1393,8 +1398,18 @@ class AgentRunner:
                                     for pending_task in (guardrail_task, model_task):
                                         if not pending_task.done():
                                             pending_task.cancel()
-                                    await asyncio.gather(
+                                    failure_outcome = await asyncio.gather(
                                         guardrail_task, model_task, return_exceptions=True
+                                    )
+                                    # A guardrail can fail without tripping - by raising - and
+                                    # that discards the overlapped turn just as a tripwire does.
+                                    # Harvest it on the way out for the same reason, so a turn
+                                    # whose tool guardrails already ran still reports them.
+                                    _record_parallel_model_task_guardrail_partials(
+                                        failure_exc,
+                                        failure_outcome,
+                                        turn_tool_input_partials,
+                                        turn_tool_output_partials,
                                     )
                                     raise
                             else:
