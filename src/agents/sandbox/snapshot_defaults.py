@@ -4,7 +4,7 @@ import os
 import sys
 import time
 from collections.abc import Mapping
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .snapshot import LocalSnapshotSpec
 
@@ -30,7 +30,7 @@ def default_local_snapshot_base_dir(
     os_name: str | None = None,
 ) -> Path:
     resolved_home = home or Path.home()
-    resolved_env = env or os.environ
+    resolved_env = os.environ if env is None else env
     resolved_platform = platform or sys.platform
     resolved_os_name = os_name or os.name
 
@@ -45,7 +45,11 @@ def default_local_snapshot_base_dir(
         base = env_base if env_base is not None else resolved_home / "AppData" / "Local"
     else:
         xdg_state_home = resolved_env.get("XDG_STATE_HOME")
-        base = Path(xdg_state_home) if xdg_state_home else resolved_home / ".local" / "state"
+        base = (
+            Path(xdg_state_home)
+            if xdg_state_home and PurePosixPath(xdg_state_home).is_absolute()
+            else resolved_home / ".local" / "state"
+        )
 
     return base / _DEFAULT_LOCAL_SNAPSHOT_SUBDIR
 
