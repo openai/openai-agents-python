@@ -851,6 +851,34 @@ async def test_close_is_idempotent_and_closes_owned_client_once() -> None:
     assert close_calls == 1
 
 
+async def test_concurrent_close_observes_a_failed_release() -> None:
+    """A caller waiting on someone else's release must see that release fail."""
+    s, fake_client = _make_owned_session("close-shared-failure")
+    attempts = 0
+    original_close = fake_client.close
+
+    async def _failing_then_ok_close() -> None:
+        nonlocal attempts
+        attempts += 1
+        await asyncio.sleep(0.05)
+        if attempts == 1:
+            raise ConnectionError("release failed")
+        await original_close()
+
+    fake_client.close = _failing_then_ok_close  # type: ignore[method-assign]
+
+    # Both callers must see the failure, not just the one that ran the release.
+    results = await asyncio.gather(s.close(), s.close(), return_exceptions=True)
+    assert attempts == 1
+    assert all(isinstance(r, ConnectionError) for r in results), results
+    assert not fake_client._closed
+
+    # Cleanup is still retryable afterwards.
+    await s.close()
+    assert fake_client._closed
+    assert attempts == 2
+
+
 async def test_concurrent_close_across_event_loops_releases_client_once() -> None:
     """Two loops closing the same session must not both release the owned client."""
     s, fake_client = _make_owned_session("close-two-loops")

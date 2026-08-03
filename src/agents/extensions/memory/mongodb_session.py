@@ -31,9 +31,11 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import weakref
+from concurrent.futures import Future
 from datetime import datetime, timezone
 from typing import Any, ClassVar
 
@@ -141,10 +143,11 @@ class MongoDBSession(SessionABC):
         self._owns_client = False
         self._closed = False
         self._client_released = False
-        # True while one caller is inside client.close(), so concurrent callers
-        # cannot start a second release. Guarded by _init_guard (a threading.Lock)
-        # rather than an asyncio.Lock, which would only serialize a single loop.
-        self._releasing_client = False
+        # Set while one caller is inside client.close(); other callers await it
+        # instead of starting a second release. A concurrent.futures.Future and
+        # the _init_guard threading.Lock are used rather than asyncio primitives,
+        # which would only serialize callers on a single event loop.
+        self._release_attempt: Future[None] | None = None
 
         client.append_metadata(_DRIVER_INFO)
 
@@ -395,26 +398,44 @@ class MongoDBSession(SessionABC):
     # Lifecycle helpers
     # ------------------------------------------------------------------
 
-    def _claim_client_release(self) -> bool:
-        """Return True if this caller is the one that should release the client.
+    def _claim_client_release(self) -> tuple[bool, Future[None] | None]:
+        """Claim the right to release the client, or report what to wait for.
+
+        Returns ``(True, None)`` for the caller that should perform the release,
+        and ``(False, pending)`` otherwise, where ``pending`` is the in-flight
+        attempt to wait on or ``None`` if the client is already released.
 
         Only a ``threading.Lock`` is used, never an ``asyncio.Lock``: a lock bound
         to one event loop cannot serialize callers on another, and this session may
         be closed from a different loop or thread than the one that created it (the
-        same constraint documented for ``_init_state``).  The claim only guards two
-        flag flips, so no async coordination is required.
+        same constraint documented for ``_init_state``).  A
+        ``concurrent.futures.Future`` is used for the same reason — unlike an
+        asyncio future it can be awaited from any loop via
+        :func:`asyncio.wrap_future`.
         """
         with self._init_guard:
-            if self._client_released or self._releasing_client:
-                return False
-            self._releasing_client = True
-            return True
+            if self._client_released:
+                return False, None
+            if self._release_attempt is not None:
+                return False, self._release_attempt
+            self._release_attempt = Future()
+            return True, None
 
-    def _finish_client_release(self, released: bool) -> None:
-        """Record the outcome of a release attempt, freeing the claim either way."""
+    def _finish_client_release(self, error: BaseException | None) -> None:
+        """Publish the outcome of a release attempt and free the claim.
+
+        On failure the client is left unreleased, so a later ``close()`` retries.
+        """
         with self._init_guard:
-            self._client_released = released
-            self._releasing_client = False
+            attempt = self._release_attempt
+            self._release_attempt = None
+            self._client_released = error is None
+        if attempt is None:  # pragma: no cover - defensive
+            return
+        if error is None:
+            attempt.set_result(None)
+        else:
+            attempt.set_exception(error)
 
     async def close(self) -> None:
         """Close the underlying MongoDB connection.
@@ -426,26 +447,33 @@ class MongoDBSession(SessionABC):
         caller is responsible for managing its lifecycle and this is a no-op.
 
         The session is terminal from the first close attempt.  If releasing the
-        client fails or is cancelled, operations still raise and a later
-        ``close()`` retries the unfinished cleanup.  Once the client is released,
-        repeated calls are safe no-ops, and concurrent calls — including from
-        different event loops or threads — release the client exactly once.
+        client fails or is cancelled, operations still raise, every concurrent
+        caller sees the failure, and a later ``close()`` retries the unfinished
+        cleanup.  Once the client is released, repeated calls are safe no-ops, and
+        concurrent calls — including from different event loops or threads —
+        release the client exactly once.
         """
         if not self._owns_client:
             return
-        # Mark terminal before releasing, so a concurrent caller that returns
-        # early below still cannot issue commands against a closing client.
+        # Mark terminal before releasing, so a caller waiting on another's
+        # release cannot issue commands against a closing client.
         self._closed = True
-        if not self._claim_client_release():
+        claimed, pending = self._claim_client_release()
+        if not claimed:
+            if pending is not None:
+                # Await the in-flight release rather than returning early, so a
+                # failed cleanup surfaces here too instead of looking successful.
+                await asyncio.wrap_future(pending)
             return
-        released = False
+
+        error: BaseException | None = None
         try:
             await self._client.close()
-            released = True
+        except BaseException as exc:
+            error = exc
+            raise
         finally:
-            # On failure or cancellation the claim is freed without marking the
-            # client released, so a later close() retries the cleanup.
-            self._finish_client_release(released)
+            self._finish_client_release(error)
 
     async def ping(self) -> bool:
         """Test MongoDB connectivity.
