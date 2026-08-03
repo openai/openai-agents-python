@@ -70,6 +70,66 @@ async def test_single_run_is_single_trace():
     )
 
 
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("surface", ["function_tool", "handoff", "mixed"])
+@pytest.mark.asyncio
+async def test_agent_span_uses_resolved_tool_name_collision_view(
+    surface: str,
+    streamed: bool,
+) -> None:
+    model = FakeModel(initial_output=[get_text_message("done")])
+    expected_tools: list[str]
+    expected_handoffs: list[str]
+
+    if surface == "function_tool":
+
+        @function_tool(name_override="lookup")
+        def first_lookup() -> str:
+            return "first"
+
+        @function_tool(name_override="lookup")
+        def second_lookup() -> str:
+            return "second"
+
+        agent = Agent(name="test_agent", model=model, tools=[first_lookup, second_lookup])
+        expected_tools = ["lookup"]
+        expected_handoffs = []
+    elif surface == "handoff":
+        agent = Agent(
+            name="test_agent",
+            model=model,
+            handoffs=[Agent(name="Billing Agent"), Agent(name="billing agent")],
+        )
+        expected_tools = []
+        expected_handoffs = ["billing agent"]
+    else:
+        agent = Agent(
+            name="test_agent",
+            model=model,
+            tools=[
+                Agent(name="transfer to Billing Agent").as_tool(
+                    tool_name=None,
+                    tool_description="Billing tool",
+                )
+            ],
+            handoffs=[Agent(name="Billing Agent")],
+        )
+        expected_tools = []
+        expected_handoffs = ["Billing Agent"]
+
+    if streamed:
+        result = Runner.run_streamed(agent, input="test")
+        async for _ in result.stream_events():
+            pass
+    else:
+        await Runner.run(agent, input="test")
+
+    agent_spans = [span for span in fetch_ordered_spans() if span.span_data.type == "agent"]
+    assert len(agent_spans) == 1
+    assert agent_spans[0].span_data.tools == expected_tools
+    assert agent_spans[0].span_data.handoffs == expected_handoffs
+
+
 @pytest.mark.asyncio
 async def test_task_and_turn_spans_export_aggregate_usage():
     @function_tool

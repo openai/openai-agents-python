@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import tempfile
 import warnings
 from collections.abc import Callable
@@ -39,6 +40,7 @@ from agents import (
     ToolExecutionConfig,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
+    ToolNameCollisionPolicy,
     ToolTimeoutError,
     UserError,
     handoff,
@@ -46,6 +48,7 @@ from agents import (
     tool_input_guardrail,
     tool_namespace,
 )
+from agents._tool_identity import resolve_tool_name_collisions
 from agents.agent import ToolsToFinalOutputResult
 from agents.computer import Computer
 from agents.items import (
@@ -166,6 +169,360 @@ async def _run_agent_with_optional_streaming(
             pass
         return result
     return await Runner.run(agent, input=input, **kwargs)
+
+
+@pytest.mark.parametrize("surface", ["agent_tool", "handoff", "mixed"])
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("collision_policy", ["warn", "error"])
+@pytest.mark.asyncio
+async def test_run_reports_derived_agent_name_collisions_before_model_call(
+    surface: str,
+    streamed: bool,
+    collision_policy: ToolNameCollisionPolicy,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    model = FakeModel(initial_output=[get_text_message("done")])
+    billing = Agent(name="Billing Agent")
+    normalized_billing = Agent(name="billing agent")
+    if surface == "agent_tool":
+        agent = Agent(
+            name="triage",
+            model=model,
+            tools=[
+                billing.as_tool(tool_name=None, tool_description="First billing agent"),
+                normalized_billing.as_tool(
+                    tool_name=None,
+                    tool_description="Second billing agent",
+                ),
+            ],
+        )
+    elif surface == "handoff":
+        agent = Agent(
+            name="triage",
+            model=model,
+            handoffs=[billing, normalized_billing],
+        )
+    else:
+        agent = Agent(
+            name="triage",
+            model=model,
+            tools=[
+                Agent(name="transfer to Billing Agent").as_tool(
+                    tool_name=None,
+                    tool_description="Billing tool",
+                )
+            ],
+            handoffs=[billing],
+        )
+
+    run_config = RunConfig(tool_name_collision_policy=collision_policy)
+    if collision_policy == "error":
+        with pytest.raises(
+            UserError,
+            match="Ambiguous (agent tool|handoff|agent routing) configuration",
+        ):
+            await _run_agent_with_optional_streaming(
+                agent,
+                input="Route this request",
+                streamed=streamed,
+                run_config=run_config,
+            )
+
+        assert model.first_turn_args is None
+        assert not model.last_turn_args
+    else:
+        with caplog.at_level("WARNING", logger="openai.agents"):
+            await _run_agent_with_optional_streaming(
+                agent,
+                input="Route this request",
+                streamed=streamed,
+                run_config=run_config,
+            )
+
+        assert model.first_turn_args is not None
+        collision_messages = [
+            message for message in caplog.messages if message.startswith("Ambiguous ")
+        ]
+        assert len(collision_messages) == 1
+        assert "Pass an explicit" in collision_messages[0]
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_run_warns_and_keeps_last_duplicate_function_tool(
+    streamed: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    calls: list[str] = []
+
+    @function_tool(name_override="lookup")
+    def first_lookup() -> str:
+        calls.append("first")
+        return "first"
+
+    @function_tool(name_override="lookup")
+    def second_lookup() -> str:
+        calls.append("second")
+        return "second"
+
+    model = FakeModel(initial_output=[get_function_tool_call("lookup", "{}")])
+    model.set_next_output([get_text_message("done")])
+    agent = Agent(name="agent", model=model, tools=[first_lookup, second_lookup])
+
+    with caplog.at_level("WARNING", logger="openai.agents"):
+        await _run_agent_with_optional_streaming(
+            agent,
+            input="Look this up",
+            streamed=streamed,
+        )
+
+    assert calls == ["second"]
+    assert model.first_turn_args is not None
+    assert model.first_turn_args["tools"] == [second_lookup]
+    collision_messages = [
+        message for message in caplog.messages if message.startswith("Ambiguous ")
+    ]
+    assert len(collision_messages) == 2
+    assert all(
+        message
+        == (
+            "Ambiguous function tool configuration: the tool name `lookup` is used by multiple "
+            "tools. Assign a unique routed name to every colliding function tool with "
+            "`name_override=`, `tool_name=`, or a namespace."
+        )
+        for message in collision_messages
+    )
+
+
+def test_collision_warning_redacts_tool_data(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret_tool_name = "tenant_secret_tool_token"
+
+    @function_tool(name_override=secret_tool_name)
+    def first_tool() -> str:
+        return "first"
+
+    @function_tool(name_override=secret_tool_name)
+    def second_tool() -> str:
+        return "second"
+
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+    with caplog.at_level("WARNING", logger="openai.agents"):
+        resolved_tools, resolved_handoffs = resolve_tool_name_collisions(
+            [first_tool, second_tool],
+            collision_policy="warn",
+        )
+
+    assert resolved_tools == [second_tool]
+    assert resolved_handoffs == []
+    assert len(caplog.records) == 1
+    record = caplog.records[0]
+    assert record.msg == (
+        "Tool name collision detected. Assign unique routed tool names or enable tool data "
+        "logging for details."
+    )
+    assert record.args == ()
+    assert record.exc_info is None
+    assert record.exc_text is None
+    assert all(
+        secret_tool_name not in value
+        for value in record.__dict__.values()
+        if isinstance(value, str)
+    )
+    assert secret_tool_name not in logging.Formatter().format(record)
+
+
+def test_collision_warning_preserves_tool_diagnostics_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    tool_name = "diagnostic_tool_name"
+
+    @function_tool(name_override=tool_name)
+    def first_tool() -> str:
+        return "first"
+
+    @function_tool(name_override=tool_name)
+    def second_tool() -> str:
+        return "second"
+
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    with caplog.at_level("WARNING", logger="openai.agents"):
+        resolve_tool_name_collisions(
+            [first_tool, second_tool],
+            collision_policy="warn",
+        )
+
+    assert len(caplog.records) == 1
+    record = caplog.records[0]
+    assert record.msg == "%s"
+    assert isinstance(record.args, tuple)
+    assert len(record.args) == 1
+    assert isinstance(record.args[0], str)
+    assert tool_name in record.args[0]
+    assert tool_name in logging.Formatter().format(record)
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_run_rejects_duplicate_function_tools_in_error_mode(streamed: bool) -> None:
+    @function_tool(name_override="lookup")
+    def first_lookup() -> str:
+        return "first"
+
+    @function_tool(name_override="lookup")
+    def second_lookup() -> str:
+        return "second"
+
+    model = FakeModel(initial_output=[get_text_message("done")])
+    agent = Agent(name="agent", model=model, tools=[first_lookup, second_lookup])
+
+    with pytest.raises(
+        UserError,
+        match="the tool name `lookup` is used by multiple tools",
+    ):
+        await _run_agent_with_optional_streaming(
+            agent,
+            input="Look this up",
+            streamed=streamed,
+            run_config=RunConfig(tool_name_collision_policy="error"),
+        )
+
+    assert model.first_turn_args is None
+
+
+@pytest.mark.asyncio
+async def test_run_warns_once_for_repeated_source_agent_name(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    model = FakeModel(initial_output=[get_text_message("done")])
+    agent = Agent(
+        name="orchestrator",
+        model=model,
+        tools=[
+            Agent(name="Refund").as_tool(tool_name=None, tool_description="First refund agent"),
+            Agent(name="refund").as_tool(tool_name=None, tool_description="Second refund agent"),
+            Agent(name="refund").as_tool(tool_name=None, tool_description="Third refund agent"),
+        ],
+    )
+
+    with caplog.at_level("WARNING", logger="openai.agents"):
+        await Runner.run(agent, "Route this request")
+
+    collision_messages = [
+        message for message in caplog.messages if message.startswith("Ambiguous ")
+    ]
+    assert collision_messages == [
+        "Ambiguous function tool configuration: the tool name `refund` is used by multiple "
+        "tools. Assign a unique routed name to every colliding function tool with "
+        "`name_override=`, `tool_name=`, or a namespace."
+    ]
+    assert model.first_turn_args is not None
+    assert model.first_turn_args["tools"] == [agent.tools[-1]]
+
+
+def test_multiway_mixed_collision_reports_every_owner_must_be_unique(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
+    @function_tool(name_override="route")
+    def first_route() -> str:
+        return "first"
+
+    @function_tool(name_override="route")
+    def second_route() -> str:
+        return "second"
+
+    route_handoff = handoff(Agent(name="Billing"), tool_name_override="route")
+
+    with caplog.at_level("WARNING", logger="openai.agents"):
+        resolved_tools, resolved_handoffs = resolve_tool_name_collisions(
+            [first_route, second_route],
+            [route_handoff],
+            collision_policy="warn",
+        )
+
+    assert resolved_tools == []
+    assert resolved_handoffs == [route_handoff]
+    assert caplog.messages == [
+        "Ambiguous tool routing configuration: the tool name `route` is used by both a function "
+        "tool and a handoff. Assign a unique routed name to every colliding function tool and "
+        "handoff with `name_override=`, `tool_name=`, `tool_name_override=`, or a namespace."
+    ]
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_handoff_enablement_uses_initialized_turn_context(streamed: bool) -> None:
+    model = FakeModel()
+    target = Agent(name="target", model=model)
+    model.add_multiple_turn_outputs(
+        [
+            [get_handoff_tool_call(target)],
+            [get_text_message("done")],
+        ]
+    )
+    observed_context: list[tuple[list[TResponseInputItem], dict[str, bool]]] = []
+
+    class InitializeContextHooks(RunHooks[dict[str, bool]]):
+        async def on_agent_start(self, context, agent) -> None:
+            if agent.name == "source":
+                context.context["hook_initialized"] = True
+
+    def dynamic_prompt(data):
+        data.context.context["prompt_initialized"] = True
+        return {"id": "prompt-id"}
+
+    def handoff_is_enabled(context: RunContextWrapper[dict[str, bool]], agent: Agent[Any]) -> bool:
+        observed_context.append((list(context.turn_input), dict(context.context)))
+        return (
+            agent.name == "source"
+            and context.turn_input == [{"content": "current turn", "role": "user"}]
+            and context.context.get("hook_initialized") is True
+            and context.context.get("prompt_initialized") is True
+        )
+
+    source = Agent(
+        name="source",
+        model=model,
+        prompt=dynamic_prompt,
+        handoffs=[handoff(target, is_enabled=handoff_is_enabled)],
+    )
+    hooks = InitializeContextHooks()
+
+    if streamed:
+        result = Runner.run_streamed(
+            source,
+            "current turn",
+            context={},
+            hooks=hooks,
+        )
+        async for _ in result.stream_events():
+            pass
+    else:
+        await Runner.run(
+            source,
+            "current turn",
+            context={},
+            hooks=hooks,
+        )
+
+    assert observed_context == [
+        (
+            [{"content": "current turn", "role": "user"}],
+            {"hook_initialized": True, "prompt_initialized": True},
+        )
+    ]
 
 
 def test_set_default_agent_runner_roundtrip():

@@ -5,7 +5,9 @@ from typing import Any, Literal, cast
 
 from typing_extensions import Required, TypedDict
 
+from . import _debug
 from .exceptions import UserError
+from .logger import logger
 
 BareFunctionToolLookupKey = tuple[Literal["bare"], str]
 NamespacedFunctionToolLookupKey = tuple[Literal["namespaced"], str, str]
@@ -317,6 +319,130 @@ def validate_function_tool_namespace_shape(
         "Responses tool-search reserves the synthetic namespace "
         f"`{reserved_key}` for deferred top-level function tools. "
         "Rename the namespace or tool name to avoid ambiguous dispatch."
+    )
+
+
+def _format_tool_name_collision_message(
+    lookup_key: BareFunctionToolLookupKey,
+    entries: Sequence[tuple[str, int, Any]],
+) -> str:
+    """Build a detailed diagnostic for errors or unredacted warnings."""
+    derived_owners: dict[str, str] = {}
+    for entry_type, _, entry in entries:
+        identity_attribute = (
+            "_agent_tool_default_identity" if entry_type == "tool" else "_default_tool_identity"
+        )
+        default_identity = getattr(entry, identity_attribute, None)
+        if not (
+            isinstance(default_identity, tuple)
+            and len(default_identity) == 2
+            and all(isinstance(value, str) for value in default_identity)
+        ):
+            continue
+        agent_name, derived_tool_name = default_identity
+        current_tool_name = (
+            get_function_tool_public_name(entry)
+            if entry_type == "tool"
+            else getattr(entry, "tool_name", None)
+        )
+        if current_tool_name == derived_tool_name:
+            override_parameter = "tool_name" if entry_type == "tool" else "tool_name_override"
+            derived_owners.setdefault(agent_name, override_parameter)
+
+    if len(entries) == 2 and len(derived_owners) == 2:
+        (
+            (prior_agent_name, prior_override_parameter),
+            (agent_name, override_parameter),
+        ) = list(derived_owners.items())[:2]
+        if override_parameter == prior_override_parameter == "tool_name":
+            configuration_type = "agent tool"
+            name_label = "tool name"
+            override_instruction = "`tool_name=`"
+        elif override_parameter == prior_override_parameter == "tool_name_override":
+            configuration_type = "handoff"
+            name_label = "handoff tool name"
+            override_instruction = "`tool_name_override=`"
+        else:
+            configuration_type = "agent routing"
+            name_label = "tool name"
+            override_instruction = "`tool_name=` or `tool_name_override=`"
+        return (
+            f"Ambiguous {configuration_type} configuration: agents "
+            f"{prior_agent_name!r} and {agent_name!r} both derive the {name_label} "
+            f"`{lookup_key[1]}`. Pass an explicit {override_instruction} to one of them."
+        )
+
+    entry_types = {entry_type for entry_type, _, _ in entries}
+    if entry_types == {"tool"}:
+        return (
+            "Ambiguous function tool configuration: the tool name "
+            f"`{lookup_key[1]}` is used by multiple tools. Assign a unique routed name "
+            "to every colliding function tool with `name_override=`, `tool_name=`, or "
+            "a namespace."
+        )
+    if entry_types == {"handoff"}:
+        return (
+            "Ambiguous handoff configuration: the handoff tool name "
+            f"`{lookup_key[1]}` is used by multiple handoffs. Pass a unique "
+            "`tool_name_override=` to each handoff."
+        )
+    return (
+        "Ambiguous tool routing configuration: the tool name "
+        f"`{lookup_key[1]}` is used by both a function tool and a handoff. "
+        "Assign a unique routed name to every colliding function tool and handoff "
+        "with `name_override=`, `tool_name=`, `tool_name_override=`, or a namespace."
+    )
+
+
+def resolve_tool_name_collisions(
+    tools: Sequence[Any],
+    handoffs: Sequence[Any] = (),
+    *,
+    collision_policy: Literal["warn", "error"],
+) -> tuple[list[Any], list[Any]]:
+    """Resolve bare function-tool and handoff name collisions before model exposure."""
+    validate_function_tool_lookup_configuration(tools)
+
+    owners: dict[BareFunctionToolLookupKey, list[tuple[str, int, Any]]] = {}
+    for index, tool in enumerate(tools):
+        lookup_key = get_function_tool_lookup_key_for_tool(tool)
+        if lookup_key is not None and lookup_key[0] == "bare":
+            owners.setdefault(lookup_key, []).append(("tool", index, tool))
+
+    for index, handoff in enumerate(handoffs):
+        tool_name = getattr(handoff, "tool_name", None)
+        if isinstance(tool_name, str) and tool_name:
+            owners.setdefault(("bare", tool_name), []).append(("handoff", index, handoff))
+
+    retained_tool_indices = set(range(len(tools)))
+    retained_handoff_indices = set(range(len(handoffs)))
+    for lookup_key, entries in owners.items():
+        if len(entries) < 2:
+            continue
+
+        if collision_policy == "error":
+            raise UserError(_format_tool_name_collision_message(lookup_key, entries))
+        if _debug.DONT_LOG_TOOL_DATA:
+            logger.warning(
+                "Tool name collision detected. Assign unique routed tool names or enable tool "
+                "data logging for details."
+            )
+        else:
+            logger.warning("%s", _format_tool_name_collision_message(lookup_key, entries))
+
+        handoff_entries = [entry for entry in entries if entry[0] == "handoff"]
+        winner = handoff_entries[-1] if handoff_entries else entries[-1]
+        for entry_type, index, _ in entries:
+            if (entry_type, index) == (winner[0], winner[1]):
+                continue
+            if entry_type == "tool":
+                retained_tool_indices.discard(index)
+            else:
+                retained_handoff_indices.discard(index)
+
+    return (
+        [tool for index, tool in enumerate(tools) if index in retained_tool_indices],
+        [handoff for index, handoff in enumerate(handoffs) if index in retained_handoff_indices],
     )
 
 

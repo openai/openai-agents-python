@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from agents import (
@@ -8,10 +10,12 @@ from agents import (
     Runner,
     SessionSettings,
     ToolExecutionConfig,
+    ToolNameCollisionPolicy,
     ToolNotFoundBehavior,
 )
 from agents.model_settings import ModelSettings
 from agents.models.interface import Model, ModelProvider
+from agents.run import __all__ as run_exports
 from agents.run_config import SandboxConcurrencyLimits, SandboxRunConfig
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.snapshot import NoopSnapshotSpec
@@ -322,3 +326,43 @@ def test_tool_not_found_behavior_is_public_from_agents_package() -> None:
     config = RunConfig(tool_not_found_behavior=behavior)
 
     assert config.tool_not_found_behavior == "return_error_to_model"
+
+
+def test_tool_name_collision_policy_defaults_to_warn() -> None:
+    config = RunConfig()
+
+    assert config.tool_name_collision_policy == "warn"
+
+
+def test_tool_name_collision_policy_is_public_from_agents_package() -> None:
+    policy: ToolNameCollisionPolicy = "error"
+    config = RunConfig(tool_name_collision_policy=policy)
+
+    assert config.tool_name_collision_policy == "error"
+    assert "ToolNameCollisionPolicy" in run_exports
+
+
+def test_tool_name_collision_policy_rejects_invalid_value() -> None:
+    with pytest.raises(
+        ValueError,
+        match="tool_name_collision_policy must be either 'warn' or 'error'",
+    ):
+        RunConfig(tool_name_collision_policy=cast(Any, "erorr"))
+
+
+@pytest.mark.asyncio
+async def test_runner_dictionary_rejects_invalid_tool_name_collision_policy() -> None:
+    model = FakeModel(initial_output=[get_text_message("done")])
+    agent = Agent(name="test", model=model)
+
+    with pytest.raises(
+        ValueError,
+        match="tool_name_collision_policy must be either 'warn' or 'error'",
+    ):
+        await Runner.run(
+            agent,
+            "hello",
+            run_config={"tool_name_collision_policy": cast(Any, "erorr")},
+        )
+
+    assert model.first_turn_args is None

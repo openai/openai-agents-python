@@ -28,6 +28,7 @@ from .._tool_identity import (
     build_function_tool_lookup_map,
     get_function_tool_lookup_key_for_call,
     get_tool_trace_name_for_tool,
+    resolve_tool_name_collisions,
 )
 from ..agent import Agent
 from ..agent_output import AgentOutputSchemaBase
@@ -990,9 +991,6 @@ async def start_streaming(
             )
 
             if current_span is None:
-                handoff_names = [
-                    h.agent_name for h in await get_handoffs(execution_agent, context_wrapper)
-                ]
                 if output_schema := get_output_schema(execution_agent):
                     output_type_name = output_schema.name()
                 else:
@@ -1000,16 +998,11 @@ async def start_streaming(
 
                 current_span = agent_span(
                     name=current_agent.name,
-                    handoffs=handoff_names,
+                    handoffs=[],
+                    tools=[],
                     output_type=output_type_name,
                 )
                 current_span.start(mark_as_current=True)
-                tool_names = [
-                    tool_name
-                    for tool in all_tools
-                    if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
-                ]
-                current_span.span_data.tools = tool_names
 
             current_turn += 1
             streamed_result.current_turn = current_turn
@@ -1176,6 +1169,7 @@ async def start_streaming(
                         reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                         prompt_cache_key_resolver=prompt_cache_key_resolver,
                         error_handlers=error_handlers,
+                        agent_span=current_span,
                     )
                 finally:
                     if current_turn_span:
@@ -1422,6 +1416,7 @@ async def run_single_turn_streamed(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
     error_handlers: RunErrorHandlers[TContext] | None = None,
+    agent_span: Span[AgentSpanData] | None = None,
 ) -> SingleStepResult:
     """Run a single streamed turn and emit events as results arrive."""
     public_agent = bindings.public_agent
@@ -1447,21 +1442,6 @@ async def run_single_turn_streamed(
     emitted_tool_call_ids: set[str] = set()
     emitted_reasoning_item_ids: set[str] = set()
     emitted_tool_search_fingerprints: set[str] = set()
-    # Precompute the lookup map used for streaming descriptions. Function tools use the same
-    # collision-free lookup keys as runtime dispatch, including deferred top-level aliases.
-    tool_map: dict[NamedToolLookupKey, Any] = cast(
-        dict[NamedToolLookupKey, Any],
-        build_function_tool_lookup_map(
-            [tool for tool in all_tools if isinstance(tool, FunctionTool)]
-        ),
-    )
-    for tool in all_tools:
-        tool_name = getattr(tool, "name", None)
-        if not isinstance(tool_name, str) or not tool_name:
-            continue
-        if isinstance(tool, FunctionTool):
-            continue
-        tool_map[tool_name] = tool
 
     def _tool_search_fingerprint(raw_item: Any) -> str:
         if isinstance(raw_item, Mapping):
@@ -1508,6 +1488,34 @@ async def run_single_turn_streamed(
     )
 
     handoffs = await get_handoffs(execution_agent, context_wrapper)
+    all_tools, handoffs = resolve_tool_name_collisions(
+        all_tools,
+        handoffs,
+        collision_policy=run_config.tool_name_collision_policy,
+    )
+    if agent_span is not None:
+        agent_span.span_data.handoffs = [handoff.agent_name for handoff in handoffs]
+        agent_span.span_data.tools = [
+            tool_name
+            for tool in all_tools
+            if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
+        ]
+
+    # Precompute the lookup map used for streaming descriptions. Function tools use the same
+    # collision-free lookup keys as runtime dispatch, including deferred top-level aliases.
+    tool_map: dict[NamedToolLookupKey, Any] = cast(
+        dict[NamedToolLookupKey, Any],
+        build_function_tool_lookup_map(
+            [tool for tool in all_tools if isinstance(tool, FunctionTool)]
+        ),
+    )
+    for tool in all_tools:
+        tool_name = getattr(tool, "name", None)
+        if not isinstance(tool_name, str) or not tool_name:
+            continue
+        if isinstance(tool, FunctionTool):
+            continue
+        tool_map[tool_name] = tool
     model = get_model(execution_agent, run_config)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(execution_agent, run_config)
@@ -1886,6 +1894,7 @@ async def run_single_turn(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
     error_handlers: RunErrorHandlers[TContext] | None = None,
+    agent_span: Span[AgentSpanData] | None = None,
 ) -> SingleStepResult:
     """Run a single non-streaming turn of the agent loop."""
     public_agent = bindings.public_agent
@@ -1917,8 +1926,21 @@ async def run_single_turn(
         execution_agent.get_prompt(context_wrapper),
     )
 
-    output_schema = get_output_schema(execution_agent)
     handoffs = await get_handoffs(execution_agent, context_wrapper)
+    all_tools, handoffs = resolve_tool_name_collisions(
+        all_tools,
+        handoffs,
+        collision_policy=run_config.tool_name_collision_policy,
+    )
+    if agent_span is not None:
+        agent_span.span_data.handoffs = [handoff.agent_name for handoff in handoffs]
+        agent_span.span_data.tools = [
+            tool_name
+            for tool in all_tools
+            if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
+        ]
+
+    output_schema = get_output_schema(execution_agent)
     if server_conversation_tracker is not None:
         input = server_conversation_tracker.prepare_input(original_input, generated_items)
     else:

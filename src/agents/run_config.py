@@ -74,6 +74,7 @@ class CallModelData(Generic[TContext]):
 CallModelInputFilter = Callable[[CallModelData[Any]], MaybeAwaitable[ModelInputData]]
 ReasoningItemIdPolicy = Literal["preserve", "omit"]
 ToolNotFoundBehavior = Literal["raise_error", "return_error_to_model"]
+ToolNameCollisionPolicy = Literal["warn", "error"]
 
 
 @dataclass
@@ -429,6 +430,15 @@ class RunConfig:
       the run continue.
     """
 
+    tool_name_collision_policy: ToolNameCollisionPolicy = "warn"
+    """Controls collisions between function tool and handoff names.
+
+    - ``"warn"`` logs an actionable warning and exposes only the current dispatch winner.
+    - ``"error"`` raises ``UserError`` before the model is called.
+
+    Existing strict validation for namespaced and deferred-loading tools is unchanged.
+    """
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -456,9 +466,12 @@ class RunConfig:
             sandbox: SandboxRunConfig | dict[str, Any] | None = None,
             tool_execution: ToolExecutionConfig | dict[str, Any] | None = None,
             tool_not_found_behavior: ToolNotFoundBehavior = "raise_error",
+            tool_name_collision_policy: ToolNameCollisionPolicy = "warn",
         ) -> None: ...
 
     def __post_init__(self) -> None:
+        if self.tool_name_collision_policy not in ("warn", "error"):
+            raise ValueError("tool_name_collision_policy must be either 'warn' or 'error'")
         if self.model_settings is not None:
             self.model_settings = _coerce_model_settings(
                 self.model_settings,
@@ -526,6 +539,7 @@ def _coerce_run_config(value: RunConfig | dict[str, Any]) -> RunConfig:
 
 __all__ = [
     "DEFAULT_MAX_TURNS",
+    "ToolNameCollisionPolicy",
     "CallModelData",
     "CallModelInputFilter",
     "ModelInputData",
