@@ -3,13 +3,17 @@
 import asyncio
 import base64
 import json
+import logging
 import time
-from unittest.mock import AsyncMock, patch
+from collections.abc import AsyncGenerator
+from typing import cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import numpy.typing as npt
 import pytest
 
+import agents._debug as _debug
 from agents import trace
 from agents.exceptions import UserError
 from tests.testing_processor import fetch_span_errors
@@ -25,6 +29,7 @@ try:
     from agents.voice.exceptions import STTWebsocketConnectionError
     from agents.voice.models.openai_stt import (
         EVENT_INACTIVITY_TIMEOUT,
+        ErrorSentinel,
         _audio_buffer_to_base64,
     )
 
@@ -93,6 +98,237 @@ async def test_transcribe_turns_propagates_consumer_cancellation(monkeypatch) ->
         await session.close()
         if session._connection_task is not None:
             await asyncio.gather(session._connection_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_transcribe_turns_closes_owned_tasks_after_yield(monkeypatch) -> None:
+    session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="whisper-1",
+        settings=STTModelSettings(),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+    session._websocket = AsyncMock()
+    tracing_span = MagicMock()
+    session._tracing_span = tracing_span
+    never_finishes = asyncio.Event()
+    started = [asyncio.Event() for _ in range(4)]
+    stopped = [asyncio.Event() for _ in range(4)]
+
+    async def hold_open(index: int) -> None:
+        started[index].set()
+        try:
+            await never_finishes.wait()
+        finally:
+            stopped[index].set()
+
+    async def hold_connection_open() -> None:
+        await hold_open(0)
+
+    monkeypatch.setattr(session, "_process_websocket_connection", hold_connection_open)
+    session._listener_task = asyncio.create_task(hold_open(1))
+    session._process_events_task = asyncio.create_task(hold_open(2))
+    session._stream_audio_task = asyncio.create_task(hold_open(3))
+    await session._output_queue.put("hello")
+
+    turns = cast(AsyncGenerator[str, None], session.transcribe_turns())
+    assert await anext(turns) == "hello"
+    await asyncio.gather(*(event.wait() for event in started))
+
+    owned_tasks = (
+        session._connection_task,
+        session._listener_task,
+        session._process_events_task,
+        session._stream_audio_task,
+    )
+    try:
+        await turns.aclose()
+        await asyncio.wait_for(
+            asyncio.gather(*(event.wait() for event in stopped)),
+            timeout=1,
+        )
+        assert all(task is not None and task.cancelled() for task in owned_tasks)
+        session._websocket.close.assert_awaited_once()
+        tracing_span.finish.assert_called_once_with()
+        assert session._tracing_span is None
+    finally:
+        tasks = [task for task in owned_tasks if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_close_finishes_span_started_while_websocket_close_is_pending() -> None:
+    session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="whisper-1",
+        settings=STTModelSettings(),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+    old_span = MagicMock()
+    replacement_span = MagicMock()
+    session._tracing_span = old_span
+    websocket_close_started = asyncio.Event()
+    allow_websocket_close = asyncio.Event()
+
+    async def close_websocket() -> None:
+        websocket_close_started.set()
+        await allow_websocket_close.wait()
+
+    session._websocket = AsyncMock()
+    session._websocket.close.side_effect = close_websocket
+    session._process_events_task = asyncio.create_task(session._handle_events())
+
+    with patch(
+        "agents.voice.models.openai_stt.transcription_span",
+        return_value=replacement_span,
+    ):
+        close_task = asyncio.create_task(session.close())
+        try:
+            await websocket_close_started.wait()
+            await session._event_queue.put(
+                {
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "transcript": "late transcript",
+                }
+            )
+            assert await session._output_queue.get() == "late transcript"
+            session._output_queue.task_done()
+
+            allow_websocket_close.set()
+            await close_task
+        finally:
+            allow_websocket_close.set()
+            if not close_task.done():
+                close_task.cancel()
+            await asyncio.gather(close_task, return_exceptions=True)
+
+    old_span.finish.assert_called_once_with()
+    replacement_span.start.assert_called_once_with()
+    replacement_span.finish.assert_called_once_with()
+    assert session._tracing_span is None
+    assert session._process_events_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_transcribe_turns_preserves_consumer_exception_when_cleanup_fails(
+    monkeypatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="whisper-1",
+        settings=STTModelSettings(),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+    never_finishes = asyncio.Event()
+
+    async def hold_connection_open() -> None:
+        await never_finishes.wait()
+
+    async def fail_cleanup() -> None:
+        raise RuntimeError("sensitive cleanup detail")
+
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
+    monkeypatch.setattr(session, "_process_websocket_connection", hold_connection_open)
+    monkeypatch.setattr(session, "_cleanup_tasks", fail_cleanup)
+    await session._output_queue.put("hello")
+    turns = cast(AsyncGenerator[str, None], session.transcribe_turns())
+    assert await anext(turns) == "hello"
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="openai.agents"):
+            with pytest.raises(ValueError, match="sensitive consumer detail"):
+                await turns.athrow(ValueError("sensitive consumer detail"))
+    finally:
+        if session._connection_task is not None:
+            session._connection_task.cancel()
+            await asyncio.gather(session._connection_task, return_exceptions=True)
+
+    message = "STT session cleanup failed while preserving another exception"
+    record = caplog.records[-1]
+    assert record.msg == message
+    assert record.args == ()
+    assert record.exc_info is None
+    assert record.exc_text is None
+    assert record.getMessage() == message
+    assert logging.Formatter().format(record) == message
+    assert all(
+        not isinstance(value, RuntimeError | ValueError) for value in record.__dict__.values()
+    )
+
+
+@pytest.mark.asyncio
+async def test_transcribe_turns_propagates_cancellation_during_cleanup(monkeypatch) -> None:
+    session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="whisper-1",
+        settings=STTModelSettings(),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+    never_finishes = asyncio.Event()
+
+    async def hold_connection_open() -> None:
+        await never_finishes.wait()
+
+    async def cancelled_cleanup() -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(session, "_process_websocket_connection", hold_connection_open)
+    monkeypatch.setattr(session, "_cleanup_tasks", cancelled_cleanup)
+    await session._output_queue.put("hello")
+    turns = cast(AsyncGenerator[str, None], session.transcribe_turns())
+    assert await anext(turns) == "hello"
+
+    try:
+        # A primary consumer exception is active, but a cancellation raised while the STT
+        # session is closing must still propagate rather than be swallowed as secondary.
+        with pytest.raises(asyncio.CancelledError):
+            await turns.athrow(ValueError("consumer detail"))
+    finally:
+        if session._connection_task is not None:
+            session._connection_task.cancel()
+            await asyncio.gather(session._connection_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_transcribe_turns_preserves_terminal_error_when_close_fails(
+    monkeypatch,
+) -> None:
+    session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="whisper-1",
+        settings=STTModelSettings(),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+    terminal_error = RuntimeError("terminal STT error")
+
+    async def fail_connection() -> None:
+        await session._output_queue.put(ErrorSentinel(terminal_error))
+        raise terminal_error
+
+    session._websocket = AsyncMock()
+    session._websocket.close.side_effect = RuntimeError("websocket cleanup error")
+    monkeypatch.setattr(session, "_process_websocket_connection", fail_connection)
+
+    turns = session.transcribe_turns()
+    with pytest.raises(RuntimeError, match="terminal STT error") as exc_info:
+        await anext(turns)
+
+    assert exc_info.value is terminal_error
+    assert session._connection_task is not None
+    await asyncio.gather(session._connection_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

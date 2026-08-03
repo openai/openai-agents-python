@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import importlib
 import inspect
 import json
 import time
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable
 from copy import copy
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
@@ -26,7 +28,7 @@ from ...agent_output import AgentOutputSchemaBase
 from ...exceptions import ModelBehaviorError, UserError
 from ...handoffs import Handoff
 from ...items import ItemHelpers, ModelResponse, TResponseInputItem, TResponseStreamEvent
-from ...logger import logger
+from ...logger import log_model_action_debug, logger
 from ...model_settings import ModelSettings
 from ...models._openai_retry import get_openai_retry_advice
 from ...models._response_terminal import (
@@ -305,8 +307,33 @@ class AnyLLMModel(Model):
         conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
+        # `aclosing` forwards an early `aclose()` on this generator to the delegate, so the
+        # delegate's cleanup runs deterministically instead of waiting for garbage collection.
+        # The guarantee stops at the iterator any-llm returns: as of any-llm 1.11.0 its
+        # exception and provider wrappers delegate with bare `async for ... yield`, so they do
+        # not forward `aclose()` to the underlying transport. Closing that transport is an
+        # upstream any-llm concern, not something to reach into from here.
         if self._selected_api() == "responses":
-            async for chunk in self._stream_response_via_responses(
+            async with contextlib.aclosing(
+                self._stream_response_via_responses(
+                    system_instructions=system_instructions,
+                    input=input,
+                    model_settings=model_settings,
+                    tools=tools,
+                    output_schema=output_schema,
+                    handoffs=handoffs,
+                    tracing=tracing,
+                    previous_response_id=previous_response_id,
+                    conversation_id=conversation_id,
+                    prompt=prompt,
+                )
+            ) as responses_stream:
+                async for chunk in responses_stream:
+                    yield chunk
+            return
+
+        async with contextlib.aclosing(
+            self._stream_response_via_chat(
                 system_instructions=system_instructions,
                 input=input,
                 model_settings=model_settings,
@@ -314,24 +341,11 @@ class AnyLLMModel(Model):
                 output_schema=output_schema,
                 handoffs=handoffs,
                 tracing=tracing,
-                previous_response_id=previous_response_id,
-                conversation_id=conversation_id,
                 prompt=prompt,
-            ):
+            )
+        ) as chat_stream:
+            async for chunk in chat_stream:
                 yield chunk
-            return
-
-        async for chunk in self._stream_response_via_chat(
-            system_instructions=system_instructions,
-            input=input,
-            model_settings=model_settings,
-            tools=tools,
-            output_schema=output_schema,
-            handoffs=handoffs,
-            tracing=tracing,
-            prompt=prompt,
-        ):
-            yield chunk
 
     async def _get_response_via_responses(
         self,
@@ -410,7 +424,7 @@ class AnyLLMModel(Model):
         previous_response_id: str | None,
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
-    ) -> AsyncIterator[ResponseStreamEvent]:
+    ) -> AsyncGenerator[ResponseStreamEvent, None]:
         with response_span(disabled=tracing.is_disabled()) as span_response:
             stream = await self._fetch_responses_response(
                 system_instructions=system_instructions,
@@ -427,6 +441,8 @@ class AnyLLMModel(Model):
 
             final_response: Response | None = None
             terminal_failure_error: ModelBehaviorError | None = None
+            yielded_terminal_event = False
+            close_stream_in_background = False
             try:
                 async for chunk in stream:
                     chunk_type = getattr(chunk, "type", None)
@@ -443,16 +459,40 @@ class AnyLLMModel(Model):
                             cast(str, chunk_type),
                             chunk,
                         )
+                    if chunk_type in {
+                        "response.completed",
+                        "response.failed",
+                        "response.incomplete",
+                        "error",
+                        "response.error",
+                    }:
+                        yielded_terminal_event = True
+                        # Populate the span before yielding the terminal event so a consumer
+                        # that stops there still leaves a fully recorded span.
+                        if tracing.include_data() and final_response:
+                            span_response.span_data.response = final_response
+                            span_response.span_data.input = input
                     yield chunk
+            except asyncio.CancelledError:
+                close_stream_in_background = True
+                self._schedule_async_iterator_close(stream)
+                raise
             finally:
-                await self._maybe_aclose(stream)
+                if not close_stream_in_background:
+                    try:
+                        await self._close_stream_allowing_background_completion(stream)
+                    except Exception as exc:
+                        if yielded_terminal_event:
+                            log_model_action_debug(
+                                logger,
+                                "Ignoring stream cleanup error after terminal event",
+                                exc,
+                            )
+                        else:
+                            raise
 
             if terminal_failure_error is not None:
                 raise terminal_failure_error
-
-            if tracing.include_data() and final_response:
-                span_response.span_data.response = final_response
-                span_response.span_data.input = input
 
     async def _get_response_via_chat(
         self,
@@ -567,7 +607,7 @@ class AnyLLMModel(Model):
         handoffs: list[Handoff],
         tracing: ModelTracing,
         prompt: ResponsePromptParam | None,
-    ) -> AsyncIterator[TResponseStreamEvent]:
+    ) -> AsyncGenerator[TResponseStreamEvent, None]:
         with generation_span(
             model=str(self.model),
             model_config=model_config_for_trace(
@@ -591,38 +631,68 @@ class AnyLLMModel(Model):
             )
 
             final_response: Response | None = None
+            yielded_terminal_event = False
+            close_stream_in_background = False
             try:
                 async for chunk in ChatCmplStreamHandler.handle_stream(
                     response,
                     cast(Any, self._normalize_chat_stream(stream)),
                     model=self.model,
                 ):
-                    yield chunk
+                    # Record terminal state and populate the span before yielding so a consumer
+                    # that stops at the completed event still leaves a fully recorded span.
                     if chunk.type == "response.completed":
                         final_response = chunk.response
+                        yielded_terminal_event = True
+                        self._populate_chat_generation_span(
+                            span_generation, final_response, tracing
+                        )
+
+                    yield chunk
+            except asyncio.CancelledError:
+                close_stream_in_background = True
+                self._schedule_async_iterator_close(stream)
+                raise
             finally:
-                await self._maybe_aclose(stream)
+                if not close_stream_in_background:
+                    try:
+                        await self._close_stream_allowing_background_completion(stream)
+                    except Exception as exc:
+                        if yielded_terminal_event:
+                            log_model_action_debug(
+                                logger,
+                                "Ignoring stream cleanup error after terminal event",
+                                exc,
+                            )
+                        else:
+                            raise
 
-            if tracing.include_data() and final_response:
-                span_generation.span_data.output = [final_response.model_dump()]
+    @staticmethod
+    def _populate_chat_generation_span(
+        span_generation: Span[GenerationSpanData],
+        final_response: Response,
+        tracing: ModelTracing,
+    ) -> None:
+        if tracing.include_data():
+            span_generation.span_data.output = [final_response.model_dump()]
 
-            if final_response and final_response.usage:
-                span_generation.span_data.usage = {
-                    "requests": 1,
-                    "input_tokens": final_response.usage.input_tokens,
-                    "output_tokens": final_response.usage.output_tokens,
-                    "total_tokens": final_response.usage.total_tokens,
-                    "input_tokens_details": (
-                        final_response.usage.input_tokens_details.model_dump()
-                        if final_response.usage.input_tokens_details
-                        else {"cached_tokens": 0, "cache_write_tokens": 0}
-                    ),
-                    "output_tokens_details": (
-                        final_response.usage.output_tokens_details.model_dump()
-                        if final_response.usage.output_tokens_details
-                        else {"reasoning_tokens": 0}
-                    ),
-                }
+        if final_response.usage:
+            span_generation.span_data.usage = {
+                "requests": 1,
+                "input_tokens": final_response.usage.input_tokens,
+                "output_tokens": final_response.usage.output_tokens,
+                "total_tokens": final_response.usage.total_tokens,
+                "input_tokens_details": (
+                    final_response.usage.input_tokens_details.model_dump()
+                    if final_response.usage.input_tokens_details
+                    else {"cached_tokens": 0, "cache_write_tokens": 0}
+                ),
+                "output_tokens_details": (
+                    final_response.usage.output_tokens_details.model_dump()
+                    if final_response.usage.output_tokens_details
+                    else {"reasoning_tokens": 0}
+                ),
+            }
 
     @overload
     async def _fetch_chat_response(
@@ -1099,6 +1169,41 @@ class AnyLLMModel(Model):
             result = close()
             if inspect.isawaitable(result):
                 await result
+
+    def _schedule_async_iterator_close(self, iterator: Any) -> None:
+        self._detach_stream_close(asyncio.ensure_future(self._maybe_aclose(iterator)))
+
+    async def _close_stream_allowing_background_completion(self, iterator: Any) -> None:
+        """Close the provider iterator, letting an in-flight close finish in the background.
+
+        Cancellation can arrive while `aclose()` is already awaiting the provider. Shielding the
+        close and detaching that exact task keeps it running instead of abandoning it half-done,
+        and avoids starting a second close: re-closing a provider iterator is not guaranteed to
+        be safe or idempotent.
+        """
+        close_task = asyncio.ensure_future(self._maybe_aclose(iterator))
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            self._detach_stream_close(close_task)
+            raise
+
+    def _detach_stream_close(self, close_task: asyncio.Future[None]) -> None:
+        if close_task.done():
+            self._consume_background_cleanup_task_result(close_task)
+            return
+        close_task.add_done_callback(self._consume_background_cleanup_task_result)
+
+    @staticmethod
+    def _consume_background_cleanup_task_result(task: asyncio.Future[Any]) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            log_model_action_debug(
+                logger, "Background stream cleanup failed after cancellation", exc
+            )
 
     def _build_chat_extra_kwargs(self, model_settings: ModelSettings) -> dict[str, Any]:
         extra_kwargs: dict[str, Any] = {}

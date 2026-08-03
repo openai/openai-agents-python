@@ -134,6 +134,7 @@ from .model_events import (
     RealtimeModelInputTokensDetails,
     RealtimeModelItemDeletedEvent,
     RealtimeModelItemUpdatedEvent,
+    RealtimeModelOutputTextDeltaEvent,
     RealtimeModelOutputTokensDetails,
     RealtimeModelRawServerEvent,
     RealtimeModelToolCallEvent,
@@ -386,6 +387,10 @@ class _ResponseCreateSequencer:
             self._response_control = "cancel_requested"
             return True
 
+    async def has_pending_response_create(self) -> bool:
+        async with self._condition:
+            return bool(self._pending_request_versions) or self._pending_response_create is not None
+
 
 def get_server_event_type_adapter() -> TypeAdapter[AllRealtimeServerEvents]:
     global ServerEventTypeAdapter
@@ -504,6 +509,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._websocket: ClientConnection | None = None
         self._websocket_task: asyncio.Task[None] | None = None
         self._response_create_tasks: set[asyncio.Task[None]] = set()
+        self._user_input_lock = asyncio.Lock()
         self._listeners: list[RealtimeModelListener] = []
         self._current_item_id: str | None = None
         self._audio_state_tracker: ModelAudioTracker = ModelAudioTracker()
@@ -723,11 +729,29 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             assert_never(event)
             raise ValueError(f"Unknown event type: {type(event)}")
 
+    async def send_event_if(
+        self, event: RealtimeModelSendEvent, send_if: Callable[[], bool]
+    ) -> bool:
+        if isinstance(event, RealtimeModelSendUserInput):
+            return await self._send_user_input(event, send_if=send_if)
+        return await super().send_event_if(event, send_if)
+
     async def _send_raw_message(self, event: OpenAIRealtimeClientEvent) -> None:
         """Send a raw message to the model."""
         assert self._websocket is not None, "Not connected"
         payload = event.model_dump_json(exclude_unset=True)
         await self._websocket.send(payload)
+
+    async def _send_raw_message_if(
+        self, event: OpenAIRealtimeClientEvent, send_if: Callable[[], bool]
+    ) -> bool:
+        """Recheck a precondition at the WebSocket send boundary."""
+        assert self._websocket is not None, "Not connected"
+        payload = event.model_dump_json(exclude_unset=True)
+        if not send_if():
+            return False
+        await self._websocket.send(payload)
+        return True
 
     async def _set_response_control(
         self, control: Literal["free", "create_requested", "cancel_requested"]
@@ -841,11 +865,29 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         if tasks_to_await:
             await asyncio.gather(*tasks_to_await, return_exceptions=True)
 
-    async def _send_user_input(self, event: RealtimeModelSendUserInput) -> None:
-        converted = _ConversionHelper.convert_user_input_to_item_create(event)
-        await self._send_raw_message(converted)
-        request_version = await self._reserve_response_create_request()
-        self._start_response_create(request_version)
+    async def _send_user_input(
+        self,
+        event: RealtimeModelSendUserInput,
+        *,
+        send_if: Callable[[], bool] | None = None,
+    ) -> bool:
+        async with self._user_input_lock:
+            if send_if is not None:
+                if (
+                    not send_if()
+                    or await self._response_create_sequencer.has_pending_response_create()
+                ):
+                    return False
+
+            converted = _ConversionHelper.convert_user_input_to_item_create(event)
+            if send_if is None:
+                await self._send_raw_message(converted)
+            elif not await self._send_raw_message_if(converted, send_if):
+                return False
+
+            request_version = await self._reserve_response_create_request()
+            self._start_response_create(request_version)
+            return True
 
     async def _send_audio(self, event: RealtimeModelSendAudio) -> None:
         converted = _ConversionHelper.convert_audio_to_input_audio_buffer_append(event)
@@ -904,6 +946,12 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         return audio_state.audio_length_ms, max_audio_ms
 
     async def _send_interrupt(self, event: RealtimeModelSendInterrupt) -> None:
+        if event.cancel_response_only:
+            if event.response_id is None:
+                raise ValueError("cancel_response_only requires response_id")
+            await self._cancel_response(response_id=event.response_id)
+            return
+
         playback_state = self._get_playback_state()
         current_item_id = playback_state.get("current_item_id")
         current_item_content_index = playback_state.get("current_item_content_index")
@@ -962,7 +1010,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             not automatic_response_cancellation_enabled
         )
         if should_cancel_response:
-            await self._cancel_response()
+            await self._cancel_response(response_id=event.response_id)
 
         if current_item_id is not None and elapsed_ms is not None:
             self._audio_state_tracker.on_interrupted()
@@ -1054,12 +1102,17 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         else:
             await self._release_response_waiters()
 
-    async def _cancel_response(self) -> None:
+    async def _cancel_response(self, *, response_id: str | None = None) -> None:
         if not await self._response_create_sequencer.begin_cancel_response():
             return
 
+        cancel_event = (
+            OpenAIResponseCancelEvent(type="response.cancel")
+            if response_id is None
+            else OpenAIResponseCancelEvent(type="response.cancel", response_id=response_id)
+        )
         try:
-            await self._send_raw_message(OpenAIResponseCancelEvent(type="response.cancel"))
+            await self._send_raw_message(cancel_event)
         except Exception:
             await self._set_response_control("free")
             raise
@@ -1220,7 +1273,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     await self._cancel_response()
         elif parsed.type == "response.created":
             await self._mark_response_created()
-            await self._emit_event(RealtimeModelTurnStartedEvent())
+            await self._emit_event(RealtimeModelTurnStartedEvent(response_id=parsed.response.id))
         elif parsed.type == "response.done":
             await self._mark_response_done()
             if parsed.response.usage is not None:
@@ -1276,9 +1329,16 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     item_id=parsed.item_id, delta=parsed.delta, response_id=parsed.response_id
                 )
             )
+        elif parsed.type == "response.output_text.delta":
+            await self._emit_event(
+                RealtimeModelOutputTextDeltaEvent(
+                    item_id=parsed.item_id,
+                    delta=parsed.delta,
+                    response_id=parsed.response_id,
+                )
+            )
         elif (
             parsed.type == "conversation.item.input_audio_transcription.delta"
-            or parsed.type == "response.output_text.delta"
             or parsed.type == "response.function_call_arguments.delta"
         ):
             # No support for partials yet

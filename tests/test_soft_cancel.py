@@ -1,13 +1,23 @@
 """Tests for soft cancel (after_turn mode) functionality."""
 
+import asyncio
 import json
+from collections.abc import AsyncGenerator
+from typing import cast
 
 import pytest
 
 from agents import Agent, Runner, SQLiteSession
+from agents.agent_output import AgentOutputSchema
+from agents.stream_events import StreamEvent
 
 from .fake_model import FakeModel
-from .test_responses import get_function_tool, get_function_tool_call, get_text_message
+from .test_responses import (
+    get_function_tool,
+    get_function_tool_call,
+    get_handoff_tool_call,
+    get_text_message,
+)
 
 
 @pytest.mark.asyncio
@@ -140,7 +150,8 @@ async def test_soft_cancel_tracks_usage():
 
 
 @pytest.mark.asyncio
-async def test_soft_cancel_stops_next_turn():
+@pytest.mark.parametrize("consumer_suspensions", [0, 1, 3])
+async def test_soft_cancel_stops_next_turn(consumer_suspensions: int):
     """Verify soft cancel prevents next turn from starting."""
     model = FakeModel()
     agent = Agent(
@@ -165,9 +176,167 @@ async def test_soft_cancel_stops_next_turn():
         if event.type == "run_item_stream_event" and event.name == "tool_output":
             turns_completed += 1
             if turns_completed == 1:
+                for _ in range(consumer_suspensions):
+                    await asyncio.sleep(0)
                 result.cancel(mode="after_turn")
 
     assert turns_completed == 1, "Should complete exactly 1 turn"
+    assert result.final_output is None
+    assert result.context_wrapper.usage.requests == 1
+
+
+@pytest.mark.asyncio
+async def test_soft_cancel_stops_next_turn_with_short_lived_anext_tasks():
+    """Per-event tasks must not acknowledge a turn before the caller handles its event."""
+    model = FakeModel()
+    agent = Agent(
+        name="Assistant",
+        model=model,
+        tools=[get_function_tool("tool1", "result1")],
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("tool1", "{}")],
+            [get_text_message("Turn 2")],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="Hello")
+    events = cast(AsyncGenerator[StreamEvent, None], result.stream_events())
+    try:
+        while True:
+            event = await asyncio.create_task(anext(events))
+            if event.type == "run_item_stream_event" and event.name == "tool_output":
+                result.cancel(mode="after_turn")
+    except StopAsyncIteration:
+        pass
+
+    assert result.final_output is None
+    assert result.context_wrapper.usage.requests == 1
+
+
+@pytest.mark.asyncio
+async def test_streamed_run_completes_without_an_event_consumer():
+    """Turn acknowledgement must not block a run whose events are not consumed."""
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("tool1", "{}")],
+            [get_text_message("Turn 2")],
+        ]
+    )
+    agent = Agent(
+        name="Assistant",
+        model=model,
+        tools=[get_function_tool("tool1", "result1")],
+    )
+
+    result = Runner.run_streamed(agent, input="Hello")
+    assert result.run_loop_task is not None
+    await asyncio.wait_for(result.run_loop_task, timeout=1)
+
+    assert result.final_output == "Turn 2"
+    assert result.context_wrapper.usage.requests == 2
+
+
+@pytest.mark.asyncio
+async def test_closing_stream_consumer_releases_turn_acknowledgement():
+    """Closing an iterator must not deadlock while a turn awaits its consumer."""
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("tool1", "{}")],
+            [get_text_message("Turn 2")],
+        ]
+    )
+    agent = Agent(
+        name="Assistant",
+        model=model,
+        tools=[get_function_tool("tool1", "result1")],
+    )
+
+    result = Runner.run_streamed(agent, input="Hello")
+    events = cast(AsyncGenerator[StreamEvent, None], result.stream_events())
+    while True:
+        event = await anext(events)
+        if event.type == "run_item_stream_event" and event.name == "tool_output":
+            break
+
+    await asyncio.wait_for(events.aclose(), timeout=1)
+
+    assert result.final_output == "Turn 2"
+    assert result.context_wrapper.usage.requests == 2
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stream_consumer_releases_turn_acknowledgement():
+    """Cancelling a consumer suspended after yield must release the completed turn."""
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("tool1", "{}")],
+            [get_text_message("Turn 2")],
+        ]
+    )
+    agent = Agent(
+        name="Assistant",
+        model=model,
+        tools=[get_function_tool("tool1", "result1")],
+    )
+
+    result = Runner.run_streamed(agent, input="Hello")
+    events = cast(AsyncGenerator[StreamEvent, None], result.stream_events())
+    consumer_suspended = asyncio.Event()
+    keep_consumer_suspended = asyncio.Event()
+
+    async def consume_events() -> None:
+        async for event in events:
+            if event.type == "run_item_stream_event" and event.name == "tool_output":
+                consumer_suspended.set()
+                await keep_consumer_suspended.wait()
+
+    consumer_task = asyncio.create_task(consume_events())
+    await asyncio.wait_for(consumer_suspended.wait(), timeout=1)
+
+    consumer_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer_task
+
+    assert result.run_loop_task is not None
+    await asyncio.wait_for(result.run_loop_task, timeout=1)
+
+    assert result.final_output == "Turn 2"
+    assert result.context_wrapper.usage.requests == 2
+    assert result._active_stream_consumers == 0
+
+    await asyncio.wait_for(events.aclose(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_immediate_cancel_releases_turn_acknowledgement():
+    """Immediate cancellation must cancel a run waiting for streamed event acknowledgement."""
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("tool1", "{}")],
+            [get_text_message("Turn 2")],
+        ]
+    )
+    agent = Agent(
+        name="Assistant",
+        model=model,
+        tools=[get_function_tool("tool1", "result1")],
+    )
+
+    result = Runner.run_streamed(agent, input="Hello")
+    async for event in result.stream_events():
+        if event.type == "run_item_stream_event" and event.name == "tool_output":
+            await asyncio.sleep(0)
+            result.cancel(mode="immediate")
+
+    assert result.is_complete
+    assert result.final_output is None
+    assert result.context_wrapper.usage.requests == 1
 
 
 @pytest.mark.asyncio
@@ -434,6 +603,64 @@ async def test_soft_cancel_with_handoff():
 
     # Cleanup
     await session.clear_session()
+
+
+@pytest.mark.asyncio
+async def test_soft_cancel_waits_for_handoff_event_consumption_before_next_turn():
+    """A suspended handoff consumer can stop the run before the delegate model starts."""
+    second_request_started = asyncio.Event()
+
+    class HandoffModel(FakeModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.request_count = 0
+
+        async def stream_response(self, *args, **kwargs):
+            self.request_count += 1
+            if self.request_count == 2:
+                second_request_started.set()
+            async for event in super().stream_response(*args, **kwargs):
+                yield event
+
+    model = HandoffModel()
+    delegate = Agent(name="Delegate", model=model, output_type=int)
+    triage = Agent(name="Triage", model=model, handoffs=[delegate])
+    model.add_multiple_turn_outputs(
+        [
+            [get_handoff_tool_call(delegate)],
+            [get_text_message("Delegate response")],
+        ]
+    )
+
+    result = Runner.run_streamed(triage, input="Route this request")
+    consumer_suspended = asyncio.Event()
+    release_consumer = asyncio.Event()
+
+    async def consume_events() -> None:
+        async for event in result.stream_events():
+            if event.type == "run_item_stream_event" and event.name == "handoff_requested":
+                consumer_suspended.set()
+                await release_consumer.wait()
+                result.cancel(mode="after_turn")
+
+    consumer_task = asyncio.create_task(consume_events())
+    await asyncio.wait_for(consumer_suspended.wait(), timeout=1)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert not second_request_started.is_set()
+
+    release_consumer.set()
+    await asyncio.wait_for(consumer_task, timeout=1)
+
+    assert result.final_output is None
+    assert result.context_wrapper.usage.requests == 1
+    assert result.current_agent is delegate
+    assert result.last_agent is delegate
+    assert result.to_state()._current_agent is delegate
+    assert result._current_agent_output_schema is not None
+    assert isinstance(result._current_agent_output_schema, AgentOutputSchema)
+    assert result._current_agent_output_schema.output_type is int
 
 
 @pytest.mark.asyncio
