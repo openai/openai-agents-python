@@ -575,6 +575,7 @@ class RunResultStreaming(RunResultBase):
     _triggered_input_guardrail_result: InputGuardrailResult | None = field(default=None, repr=False)
     _output_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _stored_exception: Exception | None = field(default=None, repr=False)
+    _stored_exception_details_stale: bool = field(default=False, repr=False)
     _cancel_mode: Literal["none", "immediate", "after_turn"] = field(default="none", repr=False)
     _last_processed_response: ProcessedResponse | None = field(default=None, repr=False)
     """The last processed model response. This is needed for resuming from interruptions."""
@@ -845,6 +846,7 @@ class RunResultStreaming(RunResultBase):
                     # failure that races past the sentinel (e.g. early sandbox failures) would
                     # be silently lost instead of surfaced via _stored_exception.
                     self._check_errors()
+                    self._refresh_stale_error_details()
                     # Safely terminate all background tasks after main execution has finished.
                     self._cleanup_tasks()
 
@@ -861,6 +863,23 @@ class RunResultStreaming(RunResultBase):
 
         if self._stored_exception:
             raise self._stored_exception
+
+    def _refresh_stale_error_details(self) -> None:
+        """Rebuild details captured before the run loop settled.
+
+        A parallel input guardrail can trip mid-turn, so the details stored then predate the tool
+        guardrail results that turn goes on to append. `_check_errors()` keeps the first stored
+        exception, so refresh its details here instead of reporting the provisional ones.
+        """
+        if not self._stored_exception_details_stale:
+            return
+        self._stored_exception_details_stale = False
+        error = self._stored_exception
+        if error is None or getattr(error, "run_data", None) is None:
+            return
+        refreshed = self._create_error_details(error)
+        if refreshed is not None:
+            error.run_data = refreshed  # type: ignore[attr-defined]
 
     def _create_error_details(self, error: BaseException | None = None) -> RunErrorDetails | None:
         """Return a `RunErrorDetails` object considering the current attributes of the class.
@@ -905,6 +924,10 @@ class RunResultStreaming(RunResultBase):
                 tripwire_exc = InputGuardrailTripwireTriggered(guardrail_result)
                 tripwire_exc.run_data = self._create_error_details(tripwire_exc)
                 self._stored_exception = tripwire_exc
+                # A parallel guardrail can trip while the current turn is still running its tool
+                # guardrails. Those results land on this object only once the turn settles, so the
+                # details above are provisional until the run loop finishes.
+                self._stored_exception_details_stale = True
 
         # Check the tasks for any exceptions
         if self.run_loop_task and self.run_loop_task.done():

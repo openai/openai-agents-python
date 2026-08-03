@@ -921,6 +921,106 @@ async def test_parallel_input_tripwire_reports_tool_guardrail_results(streaming:
     assert _names(run_data.tool_input_guardrail_results) == ["input_rejects"] * guardrail_runs
 
 
+def _build_slow_tool_parallel_tripwire_agent(
+    tool_sleep: float,
+) -> tuple[Agent, dict[str, int]]:
+    """An agent whose tool guardrail runs, then a parallel guardrail trips mid-tool-call."""
+    state = {"runs": 0}
+
+    async def allow(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        state["runs"] += 1
+        return ToolGuardrailFunctionOutput.allow(output_info="allowed")
+
+    @function_tool
+    async def guarded(query: str) -> str:
+        # Still in flight when the parallel guardrail trips.
+        await asyncio.sleep(tool_sleep)
+        return "tool output"
+
+    guarded.tool_input_guardrails = [
+        ToolInputGuardrail(guardrail_function=allow, name="input_allows")
+    ]
+
+    async def trip_mid_tool_call(ctx: Any, agent: Any, agent_input: Any) -> GuardrailFunctionOutput:
+        await asyncio.sleep(0.15)
+        return GuardrailFunctionOutput(output_info="tripped", tripwire_triggered=True)
+
+    parallel_guardrail = InputGuardrail(guardrail_function=trip_mid_tool_call, name="slow_tripwire")
+    parallel_guardrail.run_in_parallel = True
+
+    model = FakeModel()
+    call = [get_function_tool_call("guarded", '{"query": "secret"}')]
+    model.add_multiple_turn_outputs([call, call, [get_text_message("done")]])
+    agent = Agent(
+        name="parallel_guardrail_agent",
+        model=model,
+        tools=[guarded],
+        input_guardrails=[parallel_guardrail],
+    )
+    return agent, state
+
+
+@pytest.mark.asyncio
+async def test_parallel_tripwire_reports_guardrails_from_a_cancelled_turn():
+    """Cancelling the overlapped turn must not lose the tool guardrails it already ran.
+
+    `asyncio.gather` returns a fresh `CancelledError` for a cancelled task, so the partials the
+    executor recorded on the original exception are unreachable from the awaiting side.
+    """
+    agent, state = _build_slow_tool_parallel_tripwire_agent(tool_sleep=2.0)
+
+    with pytest.raises(InputGuardrailTripwireTriggered) as exc_info:
+        await Runner.run(agent, "go")
+
+    assert state["runs"] >= 1, "the tool guardrail never ran, so the test proves nothing"
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _names(run_data.tool_input_guardrail_results) == ["input_allows"] * state["runs"]
+
+
+@pytest.mark.asyncio
+async def test_parallel_tripwire_reports_guardrails_without_cancelling_the_turn():
+    """The no-cancel path (e.g. Temporal replay) still discards the turn, so harvest it."""
+    agent, state = _build_slow_tool_parallel_tripwire_agent(tool_sleep=0.0)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            "agents.run.should_cancel_parallel_model_task_on_input_guardrail_trip",
+            lambda: False,
+        )
+        with pytest.raises(InputGuardrailTripwireTriggered) as exc_info:
+            await Runner.run(agent, "go")
+
+    assert state["runs"] >= 1, "the tool guardrail never ran, so the test proves nothing"
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _names(run_data.tool_input_guardrail_results) == ["input_allows"] * state["runs"]
+
+
+@pytest.mark.asyncio
+async def test_streamed_parallel_tripwire_details_refresh_after_the_turn_settles():
+    """A streamed tripwire's details are provisional until the in-flight turn appends its results.
+
+    The consumer here yields between events, so `_check_errors()` freezes the details while the
+    tool call is still running -- a fast consumer parks on the empty queue and hides this.
+    """
+    agent, state = _build_slow_tool_parallel_tripwire_agent(tool_sleep=0.6)
+
+    with pytest.raises(InputGuardrailTripwireTriggered) as exc_info:
+        streamed = Runner.run_streamed(agent, "go")
+        async for _ in streamed.stream_events():
+            await asyncio.sleep(0.08)
+
+    assert state["runs"] >= 1, "the tool guardrail never ran, so the test proves nothing"
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _names(run_data.tool_input_guardrail_results) == ["input_allows"] * state["runs"]
+    # The streamed object itself already reported them; the exception must agree with it.
+    assert _names(run_data.tool_input_guardrail_results) == _names(
+        streamed.tool_input_guardrail_results
+    )
+
+
 if __name__ == "__main__":
     # Run a simple test to verify functionality
     async def main():

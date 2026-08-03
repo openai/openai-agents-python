@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import warnings
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from typing import Any, cast
 
 from typing_extensions import Unpack
@@ -176,17 +176,44 @@ def get_default_agent_runner() -> AgentRunner:
     return DEFAULT_AGENT_RUNNER
 
 
+async def _capture_turn_tool_guardrail_partials(
+    turn: Awaitable[Any],
+    tool_input_guardrail_results: list[ToolInputGuardrailResult],
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult],
+) -> Any:
+    """Copy an aborted turn's tool guardrail results out before the task boundary loses them.
+
+    The function-tool executor records its partials on the exception that aborts the turn, but
+    ``asyncio.gather`` hands back a *fresh* ``CancelledError`` for a cancelled task rather than
+    the annotated one.  Reading them from inside the task keeps them reachable, so the lists are
+    owned by the caller that will build ``RunErrorDetails``.
+    """
+    try:
+        return await turn
+    except BaseException as exc:
+        tool_input_guardrail_results.extend(_tool_input_guardrail_partials(exc))
+        tool_output_guardrail_results.extend(_tool_output_guardrail_partials(exc))
+        raise
+
+
 def _record_parallel_model_task_guardrail_partials(
     error: BaseException,
     model_outcome: Sequence[Any],
+    tool_input_guardrail_results: list[ToolInputGuardrailResult],
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult],
 ) -> None:
     """Carry a discarded parallel model turn's tool guardrail results onto ``error``.
 
     When a parallel input guardrail trips, the overlapped model task's ``SingleStepResult``
     is thrown away even though its tool guardrails may already have run.  Read them from a
-    completed result, or -- if the task was cancelled mid-turn -- from the partials the
-    function-tool executor recorded on its exception.
+    completed result, or -- if the task was cancelled mid-turn -- from the partials captured
+    inside the task.
     """
+    _record_tool_guardrail_partials(
+        error,
+        tool_input_guardrail_results=tool_input_guardrail_results,
+        tool_output_guardrail_results=tool_output_guardrail_results,
+    )
     for outcome in model_outcome:
         if isinstance(outcome, BaseException):
             _record_tool_guardrail_partials(
@@ -1277,27 +1304,35 @@ class AgentRunner:
                                 )
                                 raise
 
+                            # Owned out here so a cancelled turn's guardrail results stay
+                            # reachable: the task boundary replaces the annotated exception.
+                            turn_tool_input_partials: list[ToolInputGuardrailResult] = []
+                            turn_tool_output_partials: list[ToolOutputGuardrailResult] = []
                             model_task = asyncio.create_task(
-                                run_single_turn(
-                                    bindings=current_bindings,
-                                    all_tools=all_tools,
-                                    original_input=original_input,
-                                    generated_items=items_for_model,
-                                    hooks=hooks,
-                                    context_wrapper=context_wrapper,
-                                    run_config=run_config,
-                                    should_run_agent_start_hooks=should_run_agent_start_hooks,
-                                    tool_use_tracker=tool_use_tracker,
-                                    server_conversation_tracker=server_conversation_tracker,
-                                    session=session,
-                                    session_items_to_rewind=(
-                                        last_saved_input_snapshot_for_rewind
-                                        if not is_resumed_state and session_persistence_enabled
-                                        else None
+                                _capture_turn_tool_guardrail_partials(
+                                    run_single_turn(
+                                        bindings=current_bindings,
+                                        all_tools=all_tools,
+                                        original_input=original_input,
+                                        generated_items=items_for_model,
+                                        hooks=hooks,
+                                        context_wrapper=context_wrapper,
+                                        run_config=run_config,
+                                        should_run_agent_start_hooks=should_run_agent_start_hooks,
+                                        tool_use_tracker=tool_use_tracker,
+                                        server_conversation_tracker=server_conversation_tracker,
+                                        session=session,
+                                        session_items_to_rewind=(
+                                            last_saved_input_snapshot_for_rewind
+                                            if not is_resumed_state and session_persistence_enabled
+                                            else None
+                                        ),
+                                        reasoning_item_id_policy=resolved_reasoning_item_id_policy,
+                                        prompt_cache_key_resolver=prompt_cache_key_resolver,
+                                        error_handlers=error_handlers,
                                     ),
-                                    reasoning_item_id_policy=resolved_reasoning_item_id_policy,
-                                    prompt_cache_key_resolver=prompt_cache_key_resolver,
-                                    error_handlers=error_handlers,
+                                    turn_tool_input_partials,
+                                    turn_tool_output_partials,
                                 )
                             )
 
@@ -1317,20 +1352,29 @@ class AgentRunner:
                                         model_task,
                                     )
                                 except InputGuardrailTripwireTriggered as tripwire_exc:
+                                    model_outcome: Sequence[Any] = ()
                                     if should_cancel_parallel_model_task_on_input_guardrail_trip():
                                         if not model_task.done():
                                             model_task.cancel()
-                                        model_outcome: Sequence[Any] = await asyncio.gather(
+                                        model_outcome = await asyncio.gather(
                                             model_task, return_exceptions=True
                                         )
-                                    else:
-                                        model_outcome = ()
+                                    elif model_task.done():
+                                        # Not cancelling (e.g. Temporal replay compatibility) still
+                                        # discards the turn, so harvest a turn that already
+                                        # finished instead of dropping its guardrail results.
+                                        model_outcome = await asyncio.gather(
+                                            model_task, return_exceptions=True
+                                        )
                                     # The model turn overlapped this guardrail and may have run
                                     # tool guardrails before being cancelled or completing. Its
                                     # SingleStepResult is discarded here, so carry those results
                                     # onto the tripwire or they never reach RunErrorDetails.
                                     _record_parallel_model_task_guardrail_partials(
-                                        tripwire_exc, model_outcome
+                                        tripwire_exc,
+                                        model_outcome,
+                                        turn_tool_input_partials,
+                                        turn_tool_output_partials,
                                     )
                                     session_input_items_for_persistence = (
                                         await persist_session_items_for_guardrail_trip(
