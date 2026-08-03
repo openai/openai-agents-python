@@ -9,10 +9,12 @@ dependency-free while exercising the full session logic.
 from __future__ import annotations
 
 import asyncio
+import gc
 import sys
 import threading
 import types
 from collections import defaultdict
+from concurrent.futures import Future
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import patch
@@ -906,6 +908,67 @@ async def test_cancelled_waiter_does_not_break_the_in_flight_release() -> None:
     await s.close()
     with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
         await s.get_items()
+
+
+async def test_close_waits_for_an_in_flight_operation() -> None:
+    """close() must not release the client under an operation that already started."""
+    s, fake_client = _make_owned_session("close-drains")
+    await s.add_items([{"role": "user", "content": "first"}])
+
+    saw_closed_client: list[bool] = []
+    original_insert = s._messages.insert_many
+
+    async def _slow_insert(documents: list[Any], ordered: bool = True) -> None:
+        # Suspend after the closed check has already passed, like a real round-trip.
+        await asyncio.sleep(0.1)
+        saw_closed_client.append(fake_client._closed)
+        await original_insert(documents, ordered=ordered)
+
+    s._messages.insert_many = _slow_insert  # type: ignore[assignment,method-assign]
+
+    op = asyncio.create_task(s.add_items([{"role": "user", "content": "in flight"}]))
+    await asyncio.sleep(0.02)  # op is past the guard and suspended mid-command
+    await s.close()
+
+    await op
+    assert saw_closed_client == [False], "command ran against a closed client"
+    assert fake_client._closed
+
+    # The session is still terminal once the drain completes.
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await s.get_items()
+
+
+@pytest.mark.parametrize("cancel_first", [True, False])
+async def test_cancelled_waiter_consumes_a_failed_release(cancel_first: bool) -> None:
+    """An abandoned waiter must not leave a failed release's exception unretrieved."""
+    logged: list[str] = []
+    asyncio.get_running_loop().set_exception_handler(
+        lambda loop, context: logged.append(context.get("message", ""))
+    )
+
+    pending: Future[None] = Future()
+    task = asyncio.create_task(MongoDBSession._await_client_release(pending))
+    await asyncio.sleep(0.01)  # let the waiter block on the shared attempt
+
+    # Both interleavings matter: asyncio.shield only marks the wrapped outcome
+    # retrieved when the failure lands before the cancellation is delivered.
+    if cancel_first:
+        task.cancel()
+        pending.set_exception(ConnectionError("release failed"))
+    else:
+        pending.set_exception(ConnectionError("release failed"))
+        task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    del task, pending
+    for _ in range(3):
+        gc.collect()
+        await asyncio.sleep(0.01)
+
+    assert logged == [], logged
 
 
 async def test_concurrent_close_across_event_loops_releases_client_once() -> None:

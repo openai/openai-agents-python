@@ -32,9 +32,11 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import threading
 import weakref
+from collections.abc import Iterator
 from concurrent.futures import Future
 from datetime import datetime, timezone
 from typing import Any, ClassVar
@@ -148,6 +150,11 @@ class MongoDBSession(SessionABC):
         # the _init_guard threading.Lock are used rather than asyncio primitives,
         # which would only serialize callers on a single event loop.
         self._release_attempt: Future[None] | None = None
+        # Number of session operations that have passed the closed check and may
+        # still issue commands. close() drains these before releasing the client
+        # so an in-flight operation never runs against a closed one.
+        self._active_operations = 0
+        self._idle: Future[None] | None = None
 
         client.append_metadata(_DRIVER_INFO)
 
@@ -270,6 +277,34 @@ class MongoDBSession(SessionABC):
         if self._closed:
             raise RuntimeError("MongoDBSession is closed")
 
+    @contextlib.contextmanager
+    def _operation(self) -> Iterator[None]:
+        """Reject operations on a closed session and keep ``close()`` from racing them.
+
+        Entering registers the operation so a concurrent ``close()`` waits for it to
+        finish before releasing the client; otherwise an operation that already passed
+        the closed check could issue its command against a closed client.  The counter
+        is guarded by the same ``threading.Lock`` as the rest of this class's state, so
+        it works across event loops and threads where an ``asyncio.Lock`` would not.
+
+        Unlike the lock the other backends hold for their whole operation, this only
+        bounds ``close()`` -- concurrent reads and writes still overlap, which is the
+        behaviour MongoDB users get today.
+        """
+        with self._init_guard:
+            self._check_not_closed()
+            self._active_operations += 1
+        try:
+            yield
+        finally:
+            with self._init_guard:
+                self._active_operations -= 1
+                idle = self._idle if self._active_operations == 0 else None
+                if idle is not None:
+                    self._idle = None
+            if idle is not None and not idle.done():
+                idle.set_result(None)
+
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
@@ -283,44 +318,44 @@ class MongoDBSession(SessionABC):
         Returns:
             List of input items representing the conversation history.
         """
-        self._check_not_closed()
-        await self._ensure_indexes()
+        with self._operation():
+            await self._ensure_indexes()
 
-        session_limit = resolve_session_limit(limit, self.session_settings)
+            session_limit = resolve_session_limit(limit, self.session_settings)
 
-        if session_limit is not None and session_limit <= 0:
-            return []
+            if session_limit is not None and session_limit <= 0:
+                return []
 
-        query = {"session_id": self.session_id}
+            query = {"session_id": self.session_id}
 
-        async def _decode_docs(docs: list[Any]) -> list[TResponseInputItem]:
-            items: list[TResponseInputItem] = []
-            for doc in docs:
-                try:
-                    items.append(await self._deserialize_item(doc["message_data"]))
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    # Skip corrupted or malformed documents (including non-string BSON values).
-                    continue
-            return items
-
-        if session_limit is None:
-            cursor = self._messages.find(query).sort("seq", 1)
-            return await _decode_docs(await cursor.to_list())
-
-        # Fetch the latest N documents in reverse order, then reverse the
-        # list to restore chronological order. Expand the fetch window when corrupt
-        # documents sit among the newest entries so limit counts valid conversation
-        # items, matching pop_item and the SQLite backends.
-        window = session_limit
-        while True:
-            cursor = self._messages.find(query).sort("seq", -1).limit(window)
-            docs = await cursor.to_list()
-            items = await _decode_docs(docs[::-1])
-            if len(items) >= session_limit:
-                return items[-session_limit:]
-            if len(docs) < window:
+            async def _decode_docs(docs: list[Any]) -> list[TResponseInputItem]:
+                items: list[TResponseInputItem] = []
+                for doc in docs:
+                    try:
+                        items.append(await self._deserialize_item(doc["message_data"]))
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        # Skip corrupted or malformed documents (including non-string BSON values).
+                        continue
                 return items
-            window *= 2
+
+            if session_limit is None:
+                cursor = self._messages.find(query).sort("seq", 1)
+                return await _decode_docs(await cursor.to_list())
+
+            # Fetch the latest N documents in reverse order, then reverse the
+            # list to restore chronological order. Expand the fetch window when corrupt
+            # documents sit among the newest entries so limit counts valid conversation
+            # items, matching pop_item and the SQLite backends.
+            window = session_limit
+            while True:
+                cursor = self._messages.find(query).sort("seq", -1).limit(window)
+                docs = await cursor.to_list()
+                items = await _decode_docs(docs[::-1])
+                if len(items) >= session_limit:
+                    return items[-session_limit:]
+                if len(docs) < window:
+                    return items
+                window *= 2
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Add new items to the conversation history.
@@ -328,39 +363,40 @@ class MongoDBSession(SessionABC):
         Args:
             items: List of input items to append to the session.
         """
-        self._check_not_closed()
         if not items:
+            self._check_not_closed()
             return
 
-        await self._ensure_indexes()
+        with self._operation():
+            await self._ensure_indexes()
 
-        now = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc)
 
-        # Atomically reserve a block of sequence numbers for this batch.
-        # $inc returns the new value, so subtract len(items) to get the first
-        # number in the block.
-        result = await self._sessions.find_one_and_update(
-            {"session_id": self.session_id},
-            {
-                "$setOnInsert": {"session_id": self.session_id, "created_at": now},
-                "$set": {"updated_at": now},
-                "$inc": {"_seq": len(items)},
-            },
-            upsert=True,
-            return_document=True,
-        )
-        next_seq: int = (result["_seq"] if result else len(items)) - len(items)
+            # Atomically reserve a block of sequence numbers for this batch.
+            # $inc returns the new value, so subtract len(items) to get the first
+            # number in the block.
+            result = await self._sessions.find_one_and_update(
+                {"session_id": self.session_id},
+                {
+                    "$setOnInsert": {"session_id": self.session_id, "created_at": now},
+                    "$set": {"updated_at": now},
+                    "$inc": {"_seq": len(items)},
+                },
+                upsert=True,
+                return_document=True,
+            )
+            next_seq: int = (result["_seq"] if result else len(items)) - len(items)
 
-        payload = [
-            {
-                "session_id": self.session_id,
-                "seq": next_seq + i,
-                "message_data": await self._serialize_item(item),
-            }
-            for i, item in enumerate(items)
-        ]
+            payload = [
+                {
+                    "session_id": self.session_id,
+                    "seq": next_seq + i,
+                    "message_data": await self._serialize_item(item),
+                }
+                for i, item in enumerate(items)
+            ]
 
-        await self._messages.insert_many(payload, ordered=True)
+            await self._messages.insert_many(payload, ordered=True)
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
@@ -373,30 +409,48 @@ class MongoDBSession(SessionABC):
         matches :meth:`get_items`, which also skips corrupt documents, so a
         single bad row cannot make a non-empty session look empty to callers.
         """
-        await self._ensure_indexes()
+        with self._operation():
+            await self._ensure_indexes()
 
-        while True:
-            doc = await self._messages.find_one_and_delete(
-                {"session_id": self.session_id},
-                sort=[("seq", -1)],
-            )
-            if doc is None:
-                return None
-            try:
-                return await self._deserialize_item(doc["message_data"])
-            except (json.JSONDecodeError, KeyError, TypeError):
-                # Corrupt — drop it and try the next-most-recent document.
-                continue
+            while True:
+                doc = await self._messages.find_one_and_delete(
+                    {"session_id": self.session_id},
+                    sort=[("seq", -1)],
+                )
+                if doc is None:
+                    return None
+                try:
+                    return await self._deserialize_item(doc["message_data"])
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    # Corrupt — drop it and try the next-most-recent document.
+                    continue
 
     async def clear_session(self) -> None:
         """Clear all items for this session."""
-        await self._ensure_indexes()
-        await self._messages.delete_many({"session_id": self.session_id})
-        await self._sessions.delete_one({"session_id": self.session_id})
+        with self._operation():
+            await self._ensure_indexes()
+            await self._messages.delete_many({"session_id": self.session_id})
+            await self._sessions.delete_one({"session_id": self.session_id})
 
     # ------------------------------------------------------------------
     # Lifecycle helpers
     # ------------------------------------------------------------------
+
+    async def _drain_active_operations(self) -> None:
+        """Wait for operations that already passed the closed check to finish.
+
+        ``_closed`` is set before this runs, so no new operation can start; this only
+        waits out the ones already in flight.  A ``concurrent.futures.Future`` is used
+        so the wait works from any event loop, and it is shielded because a cancelled
+        ``close()`` must not abort a drain other callers are also waiting on.
+        """
+        with self._init_guard:
+            if self._active_operations == 0:
+                return
+            if self._idle is None:
+                self._idle = Future()
+            idle = self._idle
+        await self._await_client_release(idle)
 
     def _claim_client_release(self) -> tuple[bool, Future[None] | None]:
         """Claim the right to release the client, or report what to wait for.
@@ -428,16 +482,19 @@ class MongoDBSession(SessionABC):
         The attempt is shared, so cancelling this coroutine must not cancel it:
         :func:`asyncio.wrap_future` forwards cancellation to the wrapped
         ``concurrent.futures.Future``, which would leave the releasing caller unable
-        to publish its outcome.  :func:`asyncio.shield` keeps the wrapper alive, and
-        the done callback discards the eventual outcome so an abandoned wrapper
-        holding an exception does not log "exception was never retrieved".
+        to publish its outcome.  :func:`asyncio.shield` keeps the wrapper alive.
+
+        On cancellation the wrapper is abandoned, so its outcome is consumed via a
+        done callback -- otherwise a release that goes on to fail would surface as
+        "Future exception was never retrieved".  The callback is added
+        unconditionally: asyncio invokes it immediately for an already-completed
+        wrapper, and re-reading a retrieved outcome is harmless.
         """
         wrapper = asyncio.wrap_future(pending)
         try:
             await asyncio.shield(wrapper)
         except asyncio.CancelledError:
-            if not wrapper.done():
-                wrapper.add_done_callback(lambda f: f.cancelled() or f.exception())
+            wrapper.add_done_callback(lambda f: f.cancelled() or f.exception())
             raise
 
     def _finish_client_release(self, error: BaseException | None) -> None:
@@ -477,6 +534,7 @@ class MongoDBSession(SessionABC):
         # Mark terminal before releasing, so a caller waiting on another's
         # release cannot issue commands against a closing client.
         self._closed = True
+        await self._drain_active_operations()
         claimed, pending = self._claim_client_release()
         if not claimed:
             if pending is not None:
@@ -503,9 +561,9 @@ class MongoDBSession(SessionABC):
         Raises:
             RuntimeError: If the session has been closed.
         """
-        self._check_not_closed()
-        try:
-            await self._client.admin.command("ping")
-            return True
-        except Exception:
-            return False
+        with self._operation():
+            try:
+                await self._client.admin.command("ping")
+                return True
+            except Exception:
+                return False
