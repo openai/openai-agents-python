@@ -39,6 +39,7 @@ from agents import (
     Tool,
     TResponseInputItem,
     __version__,
+    trace,
 )
 from agents.exceptions import UserError
 from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE
@@ -1132,7 +1133,14 @@ async def test_any_llm_chat_omits_logprobs_when_top_logprobs_unset(monkeypatch) 
 
 
 class _ClosableStream:
-    """Minimal async iterator that records how often the provider stream was closed."""
+    """Stands in for the iterator any-llm returns, recording how often it was closed.
+
+    These fakes deliberately cover only the SDK's own boundary. any-llm's exception and
+    provider wrappers (`utils/exception_handler.py::_wrap_async_iterator`, the per-provider
+    `chunk_iterator` / `_stream_completion_async` generators) delegate with bare
+    `async for ... yield` as of 1.11.0 and do not forward `aclose()` to the underlying
+    transport, so no assertion here should be read as proving the transport was closed.
+    """
 
     def __init__(self, chunks: list[Any]) -> None:
         self._chunks = list(chunks)
@@ -1205,7 +1213,7 @@ def _completed_event() -> ResponseCompletedEvent:
     )
 
 
-def _stream_events(model: Any) -> Any:
+def _stream_events(model: Any, tracing: ModelTracing = ModelTracing.DISABLED) -> Any:
     return model.stream_response(
         system_instructions=None,
         input="hi",
@@ -1213,14 +1221,14 @@ def _stream_events(model: Any) -> Any:
         tools=[],
         output_schema=None,
         handoffs=[],
-        tracing=ModelTracing.DISABLED,
+        tracing=tracing,
         previous_response_id=None,
         conversation_id=None,
         prompt=None,
     )
 
 
-def _chat_model_with_stream(monkeypatch, stream: _ClosableStream) -> Any:
+def _chat_module_and_model_with_stream(monkeypatch, stream: _ClosableStream) -> tuple[Any, Any]:
     """Build an AnyLLMModel whose Chat Completions path yields one completed event."""
     provider = FakeAnyLLMProvider(supports_responses=False, chat_response=stream)
     module, _create_calls = _import_any_llm_module(monkeypatch, provider)
@@ -1231,13 +1239,39 @@ def _chat_model_with_stream(monkeypatch, stream: _ClosableStream) -> Any:
         yield _completed_event()
 
     monkeypatch.setattr(module.ChatCmplStreamHandler, "handle_stream", fake_handle_stream)
-    return module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+    return module, module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+
+
+def _chat_model_with_stream(monkeypatch, stream: _ClosableStream) -> Any:
+    _module, model = _chat_module_and_model_with_stream(monkeypatch, stream)
+    return model
+
+
+def _responses_module_and_model_with_stream(
+    monkeypatch, stream: _ClosableStream
+) -> tuple[Any, Any]:
+    provider = FakeAnyLLMProvider(supports_responses=True, responses_response=stream)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    return module, module.AnyLLMModel(model="openai/gpt-5.4-mini")
 
 
 def _responses_model_with_stream(monkeypatch, stream: _ClosableStream) -> Any:
-    provider = FakeAnyLLMProvider(supports_responses=True, responses_response=stream)
-    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
-    return module.AnyLLMModel(model="openai/gpt-5.4-mini")
+    _module, model = _responses_module_and_model_with_stream(monkeypatch, stream)
+    return model
+
+
+def _capture_spans(monkeypatch, module: Any, factory_name: str) -> list[Any]:
+    """Record the live span objects the module creates so tests can read them mid-stream."""
+    original = getattr(module, factory_name)
+    captured: list[Any] = []
+
+    def recording_factory(*args: Any, **kwargs: Any) -> Any:
+        span = original(*args, **kwargs)
+        captured.append(span)
+        return span
+
+    monkeypatch.setattr(module, factory_name, recording_factory)
+    return captured
 
 
 @pytest.mark.allow_call_model_methods
@@ -1469,3 +1503,160 @@ async def test_any_llm_responses_stream_closes_provider_stream_after_cancellatio
     await stream_agen.aclose()
 
     assert stream.aclose_calls == 1
+
+
+class _CloseSignalingStream(_ClosableStream):
+    """Signals when `aclose` starts and blocks until released, so a test can cancel mid-close."""
+
+    def __init__(
+        self,
+        chunks: list[Any],
+        close_started: asyncio.Event,
+        release: asyncio.Event,
+    ) -> None:
+        super().__init__(chunks)
+        self._close_started = close_started
+        self._release = release
+        self.aclose_completed = 0
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+        self._close_started.set()
+        await self._release.wait()
+        self.aclose_completed += 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_stream_populates_span_before_yielding_completed(monkeypatch) -> None:
+    """The generation span must carry output and usage when the completed event is delivered."""
+    stream = _ClosableStream([_chat_chunk("Hello")])
+    module, model = _chat_module_and_model_with_stream(monkeypatch, stream)
+    spans = _capture_spans(monkeypatch, module, "generation_span")
+
+    with trace(workflow_name="any-llm-chat-span"):
+        stream_agen = cast(Any, _stream_events(model, ModelTracing.ENABLED))
+        async for event in stream_agen:
+            if event.type == "response.completed":
+                # Assert while the generator is suspended at the terminal yield.
+                [span] = spans
+                assert span.span_data.output == [_response("Hello").model_dump()]
+                assert span.span_data.usage == {
+                    "requests": 1,
+                    "input_tokens": 11,
+                    "output_tokens": 13,
+                    "total_tokens": 24,
+                    "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                }
+                break
+        await stream_agen.aclose()
+
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_stream_populates_span_before_yielding_completed(
+    monkeypatch,
+) -> None:
+    """The response span must carry the response and input when the completed event arrives."""
+    stream = _ClosableStream([_completed_event()])
+    module, model = _responses_module_and_model_with_stream(monkeypatch, stream)
+    spans = _capture_spans(monkeypatch, module, "response_span")
+
+    with trace(workflow_name="any-llm-responses-span"):
+        stream_agen = cast(Any, _stream_events(model, ModelTracing.ENABLED))
+        async for event in stream_agen:
+            if event.type == "response.completed":
+                [span] = spans
+                assert span.span_data.response is not None
+                assert span.span_data.response.id == "resp_123"
+                assert span.span_data.input == "hi"
+                break
+        await stream_agen.aclose()
+
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_stream_lets_in_flight_close_finish_after_cancellation(
+    monkeypatch,
+) -> None:
+    """Cancelling during `aclose` continues that close instead of starting a second one."""
+    close_started = asyncio.Event()
+    release = asyncio.Event()
+    stream = _CloseSignalingStream([_chat_chunk("Hello")], close_started, release)
+    model = _chat_model_with_stream(monkeypatch, stream)
+
+    async def consume() -> None:
+        async for _event in _stream_events(model):
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(close_started.wait(), timeout=5)
+        assert stream.aclose_calls == 1
+        assert stream.aclose_completed == 0
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+
+        # The cancelled consumer must not have started a second close.
+        assert stream.aclose_calls == 1
+        assert stream.aclose_completed == 0
+
+        release.set()
+        for _ in range(200):
+            if stream.aclose_completed == 1:
+                break
+            await asyncio.sleep(0.01)
+
+        assert stream.aclose_calls == 1
+        assert stream.aclose_completed == 1
+    finally:
+        release.set()
+        task.cancel()
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_stream_lets_in_flight_close_finish_after_cancellation(
+    monkeypatch,
+) -> None:
+    """Cancelling during `aclose` continues that close instead of starting a second one."""
+    close_started = asyncio.Event()
+    release = asyncio.Event()
+    stream = _CloseSignalingStream([_completed_event()], close_started, release)
+    model = _responses_model_with_stream(monkeypatch, stream)
+
+    async def consume() -> None:
+        async for _event in _stream_events(model):
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(close_started.wait(), timeout=5)
+        assert stream.aclose_calls == 1
+        assert stream.aclose_completed == 0
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+
+        assert stream.aclose_calls == 1
+        assert stream.aclose_completed == 0
+
+        release.set()
+        for _ in range(200):
+            if stream.aclose_completed == 1:
+                break
+            await asyncio.sleep(0.01)
+
+        assert stream.aclose_calls == 1
+        assert stream.aclose_completed == 1
+    finally:
+        release.set()
+        task.cancel()
