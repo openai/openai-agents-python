@@ -93,7 +93,7 @@ from ..tool_guardrails import (
 from ..tracing import Span, SpanError, function_span, get_current_trace
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting, parse_function_tool_arguments
-from ..util._asyncio_tasks import gather_with_cancel
+from ..util._asyncio_tasks import cancelled_by_failing_sibling, gather_with_cancel
 from ..util._custom_data import maybe_extract_custom_data, merge_custom_data
 from ..util._tool_errors import get_trace_tool_error
 from ..util._types import MaybeAwaitable
@@ -166,6 +166,7 @@ TToolSpanResult = TypeVar("TToolSpanResult")
 _FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS = 0.25
 _FUNCTION_TOOL_CANCELLED_IMMEDIATE_STEP_LIMIT = 64
 _FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS = 0.1
+_FUNCTION_TOOL_TEARDOWN_DRAIN_SECONDS = 0.25
 
 
 _FunctionToolFailureSource = Literal["direct", "cancelled_teardown", "post_invoke"]
@@ -1516,7 +1517,7 @@ class _FunctionToolBatchExecutor:
         except asyncio.CancelledError as exc:
             if self.propagating_failure is exc:
                 raise
-            self._cancel_pending_tasks_for_parent_cancellation()
+            await self._cancel_pending_tasks_for_parent_cancellation()
             raise
 
         return (
@@ -1635,13 +1636,36 @@ class _FunctionToolBatchExecutor:
             timeout_seconds=_FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS,
         )
 
-    def _cancel_pending_tasks_for_parent_cancellation(self) -> None:
-        self.teardown_cancelled_tasks.update(self.pending_tasks)
-        _cancel_function_tool_tasks(self.pending_tasks)
+    async def _cancel_pending_tasks_for_parent_cancellation(self) -> None:
+        cancelled_tasks = set(self.pending_tasks)
+        self.teardown_cancelled_tasks.update(cancelled_tasks)
+        _cancel_function_tool_tasks(cancelled_tasks)
+        # The callbacks are attached before the wait below so a task that finishes
+        # while we wait still has its result consumed, and so a task that outlives
+        # the window is still reported at the loop level.
         _attach_function_tool_task_result_callbacks(
-            self.pending_tasks,
+            cancelled_tasks,
             message_for_exception=_parent_cancelled_task_exception_message,
         )
+        if not cancelled_tasks or not cancelled_by_failing_sibling():
+            # A genuine parent cancellation must not be held up by tool cleanup, so
+            # the loop-level callbacks above are the whole story there.
+            return
+        # A failing sibling category in the `_execute_tool_plan` fan-out is different:
+        # the fan-out treats our return as "this category is drained", so returning
+        # while handlers are mid-unwind would let their side effects land after the
+        # run has already raised. Give them a bounded window to finish. Bounded
+        # because a handler that swallows cancellation must not stall the run.
+        try:
+            await asyncio.wait(
+                cancelled_tasks,
+                timeout=_FUNCTION_TOOL_TEARDOWN_DRAIN_SECONDS,
+            )
+        except asyncio.CancelledError:
+            # A second cancellation (the parent run itself going away) takes
+            # priority over draining. The callbacks above still report whatever
+            # is left, so nothing is silently dropped.
+            pass
 
     async def _run_single_tool(
         self,

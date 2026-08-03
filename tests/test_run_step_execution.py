@@ -3718,3 +3718,125 @@ async def test_execute_tool_plan_cancels_sibling_category_on_failure() -> None:
 
     assert shell_cancelled.is_set(), "sibling shell command was not cancelled"
     assert shell_finished.is_set(), "sibling shell command did not finish unwinding"
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_plan_drains_function_tools_on_sibling_failure() -> None:
+    """A cancelled function tool must finish unwinding before the run raises.
+
+    Function tools are the one category that runs through
+    `_FunctionToolBatchExecutor`, which spawns its own task per tool call. When a
+    sibling category fails, `gather_with_cancel` cancels the executor coroutine and
+    treats its return as "this category is drained" -- but the executor used to
+    cancel its internal tasks and return immediately, so handlers were still
+    mid-unwind (and still landing side effects) after the run had raised.
+    """
+    from agents.run_internal.agent_bindings import bind_public_agent
+    from agents.run_internal.tool_planning import ToolExecutionPlan, _execute_tool_plan
+
+    from .test_computer_tool_lifecycle import FakeComputer
+
+    tool_started = asyncio.Event()
+    tool_cancelled = asyncio.Event()
+    tool_unwound = asyncio.Event()
+
+    @function_tool
+    async def slow_tool() -> str:
+        tool_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            tool_cancelled.set()
+            # Real handlers await during unwind (closing a client, releasing a
+            # lock). Shielded so the sleep itself is not cancelled again, which
+            # is what makes the missing drain observable.
+            await asyncio.shield(asyncio.sleep(0.05))
+            tool_unwound.set()
+            raise
+        return "unreachable"
+
+    async def reject_once_tool_is_running(_data: Any) -> bool:
+        await tool_started.wait()
+        return False
+
+    computer_tool = ComputerTool(
+        computer=FakeComputer(), on_safety_check=reject_once_tool_is_running
+    )
+    agent: Agent[Any] = Agent(name="test", tools=[slow_tool, computer_tool])
+
+    plan = ToolExecutionPlan(
+        function_runs=[
+            ToolRunFunction(
+                tool_call=ResponseFunctionToolCall(
+                    id="fn-1",
+                    call_id="fn-1",
+                    name="slow_tool",
+                    arguments="{}",
+                    type="function_call",
+                ),
+                function_tool=cast(Any, slow_tool),
+            )
+        ],
+        computer_actions=[
+            ToolRunComputerAction(
+                tool_call=ResponseComputerToolCall(
+                    id="computer-1",
+                    type="computer_call",
+                    call_id="computer-1",
+                    action=ActionScreenshot(type="screenshot"),
+                    pending_safety_checks=[
+                        PendingSafetyCheck(id="sc-1", code="malicious", message="nope")
+                    ],
+                    status="completed",
+                ),
+                computer_tool=computer_tool,
+            )
+        ],
+    )
+
+    with pytest.raises(UserError, match="safety check was not acknowledged"):
+        await _execute_tool_plan(
+            plan=plan,
+            bindings=bind_public_agent(agent),
+            hooks=RunHooks[Any](),
+            context_wrapper=RunContextWrapper(context=None),
+            run_config=RunConfig(),
+        )
+
+    assert tool_cancelled.is_set(), "function tool was not cancelled"
+    assert tool_unwound.is_set(), "function tool did not finish unwinding before the run raised"
+
+
+@pytest.mark.asyncio
+async def test_sibling_failure_drain_does_not_apply_to_parent_cancellation() -> None:
+    """The drain must not turn parent cancellation into a wait on tool cleanup.
+
+    `cancelled_by_failing_sibling()` is what separates the two, so this pins the
+    negative case directly: outside a failing-sibling gather, a cancelled batch
+    returns without waiting even though cleanup is still blocked.
+    """
+    from agents.util._asyncio_tasks import cancelled_by_failing_sibling, gather_with_cancel
+
+    observed: list[bool] = []
+
+    async def record_then_block() -> None:
+        observed.append(cancelled_by_failing_sibling())
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            observed.append(cancelled_by_failing_sibling())
+            raise
+
+    async def fail_fast() -> None:
+        await asyncio.sleep(0)
+        raise UserError("sibling failed")
+
+    with pytest.raises(UserError, match="sibling failed"):
+        await gather_with_cancel(record_then_block(), fail_fast())
+
+    # False while running, True once a failing sibling is the reason for cancellation.
+    assert observed == [False, True]
+
+    # Outside any gather_with_cancel the flag stays False, which is what keeps the
+    # parent-cancellation path prompt.
+    assert cancelled_by_failing_sibling() is False
