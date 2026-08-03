@@ -1077,6 +1077,82 @@ def test_deduplicate_input_items_preferring_latest_keeps_output_after_matching_c
     assert cast(dict[str, Any], deduplicated[1])["output"] == "new"
 
 
+def test_deduplicate_input_items_preferring_latest_keeps_reasoning_before_follower() -> None:
+    old_reasoning = cast(
+        TResponseInputItem,
+        {
+            "type": "reasoning",
+            "id": "rs-1",
+            "summary": [{"type": "summary_text", "text": "old"}],
+        },
+    )
+    call = cast(
+        TResponseInputItem,
+        {"type": "function_call", "call_id": "call-1", "name": "tool", "arguments": "{}"},
+    )
+    new_reasoning = cast(
+        TResponseInputItem,
+        {
+            "type": "reasoning",
+            "id": "rs-1",
+            "summary": [{"type": "summary_text", "text": "new"}],
+        },
+    )
+
+    deduplicated = run_items.deduplicate_input_items_preferring_latest(
+        [old_reasoning, call, new_reasoning]
+    )
+
+    assert [cast(dict[str, Any], item).get("type") for item in deduplicated] == [
+        "reasoning",
+        "function_call",
+    ]
+    assert cast(dict[str, Any], deduplicated[0])["summary"] == [
+        {"type": "summary_text", "text": "new"}
+    ]
+
+
+def test_deduplicate_input_items_preferring_latest_keeps_approval_request_before_response() -> None:
+    old_request = cast(
+        TResponseInputItem,
+        {
+            "type": "mcp_approval_request",
+            "id": "approval-1",
+            "arguments": "old",
+            "name": "lookup",
+            "server_label": "server",
+        },
+    )
+    response = cast(
+        TResponseInputItem,
+        {
+            "type": "mcp_approval_response",
+            "approval_request_id": "approval-1",
+            "approve": True,
+        },
+    )
+    new_request = cast(
+        TResponseInputItem,
+        {
+            "type": "mcp_approval_request",
+            "id": "approval-1",
+            "arguments": "new",
+            "name": "lookup",
+            "server_label": "server",
+        },
+    )
+
+    deduplicated = run_items.deduplicate_input_items_preferring_latest(
+        [old_request, response, new_request]
+    )
+
+    assert [cast(dict[str, Any], item).get("type") for item in deduplicated] == [
+        "mcp_approval_request",
+        "mcp_approval_response",
+    ]
+    assert cast(dict[str, Any], deduplicated[0])["arguments"] == "new"
+
+
 def test_deduplicate_input_items_preferring_latest_leaves_unique_items_untouched() -> None:
     items = [
         cast(TResponseInputItem, {"role": "user", "content": "hi"}),
