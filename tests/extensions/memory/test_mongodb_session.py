@@ -730,15 +730,21 @@ async def test_close_owned_client_is_closed() -> None:
         assert fake_client._closed
 
 
-async def test_closed_operations_raise_runtime_error() -> None:
-    """Operations on a closed session must fail instead of using a closed client."""
+def _make_owned_session(session_id: str = "owned") -> tuple[MongoDBSession, FakeAsyncMongoClient]:
+    """Create a from_uri session (which owns its client) backed by a fake client."""
     MongoDBSession._init_state.clear()
     fake_client = FakeAsyncMongoClient()
     with patch(
         "agents.extensions.memory.mongodb_session.AsyncMongoClient",
         return_value=fake_client,
     ):
-        s = MongoDBSession.from_uri("closed-state", uri="mongodb://localhost:27017", database="t")
+        s = MongoDBSession.from_uri(session_id, uri="mongodb://localhost:27017", database="t")
+    return s, fake_client
+
+
+async def test_closed_operations_raise_runtime_error() -> None:
+    """Operations on a closed session must fail instead of using a closed client."""
+    s, _ = _make_owned_session("closed-state")
 
     await s.add_items([{"role": "user", "content": "before close"}])
     await s.close()
@@ -761,7 +767,7 @@ async def test_closed_operations_raise_runtime_error() -> None:
 
 async def test_closed_rejects_empty_add_items() -> None:
     """add_items([]) must not bypass the closed check through the empty-list fast path."""
-    s = _make_session("closed-empty-add")
+    s, _ = _make_owned_session("closed-empty-add")
     await s.close()
 
     with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
@@ -770,7 +776,7 @@ async def test_closed_rejects_empty_add_items() -> None:
 
 async def test_closed_rejects_non_positive_limit_get_items() -> None:
     """get_items(limit=0) must not bypass the closed check through the early return."""
-    s = _make_session("closed-zero-limit")
+    s, _ = _make_owned_session("closed-zero-limit")
     await s.close()
 
     with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
@@ -779,17 +785,49 @@ async def test_closed_rejects_non_positive_limit_get_items() -> None:
 
 async def test_close_before_use_is_terminal() -> None:
     """close() before any command is issued must still make the session terminal."""
-    s = _make_session("close-before-use")
+    s, _ = _make_owned_session("close-before-use")
     await s.close()
 
     with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
         await s.get_items()
 
 
+async def test_failed_owned_client_close_can_be_retried() -> None:
+    """A failed client release must not be suppressed by the idempotence fast path."""
+    s, fake_client = _make_owned_session("close-retry")
+    attempts = 0
+    original_close = fake_client.close
+
+    async def _flaky_close() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionError("release failed")
+        await original_close()
+
+    fake_client.close = _flaky_close  # type: ignore[method-assign]
+
+    with pytest.raises(ConnectionError):
+        await s.close()
+
+    # The session is terminal even though cleanup did not finish...
+    assert not fake_client._closed
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await s.get_items()
+
+    # ...and a later close() retries the unfinished release.
+    await s.close()
+    assert fake_client._closed
+    assert attempts == 2
+
+    # Now that the client is released, further calls are no-ops.
+    await s.close()
+    assert attempts == 2
+
+
 async def test_close_is_idempotent_and_closes_owned_client_once() -> None:
     """Repeated and concurrent close() calls must remain safe no-ops."""
-    MongoDBSession._init_state.clear()
-    fake_client = FakeAsyncMongoClient()
+    s, fake_client = _make_owned_session("close-twice")
     close_calls = 0
     original_close = fake_client.close
 
@@ -800,12 +838,6 @@ async def test_close_is_idempotent_and_closes_owned_client_once() -> None:
 
     fake_client.close = _counting_close  # type: ignore[method-assign]
 
-    with patch(
-        "agents.extensions.memory.mongodb_session.AsyncMongoClient",
-        return_value=fake_client,
-    ):
-        s = MongoDBSession.from_uri("close-twice", uri="mongodb://localhost:27017", database="t")
-
     await s.add_items([{"role": "user", "content": "before close"}])
 
     await asyncio.gather(s.close(), s.close())
@@ -815,8 +847,8 @@ async def test_close_is_idempotent_and_closes_owned_client_once() -> None:
     assert close_calls == 1
 
 
-async def test_close_injected_client_still_makes_session_terminal() -> None:
-    """An injected client is left open, but the session itself must still be terminal."""
+async def test_close_injected_client_is_a_noop() -> None:
+    """With an injected client, close() must stay a no-op: the session is not terminal."""
     MongoDBSession._init_state.clear()
     client = FakeAsyncMongoClient()
     s = MongoDBSession("injected", client=client, database="agents_test")  # type: ignore[arg-type]
@@ -824,13 +856,12 @@ async def test_close_injected_client_still_makes_session_terminal() -> None:
 
     await s.close()
 
+    # Lifecycle stays with the caller, so the session keeps working.
     assert not client._closed
-    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
-        await s.get_items()
-
-    # The caller still owns the client and can keep using it through a new session.
-    other = MongoDBSession("injected", client=client, database="agents_test")  # type: ignore[arg-type]
-    assert len(await other.get_items()) == 1
+    assert len(await s.get_items()) == 1
+    await s.add_items([{"role": "user", "content": "after close"}])
+    assert len(await s.get_items()) == 2
+    assert await s.ping() is True
 
 
 async def test_operations_unaffected_before_close(session: MongoDBSession) -> None:

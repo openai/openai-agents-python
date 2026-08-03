@@ -140,6 +140,7 @@ class MongoDBSession(SessionABC):
         self._client = client
         self._owns_client = False
         self._closed = False
+        self._client_released = False
 
         client.append_metadata(_DRIVER_INFO)
 
@@ -394,18 +395,22 @@ class MongoDBSession(SessionABC):
         """Close the underlying MongoDB connection.
 
         Only closes the client if this session owns it (i.e. it was created
-        via :meth:`from_uri`).  If the client was injected externally the
-        caller is responsible for managing its lifecycle.
+        via :meth:`from_uri`).  In that case the session becomes terminal and
+        subsequent operations raise ``RuntimeError`` rather than issuing commands
+        against a closed client.  If the client was injected externally the
+        caller is responsible for managing its lifecycle and this is a no-op.
 
-        The session becomes terminal from the first close attempt: subsequent
-        operations raise ``RuntimeError`` rather than issuing commands against a
-        closed client.  Repeated calls are safe no-ops, and an injected client is
-        still left untouched.
+        The session is terminal from the first close attempt.  If releasing the
+        client fails or is cancelled, operations still raise and a later
+        ``close()`` retries the unfinished cleanup.  Once the client is released,
+        repeated calls are safe no-ops.
         """
-        already_closed = self._closed
+        if not self._owns_client:
+            return
         self._closed = True
-        if self._owns_client and not already_closed:
+        if not self._client_released:
             await self._client.close()
+            self._client_released = True
 
     async def ping(self) -> bool:
         """Test MongoDB connectivity.
