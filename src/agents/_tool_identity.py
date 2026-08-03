@@ -352,7 +352,16 @@ def validate_function_tool_lookup_configuration(tools: Sequence[Any]) -> None:
 
         prior_namespace = get_explicit_function_tool_namespace(prior_owner)
         if explicit_namespace is None and prior_namespace is None:
-            continue
+            # Both tools are plain (non-namespaced) FunctionTools sharing the same public
+            # name.  This is the most common accidental collision — e.g. two @function_tool
+            # decorators with the same name_override, or a tool appended twice via
+            # Agent.clone()/list concatenation.  The OpenAI API rejects such payloads with
+            # a 400; raise early with a clear message instead of letting it fail remotely.
+            raise UserError(
+                f"Duplicate function tool name {qualified_name!r}: two tools in the agent's "
+                f"tool list share this name. Pass a unique name_override= to one of them to "
+                f"avoid ambiguous dispatch."
+            )
 
         raise UserError(
             "Ambiguous function tool configuration: the qualified name "
