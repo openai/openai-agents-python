@@ -444,6 +444,21 @@ async def _run_output_guardrails_for_stream(
         raise
 
 
+_COMMITTED_ITEM_TYPES = frozenset({"tool_call_item", "tool_call_output_item"})
+
+
+def _partition_committed_items(items: list[RunItem]) -> tuple[list[RunItem], list[RunItem]]:
+    """Split a final turn's items into already-committed side effects and deliverable output.
+
+    Allow-listed rather than deny-listed on purpose: a new item type recording a side effect then
+    defaults to being persisted instead of silently inheriting "discard on tripwire".
+    """
+    committed = [item for item in items if item.type in _COMMITTED_ITEM_TYPES]
+    if not committed:
+        return [], items
+    return committed, [item for item in items if item.type not in _COMMITTED_ITEM_TYPES]
+
+
 async def _finalize_streamed_final_output(
     *,
     streamed_result: RunResultStreaming,
@@ -457,10 +472,16 @@ async def _finalize_streamed_final_output(
     store_setting: bool | None,
     persist_before_output_guardrails: bool,
 ) -> None:
-    if persist_before_output_guardrails:
-        # A resumed approval has already committed the tool side effect, so keep its call/output
-        # pair even when an agent output guardrail blocks delivery of the final result.
-        await save_items(items, response_id, store_setting)
+    # A committed tool side effect is kept even when an agent output guardrail blocks delivery of
+    # the final result, so the next run sees that the tool already ran instead of re-issuing it.
+    # A resumed approval commits before this point; otherwise the tools of this turn did, which is
+    # what `tool_use_behavior="stop_on_first_tool"` (and `stop_at_tool_names` / a custom callable)
+    # turns straight into the final output.
+    committed_items, deliverable_items = (
+        (items, []) if persist_before_output_guardrails else _partition_committed_items(items)
+    )
+    if committed_items:
+        await save_items(committed_items, response_id, store_setting)
 
     output_guardrail_results = await _run_output_guardrails_for_stream(
         agent=agent,
@@ -473,8 +494,8 @@ async def _finalize_streamed_final_output(
     streamed_result.final_output = output
     streamed_result.is_complete = True
 
-    if not persist_before_output_guardrails:
-        await save_items(items, response_id, store_setting)
+    if deliverable_items:
+        await save_items(deliverable_items, response_id, store_setting)
 
     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
 

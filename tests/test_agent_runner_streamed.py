@@ -2075,6 +2075,155 @@ async def test_resumed_approved_tool_final_persists_call_output_before_output_gu
         assert replayed_tool_items[1].get("output") == "approved-result"
 
 
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_stop_on_first_tool_final_persists_committed_tool_items_on_tripwire(
+    mode: str,
+) -> None:
+    """A blocked final output must not discard the session record of a tool that already ran."""
+
+    calls: list[str] = []
+
+    @function_tool(name_override="commit_tool")
+    def commit_tool() -> str:
+        calls.append("ran")
+        return "committed-result"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    model = FakeModel()
+    model.set_next_output([get_function_tool_call("commit_tool", "{}", call_id="call-committed")])
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[commit_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = SimpleListSession()
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        if mode == "non_streamed":
+            await Runner.run(agent, "Use commit_tool", session=session)
+        else:
+            result = Runner.run_streamed(agent, "Use commit_tool", session=session)
+            await consume_stream(result)
+
+    assert calls == ["ran"], "the tool never ran, so the test proves nothing"
+
+    saved_items = await session.get_items()
+    saved = [
+        (item.get("type") or item.get("role"), item.get("call_id"))
+        for item in saved_items
+        if isinstance(item, dict)
+    ]
+    assert saved == [
+        ("user", None),
+        ("function_call", "call-committed"),
+        ("function_call_output", "call-committed"),
+    ]
+
+    # The next run must see the completed call instead of re-issuing the same side effect.
+    agent.output_guardrails = []
+    model.set_next_output([get_text_message("done")])
+    if mode == "non_streamed":
+        followup: Any = await Runner.run(agent, "Continue", session=session)
+    else:
+        followup = Runner.run_streamed(agent, "Continue", session=session)
+        await consume_stream(followup)
+    assert followup.final_output == "done"
+    assert calls == ["ran"]
+
+    model_input = model.last_turn_args["input"]
+    assert isinstance(model_input, list)
+    replayed = [
+        (item.get("type"), item.get("call_id"))
+        for item in model_input
+        if isinstance(item, dict) and item.get("type") in {"function_call", "function_call_output"}
+    ]
+    assert replayed == [
+        ("function_call", "call-committed"),
+        ("function_call_output", "call-committed"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_streamed_blocked_message_final_output_is_not_persisted() -> None:
+    """Control for the committed-tool case: a rejected message is still withheld from the session.
+
+    Streamed-only on purpose. The non-streamed path persists a turn before its output guardrails
+    run, so it keeps the rejected message today; that difference is out of scope here.
+    """
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("should_not_be_saved")])
+    agent = Agent(
+        name="test",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = SimpleListSession()
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        result = Runner.run_streamed(agent, "user_message", session=session)
+        await consume_stream(result)
+
+    saved_items = await session.get_items()
+    saved = [item.get("type") or item.get("role") for item in saved_items if isinstance(item, dict)]
+    assert saved == ["user"]
+
+
+@pytest.mark.asyncio
+async def test_streamed_blocked_final_persists_tool_items_but_not_the_message() -> None:
+    """A mixed final turn splits: the tool record is kept, the blocked message is not."""
+
+    @function_tool(name_override="commit_tool")
+    def commit_tool() -> str:
+        return "committed-result"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("commit_tool", "{}", call_id="call-mixed")],
+            [get_text_message("should_not_be_saved")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[commit_tool],
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = SimpleListSession()
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        result = Runner.run_streamed(agent, "Use commit_tool", session=session)
+        await consume_stream(result)
+
+    saved_items = await session.get_items()
+    saved = [item.get("type") or item.get("role") for item in saved_items if isinstance(item, dict)]
+    assert saved == ["user", "function_call", "function_call_output"]
+
+
 @pytest.mark.asyncio
 async def test_streaming_resume_preserves_filtered_model_input_after_handoff():
     model = FakeModel()
