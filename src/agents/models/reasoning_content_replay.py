@@ -46,9 +46,14 @@ def default_should_replay_reasoning_content(context: ReasoningContentReplayConte
     # Replay only when the current request targets DeepSeek and the reasoning item either
     # came from a DeepSeek model or predates provider tracking. This avoids mixing reasoning
     # content from a different model family into the DeepSeek assistant message.
+    provider_data_without_thinking_blocks = {
+        key: value
+        for key, value in context.reasoning.provider_data.items()
+        if key != "thinking_blocks"
+    }
     return (
         origin_model is not None and "deepseek" in origin_model.lower()
-    ) or context.reasoning.provider_data == {}
+    ) or not provider_data_without_thinking_blocks
 
 
 __all__ = [

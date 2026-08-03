@@ -12,10 +12,16 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import httpx
+from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+from litellm.types.utils import ModelResponse as LiteLLMModelResponse
 from openai.types.chat import ChatCompletionMessageToolCall
 from openai.types.chat.chat_completion_message_tool_call import Function
 
-from agents.extensions.models.litellm_model import InternalChatCompletionMessage
+from agents.extensions.models.litellm_model import (
+    InternalChatCompletionMessage,
+    LitellmConverter,
+)
 from agents.models.chatcmpl_converter import Converter
 
 
@@ -34,6 +40,99 @@ def create_mock_anthropic_response_with_thinking() -> InternalChatCompletionMess
         ],
     )
     return message
+
+
+def _assistant_thinking_blocks(message: Any) -> list[dict[str, Any]]:
+    thinking_blocks = message.get("thinking_blocks")
+    assert isinstance(thinking_blocks, list)
+    assert all(isinstance(block, dict) for block in thinking_blocks)
+    return cast(list[dict[str, Any]], thinking_blocks)
+
+
+def _litellm_anthropic_message(
+    thinking_blocks: list[dict[str, Any]],
+    *,
+    tool_call: bool = False,
+) -> Any:
+    response_tail = (
+        {
+            "type": "tool_use",
+            "id": "toolu-weather",
+            "name": "get_weather",
+            "input": {"city": "Tokyo"},
+        }
+        if tool_call
+        else {"type": "text", "text": "answer"}
+    )
+    completion_response = {
+        "id": "msg-thinking",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4-5",
+        "content": [*thinking_blocks, response_tail],
+        "stop_reason": "tool_use" if tool_call else "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+    raw_response = httpx.Response(
+        200,
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+    )
+    response = AnthropicConfig().transform_parsed_response(
+        completion_response=completion_response,
+        raw_response=raw_response,
+        model_response=LiteLLMModelResponse(model="claude-sonnet-4-5"),
+    )
+    return response.choices[0].message
+
+
+def _round_trip_litellm_anthropic_blocks(
+    thinking_blocks: list[dict[str, Any]],
+    *,
+    tool_call: bool = False,
+) -> tuple[Any, list[dict[str, Any]]]:
+    litellm_message = _litellm_anthropic_message(thinking_blocks, tool_call=tool_call)
+    internal_message = LitellmConverter.convert_message_to_openai(
+        litellm_message,
+        model="anthropic/claude-sonnet-4-5",
+    )
+    output_items = Converter.message_to_output_items(
+        internal_message,
+        provider_data={"model": "anthropic/claude-sonnet-4-5"},
+    )
+    serialized_items: list[Any] = [item.model_dump() for item in output_items]
+    messages = Converter.items_to_messages(
+        serialized_items,
+        model="anthropic/claude-sonnet-4-5",
+        preserve_thinking_blocks=True,
+    )
+    outbound_request = AnthropicConfig().transform_request(
+        model="claude-sonnet-4-5",
+        messages=cast(Any, [*messages, {"role": "user", "content": "continue"}]),
+        optional_params={
+            "max_tokens": 1024,
+            **(
+                {
+                    "tools": [
+                        {
+                            "name": "get_weather",
+                            "description": "Get the weather.",
+                            "input_schema": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                                "required": ["city"],
+                            },
+                        }
+                    ]
+                }
+                if tool_call
+                else {}
+            ),
+        },
+        litellm_params={},
+        headers={},
+    )
+    return output_items, cast(list[dict[str, Any]], outbound_request["messages"])
 
 
 def test_converter_skips_reasoning_items():
@@ -92,6 +191,9 @@ def test_reasoning_items_preserved_in_message_conversion():
 
     reasoning_item = reasoning_items[0]
     assert reasoning_item.summary[0].text == "I need to call the weather function for Paris"
+    assert reasoning_item.model_dump()["provider_data"]["thinking_blocks"] == (
+        mock_message.thinking_blocks
+    )
 
     # Verify thinking blocks are stored if we preserve them
     if (
@@ -197,15 +299,11 @@ def test_anthropic_thinking_blocks_with_tool_calls():
 
     assistant_msg = assistant_messages[0]
 
-    # Content must start with thinking blocks, not text
-    content = assistant_msg.get("content")
-    assert content is not None, "Assistant message should have content"
+    # Thinking blocks must remain ahead of text in Anthropic's native block sequence.
+    thinking_blocks = _assistant_thinking_blocks(assistant_msg)
+    assert thinking_blocks, "Assistant message should have thinking blocks"
 
-    assert isinstance(content, list) and len(content) > 0, (
-        "Assistant message content should be a non-empty list"
-    )
-
-    first_content = content[0]
+    first_content = thinking_blocks[0]
     assert first_content.get("type") == "thinking", (
         f"First content must be 'thinking' type for Anthropic compatibility, "
         f"but got '{first_content.get('type')}'"
@@ -216,12 +314,11 @@ def test_anthropic_thinking_blocks_with_tool_calls():
     assert first_content.get("thinking") == expected_thinking, (
         "Thinking content should be preserved"
     )
-    # Signature should also be preserved
     assert first_content.get("signature") == "TestSignature123", (
         "Signature should be preserved in thinking block"
     )
 
-    second_content = content[1]
+    second_content = thinking_blocks[1]
     assert second_content.get("type") == "thinking", (
         f"Second content must be 'thinking' type for Anthropic compatibility, "
         f"but got '{second_content.get('type')}'"
@@ -230,17 +327,12 @@ def test_anthropic_thinking_blocks_with_tool_calls():
     assert second_content.get("thinking") == expected_thinking, (
         "Thinking content should be preserved"
     )
-    # Signature should also be preserved
     assert second_content.get("signature") == "TestSignature456", (
         "Signature should be preserved in thinking block"
     )
 
-    last_content = content[2]
-    assert last_content.get("type") == "text", (
-        f"First content must be 'text' type but got '{last_content.get('type')}'"
-    )
     expected_text = "I'll check the weather for you."
-    assert last_content.get("text") == expected_text, "Content text should be preserved"
+    assert assistant_msg.get("content") == expected_text, "Content text should be preserved"
 
     # Verify tool calls are preserved
     tool_calls = assistant_msg.get("tool_calls", [])
@@ -296,11 +388,8 @@ def test_items_to_messages_preserves_positional_bool_arguments():
     assert len(assistant_messages) == 1, "Should have exactly one assistant message with tool calls"
 
     assistant_msg = assistant_messages[0]
-    content = assistant_msg.get("content")
-    assert isinstance(content, list) and len(content) > 0, (
-        "Positional bool arguments should still preserve thinking blocks"
-    )
-    assert content[0].get("type") == "thinking", (
+    thinking_blocks = _assistant_thinking_blocks(assistant_msg)
+    assert thinking_blocks[0].get("type") == "thinking", (
         "The third positional argument must continue to map to preserve_thinking_blocks"
     )
 
@@ -383,20 +472,13 @@ def test_anthropic_thinking_blocks_without_tool_calls():
 
     assistant_msg = assistant_messages[0]
 
-    # Content must start with thinking blocks even WITHOUT tool calls
-    content = assistant_msg.get("content")
-    assert content is not None, "Assistant message should have content"
-    assert isinstance(content, list), (
-        f"Assistant message content should be a list when thinking blocks are present, "
-        f"but got {type(content)}"
-    )
-    assert len(content) >= 2, (
-        f"Assistant message should have at least 2 content items "
-        f"(thinking + text), got {len(content)}"
+    # Thinking blocks stay in LiteLLM's native field even without tool calls.
+    thinking_blocks = _assistant_thinking_blocks(assistant_msg)
+    assert len(thinking_blocks) == 1, (
+        f"Assistant message should have exactly one thinking block, got {len(thinking_blocks)}"
     )
 
-    # First content should be thinking block
-    first_content = content[0]
+    first_content = thinking_blocks[0]
     assert first_content.get("type") == "thinking", (
         f"First content must be 'thinking' type for Anthropic compatibility, "
         f"but got '{first_content.get('type')}'"
@@ -408,14 +490,146 @@ def test_anthropic_thinking_blocks_without_tool_calls():
         "Signature should be preserved in thinking block"
     )
 
-    # Second content should be text
-    second_content = content[1]
-    assert second_content.get("type") == "text", (
-        f"Second content must be 'text' type, but got '{second_content.get('type')}'"
-    )
-    assert (
-        second_content.get("text") == "The weather in Paris is sunny with a temperature of 22°C."
+    assert assistant_msg.get("content") == (
+        "The weather in Paris is sunny with a temperature of 22°C."
     ), "Text content should be preserved"
+
+
+def test_litellm_round_trip_preserves_omitted_thinking_block() -> None:
+    thinking_blocks = [{"type": "thinking", "thinking": "", "signature": "OmittedSignature"}]
+
+    output_items, outbound_messages = _round_trip_litellm_anthropic_blocks(thinking_blocks)
+
+    reasoning_items = [item for item in output_items if item.type == "reasoning"]
+    assert len(reasoning_items) == 1
+    assert reasoning_items[0].summary == []
+    assert reasoning_items[0].model_dump()["provider_data"]["thinking_blocks"] == thinking_blocks
+    assert outbound_messages[0]["content"][:1] == thinking_blocks
+
+
+def test_litellm_round_trip_preserves_complete_thinking_block_sequence() -> None:
+    thinking_blocks = [
+        {"type": "thinking", "thinking": "", "signature": "OmittedSignature"},
+        {"type": "redacted_thinking", "data": "EncryptedRedactedThinking"},
+        {"type": "thinking", "thinking": "visible", "signature": "VisibleSignature"},
+    ]
+
+    _, outbound_messages = _round_trip_litellm_anthropic_blocks(
+        thinking_blocks,
+        tool_call=True,
+    )
+
+    assert outbound_messages[0]["content"][:3] == thinking_blocks
+    assert outbound_messages[0]["content"][3] == {
+        "type": "tool_use",
+        "id": "toolu-weather",
+        "name": "get_weather",
+        "input": {"city": "Tokyo"},
+    }
+
+
+def test_complete_thinking_blocks_respect_replay_guards() -> None:
+    message = InternalChatCompletionMessage(
+        role="assistant",
+        content="answer",
+        reasoning_content="visible",
+        thinking_blocks=[{"type": "thinking", "thinking": "visible", "signature": "Signature"}],
+    )
+    items: list[Any] = [
+        item.model_dump()
+        for item in Converter.message_to_output_items(
+            message,
+            provider_data={"model": "anthropic/claude-sonnet-4-5"},
+        )
+    ]
+
+    disabled_messages = Converter.items_to_messages(
+        items,
+        model="anthropic/claude-sonnet-4-5",
+        preserve_thinking_blocks=False,
+    )
+    mismatched_messages = Converter.items_to_messages(
+        items,
+        model="anthropic/claude-opus-4-5",
+        preserve_thinking_blocks=True,
+    )
+    unknown_origin_items: list[Any] = [
+        item.model_dump()
+        for item in Converter.message_to_output_items(
+            message,
+            provider_data={"response_id": "response-from-unknown-provider"},
+        )
+    ]
+    unknown_origin_messages = Converter.items_to_messages(
+        unknown_origin_items,
+        model="anthropic/claude-sonnet-4-5",
+        preserve_thinking_blocks=True,
+    )
+
+    assert all("thinking_blocks" not in message for message in disabled_messages)
+    assert all("thinking_blocks" not in message for message in mismatched_messages)
+    assert all("thinking_blocks" not in message for message in unknown_origin_messages)
+
+
+def test_originless_thinking_blocks_preserve_legacy_deepseek_reasoning_replay() -> None:
+    message = InternalChatCompletionMessage(
+        role="assistant",
+        content="answer",
+        reasoning_content="legacy reasoning",
+        thinking_blocks=[{"type": "thinking", "thinking": "visible", "signature": "Signature"}],
+    )
+    items: list[Any] = [item.model_dump() for item in Converter.message_to_output_items(message)]
+
+    reasoning_item = next(item for item in items if item["type"] == "reasoning")
+    assert reasoning_item["provider_data"] == {
+        "thinking_blocks": [{"type": "thinking", "thinking": "visible", "signature": "Signature"}]
+    }
+
+    messages = Converter.items_to_messages(items, model="deepseek/deepseek-reasoner")
+
+    assistant_message = next(message for message in messages if message["role"] == "assistant")
+    assert assistant_message["reasoning_content"] == "legacy reasoning"  # type: ignore[typeddict-item]
+    assert "thinking_blocks" not in assistant_message
+
+
+def test_legacy_reasoning_item_reconstructs_inline_thinking_blocks() -> None:
+    for provider_data in (None, {"thinking_blocks": ["invalid-block"]}):
+        reasoning_item: dict[str, Any] = {
+            "id": "reasoning_legacy",
+            "type": "reasoning",
+            "summary": [],
+            "content": [{"type": "reasoning_text", "text": "legacy thinking"}],
+            "encrypted_content": "LegacySignature",
+        }
+        if provider_data is not None:
+            reasoning_item["provider_data"] = provider_data
+
+        history: list[dict[str, Any]] = [
+            reasoning_item,
+            {
+                "id": "message_legacy",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "answer", "annotations": []}],
+            },
+        ]
+
+        messages = Converter.items_to_messages(
+            history,  # type: ignore[arg-type]
+            model="anthropic/claude-sonnet-4-5",
+            preserve_thinking_blocks=True,
+        )
+
+        assert messages[0]["content"] == [
+            {
+                "type": "thinking",
+                "thinking": "legacy thinking",
+                "signature": "LegacySignature",
+            },
+            {"type": "text", "text": "answer"},
+        ]
+        assert "thinking_blocks" not in messages[0]
 
 
 def test_thinking_blocks_do_not_leak_across_an_intervening_user_turn():
