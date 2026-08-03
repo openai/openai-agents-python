@@ -481,6 +481,33 @@ async def _finalize_streamed_final_output(
     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
 
 
+async def _capture_streamed_turn_tool_guardrail_partials(
+    turn: Awaitable[SingleStepResult],
+    streamed_result: RunResultStreaming,
+) -> SingleStepResult:
+    """Copy an aborted streamed turn's tool guardrail results onto the streamed result.
+
+    A parallel input guardrail that fails by *raising* cancels this run loop task, and a cancelled
+    task hands back a fresh `CancelledError` rather than the annotated one - so by the time
+    `_check_errors()` builds `RunErrorDetails`, the partials recorded on the aborting error are
+    unreachable. Reading them here, from inside the task, keeps them alive on the streamed result,
+    which outlives the cancellation.
+
+    The non-streaming loop solves the same problem with caller-owned lists in
+    `_capture_turn_tool_guardrail_partials`; the owner here is the streamed result itself.
+    """
+    try:
+        return await turn
+    except BaseException as exc:
+        streamed_result._turn_tool_input_guardrail_partials.extend(
+            _tool_input_guardrail_partials(exc)
+        )
+        streamed_result._turn_tool_output_guardrail_partials.extend(
+            _tool_output_guardrail_partials(exc)
+        )
+        raise
+
+
 def _accumulate_tool_guardrail_results(
     streamed_result: RunResultStreaming,
     turn_result: SingleStepResult,
@@ -1156,22 +1183,25 @@ async def start_streaming(
                             if session_input_items_for_persistence is not None
                             else []
                         )
-                    turn_result = await run_single_turn_streamed(
+                    turn_result = await _capture_streamed_turn_tool_guardrail_partials(
+                        run_single_turn_streamed(
+                            streamed_result,
+                            current_bindings,
+                            hooks,
+                            context_wrapper,
+                            run_config,
+                            should_run_agent_start_hooks,
+                            tool_use_tracker,
+                            all_tools,
+                            server_conversation_tracker,
+                            pending_server_items=pending_server_items,
+                            session=session,
+                            reasoning_item_id_policy=resolved_reasoning_item_id_policy,
+                            prompt_cache_key_resolver=prompt_cache_key_resolver,
+                            error_handlers=error_handlers,
+                            agent_span=current_span,
+                        ),
                         streamed_result,
-                        current_bindings,
-                        hooks,
-                        context_wrapper,
-                        run_config,
-                        should_run_agent_start_hooks,
-                        tool_use_tracker,
-                        all_tools,
-                        server_conversation_tracker,
-                        pending_server_items=pending_server_items,
-                        session=session,
-                        reasoning_item_id_policy=resolved_reasoning_item_id_policy,
-                        prompt_cache_key_resolver=prompt_cache_key_resolver,
-                        error_handlers=error_handlers,
-                        agent_span=current_span,
                     )
                 finally:
                     if current_turn_span:

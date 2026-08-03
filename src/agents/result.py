@@ -230,6 +230,25 @@ def _input_items_for_result(
     return run_items_to_input_items(model_input_items, reasoning_item_id_policy)
 
 
+_GuardrailResultT = TypeVar("_GuardrailResultT")
+
+
+def _merge_guardrail_partials(
+    recorded: list[_GuardrailResultT], captured: list[_GuardrailResultT]
+) -> list[_GuardrailResultT]:
+    """Combine partials read off an error with those copied out of a cancelled turn.
+
+    Both paths can describe the same turn, so the two lists overlap whenever the aborting error
+    survived the task boundary. Dedup by identity rather than equality, matching
+    `_record_tool_guardrail_partials`: two runs of the same guardrail compare equal and both
+    should be reported.
+    """
+    if not captured:
+        return recorded
+    seen = {id(result) for result in recorded}
+    return recorded + [result for result in captured if id(result) not in seen]
+
+
 def _starting_agent_for_state(result: RunResultBase) -> Agent[Any]:
     """Return the root agent graph that should seed RunState identity resolution."""
     state = getattr(result, "_state", None)
@@ -576,6 +595,16 @@ class RunResultStreaming(RunResultBase):
     _output_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _stored_exception: Exception | None = field(default=None, repr=False)
     _stored_exception_details_stale: bool = field(default=False, repr=False)
+    # Owned here rather than read off the run loop task: a parallel guardrail that *raises*
+    # cancels that task, and `Task.exception()` on a cancelled task raises instead of handing
+    # back the annotated error, so the aborted turn's partials have to be copied out from
+    # inside the task while they are still reachable.
+    _turn_tool_input_guardrail_partials: list[ToolInputGuardrailResult] = field(
+        default_factory=list, repr=False
+    )
+    _turn_tool_output_guardrail_partials: list[ToolOutputGuardrailResult] = field(
+        default_factory=list, repr=False
+    )
     _cancel_mode: Literal["none", "immediate", "after_turn"] = field(default="none", repr=False)
     _last_processed_response: ProcessedResponse | None = field(default=None, repr=False)
     """The last processed model response. This is needed for resuming from interruptions."""
@@ -957,7 +986,9 @@ class RunResultStreaming(RunResultBase):
         original terminal exception.
 
         When ``error`` is provided, tool guardrail results collected during the aborted turn are
-        merged in; the run-wide accumulators only cover turns that completed.
+        merged in; the run-wide accumulators only cover turns that completed. Partials copied out
+        of a cancelled turn are merged in the same way, since the error that reaches here is not
+        the one they were recorded on.
         """
         try:
             last_agent = self.last_agent
@@ -965,6 +996,12 @@ class RunResultStreaming(RunResultBase):
             return None
         tool_input_partials = _tool_input_guardrail_partials(error) if error else []
         tool_output_partials = _tool_output_guardrail_partials(error) if error else []
+        tool_input_partials = _merge_guardrail_partials(
+            tool_input_partials, self._turn_tool_input_guardrail_partials
+        )
+        tool_output_partials = _merge_guardrail_partials(
+            tool_output_partials, self._turn_tool_output_guardrail_partials
+        )
         return RunErrorDetails(
             input=self.input,
             new_items=self.new_items,
@@ -1014,6 +1051,11 @@ class RunResultStreaming(RunResultBase):
                 if in_guard_exc and isinstance(in_guard_exc, Exception):
                     if isinstance(in_guard_exc, AgentsException) and in_guard_exc.run_data is None:
                         in_guard_exc.run_data = self._create_error_details(in_guard_exc)
+                        # A parallel guardrail that fails by *raising* cancels the run loop, so
+                        # the turn's tool guardrail results are still in flight here for the same
+                        # reason a tripwire's are. Refresh once the loop has settled and the
+                        # aborted turn has copied its partials out.
+                        self._stored_exception_details_stale = True
                     self._stored_exception = in_guard_exc
 
         if self._output_guardrails_task and self._output_guardrails_task.done():

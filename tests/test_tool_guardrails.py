@@ -1169,6 +1169,75 @@ async def test_parallel_guardrail_raising_reports_guardrails_from_the_discarded_
     assert _names(run_data.tool_input_guardrail_results) == ["input_allows"] * state["runs"]
 
 
+@pytest.mark.parametrize("streaming", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_parallel_guardrail_raising_mid_turn_reports_the_guardrails_that_ran(
+    streaming: bool,
+):
+    """The raise lands while the tool is still running, so the turn never completes.
+
+    Distinct from the test above, where the turn finishes before the guardrail fails. On the
+    streamed path a raising guardrail *cancels* the run loop, so the aborted turn's partials are
+    recorded on a `CancelledError` that the task boundary replaces -- the results have to be
+    copied out from inside the task, and the stored exception's details refreshed afterwards, or
+    the run reports no tool guardrails despite having run one.
+    """
+    tool_started = asyncio.Event()
+    state = {"runs": 0}
+
+    async def allow(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        state["runs"] += 1
+        return ToolGuardrailFunctionOutput.allow(output_info="allowed")
+
+    @function_tool
+    async def guarded(query: str) -> str:
+        # Hold the turn open so the guardrail fails before the tool call returns.
+        tool_started.set()
+        await asyncio.sleep(0.5)
+        return "tool output"
+
+    guarded.tool_input_guardrails = [
+        ToolInputGuardrail(guardrail_function=allow, name="input_allows")
+    ]
+
+    async def raise_mid_turn(ctx: Any, agent: Any, agent_input: Any) -> GuardrailFunctionOutput:
+        await tool_started.wait()
+        await asyncio.sleep(0.05)
+        raise ModelBehaviorError("guardrail failed")
+
+    parallel_guardrail = InputGuardrail(guardrail_function=raise_mid_turn, name="raising_guardrail")
+    parallel_guardrail.run_in_parallel = True
+
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("guarded", '{"query": "secret"}')],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="raising_mid_turn_agent",
+        model=model,
+        tools=[guarded],
+        input_guardrails=[parallel_guardrail],
+    )
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        if streaming:
+            streamed = Runner.run_streamed(agent, "go")
+            async for _ in streamed.stream_events():
+                await asyncio.sleep(0)
+        else:
+            await Runner.run(agent, "go")
+
+    assert state["runs"] == 1, "the tool input guardrail never ran, so the test proves nothing"
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _names(run_data.tool_input_guardrail_results) == ["input_allows"]
+    # The output guardrail genuinely never ran - the tool call was still in flight.
+    assert _names(run_data.tool_output_guardrail_results) == []
+
+
 if __name__ == "__main__":
     # Run a simple test to verify functionality
     async def main():
