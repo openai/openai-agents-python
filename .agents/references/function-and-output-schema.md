@@ -15,7 +15,8 @@ Schema behavior is a compatibility boundary shared by Python callables, Pydantic
 ## Strict JSON Schema Conversion
 
 - Strict conversion closes object schemas with `additionalProperties: false` and marks their declared properties required. Reject an explicit `additionalProperties: true` instead of silently changing its meaning. Treat a node as an object when it declares `type: "object"`, lists `"object"` among a type union, or carries `properties`, so the closing rule and the `required` rewrite never disagree.
-- The root is constrained further than nested branches: it must be an explicit, non-nullable, closed object. Normalize a `properties`-bearing typeless root to `type: "object"`, and reject a nullable or open map root at conversion time rather than letting the provider fail the request.
+- Every object node must also carry a `type`; the API rejects a typeless node even when it is closed. Normalize a `properties`-bearing typeless node to `type: "object"` at every depth, and leave a node that already declares its type alone so a nested nullable object keeps its `["object", "null"]` spelling.
+- The root is constrained further than nested branches: it must be non-nullable and closed. Reject a nullable or open map root at conversion time rather than letting the provider fail the request.
 - Preserve the meaning of unions, intersections, definitions, and references. Normalize `oneOf` where required, process `allOf`, retain chained references, and merge a referenced schema with sibling keys without discarding the siblings.
 - Remove defaults that only encode Python `None`; a nullable type must remain represented by its type schema rather than by an unsupported default.
 - `ensure_strict_json_schema()` may mutate a non-empty input dictionary. Copy caller-owned schemas at public boundaries before conversion. Empty-schema conversion must return a fresh object rather than shared mutable state.

@@ -1,5 +1,8 @@
+from typing import Any
+
 import pytest
 
+from agents import FunctionTool
 from agents.exceptions import UserError
 from agents.strict_schema import ensure_strict_json_schema
 
@@ -270,10 +273,10 @@ def test_typeless_root_with_permissive_additional_properties_is_rejected():
         )
 
 
-def test_nested_object_branches_are_closed():
-    # Nested branches keep their own type: a typeless or nullable object stays as written, but
-    # every one of them must come out closed and fully `required`, while non-object nodes are
-    # left alone.
+def test_nested_object_branches_are_closed_and_typed():
+    # Every object branch must come out closed, fully `required`, and carrying a `type` -- the API
+    # rejects a typeless node even when it is closed. A branch that already declares its type keeps
+    # it, so a nullable object stays `["object", "null"]`, and non-object nodes are left alone.
     schema = {
         "type": "object",
         "properties": {
@@ -288,6 +291,7 @@ def test_nested_object_branches_are_closed():
         "type": "object",
         "properties": {
             "cfg": {
+                "type": "object",
                 "properties": {"k": {"type": "string"}},
                 "required": ["k"],
                 "additionalProperties": False,
@@ -301,6 +305,7 @@ def test_nested_object_branches_are_closed():
             "u": {
                 "anyOf": [
                     {
+                        "type": "object",
                         "properties": {"x": {"type": "string"}},
                         "required": ["x"],
                         "additionalProperties": False,
@@ -310,6 +315,7 @@ def test_nested_object_branches_are_closed():
             "rows": {
                 "type": "array",
                 "items": {
+                    "type": "object",
                     "properties": {"c": {"type": "string"}},
                     "required": ["c"],
                     "additionalProperties": False,
@@ -318,5 +324,50 @@ def test_nested_object_branches_are_closed():
             "name": {"type": "string"},
         },
         "required": ["cfg", "opt", "u", "rows", "name"],
+        "additionalProperties": False,
+    }
+
+
+async def _unused_invoke(ctx: Any, args: str) -> str:
+    raise AssertionError("tool should not be invoked")
+
+
+def test_function_tool_emits_typed_and_closed_nested_objects():
+    # End-to-end through the surface that hands the schema to the provider: a strict FunctionTool
+    # must not advertise a typeless node at any depth, or the request fails with
+    # "schema must have a 'type' key".
+    tool = FunctionTool(
+        name="configure",
+        description="configure something",
+        params_json_schema={
+            "properties": {
+                "cfg": {"properties": {"k": {"type": "string"}}},
+                "rows": {"type": "array", "items": {"properties": {"c": {"type": "string"}}}},
+            }
+        },
+        on_invoke_tool=_unused_invoke,
+    )
+
+    assert tool.strict_json_schema is True
+    assert tool.params_json_schema == {
+        "type": "object",
+        "properties": {
+            "cfg": {
+                "type": "object",
+                "properties": {"k": {"type": "string"}},
+                "required": ["k"],
+                "additionalProperties": False,
+            },
+            "rows": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"c": {"type": "string"}},
+                    "required": ["c"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["cfg", "rows"],
         "additionalProperties": False,
     }

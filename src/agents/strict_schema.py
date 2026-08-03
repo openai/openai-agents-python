@@ -61,9 +61,9 @@ def ensure_strict_json_schema(
 def _ensure_strict_root(schema: dict[str, Any]) -> dict[str, Any]:
     """Apply the extra constraints the API places on the *root* of a strict schema.
 
-    A nested branch may stay typeless or nullable as long as it is closed, but the root must be an
-    explicit, non-nullable, closed object. Normalize what can be normalized and reject the rest
-    here, so an unusable root fails at construction rather than as a provider error.
+    A nested branch may stay nullable as long as it is closed and typed, but the root must be a
+    non-nullable, closed object. Normalize what can be normalized and reject the rest here, so an
+    unusable root fails at construction rather than as a provider error.
     """
     typ = schema.get("type")
     if is_list(typ):
@@ -75,10 +75,6 @@ def _ensure_strict_root(schema: dict[str, Any]) -> dict[str, Any]:
             )
         if typ == ["object"]:
             schema["type"] = "object"
-    elif typ is None and is_dict(schema.get("properties")):
-        # A node carrying `properties` is an object even without `type`, and the conversion above
-        # already closed it -- but the API rejects a root that does not say so explicitly.
-        schema["type"] = "object"
 
     # An open map root (`{"additionalProperties": {...}}` with no `properties`) is not an object
     # node as far as the conversion above is concerned, so it stays open unless rejected here.
@@ -123,6 +119,12 @@ def _ensure_strict_json_schema(
             )
 
     is_object = is_object_schema(json_schema)
+    if is_object and "type" not in json_schema:
+        # The API rejects any node that omits `type` ("schema must have a 'type' key"), so closing
+        # a `properties`-bearing node is not enough -- it has to say what it is. A node that already
+        # declares its type keeps it, so a nullable object stays spelled `["object", "null"]`.
+        json_schema["type"] = "object"
+
     if is_object and "additionalProperties" not in json_schema:
         json_schema["additionalProperties"] = False
     elif (
