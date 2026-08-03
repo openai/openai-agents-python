@@ -21,6 +21,46 @@ from .util._pretty_print import pretty_print_run_error_details
 _DRAIN_STREAM_EVENTS_ATTR = "_agents_drain_queued_stream_events"
 
 
+_TOOL_INPUT_GUARDRAIL_PARTIALS_ATTR = "_agents_tool_input_guardrail_partials"
+_TOOL_OUTPUT_GUARDRAIL_PARTIALS_ATTR = "_agents_tool_output_guardrail_partials"
+
+
+def _record_tool_guardrail_partials(
+    error: BaseException,
+    *,
+    tool_input_guardrail_results: list[ToolInputGuardrailResult],
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult],
+) -> None:
+    """Stash tool guardrail results from an in-flight turn on a propagating error.
+
+    A tool guardrail that raises aborts the turn before its `SingleStepResult` is built, so the
+    run-wide accumulators never see the results collected during that turn - including the result
+    that triggered the tripwire. Record them on the error so `RunErrorDetails` can report them.
+    """
+    for attr, results in (
+        (_TOOL_INPUT_GUARDRAIL_PARTIALS_ATTR, tool_input_guardrail_results),
+        (_TOOL_OUTPUT_GUARDRAIL_PARTIALS_ATTR, tool_output_guardrail_results),
+    ):
+        if not results:
+            continue
+        recorded = getattr(error, attr, None)
+        if recorded is None:
+            setattr(error, attr, list(results))
+        else:
+            # Identity, not equality: two distinct runs of the same guardrail produce equal
+            # results, and both should be reported.
+            seen = {id(result) for result in recorded}
+            recorded.extend(result for result in results if id(result) not in seen)
+
+
+def _tool_input_guardrail_partials(error: BaseException) -> list[ToolInputGuardrailResult]:
+    return list(getattr(error, _TOOL_INPUT_GUARDRAIL_PARTIALS_ATTR, None) or [])
+
+
+def _tool_output_guardrail_partials(error: BaseException) -> list[ToolOutputGuardrailResult]:
+    return list(getattr(error, _TOOL_OUTPUT_GUARDRAIL_PARTIALS_ATTR, None) or [])
+
+
 def _mark_error_to_drain_stream_events(error: Exception) -> None:
     setattr(error, _DRAIN_STREAM_EVENTS_ATTR, True)
 

@@ -669,6 +669,136 @@ async def test_tool_guardrail_tripwire_reports_earlier_results(streaming: bool):
     assert "output_rejects" in _names(run_data.tool_output_guardrail_results)
 
 
+def _raising_input_guardrail() -> ToolInputGuardrail[Any]:
+    async def raises(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.raise_exception(output_info="tripped")
+
+    return ToolInputGuardrail(guardrail_function=raises, name="input_raises")
+
+
+def _raising_output_guardrail() -> ToolOutputGuardrail[Any]:
+    async def raises(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.raise_exception(output_info="tripped")
+
+    return ToolOutputGuardrail(guardrail_function=raises, name="output_raises")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_tool_input_tripwire_reports_triggering_result(streaming: bool):
+    """The result that triggered the tripwire is reported, even on the very first turn.
+
+    The turn aborts before its `SingleStepResult` exists, so the run-wide accumulators are still
+    empty at that point.
+    """
+    agent = _looping_agent(input_guardrails=[_raising_input_guardrail()])
+
+    with pytest.raises(ToolInputGuardrailTripwireTriggered) as exc_info:
+        if streaming:
+            result = Runner.run_streamed(agent, "go")
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go")
+
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _names(run_data.tool_input_guardrail_results) == ["input_raises"]
+    assert exc_info.value.guardrail.get_name() == "input_raises"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_tool_output_tripwire_reports_triggering_result(streaming: bool):
+    """Same as above for the output guardrail pipeline."""
+    agent = _looping_agent(output_guardrails=[_raising_output_guardrail()])
+
+    with pytest.raises(ToolOutputGuardrailTripwireTriggered) as exc_info:
+        if streaming:
+            result = Runner.run_streamed(agent, "go")
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go")
+
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _names(run_data.tool_output_guardrail_results) == ["output_raises"]
+    assert exc_info.value.guardrail.get_name() == "output_raises"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_tool_input_tripwire_reports_passing_results_from_same_batch(streaming: bool):
+    """Guardrails that completed before the raising one in the same turn are reported too."""
+
+    @function_tool
+    def guarded(query: str) -> str:
+        return "tool output"
+
+    async def allow(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info="allowed")
+
+    guarded.tool_input_guardrails = [
+        ToolInputGuardrail(guardrail_function=allow, name="input_allows"),
+        _raising_input_guardrail(),
+    ]
+
+    model = FakeModel()
+    model.set_next_output([get_function_tool_call("guarded", '{"query": "x"}')])
+    agent = Agent(name="batch_agent", model=model, tools=[guarded])
+
+    with pytest.raises(ToolInputGuardrailTripwireTriggered) as exc_info:
+        if streaming:
+            result = Runner.run_streamed(agent, "go")
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go")
+
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _names(run_data.tool_input_guardrail_results) == ["input_allows", "input_raises"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_tool_tripwire_reports_earlier_turns_and_triggering_result(streaming: bool):
+    """Completed-turn accumulators and the aborted turn's partials are both reported, once each."""
+
+    @function_tool
+    def first(query: str) -> str:
+        return "first output"
+
+    @function_tool
+    def second(query: str) -> str:
+        return "second output"
+
+    first.tool_output_guardrails = [_rejecting_output_guardrail()]
+    second.tool_output_guardrails = [_raising_output_guardrail()]
+
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("first", '{"query": "a"}')],
+            [get_function_tool_call("second", '{"query": "b"}')],
+        ]
+    )
+    agent = Agent(name="two_turn_agent", model=model, tools=[first, second])
+
+    with pytest.raises(ToolOutputGuardrailTripwireTriggered) as exc_info:
+        if streaming:
+            result = Runner.run_streamed(agent, "go")
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go")
+
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _names(run_data.tool_output_guardrail_results) == ["output_rejects", "output_raises"]
+
+
 if __name__ == "__main__":
     # Run a simple test to verify functionality
     async def main():

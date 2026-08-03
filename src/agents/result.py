@@ -19,6 +19,8 @@ from .exceptions import (
     MaxTurnsExceeded,
     RunErrorDetails,
     _should_drain_stream_events_before_raising,
+    _tool_input_guardrail_partials,
+    _tool_output_guardrail_partials,
 )
 from .guardrail import InputGuardrailResult, OutputGuardrailResult
 from .items import (
@@ -860,15 +862,20 @@ class RunResultStreaming(RunResultBase):
         if self._stored_exception:
             raise self._stored_exception
 
-    def _create_error_details(self) -> RunErrorDetails | None:
+    def _create_error_details(self, error: BaseException | None = None) -> RunErrorDetails | None:
         """Return a `RunErrorDetails` object considering the current attributes of the class.
         Returns ``None`` when the current agent can no longer be resolved, preserving the
         original terminal exception.
+
+        When ``error`` is provided, tool guardrail results collected during the aborted turn are
+        merged in; the run-wide accumulators only cover turns that completed.
         """
         try:
             last_agent = self.last_agent
         except AgentsException:
             return None
+        tool_input_partials = _tool_input_guardrail_partials(error) if error else []
+        tool_output_partials = _tool_output_guardrail_partials(error) if error else []
         return RunErrorDetails(
             input=self.input,
             new_items=self.new_items,
@@ -877,8 +884,8 @@ class RunResultStreaming(RunResultBase):
             context_wrapper=self.context_wrapper,
             input_guardrail_results=self.input_guardrail_results,
             output_guardrail_results=self.output_guardrail_results,
-            tool_input_guardrail_results=self.tool_input_guardrail_results,
-            tool_output_guardrail_results=self.tool_output_guardrail_results,
+            tool_input_guardrail_results=self.tool_input_guardrail_results + tool_input_partials,
+            tool_output_guardrail_results=self.tool_output_guardrail_results + tool_output_partials,
         )
 
     def _check_errors(self):
@@ -888,7 +895,7 @@ class RunResultStreaming(RunResultBase):
             and not self._max_turns_handled
         ):
             max_turns_exc = MaxTurnsExceeded(f"Max turns ({self.max_turns}) exceeded")
-            max_turns_exc.run_data = self._create_error_details()
+            max_turns_exc.run_data = self._create_error_details(max_turns_exc)
             self._stored_exception = max_turns_exc
 
         # Fetch all the completed guardrail results from the queue and raise if needed
@@ -896,7 +903,7 @@ class RunResultStreaming(RunResultBase):
             guardrail_result = self._input_guardrail_queue.get_nowait()
             if guardrail_result.output.tripwire_triggered:
                 tripwire_exc = InputGuardrailTripwireTriggered(guardrail_result)
-                tripwire_exc.run_data = self._create_error_details()
+                tripwire_exc.run_data = self._create_error_details(tripwire_exc)
                 self._stored_exception = tripwire_exc
 
         # Check the tasks for any exceptions
@@ -905,7 +912,7 @@ class RunResultStreaming(RunResultBase):
                 run_impl_exc = self.run_loop_task.exception()
                 if run_impl_exc and isinstance(run_impl_exc, Exception):
                     if isinstance(run_impl_exc, AgentsException) and run_impl_exc.run_data is None:
-                        run_impl_exc.run_data = self._create_error_details()
+                        run_impl_exc.run_data = self._create_error_details(run_impl_exc)
                     self._stored_exception = run_impl_exc
 
         if self._input_guardrails_task and self._input_guardrails_task.done():
@@ -913,7 +920,7 @@ class RunResultStreaming(RunResultBase):
                 in_guard_exc = self._input_guardrails_task.exception()
                 if in_guard_exc and isinstance(in_guard_exc, Exception):
                     if isinstance(in_guard_exc, AgentsException) and in_guard_exc.run_data is None:
-                        in_guard_exc.run_data = self._create_error_details()
+                        in_guard_exc.run_data = self._create_error_details(in_guard_exc)
                     self._stored_exception = in_guard_exc
 
         if self._output_guardrails_task and self._output_guardrails_task.done():
@@ -924,7 +931,7 @@ class RunResultStreaming(RunResultBase):
                         isinstance(out_guard_exc, AgentsException)
                         and out_guard_exc.run_data is None
                     ):
-                        out_guard_exc.run_data = self._create_error_details()
+                        out_guard_exc.run_data = self._create_error_details(out_guard_exc)
                     self._stored_exception = out_guard_exc
 
     def _cleanup_tasks(self):

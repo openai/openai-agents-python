@@ -39,6 +39,8 @@ from ..exceptions import (
     OutputGuardrailTripwireTriggered,
     RunErrorDetails,
     UserError,
+    _tool_input_guardrail_partials,
+    _tool_output_guardrail_partials,
 )
 from ..handoffs import Handoff
 from ..items import (
@@ -1314,8 +1316,12 @@ async def start_streaming(
             context_wrapper=context_wrapper,
             input_guardrail_results=streamed_result.input_guardrail_results,
             output_guardrail_results=streamed_result.output_guardrail_results,
-            tool_input_guardrail_results=streamed_result.tool_input_guardrail_results,
-            tool_output_guardrail_results=streamed_result.tool_output_guardrail_results,
+            tool_input_guardrail_results=(
+                streamed_result.tool_input_guardrail_results + _tool_input_guardrail_partials(exc)
+            ),
+            tool_output_guardrail_results=(
+                streamed_result.tool_output_guardrail_results + _tool_output_guardrail_partials(exc)
+            ),
         )
         raise
     except Exception as e:

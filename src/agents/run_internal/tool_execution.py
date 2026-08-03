@@ -49,6 +49,7 @@ from ..exceptions import (
     ToolInputGuardrailTripwireTriggered,
     ToolOutputGuardrailTripwireTriggered,
     UserError,
+    _record_tool_guardrail_partials,
 )
 from ..items import (
     ItemHelpers,
@@ -1514,15 +1515,28 @@ class _FunctionToolBatchExecutor:
         try:
             await self._drain_pending_tasks(pending_tool_runs)
         except asyncio.CancelledError as exc:
+            self._record_guardrail_partials(exc)
             if self.propagating_failure is exc:
                 raise
             self._cancel_pending_tasks_for_parent_cancellation()
+            raise
+        except BaseException as exc:
+            # The turn aborts before a SingleStepResult exists, so the run-wide accumulators would
+            # never see the results collected here - including a triggering tripwire result.
+            self._record_guardrail_partials(exc)
             raise
 
         return (
             self._build_function_tool_results(),
             self.tool_input_guardrail_results,
             self.tool_output_guardrail_results,
+        )
+
+    def _record_guardrail_partials(self, error: BaseException) -> None:
+        _record_tool_guardrail_partials(
+            error,
+            tool_input_guardrail_results=self.tool_input_guardrail_results,
+            tool_output_guardrail_results=self.tool_output_guardrail_results,
         )
 
     def _fill_tool_task_slots(self, pending_tool_runs: list[tuple[int, ToolRunFunction]]) -> None:

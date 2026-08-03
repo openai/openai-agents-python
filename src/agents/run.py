@@ -17,6 +17,8 @@ from .exceptions import (
     MaxTurnsExceeded,
     RunErrorDetails,
     UserError,
+    _tool_input_guardrail_partials,
+    _tool_output_guardrail_partials,
 )
 from .guardrail import (
     InputGuardrailResult,
@@ -1601,8 +1603,12 @@ class AgentRunner:
                         context_wrapper=context_wrapper,
                         input_guardrail_results=input_guardrail_results,
                         output_guardrail_results=output_guardrail_results,
-                        tool_input_guardrail_results=tool_input_guardrail_results,
-                        tool_output_guardrail_results=tool_output_guardrail_results,
+                        tool_input_guardrail_results=(
+                            tool_input_guardrail_results + _tool_input_guardrail_partials(exc)
+                        ),
+                        tool_output_guardrail_results=(
+                            tool_output_guardrail_results + _tool_output_guardrail_partials(exc)
+                        ),
                     )
                 raise
             finally:
