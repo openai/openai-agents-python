@@ -908,7 +908,10 @@ class AnyLLMModel(Model):
             "conversation": conversation_id,
             "include": include,
             "parallel_tool_calls": parallel_tool_calls,
-            "reasoning": _to_dump_compatible(model_settings.reasoning)
+            # any-llm types `ResponsesParams.reasoning` as a mapping, so dump the model
+            # directly. `_to_dump_compatible` only materializes lazy iterables, and a
+            # pydantic model iterates as key/value pairs, which would send a list instead.
+            "reasoning": model_settings.reasoning.model_dump(mode="json", exclude_none=True)
             if model_settings.reasoning is not None
             else None,
             "text": self._remove_not_given(text),

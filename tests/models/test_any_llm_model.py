@@ -26,6 +26,7 @@ from openai.types.responses.response_usage import (
     OutputTokensDetails,
     ResponseUsage,
 )
+from openai.types.shared import Reasoning
 from pydantic import BaseModel
 
 from agents import (
@@ -994,6 +995,104 @@ async def test_any_llm_responses_path_sanitizes_replayed_items_before_validation
             "output": "The weather in Tokyo is sunny and 22°C.",
         },
     ]
+
+
+class _RecordingResponsesProvider:
+    """Provider stub that records the params any-llm's private responses API receives."""
+
+    SUPPORTS_RESPONSES = True
+
+    def __init__(self, response: Any) -> None:
+        self._response = response
+        self.private_responses_calls: list[dict[str, Any]] = []
+
+    async def aresponses(self, **kwargs: Any) -> Any:
+        raise AssertionError("public aresponses path should not be used in this test")
+
+    async def _aresponses(self, params: Any, **kwargs: Any) -> Any:
+        self.private_responses_calls.append({"params": params, "kwargs": kwargs})
+        return self._response
+
+
+def _model_bound_to_provider(provider: Any) -> Any:
+    from agents.extensions.models.any_llm_model import AnyLLMModel
+
+    class _BoundAnyLLMModel(AnyLLMModel):
+        def _get_provider(self) -> Any:
+            return provider
+
+    return _BoundAnyLLMModel(model="openai/gpt-5.4-mini", api="responses")
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_any_llm_responses_path_sends_reasoning_as_a_mapping(stream: bool) -> None:
+    """any-llm types `ResponsesParams.reasoning` as a mapping, so it must not be a pair list."""
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
+
+    async def response_stream() -> AsyncIterator[ResponseCompletedEvent]:
+        yield ResponseCompletedEvent(
+            type="response.completed",
+            response=_response("Hello"),
+            sequence_number=1,
+        )
+
+    provider = _RecordingResponsesProvider(response_stream() if stream else _response("Hello"))
+    model = _model_bound_to_provider(provider)
+
+    # Building `ResponsesParams` validates the payload, so a pair list fails before the
+    # provider is reached.
+    result = await cast(Any, model)._fetch_responses_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(reasoning=Reasoning(effort="low", summary="concise")),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=stream,
+        prompt=None,
+    )
+    if stream:
+        await result.aclose()
+
+    assert len(provider.private_responses_calls) == 1
+    params = provider.private_responses_calls[0]["params"]
+    # Unset reasoning fields are dropped, matching how this adapter sanitizes replayed input.
+    assert params.reasoning == {"effort": "low", "summary": "concise"}
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_path_omits_reasoning_when_unset() -> None:
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
+
+    provider = _RecordingResponsesProvider(_response("Hello"))
+    model = _model_bound_to_provider(provider)
+
+    await cast(Any, model)._fetch_responses_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert len(provider.private_responses_calls) == 1
+    assert provider.private_responses_calls[0]["params"].reasoning is None
 
 
 def test_any_llm_provider_passes_api_override() -> None:
