@@ -460,3 +460,56 @@ def test_run_result_streaming_v070_run_impl_task_positional_binding_is_preserved
     assert result._event_queue is event_queue
     assert result._input_guardrail_queue is input_guardrail_queue
     assert result.run_loop_task is sentinel_task
+
+
+def test_run_result_streaming_positional_binding_survives_internal_bookkeeping_fields() -> None:
+    """Internal bookkeeping fields must not consume positional slots.
+
+    The tests above pin the prefix of the positional signature. This one pins the fields that sit
+    *after* the internal state added for error-detail refreshing, so a new bookkeeping field cannot
+    silently take the slot that `_cancel_mode` / `_last_processed_response` / `interruptions`
+    occupy. Anything internal should be `init=False`.
+    """
+    sentinel_task = cast(Any, object())
+    event_queue: asyncio.Queue[Any] = asyncio.Queue()
+    input_guardrail_queue: asyncio.Queue[Any] = asyncio.Queue()
+    triggered = cast(Any, object())
+    stored_exception = RuntimeError("stored")
+    interruptions: list[Any] = []
+    result = RunResultStreaming(
+        "x",
+        [],
+        [],
+        "ok",
+        [],
+        [],
+        [],
+        [],
+        RunContextWrapper(context=None),
+        Agent(name="agent"),
+        0,
+        1,
+        None,
+        None,
+        False,
+        [],
+        event_queue,
+        input_guardrail_queue,
+        sentinel_task,
+        None,
+        triggered,
+        None,
+        stored_exception,
+        "immediate",
+        None,
+        interruptions,
+    )
+    assert result._triggered_input_guardrail_result is triggered
+    assert result._stored_exception is stored_exception
+    assert result._cancel_mode == "immediate"
+    assert result._last_processed_response is None
+    assert result.interruptions is interruptions
+    # The bookkeeping fields keep their defaults rather than binding a positional value.
+    assert result._stored_exception_details_stale is False
+    assert result._turn_tool_input_guardrail_partials == []
+    assert result._turn_tool_output_guardrail_partials == []

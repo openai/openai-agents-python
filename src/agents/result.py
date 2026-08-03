@@ -594,16 +594,20 @@ class RunResultStreaming(RunResultBase):
     _triggered_input_guardrail_result: InputGuardrailResult | None = field(default=None, repr=False)
     _output_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _stored_exception: Exception | None = field(default=None, repr=False)
-    _stored_exception_details_stale: bool = field(default=False, repr=False)
+    # `init=False` for the three below: they are internal bookkeeping that no caller passes, and
+    # this is an exported dataclass whose positional argument order is pinned by
+    # `tests/test_source_compat_constructors.py`. Adding them as init fields here would shift the
+    # positional meaning of `_cancel_mode`, `_last_processed_response` and `interruptions`.
+    _stored_exception_details_stale: bool = field(default=False, init=False, repr=False)
     # Owned here rather than read off the run loop task: a parallel guardrail that *raises*
     # cancels that task, and `Task.exception()` on a cancelled task raises instead of handing
     # back the annotated error, so the aborted turn's partials have to be copied out from
     # inside the task while they are still reachable.
     _turn_tool_input_guardrail_partials: list[ToolInputGuardrailResult] = field(
-        default_factory=list, repr=False
+        default_factory=list, init=False, repr=False
     )
     _turn_tool_output_guardrail_partials: list[ToolOutputGuardrailResult] = field(
-        default_factory=list, repr=False
+        default_factory=list, init=False, repr=False
     )
     _cancel_mode: Literal["none", "immediate", "after_turn"] = field(default="none", repr=False)
     _last_processed_response: ProcessedResponse | None = field(default=None, repr=False)
