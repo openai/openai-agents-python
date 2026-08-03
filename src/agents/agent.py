@@ -119,6 +119,59 @@ def _validate_codex_tool_name_collisions(tools: list[Tool]) -> None:
         )
 
 
+def _validate_handoff_tool_name_collisions(
+    handoffs: "list[Agent[Any] | Handoff[Any, Any]]",
+) -> None:
+    """Raise UserError if two handoffs derive the same tool name after normalization.
+
+    This catches the silent many-to-one collapse where distinct agent names such as
+    "Billing Agent" and "billing agent" both map to ``transfer_to_billing_agent``,
+    making the first-registered agent permanently unreachable.
+    """
+    from .handoffs import Handoff as _Handoff
+
+    seen: dict[str, str] = {}  # derived tool name -> first agent's original name
+    for item in handoffs:
+        if isinstance(item, _Handoff):
+            derived = item.tool_name
+            original = item.agent_name
+        else:
+            # Plain Agent — use the same derivation that Handoff.default_tool_name uses.
+            derived = _Handoff.default_tool_name(item)
+            original = item.name
+
+        if derived in seen:
+            raise UserError(
+                f"Ambiguous handoff configuration: agents {seen[derived]!r} and "
+                f"{original!r} both derive the handoff tool name {derived!r}. "
+                f"Pass an explicit tool_name_override= to handoff() for one of them "
+                f"to avoid silent routing to the wrong agent."
+            )
+        seen[derived] = original
+
+
+def _validate_tool_name_collisions(tools: list[Tool]) -> None:
+    """Raise UserError if two FunctionTools in the assembled tool list share the same name.
+
+    This catches collisions that arise from Agent.as_tool() calls whose derived names
+    converge after normalization (e.g. ``Agent(name="Refund")`` and
+    ``Agent(name="refund")`` both produce a tool named ``refund``).
+    """
+    seen: dict[str, str] = {}  # tool name -> first tool's display label
+    for tool in tools:
+        if not isinstance(tool, FunctionTool):
+            continue
+        name = tool.name
+        if name in seen:
+            raise UserError(
+                f"Duplicate tool name {name!r}: two tools in the agent's tool list share "
+                f"this name. This can happen when two Agent.as_tool() calls produce the "
+                f"same derived name after normalization. Pass an explicit tool_name= to "
+                f"Agent.as_tool() for one of them."
+            )
+        seen[name] = name
+
+
 class AgentToolStreamEvent(TypedDict):
     """Streaming event emitted when an agent is invoked as a tool."""
 
@@ -264,6 +317,7 @@ class AgentBase(Generic[TContext]):
         enabled: list[Tool] = [t for t, ok in zip(self.tools, results, strict=False) if ok]
         all_tools: list[Tool] = prune_orphaned_tool_search_tools([*mcp_tools, *enabled])
         _validate_codex_tool_name_collisions(all_tools)
+        _validate_tool_name_collisions(all_tools)
         return all_tools
 
 
@@ -451,6 +505,8 @@ class Agent(AgentBase, Generic[TContext]):
 
         if not isinstance(self.handoffs, list):
             raise TypeError(f"Agent handoffs must be a list, got {type(self.handoffs).__name__}")
+
+        _validate_handoff_tool_name_collisions(self.handoffs)
 
         if self.model is not None and not isinstance(self.model, str):
             from .models.interface import Model

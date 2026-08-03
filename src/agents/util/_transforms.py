@@ -9,7 +9,10 @@ def transform_string_function_style(name: str, *, warn_on_whitespace: bool = Tru
     transformed_name = re.sub(r"[^a-zA-Z0-9_]", "_", whitespace_normalized_name)
     final_name = transformed_name.lower()
 
-    if transformed_name != name and (
+    # Warn whenever the final name differs from the original, including case-only changes.
+    # Previously only character-replacement changes were warned about (transformed_name != name),
+    # which silently missed names like "MyAgent" → "myagent".
+    if final_name != name and (
         warn_on_whitespace or transformed_name != whitespace_normalized_name
     ):
         logger.warning(
