@@ -865,6 +865,87 @@ async def test_sibling_tool_failure_reports_function_tool_guardrail_results():
 
 
 @pytest.mark.asyncio
+async def test_sibling_tool_failure_drains_a_still_running_function_tool():
+    """A sibling failure must settle the function-tool side, not leave it running past the run.
+
+    `asyncio.gather` propagates the sibling exception as soon as it is raised and leaves the other
+    awaitable running, so a slow tool body would otherwise keep executing - and append guardrail
+    results - after the run has already failed.
+    """
+    after_failure_activity: list[str] = []
+    tool_completed = asyncio.Event()
+
+    async def allow_input(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        # Must allow, not reject: a rejected call never runs the tool body, so there is nothing
+        # left in flight for the sibling failure to abandon.
+        return ToolGuardrailFunctionOutput.allow(output_info="input_allowed")
+
+    async def record_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        after_failure_activity.append("output_guardrail")
+        return ToolGuardrailFunctionOutput.allow(output_info="output_checked")
+
+    @function_tool
+    async def slow_guarded(query: str) -> str:
+        try:
+            # Still in flight when the sibling raises.
+            await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            raise
+        after_failure_activity.append("tool_body")
+        tool_completed.set()
+        return "tool output"
+
+    slow_guarded.tool_input_guardrails = [
+        ToolInputGuardrail(guardrail_function=allow_input, name="input_allows")
+    ]
+    slow_guarded.tool_output_guardrails = [
+        ToolOutputGuardrail(guardrail_function=record_output, name="output_allows")
+    ]
+
+    def failing_executor(request: Any) -> str:
+        raise ModelBehaviorError("sibling shell tool exploded")
+
+    shell_tool = LocalShellTool(executor=failing_executor)
+    shell_call = LocalShellCall(
+        id="lsh_drain",
+        action=LocalShellCallAction(
+            command=["bash", "-c", "echo hi"],
+            env={},
+            type="exec",
+            timeout_ms=1000,
+            working_directory="/tmp",
+        ),
+        call_id="call_shell_drain",
+        status="completed",
+        type="local_shell_call",
+    )
+
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("slow_guarded", '{"query": "secret"}'), shell_call],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="mixed_tools_slow", model=model, tools=[slow_guarded, shell_tool])
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await Runner.run(agent, "go")
+
+    # The input guardrail ran before the sibling failed, so it is still reported.
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    assert _names(run_data.tool_input_guardrail_results) == ["input_allows"]
+
+    # Give the abandoned tool more than enough time to finish if it were still running.
+    await asyncio.sleep(1.2)
+    assert not tool_completed.is_set()
+    assert after_failure_activity == [], (
+        f"tool work continued after the run failed: {after_failure_activity}"
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_parallel_input_tripwire_reports_tool_guardrail_results(streaming: bool):
     """A parallel input tripwire must report tool guardrails the overlapped turn ran."""

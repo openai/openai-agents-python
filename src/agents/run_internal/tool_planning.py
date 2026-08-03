@@ -581,6 +581,21 @@ async def _execute_tool_plan(
         # guardrails that already ran must still reach RunErrorDetails.
         function_tool_input_results: list[ToolInputGuardrailResult] = []
         function_tool_output_results: list[ToolOutputGuardrailResult] = []
+        # Held as a task so a sibling failure can cancel and drain it: `asyncio.gather` propagates
+        # the sibling exception immediately and leaves this coroutine running otherwise, which both
+        # loses the guardrails it appends afterwards and lets tool work outlive the failed run.
+        function_tool_task = asyncio.ensure_future(
+            execute_function_tool_calls(
+                bindings=bindings,
+                tool_runs=plan.function_runs,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                config=run_config,
+                isolate_parallel_failures=isolate_function_tool_failures,
+                tool_input_guardrail_results=function_tool_input_results,
+                tool_output_guardrail_results=function_tool_output_results,
+            )
+        )
         try:
             (
                 (function_results, tool_input_guardrail_results, tool_output_guardrail_results),
@@ -590,16 +605,7 @@ async def _execute_tool_plan(
                 apply_patch_results,
                 local_shell_results,
             ) = await asyncio.gather(
-                execute_function_tool_calls(
-                    bindings=bindings,
-                    tool_runs=plan.function_runs,
-                    hooks=hooks,
-                    context_wrapper=context_wrapper,
-                    config=run_config,
-                    isolate_parallel_failures=isolate_function_tool_failures,
-                    tool_input_guardrail_results=function_tool_input_results,
-                    tool_output_guardrail_results=function_tool_output_results,
-                ),
+                function_tool_task,
                 execute_computer_actions(
                     public_agent=public_agent,
                     actions=plan.computer_actions,
@@ -637,6 +643,12 @@ async def _execute_tool_plan(
                 ),
             )
         except BaseException as exc:
+            # Settle the function-tool side before reading its results. A sibling failure gets here
+            # with that task still running, so recording immediately would both miss the guardrails
+            # it is about to append and leave it running past the end of the run.
+            if not function_tool_task.done():
+                function_tool_task.cancel()
+            await asyncio.gather(function_tool_task, return_exceptions=True)
             # A non-function tool raising does not pass through the function-tool
             # executor's own recording path, so copy across whatever ran before the
             # cancellation. _record_tool_guardrail_partials de-dupes by identity, so this
