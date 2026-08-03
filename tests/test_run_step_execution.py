@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import pytest
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import ResponseComputerToolCall, ResponseFunctionToolCall
+from openai.types.responses.response_computer_tool_call import (
+    ActionScreenshot,
+    PendingSafetyCheck,
+)
 from openai.types.responses.response_output_item import McpApprovalRequest
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_refusal import ResponseOutputRefusal
@@ -21,6 +25,7 @@ from agents import (
     Agent,
     AgentBase,
     ApplyPatchTool,
+    ComputerTool,
     FunctionTool,
     HostedMCPTool,
     MCPApprovalRequestItem,
@@ -3618,3 +3623,98 @@ async def test_execute_tools_emits_hosted_mcp_rejection_reason_from_explicit_mes
     assert responses[0].raw_item["approve"] is False
     assert responses[0].raw_item["approval_request_id"] == "mcp-approval-reject-reason"
     assert responses[0].raw_item["reason"] == "Denied by policy"
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_plan_cancels_sibling_category_on_failure() -> None:
+    """A failing tool category must not leave a sibling category running.
+
+    `_execute_tool_plan` fans the six tool categories out concurrently. Only
+    function tools go through `_FunctionToolBatchExecutor`, and its cancel-and-drain
+    never sees a failure raised by a sibling arm of that fan-out, so a rejected
+    computer safety check used to leave an in-flight shell command executing after
+    the run had already raised.
+    """
+    from agents.run_internal.agent_bindings import bind_public_agent
+    from agents.run_internal.tool_planning import ToolExecutionPlan, _execute_tool_plan
+
+    from .test_computer_tool_lifecycle import FakeComputer
+
+    shell_started = asyncio.Event()
+    shell_cancelled = asyncio.Event()
+    shell_finished = asyncio.Event()
+
+    async def blocking_executor(_request: Any) -> str:
+        shell_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            shell_cancelled.set()
+            raise
+        finally:
+            shell_finished.set()
+        return "unreachable"
+
+    async def reject_once_shell_is_running(_data: Any) -> bool:
+        # Fail only after the sibling is genuinely in flight, so the test pins the
+        # interleaving rather than a race between the two categories starting.
+        await shell_started.wait()
+        return False
+
+    shell_tool = ShellTool(executor=blocking_executor)
+    computer_tool = ComputerTool(
+        computer=FakeComputer(), on_safety_check=reject_once_shell_is_running
+    )
+    agent: Agent[Any] = Agent(name="test", tools=[shell_tool, computer_tool])
+
+    plan = ToolExecutionPlan(
+        shell_calls=[
+            ToolRunShellCall(
+                tool_call=cast(
+                    Any,
+                    {
+                        "type": "shell_call",
+                        "id": "shell-1",
+                        "call_id": "shell-1",
+                        "status": "in_progress",
+                        "action": {
+                            "type": "exec",
+                            "commands": ["sleep 1000"],
+                            "timeout_ms": None,
+                            "working_directory": None,
+                            "env": {},
+                            "user": None,
+                        },
+                    },
+                ),
+                shell_tool=shell_tool,
+            )
+        ],
+        computer_actions=[
+            ToolRunComputerAction(
+                tool_call=ResponseComputerToolCall(
+                    id="computer-1",
+                    type="computer_call",
+                    call_id="computer-1",
+                    action=ActionScreenshot(type="screenshot"),
+                    pending_safety_checks=[
+                        PendingSafetyCheck(id="sc-1", code="malicious", message="nope")
+                    ],
+                    status="completed",
+                ),
+                computer_tool=computer_tool,
+            )
+        ],
+    )
+
+    with pytest.raises(UserError, match="safety check was not acknowledged"):
+        await _execute_tool_plan(
+            plan=plan,
+            bindings=bind_public_agent(agent),
+            hooks=RunHooks[Any](),
+            context_wrapper=RunContextWrapper(context=None),
+            run_config=RunConfig(),
+        )
+
+    assert shell_cancelled.is_set(), "sibling shell command was not cancelled"
+    assert shell_finished.is_set(), "sibling shell command did not finish unwinding"
