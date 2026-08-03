@@ -53,7 +53,7 @@ from ...tracing import generation_span, response_span
 from ...tracing.span_data import GenerationSpanData
 from ...tracing.spans import Span
 from ...usage import Usage
-from ...util._error_tracing import model_span_errors
+from ...util._error_tracing import model_span_errors, record_model_error_on_span
 from ...util._json import _to_dump_compatible
 
 try:
@@ -487,6 +487,17 @@ class AnyLLMModel(Model):
                         if tracing.include_data() and final_response:
                             span_response.span_data.response = final_response
                             span_response.span_data.input = input
+                        if terminal_failure_error is not None:
+                            # The failure is already known here. A consumer that stops at
+                            # this event closes the generator, which raises GeneratorExit
+                            # at the yield below and skips the raise after the loop, so
+                            # recording later would miss it entirely.
+                            record_model_error_on_span(
+                                span_response,
+                                message="Error streaming response",
+                                error=terminal_failure_error,
+                                trace_include_sensitive_data=tracing.include_data(),
+                            )
                     yield chunk
             except asyncio.CancelledError:
                 close_stream_in_background = True

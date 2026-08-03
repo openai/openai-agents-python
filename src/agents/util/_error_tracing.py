@@ -33,6 +33,57 @@ def attach_error_to_current_span(error: SpanError) -> None:
         logger.warning("No span to add error %s to", error)
 
 
+def _model_error_text(error: Exception, *, trace_include_sensitive_data: bool) -> str:
+    """Render the span text for a failed model call.
+
+    The exception is only stringified when its text will actually be exported, so a
+    provider exception with a side-effecting `__str__` is not invoked just to have
+    its output thrown away by redaction.
+    """
+    if not trace_include_sensitive_data:
+        return REDACTED_TRACE_ERROR_MESSAGE
+    try:
+        return str(error)
+    except Exception:
+        logger.warning(
+            "Could not stringify %s for the model span; recording the type only",
+            type(error).__name__,
+        )
+        return f"Unrenderable {type(error).__name__}"
+
+
+def record_model_error_on_span(
+    span: Span[Any],
+    *,
+    message: str,
+    error: Exception,
+    trace_include_sensitive_data: bool,
+) -> None:
+    """Record an already-known model failure on its span.
+
+    Streaming providers learn about a terminal failure before they raise it, and a
+    consumer that stops at that terminal event closes the generator, so the raise
+    never happens. Recording at the point of knowledge keeps the span accurate in
+    that case. Best-effort: never raises, so annotating a span cannot change what
+    the caller sees.
+    """
+    try:
+        attach_error_to_span(
+            span,
+            SpanError(
+                message=message,
+                data={
+                    "error": _model_error_text(
+                        error,
+                        trace_include_sensitive_data=trace_include_sensitive_data,
+                    )
+                },
+            ),
+        )
+    except Exception:
+        logger.warning("Could not record the model error on the span", exc_info=True)
+
+
 @contextlib.contextmanager
 def model_span_errors(
     span: Span[Any],
@@ -45,20 +96,17 @@ def model_span_errors(
     `Span.__exit__` finishes a span without attaching an exception, so a provider
     that does not annotate its own span exports a failed model call that is
     indistinguishable from a successful one.
+
+    Recording is best-effort on purpose: the exception the caller sees is always the
+    one the provider raised, never one produced while annotating the span.
     """
     try:
         yield
     except Exception as error:
-        attach_error_to_span(
+        record_model_error_on_span(
             span,
-            SpanError(
-                message=message,
-                data={
-                    "error": get_trace_error(
-                        trace_include_sensitive_data=trace_include_sensitive_data,
-                        error_message=str(error),
-                    )
-                },
-            ),
+            message=message,
+            error=error,
+            trace_include_sensitive_data=trace_include_sensitive_data,
         )
         raise

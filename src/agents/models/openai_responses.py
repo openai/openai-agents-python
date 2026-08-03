@@ -75,6 +75,7 @@ from ..tool import (
 )
 from ..tracing import SpanError, response_span
 from ..usage import Usage, _response_usage_to_usage, model_usage_to_span_usage
+from ..util._error_tracing import record_model_error_on_span
 from ..util._json import _to_dump_compatible
 from ..version import __version__
 from ._openai_retry import get_openai_retry_advice
@@ -593,6 +594,17 @@ class OpenAIResponsesModel(Model):
                             "response.error",
                         }:
                             yielded_terminal_event = True
+                            if terminal_failure_error is not None:
+                                # A consumer that stops at this event closes the
+                                # generator, which raises GeneratorExit at the yield
+                                # below and skips the raise after the loop, so the
+                                # span has to be annotated here or not at all.
+                                record_model_error_on_span(
+                                    span_response,
+                                    message="Error streaming response",
+                                    error=terminal_failure_error,
+                                    trace_include_sensitive_data=tracing.include_data(),
+                                )
                         yield chunk
                 except asyncio.CancelledError:
                     close_stream_in_background = True
