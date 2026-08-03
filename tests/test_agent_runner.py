@@ -3126,6 +3126,49 @@ async def test_save_result_to_session_prefers_latest_duplicate_function_outputs(
 
 
 @pytest.mark.asyncio
+async def test_save_result_to_session_keeps_tool_call_before_its_output():
+    session = SimpleListSession()
+    call_item = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "call_ordered",
+            "name": "tool_ordered",
+            "arguments": "{}",
+        },
+    )
+    output_item = cast(
+        TResponseInputItem,
+        {"type": "function_call_output", "call_id": "call_ordered", "output": "result"},
+    )
+    # A resumed turn can replay a tool call the input list already carries. Collapsing the
+    # duplicate must not move the call behind its output in the persisted history.
+    repeated_call = _DummyRunItem(
+        {
+            "type": "function_call",
+            "call_id": "call_ordered",
+            "name": "tool_ordered",
+            "arguments": "{}",
+        },
+        item_type="tool_call_item",
+    )
+
+    await save_result_to_session(
+        session,
+        [call_item, output_item],
+        [cast(RunItem, repeated_call)],
+        None,
+    )
+
+    saved_types = [
+        cast(dict[str, Any], item).get("type")
+        for item in session.saved_items
+        if isinstance(item, dict)
+    ]
+    assert saved_types == ["function_call", "function_call_output"]
+
+
+@pytest.mark.asyncio
 async def test_rewind_handles_id_stripped_sessions() -> None:
     session = IdStrippingSession()
     item = cast(TResponseInputItem, {"id": "message-1", "type": "message", "content": "hello"})
