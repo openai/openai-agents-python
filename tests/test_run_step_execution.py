@@ -4000,3 +4000,39 @@ async def test_sibling_failure_does_not_cancel_post_invoke_work() -> None:
 
     assert post_invoke_started.is_set()
     assert post_invoke_finished.is_set(), "post-invoke lifecycle work was cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_resistant_arm_cannot_block_the_failure() -> None:
+    """One executor that ignores cancellation must not hold the run open.
+
+    Function tools already bound their own teardown. The fan-out drain has to be
+    bounded for the same reason: a shell or custom executor that catches
+    `CancelledError` and keeps cleaning up would otherwise stop the failure that
+    triggered the cancellation from ever reaching the caller. The real drain
+    window is used rather than a patched one so this fails by timing out on an
+    unbounded drain, which is the behavior being pinned.
+    """
+    from agents.util._asyncio_tasks import _ARM_DRAIN_SECONDS, gather_with_cancel
+
+    cleanup_running = asyncio.Event()
+
+    async def resists_cancellation() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cleanup_running.set()
+            while True:
+                await asyncio.sleep(0.01)
+
+    async def fails() -> None:
+        await asyncio.sleep(0)
+        raise UserError("sibling failed")
+
+    with pytest.raises(UserError, match="sibling failed"):
+        await asyncio.wait_for(
+            gather_with_cancel(resists_cancellation(), fails()),
+            timeout=_ARM_DRAIN_SECONDS + 2,
+        )
+
+    assert cleanup_running.is_set(), "the resistant arm never reached its cleanup"

@@ -6,6 +6,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, TypeVar, overload
 
+from ..logger import logger
+
 
 @dataclass
 class _SiblingCancellationScope:
@@ -33,11 +35,36 @@ def cancelled_by_failing_sibling() -> bool:
     return scope is not None and scope.cancelling
 
 
+# Long enough for an arm to run its own bounded teardown (function tools drain for
+# _FUNCTION_TOOL_TEARDOWN_DRAIN_SECONDS), short enough that one executor which
+# resists cancellation cannot hold the run open.
+_ARM_DRAIN_SECONDS = 1.0
+
+
+def _report_unfinished_arm(task: asyncio.Task[Any]) -> None:
+    """Report an arm that outlived the drain window, at the loop level."""
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.warning("Cancelled concurrent task failed after teardown: %s", error)
+
+
 async def _cancel_and_drain(tasks: list[asyncio.Task[Any]]) -> None:
     for task in tasks:
         if not task.done():
             task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    # Bounded: an executor that catches CancelledError and keeps cleaning up must
+    # not stop the original failure from propagating. Anything still running is
+    # reported through a done callback instead of being waited on.
+    done, pending = await asyncio.wait(tasks, timeout=_ARM_DRAIN_SECONDS)
+    for task in done:
+        if not task.cancelled():
+            # Retrieved so a failure during teardown is not reported as an
+            # exception that was never retrieved.
+            task.exception()
+    for task in pending:
+        task.add_done_callback(_report_unfinished_arm)
 
 
 T = TypeVar("T")
