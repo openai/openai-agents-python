@@ -1,3 +1,5 @@
+import contextlib
+from collections.abc import Iterator
 from typing import Any
 
 from .. import _debug
@@ -29,3 +31,34 @@ def attach_error_to_current_span(error: SpanError) -> None:
         logger.warning("No active span; trace error was not attached")
     else:
         logger.warning("No span to add error %s to", error)
+
+
+@contextlib.contextmanager
+def model_span_errors(
+    span: Span[Any],
+    *,
+    message: str,
+    trace_include_sensitive_data: bool,
+) -> Iterator[None]:
+    """Record a failing model call on the span it happened in, then re-raise.
+
+    `Span.__exit__` finishes a span without attaching an exception, so a provider
+    that does not annotate its own span exports a failed model call that is
+    indistinguishable from a successful one.
+    """
+    try:
+        yield
+    except Exception as error:
+        attach_error_to_span(
+            span,
+            SpanError(
+                message=message,
+                data={
+                    "error": get_trace_error(
+                        trace_include_sensitive_data=trace_include_sensitive_data,
+                        error_message=str(error),
+                    )
+                },
+            ),
+        )
+        raise

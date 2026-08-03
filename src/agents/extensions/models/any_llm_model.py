@@ -53,6 +53,7 @@ from ...tracing import generation_span, response_span
 from ...tracing.span_data import GenerationSpanData
 from ...tracing.spans import Span
 from ...usage import Usage
+from ...util._error_tracing import model_span_errors
 from ...util._json import _to_dump_compatible
 
 try:
@@ -361,7 +362,14 @@ class AnyLLMModel(Model):
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
     ) -> ModelResponse:
-        with response_span(disabled=tracing.is_disabled()) as span_response:
+        with (
+            response_span(disabled=tracing.is_disabled()) as span_response,
+            model_span_errors(
+                span_response,
+                message="Error getting response",
+                trace_include_sensitive_data=tracing.include_data(),
+            ),
+        ):
             response = await self._fetch_responses_response(
                 system_instructions=system_instructions,
                 input=input,
@@ -425,7 +433,14 @@ class AnyLLMModel(Model):
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
     ) -> AsyncGenerator[ResponseStreamEvent, None]:
-        with response_span(disabled=tracing.is_disabled()) as span_response:
+        with (
+            response_span(disabled=tracing.is_disabled()) as span_response,
+            model_span_errors(
+                span_response,
+                message="Error streaming response",
+                trace_include_sensitive_data=tracing.include_data(),
+            ),
+        ):
             stream = await self._fetch_responses_response(
                 system_instructions=system_instructions,
                 input=input,
@@ -506,15 +521,22 @@ class AnyLLMModel(Model):
         tracing: ModelTracing,
         prompt: ResponsePromptParam | None,
     ) -> ModelResponse:
-        with generation_span(
-            model=str(self.model),
-            model_config=model_config_for_trace(
-                model_settings,
-                base_url=self.base_url or "",
-                extra_config={"provider": self._provider_name, "model_impl": "any-llm"},
+        with (
+            generation_span(
+                model=str(self.model),
+                model_config=model_config_for_trace(
+                    model_settings,
+                    base_url=self.base_url or "",
+                    extra_config={"provider": self._provider_name, "model_impl": "any-llm"},
+                ),
+                disabled=tracing.is_disabled(),
+            ) as span_generation,
+            model_span_errors(
+                span_generation,
+                message="Error getting response",
+                trace_include_sensitive_data=tracing.include_data(),
             ),
-            disabled=tracing.is_disabled(),
-        ) as span_generation:
+        ):
             response = await self._fetch_chat_response(
                 system_instructions=system_instructions,
                 input=input,
@@ -608,15 +630,22 @@ class AnyLLMModel(Model):
         tracing: ModelTracing,
         prompt: ResponsePromptParam | None,
     ) -> AsyncGenerator[TResponseStreamEvent, None]:
-        with generation_span(
-            model=str(self.model),
-            model_config=model_config_for_trace(
-                model_settings,
-                base_url=self.base_url or "",
-                extra_config={"provider": self._provider_name, "model_impl": "any-llm"},
+        with (
+            generation_span(
+                model=str(self.model),
+                model_config=model_config_for_trace(
+                    model_settings,
+                    base_url=self.base_url or "",
+                    extra_config={"provider": self._provider_name, "model_impl": "any-llm"},
+                ),
+                disabled=tracing.is_disabled(),
+            ) as span_generation,
+            model_span_errors(
+                span_generation,
+                message="Error streaming response",
+                trace_include_sensitive_data=tracing.include_data(),
             ),
-            disabled=tracing.is_disabled(),
-        ) as span_generation:
+        ):
             response, stream = await self._fetch_chat_response(
                 system_instructions=system_instructions,
                 input=input,

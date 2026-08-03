@@ -59,6 +59,7 @@ from ...tracing import generation_span
 from ...tracing.span_data import GenerationSpanData
 from ...tracing.spans import Span
 from ...usage import Usage, _cache_write_tokens, _make_input_tokens_details
+from ...util._error_tracing import model_span_errors
 from ...util._json import _to_dump_compatible
 
 
@@ -214,15 +215,22 @@ class LitellmModel(Model):
         conversation_id: str | None = None,  # unused
         prompt: Any | None = None,
     ) -> ModelResponse:
-        with generation_span(
-            model=str(self.model),
-            model_config=model_config_for_trace(
-                model_settings,
-                base_url=self.base_url or "",
-                extra_config={"model_impl": "litellm"},
+        with (
+            generation_span(
+                model=str(self.model),
+                model_config=model_config_for_trace(
+                    model_settings,
+                    base_url=self.base_url or "",
+                    extra_config={"model_impl": "litellm"},
+                ),
+                disabled=tracing.is_disabled(),
+            ) as span_generation,
+            model_span_errors(
+                span_generation,
+                message="Error getting response",
+                trace_include_sensitive_data=tracing.include_data(),
             ),
-            disabled=tracing.is_disabled(),
-        ) as span_generation:
+        ):
             response = await self._fetch_response(
                 system_instructions,
                 input,
@@ -377,15 +385,22 @@ class LitellmModel(Model):
         conversation_id: str | None = None,  # unused
         prompt: Any | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
-        with generation_span(
-            model=str(self.model),
-            model_config=model_config_for_trace(
-                model_settings,
-                base_url=self.base_url or "",
-                extra_config={"model_impl": "litellm"},
+        with (
+            generation_span(
+                model=str(self.model),
+                model_config=model_config_for_trace(
+                    model_settings,
+                    base_url=self.base_url or "",
+                    extra_config={"model_impl": "litellm"},
+                ),
+                disabled=tracing.is_disabled(),
+            ) as span_generation,
+            model_span_errors(
+                span_generation,
+                message="Error streaming response",
+                trace_include_sensitive_data=tracing.include_data(),
             ),
-            disabled=tracing.is_disabled(),
-        ) as span_generation:
+        ):
             response, stream = await self._fetch_response(
                 system_instructions,
                 input,

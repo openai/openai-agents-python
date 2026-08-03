@@ -32,6 +32,7 @@ from ..tracing import generation_span
 from ..tracing.span_data import GenerationSpanData
 from ..tracing.spans import Span
 from ..usage import Usage
+from ..util._error_tracing import model_span_errors
 from ..util._json import _to_dump_compatible
 from ._openai_retry import get_openai_retry_advice
 from ._retry_runtime import should_disable_provider_managed_retries
@@ -206,11 +207,18 @@ class OpenAIChatCompletionsModel(Model):
         )
         self._handle_unsupported_prompt(prompt)
 
-        with generation_span(
-            model=str(self.model),
-            model_config=model_config_for_trace(model_settings, base_url=self._client.base_url),
-            disabled=tracing.is_disabled(),
-        ) as span_generation:
+        with (
+            generation_span(
+                model=str(self.model),
+                model_config=model_config_for_trace(model_settings, base_url=self._client.base_url),
+                disabled=tracing.is_disabled(),
+            ) as span_generation,
+            model_span_errors(
+                span_generation,
+                message="Error getting response",
+                trace_include_sensitive_data=tracing.include_data(),
+            ),
+        ):
             response = await self._fetch_response(
                 system_instructions,
                 input,
@@ -340,11 +348,18 @@ class OpenAIChatCompletionsModel(Model):
         )
         self._handle_unsupported_prompt(prompt)
 
-        with generation_span(
-            model=str(self.model),
-            model_config=model_config_for_trace(model_settings, base_url=self._client.base_url),
-            disabled=tracing.is_disabled(),
-        ) as span_generation:
+        with (
+            generation_span(
+                model=str(self.model),
+                model_config=model_config_for_trace(model_settings, base_url=self._client.base_url),
+                disabled=tracing.is_disabled(),
+            ) as span_generation,
+            model_span_errors(
+                span_generation,
+                message="Error streaming response",
+                trace_include_sensitive_data=tracing.include_data(),
+            ),
+        ):
             response, stream = await self._fetch_response(
                 system_instructions,
                 input,
