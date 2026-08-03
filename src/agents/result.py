@@ -528,7 +528,8 @@ class RunResultStreaming(RunResultBase):
 
     The streaming method will raise:
     - A MaxTurnsExceeded exception if the agent exceeds the max_turns limit.
-    - A GuardrailTripwireTriggered exception if a guardrail is tripped.
+    - A tripwire exception if a guardrail is tripped, e.g. InputGuardrailTripwireTriggered
+      or OutputGuardrailTripwireTriggered.
     """
 
     current_agent: Agent[Any]
@@ -802,7 +803,8 @@ class RunResultStreaming(RunResultBase):
 
         This will raise:
         - A MaxTurnsExceeded exception if the agent exceeds the max_turns limit.
-        - A GuardrailTripwireTriggered exception if a guardrail is tripped.
+        - A tripwire exception if a guardrail is tripped, e.g. InputGuardrailTripwireTriggered
+          or OutputGuardrailTripwireTriggered.
         """
         consumer_registered = False
         registered_consumer_task: asyncio.Task[Any] | None = None

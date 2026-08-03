@@ -78,8 +78,8 @@ class InputGuardrail(Generic[TContext]):
     You can use the `@input_guardrail()` decorator to turn a function into an `InputGuardrail`, or
     create an `InputGuardrail` manually.
 
-    Guardrails return a `GuardrailResult`. If `result.tripwire_triggered` is `True`,
-    the agent's execution will immediately stop, and
+    Guardrail functions return a `GuardrailFunctionOutput`. If its `tripwire_triggered` field is
+    `True`, the agent's execution will immediately stop, and
     an `InputGuardrailTripwireTriggered` exception will be raised
     """
 
@@ -88,8 +88,8 @@ class InputGuardrail(Generic[TContext]):
         MaybeAwaitable[GuardrailFunctionOutput],
     ]
     """A function that receives the agent input and the context, and returns a
-     `GuardrailResult`. The result marks whether the tripwire was triggered, and can optionally
-     include information about the guardrail's output.
+     `GuardrailFunctionOutput`. The output marks whether the tripwire was triggered, and can
+     optionally include information about the guardrail's output.
     """
 
     name: str | None = None
@@ -138,8 +138,8 @@ class OutputGuardrail(Generic[TContext]):
     You can use the `@output_guardrail()` decorator to turn a function into an `OutputGuardrail`,
     or create an `OutputGuardrail` manually.
 
-    Guardrails return a `GuardrailResult`. If `result.tripwire_triggered` is `True`, an
-    `OutputGuardrailTripwireTriggered` exception will be raised.
+    Guardrail functions return a `GuardrailFunctionOutput`. If its `tripwire_triggered` field is
+    `True`, an `OutputGuardrailTripwireTriggered` exception will be raised.
     """
 
     guardrail_function: Callable[
@@ -147,8 +147,8 @@ class OutputGuardrail(Generic[TContext]):
         MaybeAwaitable[GuardrailFunctionOutput],
     ]
     """A function that receives the final agent, its output, and the context, and returns a
-     `GuardrailResult`. The result marks whether the tripwire was triggered, and can optionally
-     include information about the guardrail's output.
+     `GuardrailFunctionOutput`. The output marks whether the tripwire was triggered, and can
+     optionally include information about the guardrail's output.
     """
 
     name: str | None = None

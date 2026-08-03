@@ -236,8 +236,8 @@ class Runner:
         In two cases, the agent may raise an exception:
 
           1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised unless handled.
-          2. If a guardrail tripwire is triggered, a GuardrailTripwireTriggered
-             exception is raised.
+          2. If a guardrail tripwire is triggered, the matching tripwire exception is raised,
+             e.g. InputGuardrailTripwireTriggered or OutputGuardrailTripwireTriggered.
 
         Note:
             Only the first agent's input guardrails are run.
@@ -325,8 +325,8 @@ class Runner:
         In two cases, the agent may raise an exception:
 
           1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised unless handled.
-          2. If a guardrail tripwire is triggered, a GuardrailTripwireTriggered
-             exception is raised.
+          2. If a guardrail tripwire is triggered, the matching tripwire exception is raised,
+             e.g. InputGuardrailTripwireTriggered or OutputGuardrailTripwireTriggered.
 
         Note:
             Only the first agent's input guardrails are run.
@@ -405,8 +405,8 @@ class Runner:
         In two cases, the agent may raise an exception:
 
           1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised unless handled.
-          2. If a guardrail tripwire is triggered, a GuardrailTripwireTriggered
-             exception is raised.
+          2. If a guardrail tripwire is triggered, the matching tripwire exception is raised,
+             e.g. InputGuardrailTripwireTriggered or OutputGuardrailTripwireTriggered.
 
         Note:
             Only the first agent's input guardrails are run.
