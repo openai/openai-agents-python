@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from agents.sandbox.snapshot import LocalSnapshotSpec
 from agents.sandbox.snapshot_defaults import (
     _DEFAULT_LOCAL_SNAPSHOT_TTL_SECONDS,
@@ -13,15 +15,47 @@ from agents.sandbox.snapshot_defaults import (
 
 
 def test_default_local_snapshot_base_dir_uses_xdg_state_home(tmp_path: Path) -> None:
-    state_home = tmp_path / "state"
+    state_home = "/state"
     result = default_local_snapshot_base_dir(
         home=tmp_path / "home",
-        env={"XDG_STATE_HOME": str(state_home)},
+        env={"XDG_STATE_HOME": state_home},
         platform="linux",
         os_name="posix",
     )
 
-    assert result == state_home / "openai-agents-python" / "sandbox" / "snapshots"
+    assert result == Path(state_home) / "openai-agents-python" / "sandbox" / "snapshots"
+
+
+def test_default_local_snapshot_base_dir_honors_explicit_empty_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("XDG_STATE_HOME", "/ambient/state")
+
+    result = default_local_snapshot_base_dir(
+        home=home,
+        env={},
+        platform="linux",
+        os_name="posix",
+    )
+
+    assert result == home / ".local" / "state" / "openai-agents-python" / "sandbox" / "snapshots"
+
+
+def test_default_local_snapshot_base_dir_ignores_relative_xdg_state_home(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+
+    result = default_local_snapshot_base_dir(
+        home=home,
+        env={"XDG_STATE_HOME": "relative-state"},
+        platform="linux",
+        os_name="posix",
+    )
+
+    assert result == home / ".local" / "state" / "openai-agents-python" / "sandbox" / "snapshots"
 
 
 def test_default_local_snapshot_base_dir_uses_macos_application_support(tmp_path: Path) -> None:
@@ -124,8 +158,8 @@ def test_cleanup_stale_default_local_snapshots_removes_only_old_tar_files(tmp_pa
 def test_resolve_default_local_snapshot_spec_keeps_existing_stale_files(
     tmp_path: Path,
 ) -> None:
-    state_home = tmp_path / "state"
-    managed_dir = state_home / "openai-agents-python" / "sandbox" / "snapshots"
+    home = tmp_path / "home"
+    managed_dir = home / ".local" / "state" / "openai-agents-python" / "sandbox" / "snapshots"
     managed_dir.mkdir(parents=True)
     stale = managed_dir / "stale.tar"
     stale.write_bytes(b"stale")
@@ -134,8 +168,8 @@ def test_resolve_default_local_snapshot_spec_keeps_existing_stale_files(
     os.utime(stale, (stale_mtime, stale_mtime))
 
     spec = resolve_default_local_snapshot_spec(
-        home=tmp_path / "home",
-        env={"XDG_STATE_HOME": str(state_home)},
+        home=home,
+        env={},
         platform="linux",
         os_name="posix",
         now=now,
