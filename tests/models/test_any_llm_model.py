@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 import types as pytypes
@@ -14,9 +15,10 @@ from openai.types.chat import (
     ChatCompletionMessageFunctionToolCall,
 )
 from openai.types.chat.chat_completion import Choice
-from openai.types.chat.chat_completion_chunk import ChoiceDelta
+from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice, ChoiceDelta
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 from openai.types.responses import Response, ResponseCompletedEvent, ResponseOutputMessage
+from openai.types.responses.response_created_event import ResponseCreatedEvent
 from openai.types.responses.response_error_event import ResponseErrorEvent
 from openai.types.responses.response_failed_event import ResponseFailedEvent
 from openai.types.responses.response_incomplete_event import ResponseIncompleteEvent
@@ -26,6 +28,7 @@ from openai.types.responses.response_usage import (
     OutputTokensDetails,
     ResponseUsage,
 )
+from openai.types.shared import Reasoning
 from pydantic import BaseModel
 
 from agents import (
@@ -37,6 +40,7 @@ from agents import (
     Tool,
     TResponseInputItem,
     __version__,
+    trace,
 )
 from agents.exceptions import UserError
 from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE
@@ -996,6 +1000,104 @@ async def test_any_llm_responses_path_sanitizes_replayed_items_before_validation
     ]
 
 
+class _RecordingResponsesProvider:
+    """Provider stub that records the params any-llm's private responses API receives."""
+
+    SUPPORTS_RESPONSES = True
+
+    def __init__(self, response: Any) -> None:
+        self._response = response
+        self.private_responses_calls: list[dict[str, Any]] = []
+
+    async def aresponses(self, **kwargs: Any) -> Any:
+        raise AssertionError("public aresponses path should not be used in this test")
+
+    async def _aresponses(self, params: Any, **kwargs: Any) -> Any:
+        self.private_responses_calls.append({"params": params, "kwargs": kwargs})
+        return self._response
+
+
+def _model_bound_to_provider(provider: Any) -> Any:
+    from agents.extensions.models.any_llm_model import AnyLLMModel
+
+    class _BoundAnyLLMModel(AnyLLMModel):
+        def _get_provider(self) -> Any:
+            return provider
+
+    return _BoundAnyLLMModel(model="openai/gpt-5.4-mini", api="responses")
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_any_llm_responses_path_sends_reasoning_as_a_mapping(stream: bool) -> None:
+    """any-llm types `ResponsesParams.reasoning` as a mapping, so it must not be a pair list."""
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
+
+    async def response_stream() -> AsyncIterator[ResponseCompletedEvent]:
+        yield ResponseCompletedEvent(
+            type="response.completed",
+            response=_response("Hello"),
+            sequence_number=1,
+        )
+
+    provider = _RecordingResponsesProvider(response_stream() if stream else _response("Hello"))
+    model = _model_bound_to_provider(provider)
+
+    # Building `ResponsesParams` validates the payload, so a pair list fails before the
+    # provider is reached.
+    result = await cast(Any, model)._fetch_responses_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(reasoning=Reasoning(effort="low", summary="concise")),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=stream,
+        prompt=None,
+    )
+    if stream:
+        await result.aclose()
+
+    assert len(provider.private_responses_calls) == 1
+    params = provider.private_responses_calls[0]["params"]
+    # Unset reasoning fields are dropped, matching how this adapter sanitizes replayed input.
+    assert params.reasoning == {"effort": "low", "summary": "concise"}
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_path_omits_reasoning_when_unset() -> None:
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
+
+    provider = _RecordingResponsesProvider(_response("Hello"))
+    model = _model_bound_to_provider(provider)
+
+    await cast(Any, model)._fetch_responses_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert len(provider.private_responses_calls) == 1
+    assert provider.private_responses_calls[0]["params"].reasoning is None
+
+
 def test_any_llm_provider_passes_api_override() -> None:
     pytest.importorskip(
         "any_llm",
@@ -1127,3 +1229,533 @@ async def test_any_llm_chat_omits_logprobs_when_top_logprobs_unset(monkeypatch) 
     )
 
     assert "logprobs" not in provider.chat_calls[0]
+
+
+class _ClosableStream:
+    """Stands in for the iterator any-llm returns, recording how often it was closed.
+
+    These fakes deliberately cover only the SDK's own boundary. any-llm's exception and
+    provider wrappers (`utils/exception_handler.py::_wrap_async_iterator`, the per-provider
+    `chunk_iterator` / `_stream_completion_async` generators) delegate with bare
+    `async for ... yield` as of 1.11.0 and do not forward `aclose()` to the underlying
+    transport, so no assertion here should be read as proving the transport was closed.
+    """
+
+    def __init__(self, chunks: list[Any]) -> None:
+        self._chunks = list(chunks)
+        self.aclose_calls = 0
+
+    def __aiter__(self) -> _ClosableStream:
+        return self
+
+    async def __anext__(self) -> Any:
+        if not self._chunks:
+            raise StopAsyncIteration
+        return self._chunks.pop(0)
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+
+
+class _FailingCloseStream(_ClosableStream):
+    """Raises from `aclose` after recording the cleanup attempt."""
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+        raise RuntimeError("close-failure")
+
+
+class _BlockingStream(_ClosableStream):
+    """Blocks forever after its chunks are exhausted so the consumer can be cancelled."""
+
+    def __init__(self, chunks: list[Any], blocked: asyncio.Event) -> None:
+        super().__init__(chunks)
+        self._blocked = blocked
+
+    async def __anext__(self) -> Any:
+        if self._chunks:
+            return self._chunks.pop(0)
+        self._blocked.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+class _SlowCloseStream(_BlockingStream):
+    """Blocks in `aclose` until released, mirroring a close that waits on transport I/O."""
+
+    def __init__(self, chunks: list[Any], blocked: asyncio.Event, release: asyncio.Event) -> None:
+        super().__init__(chunks, blocked)
+        self._release = release
+        self.aclose_completed = 0
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+        await self._release.wait()
+        self.aclose_completed += 1
+
+
+def _chat_chunk(text: str) -> ChatCompletionChunk:
+    return ChatCompletionChunk(
+        id="chunk_123",
+        created=0,
+        model="fake-model",
+        object="chat.completion.chunk",
+        choices=[ChunkChoice(index=0, delta=ChoiceDelta(content=text))],
+    )
+
+
+def _completed_event() -> ResponseCompletedEvent:
+    return ResponseCompletedEvent(
+        type="response.completed",
+        response=_response("Hello"),
+        sequence_number=1,
+    )
+
+
+def _stream_events(model: Any, tracing: ModelTracing = ModelTracing.DISABLED) -> Any:
+    return model.stream_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=tracing,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+
+def _chat_module_and_model_with_stream(monkeypatch, stream: _ClosableStream) -> tuple[Any, Any]:
+    """Build an AnyLLMModel whose Chat Completions path yields one completed event."""
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=stream)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+
+    async def fake_handle_stream(response, chunk_stream, model=None):
+        async for _chunk in chunk_stream:
+            pass
+        yield _completed_event()
+
+    monkeypatch.setattr(module.ChatCmplStreamHandler, "handle_stream", fake_handle_stream)
+    return module, module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+
+
+def _chat_model_with_stream(monkeypatch, stream: _ClosableStream) -> Any:
+    _module, model = _chat_module_and_model_with_stream(monkeypatch, stream)
+    return model
+
+
+def _responses_module_and_model_with_stream(
+    monkeypatch, stream: _ClosableStream
+) -> tuple[Any, Any]:
+    provider = FakeAnyLLMProvider(supports_responses=True, responses_response=stream)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    return module, module.AnyLLMModel(model="openai/gpt-5.4-mini")
+
+
+def _responses_model_with_stream(monkeypatch, stream: _ClosableStream) -> Any:
+    _module, model = _responses_module_and_model_with_stream(monkeypatch, stream)
+    return model
+
+
+def _capture_spans(monkeypatch, module: Any, factory_name: str) -> list[Any]:
+    """Record the live span objects the module creates so tests can read them mid-stream."""
+    original = getattr(module, factory_name)
+    captured: list[Any] = []
+
+    def recording_factory(*args: Any, **kwargs: Any) -> Any:
+        span = original(*args, **kwargs)
+        captured.append(span)
+        return span
+
+    monkeypatch.setattr(module, factory_name, recording_factory)
+    return captured
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_stream_ignores_close_failure_after_terminal_event(monkeypatch) -> None:
+    """A completed Chat Completions response stays successful when provider cleanup fails."""
+    stream = _FailingCloseStream([_chat_chunk("Hello")])
+    model = _chat_model_with_stream(monkeypatch, stream)
+
+    events = [event async for event in _stream_events(model)]
+
+    assert [event.type for event in events] == ["response.completed"]
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_stream_ignores_close_failure_when_closed_at_terminal_event(
+    monkeypatch,
+) -> None:
+    """Terminal state must be recorded before the completed event is yielded."""
+    stream = _FailingCloseStream([_chat_chunk("Hello")])
+    model = _chat_model_with_stream(monkeypatch, stream)
+    stream_agen = cast(Any, _stream_events(model))
+
+    async for event in stream_agen:
+        if event.type == "response.completed":
+            break
+    await stream_agen.aclose()
+
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_stream_closes_provider_stream_after_cancellation(monkeypatch) -> None:
+    """Cancelling the consumer must still release the provider stream."""
+    blocked = asyncio.Event()
+    stream = _BlockingStream([_chat_chunk("He")], blocked)
+    model = _chat_model_with_stream(monkeypatch, stream)
+    stream_agen = cast(Any, _stream_events(model))
+
+    async def consume() -> None:
+        async for _event in stream_agen:
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(blocked.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        task.cancel()
+
+    await stream_agen.aclose()
+
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_stream_does_not_block_cancellation_on_slow_close(monkeypatch) -> None:
+    """A provider close that waits on transport I/O must not delay cancellation."""
+    blocked = asyncio.Event()
+    release = asyncio.Event()
+    stream = _SlowCloseStream([_chat_chunk("He")], blocked, release)
+    model = _chat_model_with_stream(monkeypatch, stream)
+    stream_agen = cast(Any, _stream_events(model))
+
+    async def consume() -> None:
+        async for _event in stream_agen:
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(blocked.wait(), timeout=5)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        assert stream.aclose_calls == 1
+        assert stream.aclose_completed == 0
+
+        release.set()
+        for _ in range(200):
+            if stream.aclose_completed == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert stream.aclose_completed == 1
+    finally:
+        release.set()
+        task.cancel()
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_stream_propagates_close_failure_before_terminal_event(
+    monkeypatch,
+) -> None:
+    """Cleanup failures before completion stay observable by the caller."""
+    stream = _FailingCloseStream([_chat_chunk("Hello")])
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=stream)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+
+    async def fake_handle_stream(response, chunk_stream, model=None):
+        yield ResponseCreatedEvent(
+            type="response.created",
+            response=_response("partial"),
+            sequence_number=0,
+        )
+        async for _chunk in chunk_stream:
+            pass
+        yield _completed_event()
+
+    monkeypatch.setattr(module.ChatCmplStreamHandler, "handle_stream", fake_handle_stream)
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+    stream_agen = cast(Any, _stream_events(model))
+
+    first_event = await anext(stream_agen)
+    assert first_event.type == "response.created"
+
+    with pytest.raises(RuntimeError, match="close-failure"):
+        await stream_agen.aclose()
+
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_stream_ignores_close_failure_after_terminal_event(
+    monkeypatch,
+) -> None:
+    """A completed Responses stream stays successful when provider cleanup fails."""
+    stream = _FailingCloseStream([_completed_event()])
+    model = _responses_model_with_stream(monkeypatch, stream)
+
+    events = [event async for event in _stream_events(model)]
+
+    assert [event.type for event in events] == ["response.completed"]
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_stream_ignores_close_failure_after_terminal_failure(
+    monkeypatch,
+) -> None:
+    """A cleanup failure must not replace the terminal failure the caller should see."""
+    stream = _FailingCloseStream(
+        [
+            ResponseFailedEvent(
+                type="response.failed",
+                response=_response("partial", response_id="resp-terminal"),
+                sequence_number=1,
+            )
+        ]
+    )
+    model = _responses_model_with_stream(monkeypatch, stream)
+
+    with pytest.raises(ModelBehaviorError, match="response.failed"):
+        async for _event in _stream_events(model):
+            pass
+
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_stream_propagates_close_failure_before_terminal_event(
+    monkeypatch,
+) -> None:
+    """Cleanup failures before completion stay observable by the caller."""
+    stream = _FailingCloseStream(
+        [
+            ResponseCreatedEvent(
+                type="response.created",
+                response=_response("partial"),
+                sequence_number=0,
+            ),
+            _completed_event(),
+        ]
+    )
+    model = _responses_model_with_stream(monkeypatch, stream)
+    stream_agen = cast(Any, _stream_events(model))
+
+    first_event = await anext(stream_agen)
+    assert first_event.type == "response.created"
+
+    with pytest.raises(RuntimeError, match="close-failure"):
+        await stream_agen.aclose()
+
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_stream_closes_provider_stream_after_cancellation(
+    monkeypatch,
+) -> None:
+    """Cancelling the consumer must still release the provider Responses stream."""
+    blocked = asyncio.Event()
+    stream = _BlockingStream(
+        [
+            ResponseCreatedEvent(
+                type="response.created",
+                response=_response("partial"),
+                sequence_number=0,
+            )
+        ],
+        blocked,
+    )
+    model = _responses_model_with_stream(monkeypatch, stream)
+    stream_agen = cast(Any, _stream_events(model))
+
+    async def consume() -> None:
+        async for _event in stream_agen:
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(blocked.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        task.cancel()
+
+    await stream_agen.aclose()
+
+    assert stream.aclose_calls == 1
+
+
+class _CloseSignalingStream(_ClosableStream):
+    """Signals when `aclose` starts and blocks until released, so a test can cancel mid-close."""
+
+    def __init__(
+        self,
+        chunks: list[Any],
+        close_started: asyncio.Event,
+        release: asyncio.Event,
+    ) -> None:
+        super().__init__(chunks)
+        self._close_started = close_started
+        self._release = release
+        self.aclose_completed = 0
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+        self._close_started.set()
+        await self._release.wait()
+        self.aclose_completed += 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_stream_populates_span_before_yielding_completed(monkeypatch) -> None:
+    """The generation span must carry output and usage when the completed event is delivered."""
+    stream = _ClosableStream([_chat_chunk("Hello")])
+    module, model = _chat_module_and_model_with_stream(monkeypatch, stream)
+    spans = _capture_spans(monkeypatch, module, "generation_span")
+
+    with trace(workflow_name="any-llm-chat-span"):
+        stream_agen = cast(Any, _stream_events(model, ModelTracing.ENABLED))
+        async for event in stream_agen:
+            if event.type == "response.completed":
+                # Assert while the generator is suspended at the terminal yield.
+                [span] = spans
+                assert span.span_data.output == [_response("Hello").model_dump()]
+                assert span.span_data.usage == {
+                    "requests": 1,
+                    "input_tokens": 11,
+                    "output_tokens": 13,
+                    "total_tokens": 24,
+                    "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                }
+                break
+        await stream_agen.aclose()
+
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_stream_populates_span_before_yielding_completed(
+    monkeypatch,
+) -> None:
+    """The response span must carry the response and input when the completed event arrives."""
+    stream = _ClosableStream([_completed_event()])
+    module, model = _responses_module_and_model_with_stream(monkeypatch, stream)
+    spans = _capture_spans(monkeypatch, module, "response_span")
+
+    with trace(workflow_name="any-llm-responses-span"):
+        stream_agen = cast(Any, _stream_events(model, ModelTracing.ENABLED))
+        async for event in stream_agen:
+            if event.type == "response.completed":
+                [span] = spans
+                assert span.span_data.response is not None
+                assert span.span_data.response.id == "resp_123"
+                assert span.span_data.input == "hi"
+                break
+        await stream_agen.aclose()
+
+    assert stream.aclose_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_stream_lets_in_flight_close_finish_after_cancellation(
+    monkeypatch,
+) -> None:
+    """Cancelling during `aclose` continues that close instead of starting a second one."""
+    close_started = asyncio.Event()
+    release = asyncio.Event()
+    stream = _CloseSignalingStream([_chat_chunk("Hello")], close_started, release)
+    model = _chat_model_with_stream(monkeypatch, stream)
+
+    async def consume() -> None:
+        async for _event in _stream_events(model):
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(close_started.wait(), timeout=5)
+        assert stream.aclose_calls == 1
+        assert stream.aclose_completed == 0
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+
+        # The cancelled consumer must not have started a second close.
+        assert stream.aclose_calls == 1
+        assert stream.aclose_completed == 0
+
+        release.set()
+        for _ in range(200):
+            if stream.aclose_completed == 1:
+                break
+            await asyncio.sleep(0.01)
+
+        assert stream.aclose_calls == 1
+        assert stream.aclose_completed == 1
+    finally:
+        release.set()
+        task.cancel()
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_stream_lets_in_flight_close_finish_after_cancellation(
+    monkeypatch,
+) -> None:
+    """Cancelling during `aclose` continues that close instead of starting a second one."""
+    close_started = asyncio.Event()
+    release = asyncio.Event()
+    stream = _CloseSignalingStream([_completed_event()], close_started, release)
+    model = _responses_model_with_stream(monkeypatch, stream)
+
+    async def consume() -> None:
+        async for _event in _stream_events(model):
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(close_started.wait(), timeout=5)
+        assert stream.aclose_calls == 1
+        assert stream.aclose_completed == 0
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+
+        assert stream.aclose_calls == 1
+        assert stream.aclose_completed == 0
+
+        release.set()
+        for _ in range(200):
+            if stream.aclose_completed == 1:
+                break
+            await asyncio.sleep(0.01)
+
+        assert stream.aclose_calls == 1
+        assert stream.aclose_completed == 1
+    finally:
+        release.set()
+        task.cancel()

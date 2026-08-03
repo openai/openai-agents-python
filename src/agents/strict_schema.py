@@ -20,6 +20,13 @@ _EMPTY_SCHEMA = {
 # example, tool schemas advertised by a third-party MCP server).
 _MAX_SCHEMA_NODES = 100_000
 
+_ADDITIONAL_PROPERTIES_ERROR = (
+    "additionalProperties should not be set for object types. This could be because "
+    "you're using an older version of Pydantic, or because you configured additional "
+    "properties to be allowed. If you really need this, update the function or output tool "
+    "to not use a strict schema."
+)
+
 
 class _NodeBudget:
     """Tracks the remaining schema-node expansion budget across the recursion."""
@@ -45,9 +52,27 @@ def ensure_strict_json_schema(
     """
     if schema == {}:
         return copy.deepcopy(_EMPTY_SCHEMA)
-    return _ensure_strict_json_schema(
+    converted = _ensure_strict_json_schema(
         schema, path=(), root=schema, budget=_NodeBudget(_MAX_SCHEMA_NODES)
     )
+    return _ensure_strict_root(converted)
+
+
+def _ensure_strict_root(schema: dict[str, Any]) -> dict[str, Any]:
+    if is_list(schema.get("anyOf")):
+        raise UserError("The root of a strict JSON schema must not use `anyOf`.")
+
+    typ = schema.get("type")
+    if is_list(typ) and "object" in typ:
+        if typ == ["object"]:
+            schema["type"] = "object"
+        else:
+            raise UserError(
+                "The root of a strict JSON schema must be a non-nullable object, but its type is "
+                f"{typ}. Make the root a plain object, or update the function or output tool to "
+                "not use a strict schema."
+            )
+    return schema
 
 
 # Adapted from https://github.com/openai/openai-python/blob/main/src/openai/lib/_pydantic.py
@@ -85,26 +110,26 @@ def _ensure_strict_json_schema(
             )
 
     typ = json_schema.get("type")
-    if typ == "object" and "additionalProperties" not in json_schema:
+    properties = json_schema.get("properties")
+    if typ is None and is_dict(properties):
+        typ = json_schema["type"] = "object"
+    elif typ is None and json_schema.get("additionalProperties", False) is not False:
+        raise UserError(_ADDITIONAL_PROPERTIES_ERROR)
+    is_object = typ == "object" or (is_list(typ) and "object" in typ)
+    if is_object and "additionalProperties" not in json_schema:
         json_schema["additionalProperties"] = False
     elif (
-        typ == "object"
+        is_object
         and "additionalProperties" in json_schema
         # Compare with ``is not False`` rather than truthiness: OpenAPI/MCP schemas often use
         # ``additionalProperties: {}`` (an empty schema meaning "allow anything"). That value is
         # falsy in Python, so a truthiness check would silently leave a non-strict schema in place.
         and json_schema["additionalProperties"] is not False
     ):
-        raise UserError(
-            "additionalProperties should not be set for object types. This could be because "
-            "you're using an older version of Pydantic, or because you configured additional "
-            "properties to be allowed. If you really need this, update the function or output tool "
-            "to not use a strict schema."
-        )
+        raise UserError(_ADDITIONAL_PROPERTIES_ERROR)
 
     # object types
     # { 'type': 'object', 'properties': { 'a':  {...} } }
-    properties = json_schema.get("properties")
     if is_dict(properties):
         json_schema["required"] = list(properties.keys())
         json_schema["properties"] = {
@@ -158,6 +183,7 @@ def _ensure_strict_json_schema(
                 )
             )
             json_schema.pop("allOf")
+            return _ensure_strict_json_schema(json_schema, path=path, root=root, budget=budget)
         else:
             json_schema["allOf"] = [
                 _ensure_strict_json_schema(

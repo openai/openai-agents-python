@@ -546,6 +546,11 @@ class FunctionTool:
     _is_agent_tool: bool = field(default=False, kw_only=True, repr=False)
     """Internal flag indicating if this tool is an agent-as-tool."""
 
+    _agent_tool_default_identity: tuple[str, str] | None = field(
+        default=None, kw_only=True, repr=False
+    )
+    """The source agent name and derived tool name when the default was used."""
+
     _is_codex_tool: bool = field(default=False, kw_only=True, repr=False)
     """Internal flag indicating if this tool is a Codex tool wrapper."""
 

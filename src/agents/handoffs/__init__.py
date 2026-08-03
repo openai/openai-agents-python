@@ -169,6 +169,9 @@ class Handoff(Generic[TContext, TAgent]):
     )
     """Weak reference to the target agent when constructed via `handoff()`."""
 
+    _default_tool_identity: tuple[str, str] | None = field(default=None, kw_only=True, repr=False)
+    """The target agent name and derived tool name when the default was used."""
+
     def get_transfer_message(self, agent: AgentBase[Any]) -> str:
         return json.dumps({"assistant": agent.name})
 
@@ -336,6 +339,7 @@ def handoff(
         nest_handoff_history=nest_handoff_history,
         agent_name=agent.name,
         is_enabled=_is_enabled if callable(is_enabled) else is_enabled,
+        _default_tool_identity=(agent.name, tool_name) if not tool_name_override else None,
     )
     handoff_obj._agent_ref = weakref.ref(agent)
     return handoff_obj

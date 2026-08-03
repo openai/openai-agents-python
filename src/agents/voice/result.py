@@ -7,7 +7,11 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ..exceptions import UserError
-from ..logger import log_model_action_error, log_model_and_tool_action_error, logger
+from ..logger import (
+    log_model_action_error,
+    log_model_and_tool_action_error,
+    logger,
+)
 from ..tracing import Span, SpeechGroupSpanData, speech_group_span, speech_span
 from ..tracing.util import time_iso
 from ..util._error_tracing import get_trace_error
@@ -289,7 +293,7 @@ class StreamedAudioResult:
             tasks.append(self._dispatcher_task)
         await asyncio.gather(*tasks)
 
-    async def _cleanup_tasks(self):
+    async def _cleanup_tasks(self) -> None:
         current_task = asyncio.current_task()
         tasks: list[asyncio.Task[Any]] = []
         seen: set[asyncio.Task[Any]] = set()
@@ -311,7 +315,7 @@ class StreamedAudioResult:
 
     def _check_errors(self):
         for task in self._tasks:
-            if task.done():
+            if task.done() and not task.cancelled():
                 if task.exception():
                     self._stored_exception = task.exception()
                     break
@@ -319,38 +323,89 @@ class StreamedAudioResult:
     async def stream(self) -> AsyncIterator[VoiceStreamEvent]:
         """Stream the events and audio data as they're generated."""
         saw_session_end = False
-        while True:
-            try:
-                event = await self._queue.get()
-            except asyncio.CancelledError:
-                await self._cleanup_tasks()
-                raise
-            if isinstance(event, VoiceStreamEventError):
-                self._stored_exception = event.error
-                log_model_and_tool_action_error(
-                    logger, "Error processing voice output", event.error
-                )
-                break
-            if event is None:
-                break
-            yield event
-            if event.type == "voice_stream_event_lifecycle" and event.event == "session_ended":
-                saw_session_end = True
-                break
-
-        # On the normal completion path, let the producer task finish gracefully so any active
-        # trace context can emit `trace_end` before we run cleanup.
+        primary_exception: BaseException | None = None
         try:
-            if (
-                saw_session_end
-                and self.text_generation_task is not None
-                and not self.text_generation_task.done()
-            ):
-                await asyncio.shield(self.text_generation_task)
+            while True:
+                event = await self._queue.get()
+                if isinstance(event, VoiceStreamEventError):
+                    self._stored_exception = event.error
+                    log_model_and_tool_action_error(
+                        logger, "Error processing voice output", event.error
+                    )
+                    break
+                if event is None:
+                    break
+                is_session_end = (
+                    event.type == "voice_stream_event_lifecycle" and event.event == "session_ended"
+                )
+                if is_session_end:
+                    saw_session_end = True
+                yield event
+                if is_session_end:
+                    break
 
             self._check_errors()
+            if self._stored_exception:
+                raise self._stored_exception
+        except BaseException as exc:
+            primary_exception = exc
+            raise
         finally:
-            await self._cleanup_tasks()
+            producer_exception: BaseException | None = None
+            cleanup_exception: BaseException | None = None
 
+            # Let the producer finish gracefully after terminal event delivery so any active
+            # trace context can emit `trace_end` before cleanup. Await completed tasks too so a
+            # terminal producer failure cannot be hidden by the preceding lifecycle event.
+            if saw_session_end and self.text_generation_task is not None:
+                try:
+                    await asyncio.shield(self.text_generation_task)
+                except BaseException as exc:
+                    producer_exception = exc
+
+            try:
+                await self._cleanup_tasks()
+            except BaseException as exc:
+                cleanup_exception = exc
+
+            # A caller cancellation always wins. Otherwise preserve a consumer exception, except
+            # that GeneratorExit after terminal delivery is only the control-flow signal from
+            # aclose() and must not replace the producer's terminal outcome.
+            preserve_primary_exception = primary_exception is not None and not (
+                isinstance(primary_exception, GeneratorExit) and saw_session_end
+            )
+            exception_to_raise: BaseException | None = None
+            if isinstance(primary_exception, asyncio.CancelledError):
+                pass
+            elif isinstance(producer_exception, asyncio.CancelledError):
+                exception_to_raise = producer_exception
+            elif isinstance(cleanup_exception, asyncio.CancelledError):
+                exception_to_raise = cleanup_exception
+            elif preserve_primary_exception:
+                pass
+            elif producer_exception is not None:
+                exception_to_raise = producer_exception
+            elif cleanup_exception is not None:
+                exception_to_raise = cleanup_exception
+
+            finalization_exception_was_suppressed = any(
+                exc is not None
+                and not isinstance(exc, asyncio.CancelledError)
+                and exc is not exception_to_raise
+                for exc in (producer_exception, cleanup_exception)
+            )
+            if finalization_exception_was_suppressed:
+                try:
+                    logger.warning(
+                        "Voice stream finalization failed while preserving another exception"
+                    )
+                except Exception:
+                    # Logging must not replace the selected exception.
+                    pass
+
+            if exception_to_raise is not None:
+                raise exception_to_raise
+
+        self._check_errors()
         if self._stored_exception:
             raise self._stored_exception

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Implementation Final Review"
+  short_description: "Review implementation diffs before completion"
+  default_prompt: "Use $implementation-final-review to audit this implementation from first principles before calling it complete."
+
+policy:
+  allow_implicit_invocation: false

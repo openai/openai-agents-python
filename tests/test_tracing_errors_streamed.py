@@ -314,7 +314,7 @@ async def test_multiple_handoff_doesnt_error():
                         "type": "agent",
                         "data": {
                             "name": "test",
-                            "handoffs": ["test", "test"],
+                            "handoffs": ["test"],
                             "tools": ["some_function"],
                             "output_type": "str",
                         },

@@ -169,6 +169,44 @@ def test_run_config_tool_not_found_behavior_append_preserves_tool_execution_posi
     assert config.tool_not_found_behavior == "return_error_to_model"
 
 
+def test_run_config_tool_name_collision_policy_append_preserves_prior_positions() -> None:
+    session_settings = SessionSettings(limit=123)
+    tool_execution = ToolExecutionConfig(max_function_tool_concurrency=2)
+    config = RunConfig(
+        None,
+        MultiProvider(),
+        None,
+        None,
+        False,
+        None,
+        None,
+        None,
+        False,
+        None,
+        True,
+        "Agent workflow",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        session_settings,
+        "omit",
+        None,
+        tool_execution,
+        "return_error_to_model",
+        "error",
+    )
+
+    assert config.session_settings == session_settings
+    assert config.reasoning_item_id_policy == "omit"
+    assert config.sandbox is None
+    assert config.tool_execution is tool_execution
+    assert config.tool_not_found_behavior == "return_error_to_model"
+    assert config.tool_name_collision_policy == "error"
+
+
 def test_tool_execution_config_pre_approval_append_preserves_max_concurrency() -> None:
     config = ToolExecutionConfig(2, True)
 

@@ -115,6 +115,7 @@ from .run import (
     ToolErrorFormatter,
     ToolErrorFormatterArgs,
     ToolExecutionConfig,
+    ToolNameCollisionPolicy,
     ToolNotFoundBehavior,
 )
 from .run_context import AgentHookContext, RunContextWrapper, TContext
@@ -476,6 +477,7 @@ __all__ = [
     "RunResultStreaming",
     "ResponsesWebSocketSession",
     "RunConfig",
+    "ToolNameCollisionPolicy",
     "ReasoningItemIdPolicy",
     "ToolExecutionConfig",
     "ToolErrorFormatter",

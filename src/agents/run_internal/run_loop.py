@@ -28,6 +28,7 @@ from .._tool_identity import (
     build_function_tool_lookup_map,
     get_function_tool_lookup_key_for_call,
     get_tool_trace_name_for_tool,
+    resolve_tool_name_collisions,
 )
 from ..agent import Agent
 from ..agent_output import AgentOutputSchemaBase
@@ -325,6 +326,28 @@ def _complete_stream_interruption(
     streamed_result._last_processed_response = processed_response
     streamed_result.is_complete = True
     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+
+
+async def _wait_for_streamed_turn_events_and_stop_if_cancelled(
+    streamed_result: RunResultStreaming,
+) -> bool:
+    """Let consumers process the completed turn before starting another one."""
+    await streamed_result._wait_for_turn_event_consumption()
+    if streamed_result._cancel_mode != "after_turn":
+        return False
+
+    streamed_result.is_complete = True
+    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+    return True
+
+
+def _publish_streamed_result_agent(
+    streamed_result: RunResultStreaming,
+    agent: Agent[Any],
+) -> None:
+    """Publish an agent transition before cancellation can complete the streamed run."""
+    streamed_result.current_agent = agent
+    streamed_result._current_agent_output_schema = get_output_schema(agent)
 
 
 async def _save_resumed_stream_items(
@@ -911,6 +934,7 @@ async def start_streaming(
                         current_agent = turn_result.next_step.new_agent
                         if run_state is not None:
                             run_state._current_agent = current_agent
+                        _publish_streamed_result_agent(streamed_result, current_agent)
                         if current_span:
                             current_span.finish(reset_current=True)
                         current_span = None
@@ -919,6 +943,10 @@ async def start_streaming(
                             AgentUpdatedStreamEvent(new_agent=current_agent)
                         )
                         run_state._current_step = NextStepRunAgain()  # type: ignore[assignment]
+                        if await _wait_for_streamed_turn_events_and_stop_if_cancelled(
+                            streamed_result
+                        ):
+                            break
                         continue
 
                     if isinstance(turn_result.next_step, NextStepFinalOutput):
@@ -943,6 +971,10 @@ async def start_streaming(
                             store_setting,
                         )
                         run_state._current_step = NextStepRunAgain()  # type: ignore[assignment]
+                        if await _wait_for_streamed_turn_events_and_stop_if_cancelled(
+                            streamed_result
+                        ):
+                            break
                         continue
 
                     run_state._current_step = None
@@ -961,9 +993,6 @@ async def start_streaming(
             )
 
             if current_span is None:
-                handoff_names = [
-                    h.agent_name for h in await get_handoffs(execution_agent, context_wrapper)
-                ]
                 if output_schema := get_output_schema(execution_agent):
                     output_type_name = output_schema.name()
                 else:
@@ -971,16 +1000,11 @@ async def start_streaming(
 
                 current_span = agent_span(
                     name=current_agent.name,
-                    handoffs=handoff_names,
+                    handoffs=[],
+                    tools=[],
                     output_type=output_type_name,
                 )
                 current_span.start(mark_as_current=True)
-                tool_names = [
-                    tool_name
-                    for tool in all_tools
-                    if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
-                ]
-                current_span.span_data.tools = tool_names
 
             current_turn += 1
             streamed_result.current_turn = current_turn
@@ -1147,6 +1171,7 @@ async def start_streaming(
                         reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                         prompt_cache_key_resolver=prompt_cache_key_resolver,
                         error_handlers=error_handlers,
+                        agent_span=current_span,
                     )
                 finally:
                     if current_turn_span:
@@ -1222,6 +1247,7 @@ async def start_streaming(
                     current_agent = turn_result.next_step.new_agent
                     if run_state is not None:
                         run_state._current_agent = current_agent
+                    _publish_streamed_result_agent(streamed_result, current_agent)
                     current_span.finish(reset_current=True)
                     current_span = None
                     should_run_agent_start_hooks = True
@@ -1231,9 +1257,7 @@ async def start_streaming(
                     if streamed_result._state is not None:
                         streamed_result._state._current_step = NextStepRunAgain()
 
-                    if streamed_result._cancel_mode == "after_turn":  # type: ignore[comparison-overlap]
-                        streamed_result.is_complete = True
-                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    if await _wait_for_streamed_turn_events_and_stop_if_cancelled(streamed_result):
                         break
                 elif isinstance(turn_result.next_step, NextStepFinalOutput):
                     await _finalize_streamed_final_output(
@@ -1284,9 +1308,7 @@ async def start_streaming(
                         store_setting,
                     )
 
-                    if streamed_result._cancel_mode == "after_turn":  # type: ignore[comparison-overlap]
-                        streamed_result.is_complete = True
-                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    if await _wait_for_streamed_turn_events_and_stop_if_cancelled(streamed_result):
                         break
             except Exception as e:
                 if current_span and _should_attach_generic_agent_error(e):
@@ -1402,6 +1424,7 @@ async def run_single_turn_streamed(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
     error_handlers: RunErrorHandlers[TContext] | None = None,
+    agent_span: Span[AgentSpanData] | None = None,
 ) -> SingleStepResult:
     """Run a single streamed turn and emit events as results arrive."""
     public_agent = bindings.public_agent
@@ -1427,21 +1450,6 @@ async def run_single_turn_streamed(
     emitted_tool_call_ids: set[str] = set()
     emitted_reasoning_item_ids: set[str] = set()
     emitted_tool_search_fingerprints: set[str] = set()
-    # Precompute the lookup map used for streaming descriptions. Function tools use the same
-    # collision-free lookup keys as runtime dispatch, including deferred top-level aliases.
-    tool_map: dict[NamedToolLookupKey, Any] = cast(
-        dict[NamedToolLookupKey, Any],
-        build_function_tool_lookup_map(
-            [tool for tool in all_tools if isinstance(tool, FunctionTool)]
-        ),
-    )
-    for tool in all_tools:
-        tool_name = getattr(tool, "name", None)
-        if not isinstance(tool_name, str) or not tool_name:
-            continue
-        if isinstance(tool, FunctionTool):
-            continue
-        tool_map[tool_name] = tool
 
     def _tool_search_fingerprint(raw_item: Any) -> str:
         if isinstance(raw_item, Mapping):
@@ -1488,6 +1496,34 @@ async def run_single_turn_streamed(
     )
 
     handoffs = await get_handoffs(execution_agent, context_wrapper)
+    all_tools, handoffs = resolve_tool_name_collisions(
+        all_tools,
+        handoffs,
+        collision_policy=run_config.tool_name_collision_policy,
+    )
+    if agent_span is not None:
+        agent_span.span_data.handoffs = [handoff.agent_name for handoff in handoffs]
+        agent_span.span_data.tools = [
+            tool_name
+            for tool in all_tools
+            if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
+        ]
+
+    # Precompute the lookup map used for streaming descriptions. Function tools use the same
+    # collision-free lookup keys as runtime dispatch, including deferred top-level aliases.
+    tool_map: dict[NamedToolLookupKey, Any] = cast(
+        dict[NamedToolLookupKey, Any],
+        build_function_tool_lookup_map(
+            [tool for tool in all_tools if isinstance(tool, FunctionTool)]
+        ),
+    )
+    for tool in all_tools:
+        tool_name = getattr(tool, "name", None)
+        if not isinstance(tool_name, str) or not tool_name:
+            continue
+        if isinstance(tool, FunctionTool):
+            continue
+        tool_map[tool_name] = tool
     model = get_model(execution_agent, run_config)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(execution_agent, run_config)
@@ -1866,6 +1902,7 @@ async def run_single_turn(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
     error_handlers: RunErrorHandlers[TContext] | None = None,
+    agent_span: Span[AgentSpanData] | None = None,
 ) -> SingleStepResult:
     """Run a single non-streaming turn of the agent loop."""
     public_agent = bindings.public_agent
@@ -1897,8 +1934,21 @@ async def run_single_turn(
         execution_agent.get_prompt(context_wrapper),
     )
 
-    output_schema = get_output_schema(execution_agent)
     handoffs = await get_handoffs(execution_agent, context_wrapper)
+    all_tools, handoffs = resolve_tool_name_collisions(
+        all_tools,
+        handoffs,
+        collision_policy=run_config.tool_name_collision_policy,
+    )
+    if agent_span is not None:
+        agent_span.span_data.handoffs = [handoff.agent_name for handoff in handoffs]
+        agent_span.span_data.tools = [
+            tool_name
+            for tool in all_tools
+            if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
+        ]
+
+    output_schema = get_output_schema(execution_agent)
     if server_conversation_tracker is not None:
         input = server_conversation_tracker.prepare_input(original_input, generated_items)
     else:

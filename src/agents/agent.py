@@ -985,6 +985,8 @@ class Agent(AgentBase, Generic[TContext]):
             ),
         )
         run_agent_tool._is_agent_tool = True
+        if not tool_name:
+            run_agent_tool._agent_tool_default_identity = (self.name, tool_name_resolved)
         run_agent_tool._agent_instance = self
 
         return run_agent_tool

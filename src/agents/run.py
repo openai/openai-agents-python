@@ -9,7 +9,6 @@ from typing import Any, cast
 from typing_extensions import Unpack
 
 from . import _debug
-from ._tool_identity import get_tool_trace_name_for_tool
 from .agent import Agent
 from .agent_tool_state import set_agent_tool_state_scope
 from .exceptions import (
@@ -46,6 +45,7 @@ from .run_config import (
     ToolErrorFormatter,
     ToolErrorFormatterArgs,
     ToolExecutionConfig,
+    ToolNameCollisionPolicy as ToolNameCollisionPolicy,
     ToolNotFoundBehavior,
     _coerce_run_config,
 )
@@ -91,7 +91,6 @@ from .run_internal.run_grouping import resolve_run_grouping_id
 from .run_internal.run_loop import (
     cleanup_models_after_run,
     get_all_tools,
-    get_handoffs,
     get_output_schema,
     initialize_computer_tools,
     resolve_interrupted_turn,
@@ -147,6 +146,7 @@ __all__ = [
     "ModelInputData",
     "CallModelData",
     "CallModelInputFilter",
+    "ToolNameCollisionPolicy",
     "ReasoningItemIdPolicy",
     "ToolExecutionConfig",
     "ToolErrorFormatter",
@@ -1138,10 +1138,6 @@ class AgentRunner:
                     )
 
                     if current_span is None:
-                        handoff_names = [
-                            h.agent_name
-                            for h in await get_handoffs(execution_agent, context_wrapper)
-                        ]
                         if output_schema := get_output_schema(execution_agent):
                             output_type_name = output_schema.name()
                         else:
@@ -1149,15 +1145,11 @@ class AgentRunner:
 
                         current_span = agent_span(
                             name=current_agent.name,
-                            handoffs=handoff_names,
+                            handoffs=[],
+                            tools=[],
                             output_type=output_type_name,
                         )
                         current_span.start(mark_as_current=True)
-                        current_span.span_data.tools = [
-                            tool_name
-                            for tool in all_tools
-                            if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
-                        ]
 
                     current_turn += 1
                     if max_turns is not None and current_turn > max_turns:
@@ -1330,6 +1322,7 @@ class AgentRunner:
                                         reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                                         prompt_cache_key_resolver=prompt_cache_key_resolver,
                                         error_handlers=error_handlers,
+                                        agent_span=current_span,
                                     ),
                                     turn_tool_input_partials,
                                     turn_tool_output_partials,
@@ -1423,6 +1416,7 @@ class AgentRunner:
                                 reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                                 prompt_cache_key_resolver=prompt_cache_key_resolver,
                                 error_handlers=error_handlers,
+                                agent_span=current_span,
                             )
                     finally:
                         if current_turn_span:
