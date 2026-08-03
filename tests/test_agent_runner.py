@@ -3169,6 +3169,41 @@ async def test_save_result_to_session_keeps_tool_call_before_its_output():
 
 
 @pytest.mark.asyncio
+async def test_save_result_to_session_keeps_latest_output_after_its_call():
+    session = SimpleListSession()
+    old_output = cast(
+        TResponseInputItem,
+        {"type": "function_call_output", "call_id": "call_ordered", "output": "old"},
+    )
+    call_item = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "call_ordered",
+            "name": "tool_ordered",
+            "arguments": "{}",
+        },
+    )
+    new_output = _DummyRunItem(
+        {"type": "function_call_output", "call_id": "call_ordered", "output": "new"}
+    )
+
+    await save_result_to_session(
+        session,
+        [old_output, call_item],
+        [cast(RunItem, new_output)],
+        None,
+    )
+
+    saved_items = [cast(dict[str, Any], item) for item in session.saved_items]
+    assert [item.get("type") for item in saved_items] == [
+        "function_call",
+        "function_call_output",
+    ]
+    assert saved_items[1]["output"] == "new"
+
+
+@pytest.mark.asyncio
 async def test_rewind_handles_id_stripped_sessions() -> None:
     session = IdStrippingSession()
     item = cast(TResponseInputItem, {"id": "message-1", "type": "message", "content": "hello"})

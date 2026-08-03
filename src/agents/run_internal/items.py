@@ -728,25 +728,32 @@ def deduplicate_input_items(items: Sequence[TResponseInputItem]) -> list[TRespon
 def deduplicate_input_items_preferring_latest(
     items: Sequence[TResponseInputItem],
 ) -> list[TResponseInputItem]:
-    """Deduplicate by stable identifiers, keeping the latest value at the earliest position.
+    """Deduplicate by stable identifiers while keeping the latest value.
 
-    Duplicates collapse onto the first occurrence of their dedupe key so the caller's item
-    order is preserved, while the last occurrence supplies the value. Relocating an item to
-    the position of its final duplicate would move a `function_call` behind its
-    `function_call_output`, which the Responses API rejects.
+    Tool calls stay at their earliest position so they cannot move behind matching outputs.
+    Other identified items stay at their latest position so replacing a stale value does not
+    move the replacement earlier in the conversation.
     """
     latest_by_key: dict[str, TResponseInputItem] = {}
-    for item in items:
+    anchor_index_by_key: dict[str, int] = {}
+    for index, item in enumerate(items):
         dedupe_key = _dedupe_key(item)
-        if dedupe_key is not None:
-            latest_by_key[dedupe_key] = item
+        if dedupe_key is None:
+            continue
 
-    # deduplicate_input_items keeps the first item per dedupe key, which is what preserves the
-    # caller's order; swapping in the latest value per surviving key is all this adds.
+        latest_by_key[dedupe_key] = item
+        payload = _coerce_to_dict(item)
+        item_type = payload.get("type") if payload is not None else None
+        if dedupe_key not in anchor_index_by_key or item_type not in _TOOL_CALL_TO_OUTPUT_TYPE:
+            anchor_index_by_key[dedupe_key] = index
+
     deduplicated: list[TResponseInputItem] = []
-    for item in deduplicate_input_items(items):
+    for index, item in enumerate(items):
         dedupe_key = _dedupe_key(item)
-        deduplicated.append(item if dedupe_key is None else latest_by_key[dedupe_key])
+        if dedupe_key is None:
+            deduplicated.append(item)
+        elif anchor_index_by_key[dedupe_key] == index:
+            deduplicated.append(latest_by_key[dedupe_key])
     return deduplicated
 
 
