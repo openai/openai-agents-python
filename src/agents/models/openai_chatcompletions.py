@@ -139,11 +139,33 @@ class OpenAIChatCompletionsModel(Model):
                 await close_result
 
     def _schedule_async_iterator_close(self, iterator: Any) -> None:
-        task = asyncio.create_task(self._maybe_aclose_async_iterator(iterator))
-        task.add_done_callback(self._consume_background_cleanup_task_result)
+        self._detach_stream_close(
+            asyncio.ensure_future(self._maybe_aclose_async_iterator(iterator))
+        )
+
+    async def _close_stream_allowing_background_completion(self, iterator: Any) -> None:
+        """Close the provider stream, letting an in-flight close finish in the background.
+
+        Cancellation can arrive while `aclose()` is already awaiting the provider. Shielding the
+        close and detaching that exact task keeps it running instead of abandoning it half-done,
+        and avoids starting a second close: re-closing a provider stream is not guaranteed to be
+        safe or idempotent.
+        """
+        close_task = asyncio.ensure_future(self._maybe_aclose_async_iterator(iterator))
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            self._detach_stream_close(close_task)
+            raise
+
+    def _detach_stream_close(self, close_task: asyncio.Future[None]) -> None:
+        if close_task.done():
+            self._consume_background_cleanup_task_result(close_task)
+            return
+        close_task.add_done_callback(self._consume_background_cleanup_task_result)
 
     @staticmethod
-    def _consume_background_cleanup_task_result(task: asyncio.Task[Any]) -> None:
+    def _consume_background_cleanup_task_result(task: asyncio.Future[Any]) -> None:
         try:
             task.result()
         except asyncio.CancelledError:
@@ -386,7 +408,7 @@ class OpenAIChatCompletionsModel(Model):
             finally:
                 if not close_stream_in_background:
                     try:
-                        await self._maybe_aclose_async_iterator(stream)
+                        await self._close_stream_allowing_background_completion(stream)
                     except Exception as exc:
                         if yielded_terminal_event:
                             log_model_action_debug(

@@ -764,6 +764,31 @@ class _SlowCloseChatStream(_ClosableChatStream):
         self.aclose_completed += 1
 
 
+class _CloseSignalingChatStream(_ClosableChatStream):
+    """Exhausts normally, then signals from `aclose` and blocks until released.
+
+    Unlike `_SlowCloseChatStream` this does not block in `__anext__`, so the consumer reaches
+    the cleanup `finally` on its own and a test can cancel while that close is in flight.
+    """
+
+    def __init__(
+        self,
+        chunks: list[ChatCompletionChunk],
+        close_started: asyncio.Event,
+        release: asyncio.Event,
+    ) -> None:
+        super().__init__(chunks)
+        self._close_started = close_started
+        self._release = release
+        self.aclose_completed = 0
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+        self._close_started.set()
+        await self._release.wait()
+        self.aclose_completed += 1
+
+
 class _FailingCloseChatStream(_ClosableChatStream):
     """Raises from `aclose` after recording the cleanup attempt."""
 
@@ -958,6 +983,53 @@ async def test_stream_response_does_not_block_cancellation_on_slow_close(monkeyp
             if provider_stream.aclose_completed == 1:
                 break
             await asyncio.sleep(0.01)
+        assert provider_stream.aclose_completed == 1
+    finally:
+        release.set()
+        task.cancel()
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_lets_in_flight_close_finish_after_cancellation(
+    monkeypatch,
+) -> None:
+    """Cancelling during the cleanup `aclose` continues that close instead of abandoning it."""
+    close_started = asyncio.Event()
+    release = asyncio.Event()
+    provider_stream = _CloseSignalingChatStream([_text_chunk("He")], close_started, release)
+    _patch_fetch_response(monkeypatch, provider_stream)
+    model = LitellmProvider().get_model("gpt-4")
+
+    stream_agen = cast(Any, _stream_response(model))
+
+    async def consume() -> None:
+        async for _event in stream_agen:
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        # The stream exhausts on its own, so the consumer reaches the cleanup `finally`
+        # and suspends inside the provider close.
+        await asyncio.wait_for(close_started.wait(), timeout=5)
+        assert provider_stream.aclose_calls == 1
+        assert provider_stream.aclose_completed == 0
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+
+        # The cancelled consumer must not have started a second close.
+        assert provider_stream.aclose_calls == 1
+        assert provider_stream.aclose_completed == 0
+
+        release.set()
+        for _ in range(200):
+            if provider_stream.aclose_completed == 1:
+                break
+            await asyncio.sleep(0.01)
+
+        assert provider_stream.aclose_calls == 1
         assert provider_stream.aclose_completed == 1
     finally:
         release.set()

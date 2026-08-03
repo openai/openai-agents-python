@@ -4185,3 +4185,97 @@ def test_websocket_pre_event_disconnect_retry_respects_websocket_retry_disable()
 
     with websocket_pre_event_retries_disabled(True):
         assert _should_retry_pre_event_websocket_disconnect() is False
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_lets_in_flight_close_finish_after_cancellation() -> None:
+    """Cancelling during the cleanup `aclose` continues that close instead of abandoning it."""
+
+    class CloseSignalingStream:
+        """Exhausts normally, then signals from `aclose` and blocks until released."""
+
+        def __init__(self, close_started: asyncio.Event, release: asyncio.Event) -> None:
+            self._yielded = False
+            self._close_started = close_started
+            self._release = release
+            self.aclose_calls = 0
+            self.aclose_completed = 0
+
+        def __aiter__(self) -> CloseSignalingStream:
+            return self
+
+        async def __anext__(self):
+            if self._yielded:
+                raise StopAsyncIteration
+            self._yielded = True
+            return ResponseCompletedEvent(
+                type="response.completed",
+                response=get_response_obj([]),
+                sequence_number=0,
+            )
+
+        async def aclose(self) -> None:
+            self.aclose_calls += 1
+            self._close_started.set()
+            await self._release.wait()
+            self.aclose_completed += 1
+
+    close_started = asyncio.Event()
+    release = asyncio.Event()
+    provider_stream = CloseSignalingStream(close_started, release)
+
+    class DummyResponses:
+        async def create(self, **kwargs):
+            return provider_stream
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore[arg-type]
+
+    stream_agen = cast(
+        Any,
+        model.stream_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        ),
+    )
+
+    async def consume() -> None:
+        async for _event in stream_agen:
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        # The stream exhausts on its own, so the consumer reaches the cleanup `finally`
+        # and suspends inside the provider close.
+        await asyncio.wait_for(close_started.wait(), timeout=5)
+        assert provider_stream.aclose_calls == 1
+        assert provider_stream.aclose_completed == 0
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+
+        # The cancelled consumer must not have started a second close.
+        assert provider_stream.aclose_calls == 1
+        assert provider_stream.aclose_completed == 0
+
+        release.set()
+        for _ in range(200):
+            if provider_stream.aclose_completed == 1:
+                break
+            await asyncio.sleep(0.01)
+
+        assert provider_stream.aclose_calls == 1
+        assert provider_stream.aclose_completed == 1
+    finally:
+        release.set()
+        task.cancel()
