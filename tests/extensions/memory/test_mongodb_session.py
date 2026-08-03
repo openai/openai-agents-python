@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 import types
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -834,6 +835,9 @@ async def test_close_is_idempotent_and_closes_owned_client_once() -> None:
     async def _counting_close() -> None:
         nonlocal close_calls
         close_calls += 1
+        # Suspend mid-release, as a real client awaiting network I/O would. Without
+        # this a concurrent second close() can never observe the in-flight one.
+        await asyncio.sleep(0)
         await original_close()
 
     fake_client.close = _counting_close  # type: ignore[method-assign]
@@ -845,6 +849,32 @@ async def test_close_is_idempotent_and_closes_owned_client_once() -> None:
 
     assert fake_client._closed
     assert close_calls == 1
+
+
+async def test_close_from_a_second_event_loop_does_not_error() -> None:
+    """The lazily-created close lock must not bind the session to one event loop."""
+    s, fake_client = _make_owned_session("close-other-loop")
+    await s.add_items([{"role": "user", "content": "before close"}])
+
+    # Close from a different loop, in its own thread. A lock bound to this test's
+    # loop would raise "is bound to a different event loop" instead.
+    error: list[BaseException] = []
+
+    def _close_in_new_loop() -> None:
+        try:
+            asyncio.run(s.close())
+        except BaseException as exc:  # pragma: no cover - only on regression
+            error.append(exc)
+
+    thread = threading.Thread(target=_close_in_new_loop)
+    thread.start()
+    thread.join()
+
+    assert not error, f"close() failed on a second loop: {error}"
+    assert fake_client._closed
+
+    # Closing again, back on the original loop, stays a no-op.
+    await s.close()
 
 
 async def test_close_injected_client_is_a_noop() -> None:
