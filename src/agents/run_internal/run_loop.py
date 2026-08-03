@@ -444,16 +444,33 @@ async def _run_output_guardrails_for_stream(
         raise
 
 
-_COMMITTED_ITEM_TYPES = frozenset({"tool_call_item", "tool_call_output_item"})
+_SIDE_EFFECT_ITEM_TYPES = frozenset({"tool_call_item", "tool_call_output_item"})
+
+# Not side effects themselves, but part of the replay context a retained tool call needs: a
+# reasoning model requires the reasoning item that preceded a function call to accompany it in the
+# next request, so dropping it here would leave the call unreplayable.
+_SIDE_EFFECT_CONTEXT_ITEM_TYPES = frozenset({"reasoning_item"})
 
 
-def _committed_side_effect_items(items: list[RunItem]) -> list[RunItem]:
-    """Pick out the items of a final turn that record a side effect which already happened.
+def _retained_items_for_blocked_output(items: list[RunItem]) -> list[RunItem]:
+    """Pick out the items of a final turn to keep when its output is not deliverable.
 
-    Allow-listed rather than deny-listed on purpose: a new item type recording a side effect then
-    defaults to being persisted instead of silently inheriting "discard on tripwire".
+    A tool that already ran has to stay in the session, together with the context needed to replay
+    its call. Everything else - the assistant message the guardrail rejected above all - is dropped.
+
+    The two sets are enumerated rather than derived, so an item type added later is *discarded*
+    here by default and has to be classified deliberately. A record of a side effect that goes
+    unclassified is a bug, so the safer default is the one that surfaces as a missing item rather
+    than as a rejected message quietly reaching the session.
     """
-    return [item for item in items if item.type in _COMMITTED_ITEM_TYPES]
+    if not any(item.type in _SIDE_EFFECT_ITEM_TYPES for item in items):
+        return []
+    # Filtered in a single pass so the retained items keep the model's own order.
+    return [
+        item
+        for item in items
+        if item.type in _SIDE_EFFECT_ITEM_TYPES or item.type in _SIDE_EFFECT_CONTEXT_ITEM_TYPES
+    ]
 
 
 async def _finalize_streamed_final_output(
@@ -488,9 +505,9 @@ async def _finalize_streamed_final_output(
         # items when `tool_use_behavior="stop_on_first_tool"` (or `stop_at_tool_names`, or a custom
         # callable) turned a tool result straight into the final output.
         if not persist_before_output_guardrails:
-            committed_items = _committed_side_effect_items(items)
-            if committed_items:
-                await save_items(committed_items, response_id, store_setting)
+            retained_items = _retained_items_for_blocked_output(items)
+            if retained_items:
+                await save_items(retained_items, response_id, store_setting)
         raise
 
     streamed_result.output_guardrail_results = output_guardrail_results

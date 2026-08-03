@@ -2289,6 +2289,85 @@ async def test_mixed_final_turn_session_order_and_committed_items(
         assert saved == ["user", "message", "function_call", "function_call_output"]
 
 
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.parametrize("tripwire", [False, True], ids=["passes", "trips"])
+@pytest.mark.asyncio
+async def test_blocked_tool_final_keeps_reasoning_context_with_the_committed_call(
+    mode: str,
+    tripwire: bool,
+) -> None:
+    """A retained tool call keeps the reasoning item it belongs to, in order.
+
+    A reasoning model requires the reasoning item that preceded a function call to accompany that
+    call in the next request, so persisting the call/output pair without it leaves an unreplayable
+    turn. Asserted on both the session contents and the next run's model input.
+    """
+
+    @function_tool(name_override="commit_tool")
+    def commit_tool() -> str:
+        return "committed-result"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=tripwire)
+
+    model = FakeModel()
+    model.set_next_output(
+        [
+            ResponseReasoningItem(
+                id="rs_committed",
+                summary=[Summary(text="deciding to call the tool", type="summary_text")],
+                type="reasoning",
+            ),
+            get_function_tool_call("commit_tool", "{}", call_id="call-reasoned"),
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[commit_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = SimpleListSession()
+
+    async def run_once(input_value: Any) -> Any:
+        if mode == "non_streamed":
+            return await Runner.run(agent, input_value, session=session)
+        result = Runner.run_streamed(agent, input_value, session=session)
+        await consume_stream(result)
+        return result
+
+    if tripwire:
+        with pytest.raises(OutputGuardrailTripwireTriggered):
+            await run_once("Use commit_tool")
+    else:
+        assert (await run_once("Use commit_tool")).final_output == "committed-result"
+
+    saved_items = await session.get_items()
+    saved = [item.get("type") or item.get("role") for item in saved_items if isinstance(item, dict)]
+    assert saved == ["user", "reasoning", "function_call", "function_call_output"]
+
+    # The reasoning/call/output group has to reach the next request in that order.
+    agent.output_guardrails = []
+    model.set_next_output([get_text_message("done")])
+    followup = await run_once("Continue")
+    assert followup.final_output == "done"
+
+    model_input = model.last_turn_args["input"]
+    assert isinstance(model_input, list)
+    replayed = [
+        item.get("type")
+        for item in model_input
+        if isinstance(item, dict)
+        and item.get("type") in {"reasoning", "function_call", "function_call_output"}
+    ]
+    assert replayed == ["reasoning", "function_call", "function_call_output"]
+
+
 @pytest.mark.asyncio
 async def test_streaming_resume_preserves_filtered_model_input_after_handoff():
     model = FakeModel()
