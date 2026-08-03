@@ -501,6 +501,14 @@ class MongoDBSession(SessionABC):
         """Publish the outcome of a release attempt and free the claim.
 
         On failure the client is left unreleased, so a later ``close()`` retries.
+
+        A cancellation is translated rather than forwarded.  Publishing it verbatim would
+        reach the waiters in :meth:`_await_client_release` as an ``asyncio.CancelledError``
+        (``asyncio`` maps a ``concurrent.futures.CancelledError`` back to its own on the way
+        out of ``wrap_future``), marking tasks nobody cancelled as *cancelled* rather than
+        *failed*: the real cause becomes invisible to the caller and whatever the teardown
+        path sequenced after the await is silently skipped.  Only the caller that was
+        actually cancelled sees ``CancelledError``, which ``close()`` re-raises itself.
         """
         with self._init_guard:
             attempt = self._release_attempt
@@ -510,6 +518,10 @@ class MongoDBSession(SessionABC):
             return
         if error is None:
             attempt.set_result(None)
+        elif isinstance(error, asyncio.CancelledError):
+            attempt.set_exception(
+                RuntimeError("MongoDB client release was cancelled; call close() again to retry")
+            )
         else:
             attempt.set_exception(error)
 

@@ -910,6 +910,49 @@ async def test_cancelled_waiter_does_not_break_the_in_flight_release() -> None:
         await s.get_items()
 
 
+async def test_cancelling_the_release_owner_fails_waiters_without_cancelling_them() -> None:
+    """A cancelled release must reach waiters as a failure, not as a cancellation.
+
+    ``asyncio`` maps a ``concurrent.futures.CancelledError`` back to its own on the way out of
+    ``wrap_future``, so forwarding the owner's cancellation verbatim would mark a waiting task
+    as *cancelled* rather than *failed* -- hiding the cause and skipping whatever the caller
+    sequenced after the await.
+    """
+    s, fake_client = _make_owned_session("close-owner-cancelled")
+
+    started = asyncio.Event()
+    unblock = asyncio.Event()
+    original_close = fake_client.close
+
+    async def _blocking_close() -> None:
+        started.set()
+        await unblock.wait()
+        await original_close()
+
+    fake_client.close = _blocking_close  # type: ignore[method-assign]
+
+    releaser = asyncio.create_task(s.close())
+    await started.wait()  # the releaser owns the attempt and is inside client.close()
+    waiter = asyncio.create_task(s.close())
+    await asyncio.sleep(0.02)  # let the waiter block on the shared attempt
+
+    releaser.cancel()
+    unblock.set()
+
+    # Only the caller that was actually cancelled sees CancelledError.
+    with pytest.raises(asyncio.CancelledError):
+        await releaser
+    with pytest.raises(RuntimeError, match="release was cancelled"):
+        await waiter
+    assert not waiter.cancelled()
+
+    # The client was never released, so a later close() retries the unfinished cleanup.
+    assert not fake_client._closed
+    fake_client.close = original_close  # type: ignore[method-assign]
+    await s.close()
+    assert fake_client._closed
+
+
 async def test_close_waits_for_an_in_flight_operation() -> None:
     """close() must not release the client under an operation that already started."""
     s, fake_client = _make_owned_session("close-drains")
