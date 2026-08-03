@@ -1637,17 +1637,37 @@ class _FunctionToolBatchExecutor:
         )
 
     async def _cancel_pending_tasks_for_parent_cancellation(self) -> None:
-        cancelled_tasks = set(self.pending_tasks)
-        self.teardown_cancelled_tasks.update(cancelled_tasks)
-        _cancel_function_tool_tasks(cancelled_tasks)
-        # The callbacks are attached before the wait below so a task that finishes
-        # while we wait still has its result consumed, and so a task that outlives
-        # the window is still reported at the loop level.
+        if not self.pending_tasks:
+            return
+
+        drain_for_failing_sibling = cancelled_by_failing_sibling()
+        if drain_for_failing_sibling:
+            # Same split the in-batch sibling-failure path uses: a handler that has
+            # already returned is running its post-invoke lifecycle (output
+            # guardrails, custom output extraction, on_tool_end), and cancelling
+            # that would land the tool's side effect while skipping the work the
+            # tool contract requires after it. Only genuinely in-flight handlers
+            # are cancellable.
+            cancellable_tasks, post_invoke_tasks = self._partition_pending_tasks()
+        else:
+            # A parent cancellation is tearing the whole run down, so there is no
+            # lifecycle left to protect and nothing waits on the outcome.
+            cancellable_tasks, post_invoke_tasks = set(self.pending_tasks), set()
+
+        self.teardown_cancelled_tasks.update(cancellable_tasks)
+        _cancel_function_tool_tasks(cancellable_tasks)
+        # Attached before any wait below so a task finishing inside the window still
+        # has its result consumed, and one outliving it is still reported.
         _attach_function_tool_task_result_callbacks(
-            cancelled_tasks,
+            cancellable_tasks,
             message_for_exception=_parent_cancelled_task_exception_message,
         )
-        if not cancelled_tasks or not cancelled_by_failing_sibling():
+        if post_invoke_tasks:
+            _attach_function_tool_task_result_callbacks(
+                post_invoke_tasks,
+                message_for_exception=_background_post_invoke_task_exception_message,
+            )
+        if not drain_for_failing_sibling:
             # A genuine parent cancellation must not be held up by tool cleanup, so
             # the loop-level callbacks above are the whole story there.
             return
@@ -1658,7 +1678,7 @@ class _FunctionToolBatchExecutor:
         # because a handler that swallows cancellation must not stall the run.
         try:
             await asyncio.wait(
-                cancelled_tasks,
+                cancellable_tasks | post_invoke_tasks,
                 timeout=_FUNCTION_TOOL_TEARDOWN_DRAIN_SECONDS,
             )
         except asyncio.CancelledError:

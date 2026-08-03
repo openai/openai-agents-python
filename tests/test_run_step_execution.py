@@ -3840,3 +3840,163 @@ async def test_sibling_failure_drain_does_not_apply_to_parent_cancellation() -> 
     # Outside any gather_with_cancel the flag stays False, which is what keeps the
     # parent-cancellation path prompt.
     assert cancelled_by_failing_sibling() is False
+
+
+@pytest.mark.asyncio
+async def test_arm_raising_cancellederror_counts_as_a_sibling_failure() -> None:
+    """An arm that reports its own cancellation is still a sibling failure.
+
+    A tool executor can raise `CancelledError` to report tool-local cancellation.
+    The caller is not going away in that case, so the other arms still owe the
+    fan-out a drained result and must not take the prompt teardown path.
+    """
+    from agents.util._asyncio_tasks import cancelled_by_failing_sibling, gather_with_cancel
+
+    observed: list[bool] = []
+
+    async def blocker() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            observed.append(cancelled_by_failing_sibling())
+            raise
+
+    async def tool_local_cancel() -> None:
+        await asyncio.sleep(0)
+        raise asyncio.CancelledError("executor reported its own cancellation")
+
+    with pytest.raises(asyncio.CancelledError):
+        await gather_with_cancel(blocker(), tool_local_cancel())
+
+    assert observed == [True]
+
+
+@pytest.mark.asyncio
+async def test_ancestor_cancellation_is_not_read_as_a_sibling_failure() -> None:
+    """Cancelling the gather from outside must leave the flag False."""
+    from agents.util._asyncio_tasks import cancelled_by_failing_sibling, gather_with_cancel
+
+    observed: list[bool] = []
+    started = asyncio.Event()
+
+    async def blocker() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            observed.append(cancelled_by_failing_sibling())
+            raise
+
+    async def other() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(gather_with_cancel(blocker(), other()))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert observed == [False]
+
+
+@pytest.mark.asyncio
+async def test_gather_with_cancel_preserves_argument_order() -> None:
+    """Results stay positional even though completion order differs."""
+    from agents.util._asyncio_tasks import gather_with_cancel
+
+    async def slow() -> str:
+        await asyncio.sleep(0.02)
+        return "first"
+
+    async def fast() -> str:
+        return "second"
+
+    assert await gather_with_cancel(slow(), fast()) == ("first", "second")
+    assert await gather_with_cancel() == ()
+
+
+class _SlowToolEndHooks(RunHooks[Any]):
+    """Hooks whose `on_tool_end` is still running when a sibling category fails."""
+
+    def __init__(self, started: asyncio.Event, finished: asyncio.Event) -> None:
+        self.started = started
+        self.finished = finished
+
+    async def on_tool_end(self, context: Any, agent: Any, tool: Any, result: Any) -> None:
+        self.started.set()
+        await asyncio.sleep(0.05)
+        self.finished.set()
+
+
+@pytest.mark.asyncio
+async def test_sibling_failure_does_not_cancel_post_invoke_work() -> None:
+    """A handler that already returned keeps its post-invoke lifecycle.
+
+    Once the handler itself is done the task is running output guardrails, custom
+    output extraction and `on_tool_end`. Cancelling that would land the tool's
+    side effect while skipping the work the tool contract requires after it, so
+    the cross-category drain partitions exactly the way the in-batch
+    sibling-failure path does.
+    """
+    from agents.run_internal.agent_bindings import bind_public_agent
+    from agents.run_internal.tool_planning import ToolExecutionPlan, _execute_tool_plan
+
+    from .test_computer_tool_lifecycle import FakeComputer
+
+    post_invoke_started = asyncio.Event()
+    post_invoke_finished = asyncio.Event()
+
+    @function_tool
+    async def quick_tool() -> str:
+        return "ok"
+
+    async def reject_once_post_invoke_is_running(_data: Any) -> bool:
+        await post_invoke_started.wait()
+        return False
+
+    computer_tool = ComputerTool(
+        computer=FakeComputer(), on_safety_check=reject_once_post_invoke_is_running
+    )
+    agent: Agent[Any] = Agent(name="test", tools=[quick_tool, computer_tool])
+
+    plan = ToolExecutionPlan(
+        function_runs=[
+            ToolRunFunction(
+                tool_call=ResponseFunctionToolCall(
+                    id="fn-1",
+                    call_id="fn-1",
+                    name="quick_tool",
+                    arguments="{}",
+                    type="function_call",
+                ),
+                function_tool=cast(Any, quick_tool),
+            )
+        ],
+        computer_actions=[
+            ToolRunComputerAction(
+                tool_call=ResponseComputerToolCall(
+                    id="computer-1",
+                    type="computer_call",
+                    call_id="computer-1",
+                    action=ActionScreenshot(type="screenshot"),
+                    pending_safety_checks=[
+                        PendingSafetyCheck(id="sc-1", code="malicious", message="nope")
+                    ],
+                    status="completed",
+                ),
+                computer_tool=computer_tool,
+            )
+        ],
+    )
+
+    with pytest.raises(UserError, match="safety check was not acknowledged"):
+        await _execute_tool_plan(
+            plan=plan,
+            bindings=bind_public_agent(agent),
+            hooks=_SlowToolEndHooks(post_invoke_started, post_invoke_finished),
+            context_wrapper=RunContextWrapper(context=None),
+            run_config=RunConfig(),
+        )
+
+    assert post_invoke_started.is_set()
+    assert post_invoke_finished.is_set(), "post-invoke lifecycle work was cancelled"

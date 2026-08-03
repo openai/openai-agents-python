@@ -33,6 +33,13 @@ def cancelled_by_failing_sibling() -> bool:
     return scope is not None and scope.cancelling
 
 
+async def _cancel_and_drain(tasks: list[asyncio.Task[Any]]) -> None:
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 T = TypeVar("T")
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")
@@ -98,21 +105,35 @@ async def gather_with_cancel(*awaitables: Awaitable[T]) -> tuple[T, ...]: ...
 
 async def gather_with_cancel(*awaitables: Awaitable[Any]) -> tuple[Any, ...]:
     """Gather awaitables, cancelling and draining siblings when one raises."""
+    if not awaitables:
+        return ()
+
     scope = _SiblingCancellationScope()
     token = _sibling_cancellation_scope.set(scope)
     try:
         tasks = [asyncio.ensure_future(awaitable) for awaitable in awaitables]
         try:
-            return tuple(await asyncio.gather(*tasks))
-        except BaseException as error:
-            # Only a genuine sibling failure flips the flag. If the gather itself was
-            # cancelled, an ancestor is going away and arms should unwind promptly
-            # rather than drain.
-            scope.cancelling = not isinstance(error, asyncio.CancelledError)
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # Waiting on completion rather than `asyncio.gather` is what makes the
+            # two cancellation causes distinguishable. An arm that ends badly comes
+            # back as a finished task here, so this frame is demonstrably still
+            # alive and the cancellation that follows originates with us. An
+            # ancestor cancelling us instead raises out of the wait itself, leaving
+            # `scope.cancelling` false so arms unwind promptly. Note that the arm may
+            # end badly by *being cancelled* rather than raising, which is why this
+            # cannot use FIRST_EXCEPTION: cancellation does not satisfy it.
+            pending = set(tasks)
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                # Ordered by original position so which failure wins is deterministic
+                # when several arms finish in the same pass.
+                for task in sorted(done, key=tasks.index):
+                    if task.cancelled() or task.exception() is not None:
+                        scope.cancelling = True
+                        await _cancel_and_drain(tasks)
+                        task.result()  # re-raises the arm's exception
+        except BaseException:
+            await _cancel_and_drain(tasks)
             raise
+        return tuple(task.result() for task in tasks)
     finally:
         _sibling_cancellation_scope.reset(token)
