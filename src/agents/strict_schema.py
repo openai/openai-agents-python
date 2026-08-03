@@ -20,6 +20,13 @@ _EMPTY_SCHEMA = {
 # example, tool schemas advertised by a third-party MCP server).
 _MAX_SCHEMA_NODES = 100_000
 
+_ADDITIONAL_PROPERTIES_ERROR = (
+    "additionalProperties should not be set for object types. This could be because "
+    "you're using an older version of Pydantic, or because you configured additional "
+    "properties to be allowed. If you really need this, update the function or output tool "
+    "to not use a strict schema."
+)
+
 
 class _NodeBudget:
     """Tracks the remaining schema-node expansion budget across the recursion."""
@@ -45,9 +52,40 @@ def ensure_strict_json_schema(
     """
     if schema == {}:
         return copy.deepcopy(_EMPTY_SCHEMA)
-    return _ensure_strict_json_schema(
+    converted = _ensure_strict_json_schema(
         schema, path=(), root=schema, budget=_NodeBudget(_MAX_SCHEMA_NODES)
     )
+    return _ensure_strict_root(converted)
+
+
+def _ensure_strict_root(schema: dict[str, Any]) -> dict[str, Any]:
+    """Apply the extra constraints the API places on the *root* of a strict schema.
+
+    A nested branch may stay typeless or nullable as long as it is closed, but the root must be an
+    explicit, non-nullable, closed object. Normalize what can be normalized and reject the rest
+    here, so an unusable root fails at construction rather than as a provider error.
+    """
+    typ = schema.get("type")
+    if is_list(typ):
+        if "object" in typ and len(typ) > 1:
+            raise UserError(
+                "The root of a strict JSON schema must be a non-nullable object, but its type is "
+                f"{typ}. Make the root a plain object, or update the function or output tool to "
+                "not use a strict schema."
+            )
+        if typ == ["object"]:
+            schema["type"] = "object"
+    elif typ is None and is_dict(schema.get("properties")):
+        # A node carrying `properties` is an object even without `type`, and the conversion above
+        # already closed it -- but the API rejects a root that does not say so explicitly.
+        schema["type"] = "object"
+
+    # An open map root (`{"additionalProperties": {...}}` with no `properties`) is not an object
+    # node as far as the conversion above is concerned, so it stays open unless rejected here.
+    if schema.get("additionalProperties", False) is not False:
+        raise UserError(_ADDITIONAL_PROPERTIES_ERROR)
+
+    return schema
 
 
 # Adapted from https://github.com/openai/openai-python/blob/main/src/openai/lib/_pydantic.py
@@ -95,12 +133,7 @@ def _ensure_strict_json_schema(
         # falsy in Python, so a truthiness check would silently leave a non-strict schema in place.
         and json_schema["additionalProperties"] is not False
     ):
-        raise UserError(
-            "additionalProperties should not be set for object types. This could be because "
-            "you're using an older version of Pydantic, or because you configured additional "
-            "properties to be allowed. If you really need this, update the function or output tool "
-            "to not use a strict schema."
-        )
+        raise UserError(_ADDITIONAL_PROPERTIES_ERROR)
 
     # object types
     # { 'type': 'object', 'properties': { 'a':  {...} } }
@@ -220,10 +253,10 @@ def is_object_schema(json_schema: dict[str, object]) -> bool:
     """Return True for nodes strict mode must treat as objects.
 
     `type` alone is not enough: JSON Schema does not require it, and OpenAPI 3.1 spells a
-    nullable object as `{"type": ["object", "null"]}`. This must stay in sync with the
-    `required` rewrite below, which keys off `properties` alone -- if the two disagree, a node
-    comes out half-converted (strict `required`, no `additionalProperties`) and the provider
-    rejects the whole schema.
+    nullable object as `{"type": ["object", "null"]}`. This must stay in sync with the `required`
+    rewrite in `_ensure_strict_json_schema`, which keys off `properties` alone -- if the two
+    disagree, a node comes out half-converted (strict `required`, no `additionalProperties`) and
+    the provider rejects the whole schema.
     """
     typ = json_schema.get("type")
     if is_list(typ):

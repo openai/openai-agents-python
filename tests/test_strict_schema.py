@@ -223,77 +223,100 @@ def test_ref_expansion_bomb_is_rejected():
         ensure_strict_json_schema(schema)
 
 
-def test_typeless_object_gets_additional_properties():
-    # JSON Schema does not require `type`, and hand-written / MCP schemas often omit it.
-    # The `required` rewrite already treats such a node as an object, so `additionalProperties`
-    # must agree or the provider rejects the schema.
-    result = ensure_strict_json_schema({"properties": {"a": {"type": "string"}}})
-    assert result["additionalProperties"] is False
-    assert result["required"] == ["a"]
+def test_typeless_root_is_normalized_to_object():
+    # JSON Schema does not require `type`, and hand-written / MCP schemas often omit it. The root
+    # of a strict schema must be an explicit closed object, so the type is filled in here.
+    assert ensure_strict_json_schema({"properties": {"a": {"type": "string"}}}) == {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "required": ["a"],
+        "additionalProperties": False,
+    }
 
 
-def test_union_typed_object_gets_additional_properties():
+def test_single_entry_type_list_root_is_normalized_to_object():
+    # `["object"]` is a verbose spelling of `"object"`, so it converts instead of being rejected.
+    assert ensure_strict_json_schema(
+        {"type": ["object"], "properties": {"a": {"type": "string"}}}
+    ) == {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "required": ["a"],
+        "additionalProperties": False,
+    }
+
+
+def test_nullable_root_is_rejected():
     # OpenAPI 3.1 / JSON Schema 2020-12 spell a nullable object as `type: ["object", "null"]`.
-    result = ensure_strict_json_schema(
-        {"type": ["object", "null"], "properties": {"a": {"type": "string"}}}
-    )
-    assert result["additionalProperties"] is False
-    assert result["required"] == ["a"]
+    # A nullable root cannot be made strict, so it must fail here rather than as a provider error.
+    with pytest.raises(UserError):
+        ensure_strict_json_schema(
+            {"type": ["object", "null"], "properties": {"a": {"type": "string"}}}
+        )
 
 
-@pytest.mark.parametrize(
-    ("schema", "path"),
-    [
-        (
-            {"type": "object", "properties": {"cfg": {"properties": {"k": {"type": "string"}}}}},
-            ("properties", "cfg"),
-        ),
-        (
-            {
-                "type": "object",
-                "properties": {"u": {"anyOf": [{"properties": {"x": {"type": "string"}}}]}},
-            },
-            ("properties", "u", "anyOf", 0),
-        ),
-        (
-            {
-                "type": "object",
-                "properties": {
-                    "rows": {"type": "array", "items": {"properties": {"c": {"type": "string"}}}}
-                },
-            },
-            ("properties", "rows", "items"),
-        ),
-    ],
-    ids=["nested_property", "anyof_branch", "array_items"],
-)
-def test_typeless_object_gets_additional_properties_when_nested(schema, path):
-    node = ensure_strict_json_schema(schema)
-    for key in path:
-        node = node[key]
-
-    assert node["additionalProperties"] is False
+def test_open_map_root_is_rejected():
+    # `{"additionalProperties": {...}}` with no `properties` is an open map: it accepts keys the
+    # schema never declares, which is exactly what strict mode forbids at the root.
+    with pytest.raises(UserError):
+        ensure_strict_json_schema({"additionalProperties": {"type": "string"}})
 
 
-def test_typeless_object_with_permissive_additional_properties_errors():
-    # Same rejection an explicitly typed object already gets: a map-valued `additionalProperties`
-    # cannot be made strict, so it must fail at construction rather than as a provider 400.
+def test_typeless_root_with_permissive_additional_properties_is_rejected():
+    # Same rejection an explicitly typed object already gets.
     with pytest.raises(UserError):
         ensure_strict_json_schema(
             {"properties": {"a": {"type": "string"}}, "additionalProperties": {}}
         )
 
 
-def test_non_object_nodes_are_not_given_additional_properties():
-    result = ensure_strict_json_schema(
-        {"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "array"}}}
-    )
-    assert "additionalProperties" not in result["properties"]["a"]
-    assert "additionalProperties" not in result["properties"]["b"]
-
-
-def test_map_style_additional_properties_without_properties_is_untouched():
-    # `{"additionalProperties": {...}}` with no `properties` is a map, not a strict object node;
-    # it must not start raising just because it can hold keys.
-    schema = {"additionalProperties": {"type": "string"}}
-    assert ensure_strict_json_schema(schema) == schema
+def test_nested_object_branches_are_closed():
+    # Nested branches keep their own type: a typeless or nullable object stays as written, but
+    # every one of them must come out closed and fully `required`, while non-object nodes are
+    # left alone.
+    schema = {
+        "type": "object",
+        "properties": {
+            "cfg": {"properties": {"k": {"type": "string"}}},
+            "opt": {"type": ["object", "null"], "properties": {"n": {"type": "integer"}}},
+            "u": {"anyOf": [{"properties": {"x": {"type": "string"}}}]},
+            "rows": {"type": "array", "items": {"properties": {"c": {"type": "string"}}}},
+            "name": {"type": "string"},
+        },
+    }
+    assert ensure_strict_json_schema(schema) == {
+        "type": "object",
+        "properties": {
+            "cfg": {
+                "properties": {"k": {"type": "string"}},
+                "required": ["k"],
+                "additionalProperties": False,
+            },
+            "opt": {
+                "type": ["object", "null"],
+                "properties": {"n": {"type": "integer"}},
+                "required": ["n"],
+                "additionalProperties": False,
+            },
+            "u": {
+                "anyOf": [
+                    {
+                        "properties": {"x": {"type": "string"}},
+                        "required": ["x"],
+                        "additionalProperties": False,
+                    }
+                ]
+            },
+            "rows": {
+                "type": "array",
+                "items": {
+                    "properties": {"c": {"type": "string"}},
+                    "required": ["c"],
+                    "additionalProperties": False,
+                },
+            },
+            "name": {"type": "string"},
+        },
+        "required": ["cfg", "opt", "u", "rows", "name"],
+        "additionalProperties": False,
+    }
