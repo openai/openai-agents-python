@@ -13,7 +13,7 @@ from pydantic import TypeAdapter
 from agents import Agent, function_tool
 from agents.exceptions import UserError
 from agents.handoffs import handoff
-from agents.realtime.model import RealtimeModelConfig
+from agents.realtime.model import RealtimeModelConfig, RealtimePlaybackTracker
 from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
     RealtimeModelErrorEvent,
@@ -719,7 +719,10 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
 
                 return SimpleNamespace(
                     type=event["type"],
-                    response=SimpleNamespace(usage=RealtimeResponseUsage.model_validate(usage)),
+                    response=SimpleNamespace(
+                        id="response_1",
+                        usage=RealtimeResponseUsage.model_validate(usage),
+                    ),
                 )
 
         model._server_event_type_adapter = ResponseDoneAdapter()
@@ -738,6 +741,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         assert isinstance(emitted[1], RealtimeModelUsageEvent)
         assert emitted[1].input_tokens_details is not None
         assert emitted[1].input_tokens_details.audio_tokens == 10
+        assert emitted[2].response_id == "response_1"
 
     @pytest.mark.asyncio
     async def test_response_done_without_usage_skips_usage_event(self, model):
@@ -1231,7 +1235,9 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
     @pytest.mark.asyncio
     async def test_normal_interrupt_targets_response_and_interrupts_audio(self, model, monkeypatch):
         model._audio_state_tracker.set_audio_format("pcm16")
-        model._audio_state_tracker.on_audio_delta("audio_item", 0, b"\x00" * 4800)
+        model._audio_state_tracker.on_audio_delta(
+            "audio_item", 0, b"\x00" * 4800, response_id="response_1"
+        )
         await model._mark_response_created()
 
         send_raw = AsyncMock()
@@ -1255,6 +1261,234 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert emit_event.await_args is not None
         assert emit_event.await_args.args[0].type == "audio_interrupted"
         assert model._audio_state_tracker.get_last_audio_item() is None
+
+    @pytest.mark.asyncio
+    async def test_playback_only_interrupt_does_not_stop_newer_response_audio(
+        self, model, monkeypatch
+    ):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "old_audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="old_response",
+        )
+        model._audio_state_tracker.on_audio_delta(
+            "new_audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="new_response",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("new_audio_item", 0, 50)
+        await model._mark_response_created()
+
+        send_raw = AsyncMock()
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_interrupt(
+            RealtimeModelSendInterrupt(
+                response_id="old_response",
+                playback_only=True,
+            )
+        )
+
+        send_raw.assert_not_awaited()
+        assert [call.args[0].item_id for call in emit_event.await_args_list] == ["old_audio_item"]
+        assert model._ongoing_response is True
+        assert model._response_control == "free"
+        assert model._playback_tracker.get_state()["current_item_id"] == "new_audio_item"
+        assert model._audio_state_tracker.get_audio_items_for_response("old_response") == ()
+
+    @pytest.mark.asyncio
+    async def test_response_scoped_interrupt_rechecks_playback_after_event_listener(
+        self, model, monkeypatch
+    ):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "old_audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="old_response",
+        )
+        model._audio_state_tracker.on_audio_delta(
+            "new_audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="new_response",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("old_audio_item", 0, 50)
+
+        async def advance_playback(_event):
+            model._playback_tracker.on_play_ms("new_audio_item", 0, 25)
+
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock(side_effect=advance_playback))
+
+        await model._send_interrupt(
+            RealtimeModelSendInterrupt(
+                response_id="old_response",
+                playback_only=True,
+            )
+        )
+
+        assert send_raw.await_count == 1
+        assert send_raw.await_args is not None
+        assert send_raw.await_args.args[0].item_id == "old_audio_item"
+        assert model._playback_tracker.get_state()["current_item_id"] == "new_audio_item"
+
+    @pytest.mark.asyncio
+    async def test_response_scoped_interrupt_suppresses_late_source_audio_until_done(
+        self, model, monkeypatch
+    ):
+        send_raw = AsyncMock()
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_interrupt(
+            RealtimeModelSendInterrupt(
+                force_response_cancel=True,
+                response_id="source_response",
+            )
+        )
+
+        await model._handle_audio_delta(
+            SimpleNamespace(
+                response_id="source_response",
+                item_id="source_item",
+                content_index=0,
+                delta="dGVzdA==",
+            )
+        )
+        await model._handle_audio_delta(
+            SimpleNamespace(
+                response_id="newer_response",
+                item_id="newer_item",
+                content_index=0,
+                delta="dGVzdA==",
+            )
+        )
+
+        assert model._audio_state_tracker.get_state("source_item", 0) is None
+        assert model._audio_state_tracker.get_state("newer_item", 0) is not None
+        assert [
+            event.response_id for event in (call.args[0] for call in emit_event.await_args_list)
+        ] == ["newer_response"]
+
+        class ResponseDoneAdapter:
+            def validate_python(self, event):
+                return SimpleNamespace(
+                    type=event["type"],
+                    response=SimpleNamespace(id="source_response", usage=None),
+                )
+
+        model._server_event_type_adapter = ResponseDoneAdapter()
+        await model._handle_ws_event({"type": "response.done", "response": {}})
+
+        assert "source_response" not in model._interrupted_audio_response_ids
+
+    def test_response_audio_indexes_are_bounded_after_retirement(self, model):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        for response_number in range(20):
+            response_id = f"response_{response_number}"
+            item_id = f"item_{response_number}"
+            model._audio_state_tracker.on_audio_delta(
+                item_id,
+                0,
+                b"\x00" * 4800,
+                response_id=response_id,
+            )
+            state = model._audio_state_tracker.get_state(item_id, 0)
+            assert state is not None
+            state.initial_received_time -= 1
+            model._retire_response_audio(response_id)
+
+        assert model._audio_state_tracker._audio_items_by_response_id == {}
+        assert model._pending_audio_response_retirements == {}
+        assert model._audio_state_tracker.get_state("item_19", 0) is not None
+
+    def test_custom_playback_retains_index_until_last_response_item_finishes(self, model):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "first_item",
+            0,
+            b"\x00" * 4800,
+            response_id="response_1",
+        )
+        model._audio_state_tracker.on_audio_delta(
+            "second_item",
+            0,
+            b"\x00" * 4800,
+            response_id="response_1",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+
+        model._retire_response_audio("response_1")
+        assert model._audio_state_tracker.get_audio_items_for_response("response_1")
+
+        model._playback_tracker.on_play_ms("first_item", 0, 100)
+        assert model._audio_state_tracker.get_audio_items_for_response("response_1")
+        model._playback_tracker.on_play_ms("second_item", 0, 100)
+
+        assert model._audio_state_tracker.get_audio_items_for_response("response_1") == ()
+        assert model._pending_audio_response_retirements == {}
+        assert model._playback_tracker._progress_listeners == set()
+
+    @pytest.mark.asyncio
+    async def test_custom_playback_started_before_retirement_releases_source_index(
+        self, model, monkeypatch
+    ):
+        model._playback_tracker = RealtimePlaybackTracker()
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._handle_audio_delta(
+            SimpleNamespace(
+                response_id="old_response",
+                item_id="old_item",
+                content_index=0,
+                delta="dGVzdA==",
+            )
+        )
+        await model._handle_audio_delta(
+            SimpleNamespace(
+                response_id="new_response",
+                item_id="new_item",
+                content_index=0,
+                delta="dGVzdA==",
+            )
+        )
+
+        model._playback_tracker.on_play_ms("old_item", 0, 1)
+        model._playback_tracker.on_play_ms("new_item", 0, 1)
+        model._retire_response_audio("old_response")
+
+        assert model._audio_state_tracker.get_audio_items_for_response("old_response") == ()
+        assert model._pending_audio_response_retirements == {}
+
+    @pytest.mark.asyncio
+    async def test_close_releases_pending_response_audio_indexes(self, model):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="response_1",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("audio_item", 0, 50)
+        model._retire_response_audio("response_1")
+
+        await model.close()
+
+        assert model._audio_state_tracker.get_audio_items_for_response("response_1") == ()
+        assert model._pending_audio_response_retirements == {}
+        assert model._interrupted_audio_response_ids == set()
+        assert model._playback_tracker._progress_listeners == set()
 
     @pytest.mark.asyncio
     async def test_response_only_interrupt_requires_response_id(self, model):
@@ -1750,6 +1984,35 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert model._ongoing_response is False
         assert model._response_control == "free"
         assert model._pending_response_create_event_id is None
+
+    @pytest.mark.asyncio
+    async def test_release_response_waiters_preserves_audio_for_delayed_guardrail(
+        self, model, monkeypatch
+    ):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "source_item",
+            0,
+            b"\x00" * 4800,
+            response_id="source_response",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("source_item", 0, 50)
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+        monkeypatch.setattr(model, "_send_raw_message", AsyncMock())
+
+        await model._release_response_waiters()
+        await model._send_interrupt(
+            RealtimeModelSendInterrupt(
+                response_id="source_response",
+                playback_only=True,
+            )
+        )
+
+        assert emit_event.await_count == 1
+        assert emit_event.await_args is not None
+        assert emit_event.await_args.args[0].item_id == "source_item"
 
     @pytest.mark.asyncio
     async def test_close_cancels_waiting_response_create_after_active_response(self, model):

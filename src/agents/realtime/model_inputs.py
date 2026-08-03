@@ -107,6 +107,9 @@ class RealtimeModelSendInterrupt:
     cancel_response_only: bool = False
     """Cancel only `response_id` without interrupting audio playback."""
 
+    playback_only: bool = False
+    """Interrupt playback for `response_id` without cancelling a response."""
+
 
 @dataclass
 class RealtimeModelSendSessionUpdate:

@@ -37,6 +37,7 @@ class RealtimePlaybackTracker:
         # (item_id, item_content_index)
         self._current_item: tuple[str, int] | None = None
         self._elapsed_ms: float | None = None
+        self._progress_listeners: set[Callable[[], None]] = set()
 
     def on_play_bytes(self, item_id: str, item_content_index: int, bytes: bytes) -> None:
         """Called by you when you have played some audio.
@@ -63,11 +64,23 @@ class RealtimePlaybackTracker:
         else:
             assert self._elapsed_ms is not None
             self._elapsed_ms += ms
+        self._notify_progress_listeners()
 
     def on_interrupted(self) -> None:
         """Called by the model when the audio playback has been interrupted."""
         self._current_item = None
         self._elapsed_ms = None
+        self._notify_progress_listeners()
+
+    def _add_progress_listener(self, listener: Callable[[], None]) -> None:
+        self._progress_listeners.add(listener)
+
+    def _remove_progress_listener(self, listener: Callable[[], None]) -> None:
+        self._progress_listeners.discard(listener)
+
+    def _notify_progress_listeners(self) -> None:
+        for listener in tuple(self._progress_listeners):
+            listener()
 
     def set_audio_format(self, format: RealtimeAudioFormat) -> None:
         """Will be called by the model to set the audio format.
@@ -185,6 +198,10 @@ class RealtimeModel(abc.ABC):
             transport does not implement conditional sends.
         """
         return False
+
+    def _retire_response_audio(self, response_id: str) -> None:
+        """Release model-owned response audio indexes after session guardrails settle."""
+        return None
 
     @abc.abstractmethod
     async def close(self) -> None:

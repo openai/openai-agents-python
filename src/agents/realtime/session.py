@@ -238,6 +238,8 @@ class RealtimeSession(RealtimeModelListener):
         )
 
         self._guardrail_tasks: set[asyncio.Task[Any]] = set()
+        self._guardrail_tasks_by_response_id: dict[str, set[asyncio.Task[Any]]] = {}
+        self._responses_awaiting_guardrail_cleanup: set[str] = set()
         self._tool_call_tasks: set[asyncio.Task[Any]] = set()
         self._async_tool_calls: bool = bool(self._run_config.get("async_tool_calls", True))
 
@@ -365,6 +367,15 @@ class RealtimeSession(RealtimeModelListener):
             RealtimeModelSendSessionUpdate(session_settings=updated_settings)
         )
 
+    def _reconcile_output_response(self, response_id: str) -> None:
+        if self._active_output_response_generation is None:
+            self._latest_output_response_generation += 1
+            self._active_output_response_generation = self._latest_output_response_generation
+            self._active_output_response_id = response_id
+            self._active_output_response_agent = self._current_agent
+        elif self._active_output_response_id is None:
+            self._active_output_response_id = response_id
+
     async def on_event(self, event: RealtimeModelEvent) -> None:
         if self._closing or self._closed:
             return
@@ -389,14 +400,15 @@ class RealtimeSession(RealtimeModelListener):
                     handle_kwargs["dispatch_snapshot"] = dispatch_snapshot
                 await self._handle_tool_call(event, **handle_kwargs)
         elif event.type == "audio":
-            await self._put_event(
-                RealtimeAudio(
-                    info=self._event_info,
-                    audio=event,
-                    item_id=event.item_id,
-                    content_index=event.content_index,
+            if event.response_id not in self._interrupted_response_ids:
+                await self._put_event(
+                    RealtimeAudio(
+                        info=self._event_info,
+                        audio=event,
+                        item_id=event.item_id,
+                        content_index=event.content_index,
+                    )
                 )
-            )
         elif event.type == "audio_interrupted":
             await self._put_event(
                 RealtimeAudioInterrupted(
@@ -429,10 +441,14 @@ class RealtimeSession(RealtimeModelListener):
             )
         elif event.type == "transcript_delta":
             item_id = event.item_id
+            self._reconcile_output_response(event.response_id)
             self._record_output_guardrail_delta(
                 item_id,
                 event.delta,
                 event.response_id,
+                agent_snapshot=self._active_output_response_agent,
+                output_response_generation=self._active_output_response_generation,
+                is_audio_output=True,
             )
             self._history = self._get_new_history(
                 self._history,
@@ -443,17 +459,14 @@ class RealtimeSession(RealtimeModelListener):
             )
         elif event.type == "output_text_delta":
             assert isinstance(event, RealtimeModelOutputTextDeltaEvent)
-            if self._active_output_response_generation is None:
-                self._latest_output_response_generation += 1
-                self._active_output_response_generation = self._latest_output_response_generation
-                self._active_output_response_id = event.response_id
-                self._active_output_response_agent = self._current_agent
+            self._reconcile_output_response(event.response_id)
             self._record_output_guardrail_delta(
                 event.item_id,
                 event.delta,
                 event.response_id,
                 agent_snapshot=self._active_output_response_agent,
                 output_response_generation=self._active_output_response_generation,
+                is_audio_output=False,
             )
         elif event.type == "item_updated":
             is_new = not any(item.item_id == event.item.item_id for item in self._history)
@@ -547,12 +560,20 @@ class RealtimeSession(RealtimeModelListener):
             assert isinstance(event, RealtimeModelUsageEvent)
             self._context_wrapper.usage.add(event.usage)
         elif event.type == "turn_ended":
-            # Clear guardrail state for next turn
-            self._item_transcripts.clear()
-            self._item_guardrail_run_counts.clear()
-            self._active_output_response_generation = None
-            self._active_output_response_id = None
-            self._active_output_response_agent = None
+            response_id = event.response_id or self._active_output_response_id
+            if response_id is not None:
+                self._finish_response_guardrail_lifecycle(response_id)
+
+            is_active_response_ended = (
+                event.response_id is None or event.response_id == self._active_output_response_id
+            )
+            if is_active_response_ended:
+                # Clear guardrail state for next turn.
+                self._item_transcripts.clear()
+                self._item_guardrail_run_counts.clear()
+                self._active_output_response_generation = None
+                self._active_output_response_id = None
+                self._active_output_response_agent = None
 
             await self._put_event(
                 RealtimeAgentEndEvent(
@@ -1328,6 +1349,7 @@ class RealtimeSession(RealtimeModelListener):
         *,
         agent_snapshot: RealtimeAgent[Any] | None = None,
         output_response_generation: int | None = None,
+        is_audio_output: bool = True,
     ) -> bool:
         """Run output guardrails on the given text. Returns True if any guardrail was triggered."""
         if self._closing or self._closed:
@@ -1397,13 +1419,27 @@ class RealtimeSession(RealtimeModelListener):
                 await self._model.send_event(RealtimeModelSendInterrupt(force_response_cancel=True))
             else:
                 if output_response_generation != self._latest_output_response_generation:
+                    if is_audio_output:
+                        await self._model.send_event(
+                            RealtimeModelSendInterrupt(
+                                response_id=response_id,
+                                playback_only=True,
+                            )
+                        )
                     return True
                 if output_response_generation == self._active_output_response_generation:
                     await self._model.send_event(
                         RealtimeModelSendInterrupt(
                             force_response_cancel=True,
                             response_id=response_id,
-                            cancel_response_only=True,
+                            cancel_response_only=not is_audio_output,
+                        )
+                    )
+                elif is_audio_output:
+                    await self._model.send_event(
+                        RealtimeModelSendInterrupt(
+                            response_id=response_id,
+                            playback_only=True,
                         )
                     )
 
@@ -1439,6 +1475,7 @@ class RealtimeSession(RealtimeModelListener):
         *,
         agent_snapshot: RealtimeAgent[Any] | None = None,
         output_response_generation: int | None = None,
+        is_audio_output: bool = True,
     ) -> None:
         if item_id not in self._item_transcripts:
             self._item_transcripts[item_id] = ""
@@ -1456,6 +1493,7 @@ class RealtimeSession(RealtimeModelListener):
                 response_id,
                 agent_snapshot=agent_snapshot,
                 output_response_generation=output_response_generation,
+                is_audio_output=is_audio_output,
             )
 
     def _enqueue_guardrail_task(
@@ -1465,6 +1503,7 @@ class RealtimeSession(RealtimeModelListener):
         *,
         agent_snapshot: RealtimeAgent[Any] | None = None,
         output_response_generation: int | None = None,
+        is_audio_output: bool = True,
     ) -> None:
         # Runs the guardrails in a separate task to avoid blocking the main loop
         if self._closing or self._closed:
@@ -1476,21 +1515,38 @@ class RealtimeSession(RealtimeModelListener):
                 response_id,
                 agent_snapshot=agent_snapshot,
                 output_response_generation=output_response_generation,
+                is_audio_output=is_audio_output,
             )
         )
         self._guardrail_tasks.add(task)
+        self._guardrail_tasks_by_response_id.setdefault(response_id, set()).add(task)
 
         # Add callback to remove completed tasks and handle exceptions
-        task.add_done_callback(self._on_guardrail_task_done)
+        task.add_done_callback(partial(self._on_guardrail_task_done, response_id=response_id))
 
-    def _on_guardrail_task_done(self, task: asyncio.Task[Any]) -> None:
+    def _on_guardrail_task_done(self, task: asyncio.Task[Any], *, response_id: str) -> None:
         """Handle completion of a guardrail task."""
         # Remove from tracking set
         self._guardrail_tasks.discard(task)
+        response_tasks = self._guardrail_tasks_by_response_id.get(response_id)
+        if response_tasks is not None:
+            response_tasks.discard(task)
+            if not response_tasks:
+                self._guardrail_tasks_by_response_id.pop(response_id, None)
+
+        should_retire_response_audio = (
+            response_id in self._responses_awaiting_guardrail_cleanup
+            and response_id not in self._guardrail_tasks_by_response_id
+        )
+        if should_retire_response_audio:
+            self._responses_awaiting_guardrail_cleanup.discard(response_id)
 
         if self._closing or self._closed:
             self._consume_task_result(task)
             return
+
+        if should_retire_response_audio:
+            self._retire_response_audio(response_id)
 
         # Check for exceptions and propagate as events
         if not task.cancelled():
@@ -1503,6 +1559,25 @@ class RealtimeSession(RealtimeModelListener):
                         error={"message": f"Guardrail task failed: {str(exception)}"},
                     )
                 )
+
+    def _finish_response_guardrail_lifecycle(self, response_id: str) -> None:
+        if response_id in self._guardrail_tasks_by_response_id:
+            self._responses_awaiting_guardrail_cleanup.add(response_id)
+            return
+        self._retire_response_audio(response_id)
+
+    def _retire_response_audio(self, response_id: str) -> None:
+        try:
+            self._model._retire_response_audio(response_id)
+        except Exception as exception:
+            self._put_event_nowait(
+                RealtimeError(
+                    info=self._event_info,
+                    error={"message": f"Response audio cleanup failed: {exception}"},
+                )
+            )
+        finally:
+            self._interrupted_response_ids.discard(response_id)
 
     def _enqueue_tool_call_task(
         self,
@@ -1617,6 +1692,16 @@ class RealtimeSession(RealtimeModelListener):
         for _ in range(self._event_iterator_waiters):
             self._event_queue.put_nowait(_REALTIME_SESSION_CLOSED_SENTINEL)
 
+    def _clear_response_bookkeeping(self) -> None:
+        self._interrupted_response_ids.clear()
+        self._active_output_response_generation = None
+        self._active_output_response_id = None
+        self._active_output_response_agent = None
+        self._item_transcripts.clear()
+        self._item_guardrail_run_counts.clear()
+        self._guardrail_tasks_by_response_id.clear()
+        self._responses_awaiting_guardrail_cleanup.clear()
+
     async def _cleanup(self) -> None:
         """Clean up all resources and mark session as closed."""
         if self._closed:
@@ -1628,6 +1713,7 @@ class RealtimeSession(RealtimeModelListener):
 
         # Account for session-owned background work before closing its transport.
         await self._cancel_background_tasks()
+        self._clear_response_bookkeeping()
 
         # Close the model connection
         await self._model.close()

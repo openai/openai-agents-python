@@ -49,3 +49,19 @@ def test_custom_model_can_construct_typed_usage_without_openai_types() -> None:
     assert event.input_tokens_details.audio_tokens == 6
     assert event.output_tokens_details is not None
     assert event.output_tokens_details.audio_tokens == 4
+
+
+def test_turn_ended_response_id_preserves_existing_positional_construction() -> None:
+    event = realtime.RealtimeModelTurnEndedEvent("turn_ended")
+
+    assert event.type == "turn_ended"
+    assert event.response_id is None
+
+
+def test_interrupt_playback_only_preserves_existing_positional_construction() -> None:
+    event = realtime.RealtimeModelSendInterrupt(True, "response_1", True)
+
+    assert event.force_response_cancel is True
+    assert event.response_id == "response_1"
+    assert event.cancel_response_only is True
+    assert event.playback_only is False

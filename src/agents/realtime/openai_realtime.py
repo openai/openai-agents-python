@@ -219,6 +219,19 @@ class _PendingResponseCreate:
     is_manual: bool
 
 
+class _RealtimeInterruptError(RuntimeError):
+    def __init__(self, errors: list[tuple[str, Exception]]) -> None:
+        self.errors = tuple(errors)
+        details = "; ".join(f"{operation}={error!r}" for operation, error in errors)
+        super().__init__(f"Multiple Realtime interrupt operations failed: {details}")
+
+
+@dataclass
+class _PendingAudioResponseRetirement:
+    playback_started: bool = False
+    timer_handle: asyncio.TimerHandle | None = None
+
+
 class _ResponseCreateSequencer:
     """Tracks local response sequencing around response.create and response.cancel."""
 
@@ -513,6 +526,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._listeners: list[RealtimeModelListener] = []
         self._current_item_id: str | None = None
         self._audio_state_tracker: ModelAudioTracker = ModelAudioTracker()
+        self._interrupted_audio_response_ids: set[str] = set()
+        self._pending_audio_response_retirements: dict[str, _PendingAudioResponseRetirement] = {}
         self._response_create_sequencer = _ResponseCreateSequencer()
         self._tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None = None
         self._playback_tracker: RealtimePlaybackTracker | None = None
@@ -945,17 +960,44 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         max_audio_ms = int(math.ceil(audio_state.audio_length_ms))
         return audio_state.audio_length_ms, max_audio_ms
 
-    async def _send_interrupt(self, event: RealtimeModelSendInterrupt) -> None:
-        if event.cancel_response_only:
-            if event.response_id is None:
-                raise ValueError("cancel_response_only requires response_id")
-            await self._cancel_response(response_id=event.response_id)
-            return
-
+    async def _interrupt_audio_playback(
+        self,
+        event: RealtimeModelSendInterrupt,
+    ) -> list[tuple[str, Exception]]:
+        errors: list[tuple[str, Exception]] = []
         playback_state = self._get_playback_state()
         current_item_id = playback_state.get("current_item_id")
         current_item_content_index = playback_state.get("current_item_content_index")
         elapsed_ms = playback_state.get("elapsed_ms")
+
+        response_scoped = event.response_id is not None
+        source_audio_items: tuple[tuple[str, int], ...] = ()
+        if response_scoped:
+            assert event.response_id is not None
+            source_audio_items = self._audio_state_tracker.get_audio_items_for_response(
+                event.response_id
+            )
+            if not source_audio_items:
+                return errors
+            for source_audio_item in source_audio_items:
+                try:
+                    await self._emit_event(
+                        RealtimeModelAudioInterruptedEvent(
+                            item_id=source_audio_item[0],
+                            content_index=source_audio_item[1],
+                        )
+                    )
+                except Exception as exc:
+                    errors.append(("emit_audio_interrupted", exc))
+
+            current_audio_item = (
+                (current_item_id, current_item_content_index or 0)
+                if current_item_id is not None
+                else None
+            )
+            if current_audio_item not in source_audio_items:
+                self._audio_state_tracker.on_response_interrupted(event.response_id)
+                return errors
 
         if current_item_id is None or elapsed_ms is None:
             logger.debug(
@@ -967,28 +1009,37 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         else:
             current_item_content_index = current_item_content_index or 0
             if elapsed_ms > 0:
-                await self._emit_event(
-                    RealtimeModelAudioInterruptedEvent(
-                        item_id=current_item_id,
-                        content_index=current_item_content_index,
-                    )
-                )
+                if not response_scoped:
+                    try:
+                        await self._emit_event(
+                            RealtimeModelAudioInterruptedEvent(
+                                item_id=current_item_id,
+                                content_index=current_item_content_index,
+                            )
+                        )
+                    except Exception as exc:
+                        errors.append(("emit_audio_interrupted", exc))
                 max_audio_ms: int | None = None
                 audio_limits = self._get_audio_limits(current_item_id, current_item_content_index)
                 if audio_limits is not None:
                     _, max_audio_ms = audio_limits
                 truncated_ms = max(int(elapsed_ms), 0)
-                if self._ongoing_response or max_audio_ms is None or truncated_ms < max_audio_ms:
+                if (
+                    (self._ongoing_response and not event.playback_only)
+                    or max_audio_ms is None
+                    or truncated_ms < max_audio_ms
+                ):
                     if max_audio_ms is not None:
-                        # Never truncate past the audio this client received: the Realtime API
-                        # rejects an audio_end_ms beyond the item's audio duration.
                         truncated_ms = min(truncated_ms, max_audio_ms)
                     converted = _ConversionHelper.convert_interrupt(
                         current_item_id,
                         current_item_content_index,
                         truncated_ms,
                     )
-                    await self._send_raw_message(converted)
+                    try:
+                        await self._send_raw_message(converted)
+                    except Exception as exc:
+                        errors.append(("truncate_audio", exc))
             else:
                 logger.debug(
                     "Didn't interrupt bc elapsed ms is < 0. Item id: %s, "
@@ -998,24 +1049,58 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     current_item_content_index,
                 )
 
-        session = self._created_session
-        automatic_response_cancellation_enabled = (
-            session
-            and session.audio is not None
-            and session.audio.input is not None
-            and session.audio.input.turn_detection is not None
-            and session.audio.input.turn_detection.interrupt_response is True
-        )
-        should_cancel_response = event.force_response_cancel or (
-            not automatic_response_cancellation_enabled
-        )
-        if should_cancel_response:
-            await self._cancel_response(response_id=event.response_id)
-
         if current_item_id is not None and elapsed_ms is not None:
-            self._audio_state_tracker.on_interrupted()
+            if response_scoped and event.response_id is not None:
+                self._audio_state_tracker.on_response_interrupted(event.response_id)
+            else:
+                self._audio_state_tracker.on_interrupted()
             if self._playback_tracker:
-                self._playback_tracker.on_interrupted()
+                latest_playback_state = self._playback_tracker.get_state()
+                latest_item_id = latest_playback_state.get("current_item_id")
+                latest_content_index = latest_playback_state.get("current_item_content_index") or 0
+                latest_audio_item = (
+                    (latest_item_id, latest_content_index) if latest_item_id is not None else None
+                )
+                if not response_scoped or latest_audio_item in source_audio_items:
+                    self._playback_tracker.on_interrupted()
+
+        return errors
+
+    async def _send_interrupt(self, event: RealtimeModelSendInterrupt) -> None:
+        if event.cancel_response_only:
+            if event.response_id is None:
+                raise ValueError("cancel_response_only requires response_id")
+            await self._cancel_response(response_id=event.response_id)
+            return
+
+        if event.response_id is not None:
+            self._interrupted_audio_response_ids.add(event.response_id)
+
+        errors = await self._interrupt_audio_playback(event)
+
+        if not event.playback_only:
+            session = self._created_session
+            automatic_response_cancellation_enabled = (
+                session
+                and session.audio is not None
+                and session.audio.input is not None
+                and session.audio.input.turn_detection is not None
+                and session.audio.input.turn_detection.interrupt_response is True
+            )
+            should_cancel_response = event.force_response_cancel or (
+                not automatic_response_cancellation_enabled
+            )
+            if should_cancel_response:
+                try:
+                    await self._cancel_response(response_id=event.response_id)
+                except Exception as exc:
+                    errors.append(("cancel_response", exc))
+
+        self._retire_inactive_response_audio()
+        if len(errors) == 1:
+            raise errors[0][1]
+        if errors:
+            raise _RealtimeInterruptError(errors) from errors[0][1]
 
     async def _send_session_update(self, event: RealtimeModelSendSessionUpdate) -> None:
         """Send a session update to the model."""
@@ -1023,11 +1108,22 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def _handle_audio_delta(self, parsed: ResponseAudioDeltaEvent) -> None:
         """Handle audio delta events and update audio tracking state."""
+        if parsed.response_id in self._interrupted_audio_response_ids:
+            return
+
         self._current_item_id = parsed.item_id
 
         audio_bytes = base64.b64decode(parsed.delta)
 
-        self._audio_state_tracker.on_audio_delta(parsed.item_id, parsed.content_index, audio_bytes)
+        self._audio_state_tracker.on_audio_delta(
+            parsed.item_id,
+            parsed.content_index,
+            audio_bytes,
+            response_id=parsed.response_id,
+        )
+        if self._playback_tracker is not None:
+            self._playback_tracker._add_progress_listener(self._record_playback_progress)
+        self._retire_inactive_response_audio()
 
         await self._emit_event(
             RealtimeModelAudioEvent(
@@ -1088,19 +1184,124 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def close(self) -> None:
         """Close the session."""
-        await self._cancel_response_create_tasks()
-        if self._websocket:
-            await self._websocket.close()
-            self._websocket = None
-        if self._websocket_task:
-            self._websocket_task.cancel()
-            try:
-                await self._websocket_task
-            except asyncio.CancelledError:
-                pass
-            self._websocket_task = None
-        else:
-            await self._release_response_waiters()
+        try:
+            await self._cancel_response_create_tasks()
+            if self._websocket:
+                await self._websocket.close()
+                self._websocket = None
+            if self._websocket_task:
+                self._websocket_task.cancel()
+                try:
+                    await self._websocket_task
+                except asyncio.CancelledError:
+                    pass
+                self._websocket_task = None
+            else:
+                await self._release_response_waiters()
+        finally:
+            self._clear_response_audio_indexes()
+
+    def _retire_response_audio(self, response_id: str) -> None:
+        self._interrupted_audio_response_ids.discard(response_id)
+        if self._playback_tracker is not None:
+            self._playback_tracker._add_progress_listener(self._retire_inactive_response_audio)
+        self._pending_audio_response_retirements.setdefault(
+            response_id,
+            _PendingAudioResponseRetirement(
+                playback_started=self._audio_state_tracker.has_response_playback_started(
+                    response_id
+                )
+            ),
+        )
+        self._retire_inactive_response_audio()
+
+    def _record_playback_progress(self) -> None:
+        if self._playback_tracker is None:
+            return
+        playback_state = self._playback_tracker.get_state()
+        item_id = playback_state.get("current_item_id")
+        if item_id is None:
+            return
+        self._audio_state_tracker.on_playback_started(
+            item_id,
+            playback_state.get("current_item_content_index") or 0,
+        )
+
+    def _retire_inactive_response_audio(self) -> None:
+        playback_state = self._get_playback_state()
+        current_item_id = playback_state.get("current_item_id")
+        current_content_index = playback_state.get("current_item_content_index") or 0
+        current_item = (
+            (current_item_id, current_content_index) if current_item_id is not None else None
+        )
+        elapsed_ms = playback_state.get("elapsed_ms")
+
+        for response_id, retirement in list(self._pending_audio_response_retirements.items()):
+            response_items = self._audio_state_tracker.get_audio_items_for_response(response_id)
+            if not response_items:
+                self._complete_response_audio_retirement(response_id)
+                continue
+            if current_item not in response_items:
+                if self._playback_tracker is None or retirement.playback_started:
+                    self._complete_response_audio_retirement(response_id)
+                continue
+
+            retirement.playback_started = True
+            audio_limits = self._get_audio_limits(*current_item)
+            if audio_limits is None or elapsed_ms is None:
+                continue
+            audio_length_ms, _ = audio_limits
+            if current_item == response_items[-1] and elapsed_ms >= audio_length_ms:
+                self._complete_response_audio_retirement(response_id)
+                continue
+
+            if self._playback_tracker is None:
+                self._schedule_response_audio_retirement(response_id, audio_length_ms - elapsed_ms)
+
+    def _schedule_response_audio_retirement(self, response_id: str, remaining_ms: float) -> None:
+        retirement = self._pending_audio_response_retirements.get(response_id)
+        if retirement is None or retirement.timer_handle is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        retirement.timer_handle = loop.call_later(
+            max(remaining_ms / 1000, 0.001),
+            self._on_response_audio_retirement_timer,
+            response_id,
+        )
+
+    def _on_response_audio_retirement_timer(self, response_id: str) -> None:
+        retirement = self._pending_audio_response_retirements.get(response_id)
+        if retirement is None:
+            return
+        retirement.timer_handle = None
+        self._retire_inactive_response_audio()
+
+    def _complete_response_audio_retirement(self, response_id: str) -> None:
+        retirement = self._pending_audio_response_retirements.pop(response_id, None)
+        if retirement is not None and retirement.timer_handle is not None:
+            retirement.timer_handle.cancel()
+        self._interrupted_audio_response_ids.discard(response_id)
+        self._audio_state_tracker.on_response_done(response_id)
+        self._remove_playback_progress_listener_if_idle()
+
+    def _remove_playback_progress_listener_if_idle(self) -> None:
+        if self._pending_audio_response_retirements or self._playback_tracker is None:
+            return
+        self._playback_tracker._remove_progress_listener(self._retire_inactive_response_audio)
+
+    def _clear_response_audio_indexes(self) -> None:
+        self._interrupted_audio_response_ids.clear()
+        for retirement in self._pending_audio_response_retirements.values():
+            if retirement.timer_handle is not None:
+                retirement.timer_handle.cancel()
+        self._pending_audio_response_retirements.clear()
+        self._audio_state_tracker.clear_response_indexes()
+        if self._playback_tracker is not None:
+            self._playback_tracker._remove_progress_listener(self._record_playback_progress)
+        self._remove_playback_progress_listener_if_idle()
 
     async def _cancel_response(self, *, response_id: str | None = None) -> None:
         if not await self._response_create_sequencer.begin_cancel_response():
@@ -1258,6 +1459,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 self._audio_state_tracker.on_interrupted()
                 if self._playback_tracker:
                     self._playback_tracker.on_interrupted()
+                self._retire_inactive_response_audio()
 
                 # If server isn't configured to auto‑interrupt/cancel, cancel the
                 # response to prevent further audio.
@@ -1275,12 +1477,15 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             await self._mark_response_created()
             await self._emit_event(RealtimeModelTurnStartedEvent(response_id=parsed.response.id))
         elif parsed.type == "response.done":
+            response_id = getattr(parsed.response, "id", None)
+            if response_id is not None:
+                self._interrupted_audio_response_ids.discard(response_id)
             await self._mark_response_done()
             if parsed.response.usage is not None:
                 await self._emit_event(
                     _ConversionHelper.convert_response_usage(parsed.response.usage)
                 )
-            await self._emit_event(RealtimeModelTurnEndedEvent())
+            await self._emit_event(RealtimeModelTurnEndedEvent(response_id=response_id))
         elif parsed.type == "session.created":
             await self._send_tracing_config(self._tracing_config)
             self._update_created_session(parsed.session)

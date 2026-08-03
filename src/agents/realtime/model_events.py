@@ -203,6 +203,8 @@ class RealtimeModelTurnEndedEvent:
     """Triggered when the model finishes generating a response for a turn."""
 
     type: Literal["turn_ended"] = "turn_ended"
+    response_id: str | None = None
+    """Provider response ID for this turn, when available."""
 
 
 @dataclass
