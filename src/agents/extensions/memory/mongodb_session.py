@@ -31,11 +31,9 @@ Usage::
 
 from __future__ import annotations
 
-import asyncio
 import json
 import threading
 import weakref
-from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
 from typing import Any, ClassVar
 
@@ -143,12 +141,10 @@ class MongoDBSession(SessionABC):
         self._owns_client = False
         self._closed = False
         self._client_released = False
-        # Serializes close() so concurrent callers cannot both release the client.
-        # Created lazily rather than here: an asyncio.Lock binds to the loop that
-        # first acquires it, and this session is usable from more than one loop
-        # (see the _init_state notes above).
-        self._close_lock: asyncio.Lock | None = None
-        self._close_lock_loop: asyncio.AbstractEventLoop | None = None
+        # True while one caller is inside client.close(), so concurrent callers
+        # cannot start a second release. Guarded by _init_guard (a threading.Lock)
+        # rather than an asyncio.Lock, which would only serialize a single loop.
+        self._releasing_client = False
 
         client.append_metadata(_DRIVER_INFO)
 
@@ -399,21 +395,26 @@ class MongoDBSession(SessionABC):
     # Lifecycle helpers
     # ------------------------------------------------------------------
 
-    def _close_guard(self) -> AbstractAsyncContextManager[Any]:
-        """Return the lock serializing ``close()`` on the current event loop.
+    def _claim_client_release(self) -> bool:
+        """Return True if this caller is the one that should release the client.
 
-        The lock is created on first use and rebound if the session is closed
-        from a different loop than the one that created it — an ``asyncio.Lock``
-        is bound to a single loop, so a session shared across loops cannot hold
-        one for its whole lifetime.  Rebinding is safe because a differing loop
-        means no concurrent close is in flight on the previous one.
+        Only a ``threading.Lock`` is used, never an ``asyncio.Lock``: a lock bound
+        to one event loop cannot serialize callers on another, and this session may
+        be closed from a different loop or thread than the one that created it (the
+        same constraint documented for ``_init_state``).  The claim only guards two
+        flag flips, so no async coordination is required.
         """
         with self._init_guard:
-            loop = asyncio.get_running_loop()
-            if self._close_lock is None or self._close_lock_loop is not loop:
-                self._close_lock = asyncio.Lock()
-                self._close_lock_loop = loop
-            return self._close_lock
+            if self._client_released or self._releasing_client:
+                return False
+            self._releasing_client = True
+            return True
+
+    def _finish_client_release(self, released: bool) -> None:
+        """Record the outcome of a release attempt, freeing the claim either way."""
+        with self._init_guard:
+            self._client_released = released
+            self._releasing_client = False
 
     async def close(self) -> None:
         """Close the underlying MongoDB connection.
@@ -427,18 +428,24 @@ class MongoDBSession(SessionABC):
         The session is terminal from the first close attempt.  If releasing the
         client fails or is cancelled, operations still raise and a later
         ``close()`` retries the unfinished cleanup.  Once the client is released,
-        repeated calls are safe no-ops, and concurrent calls release the client
-        exactly once.
+        repeated calls are safe no-ops, and concurrent calls — including from
+        different event loops or threads — release the client exactly once.
         """
         if not self._owns_client:
             return
-        # Mark terminal before awaiting the lock so a caller blocked behind a
-        # slow release still cannot issue commands in the meantime.
+        # Mark terminal before releasing, so a concurrent caller that returns
+        # early below still cannot issue commands against a closing client.
         self._closed = True
-        async with self._close_guard():
-            if not self._client_released:
-                await self._client.close()
-                self._client_released = True
+        if not self._claim_client_release():
+            return
+        released = False
+        try:
+            await self._client.close()
+            released = True
+        finally:
+            # On failure or cancellation the claim is freed without marking the
+            # client released, so a later close() retries the cleanup.
+            self._finish_client_release(released)
 
     async def ping(self) -> bool:
         """Test MongoDB connectivity.

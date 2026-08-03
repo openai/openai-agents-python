@@ -851,6 +851,36 @@ async def test_close_is_idempotent_and_closes_owned_client_once() -> None:
     assert close_calls == 1
 
 
+async def test_concurrent_close_across_event_loops_releases_client_once() -> None:
+    """Two loops closing the same session must not both release the owned client."""
+    s, fake_client = _make_owned_session("close-two-loops")
+    close_calls = 0
+    original_close = fake_client.close
+    gate = threading.Barrier(2)
+
+    async def _counting_close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        # Stay in-flight long enough for the other loop to reach the guard.
+        await asyncio.sleep(0.05)
+        await original_close()
+
+    fake_client.close = _counting_close  # type: ignore[method-assign]
+
+    def _close_in_new_loop() -> None:
+        gate.wait()
+        asyncio.run(s.close())
+
+    threads = [threading.Thread(target=_close_in_new_loop) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert fake_client._closed
+    assert close_calls == 1
+
+
 async def test_close_from_a_second_event_loop_does_not_error() -> None:
     """The lazily-created close lock must not bind the session to one event loop."""
     s, fake_client = _make_owned_session("close-other-loop")
