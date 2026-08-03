@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import pytest
 
+from agents import function_tool
 from agents._tool_identity import (
+    build_function_tool_lookup_map,
     deserialize_function_tool_lookup_key,
     get_function_tool_lookup_key,
     get_tool_call_name,
@@ -21,6 +23,7 @@ from agents._tool_identity import (
     serialize_function_tool_lookup_key,
     tool_qualified_name,
     tool_trace_name,
+    validate_function_tool_lookup_configuration,
 )
 from agents.exceptions import UserError
 
@@ -165,3 +168,22 @@ def test_validate_function_tool_namespace_shape_rejects_synthetic() -> None:
     # The reserved synthetic shape (name == namespace) is rejected.
     with pytest.raises(UserError, match="reserves the synthetic namespace"):
         validate_function_tool_namespace_shape("search", "search")
+
+
+def test_validate_function_tool_lookup_configuration_rejects_duplicate_bare_names() -> None:
+    @function_tool(name_override="lookup")
+    def first_lookup() -> str:
+        return "first"
+
+    @function_tool(name_override="lookup")
+    def second_lookup() -> str:
+        return "second"
+
+    with pytest.raises(
+        UserError,
+        match=r"the tool name `lookup` is used by multiple tools.*name_override=",
+    ):
+        validate_function_tool_lookup_configuration([first_lookup, second_lookup])
+
+    with pytest.raises(UserError, match="the tool name `lookup` is used by multiple tools"):
+        build_function_tool_lookup_map([first_lookup, second_lookup])

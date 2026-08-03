@@ -2298,7 +2298,8 @@ async def execute_approved_tools(
     tool_map: dict[NamedToolLookupKey, Tool] = cast(
         dict[NamedToolLookupKey, Tool],
         build_function_tool_lookup_map(
-            [tool for tool in all_tools or [] if isinstance(tool, FunctionTool)]
+            [tool for tool in all_tools or [] if isinstance(tool, FunctionTool)],
+            allow_bare_name_collisions=True,
         ),
     )
     for tool in all_tools or []:

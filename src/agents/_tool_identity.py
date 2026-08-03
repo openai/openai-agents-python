@@ -401,7 +401,7 @@ def resolve_tool_name_collisions(
     collision_policy: Literal["warn", "error"],
 ) -> tuple[list[Any], list[Any]]:
     """Resolve bare function-tool and handoff name collisions before model exposure."""
-    validate_function_tool_lookup_configuration(tools)
+    validate_function_tool_lookup_configuration(tools, allow_bare_name_collisions=True)
 
     owners: dict[BareFunctionToolLookupKey, list[tuple[str, int, Any]]] = {}
     for index, tool in enumerate(tools):
@@ -446,7 +446,9 @@ def resolve_tool_name_collisions(
     )
 
 
-def validate_function_tool_lookup_configuration(tools: Sequence[Any]) -> None:
+def validate_function_tool_lookup_configuration(
+    tools: Sequence[Any], *, allow_bare_name_collisions: bool = False
+) -> None:
     """Reject function-tool combinations that are ambiguous on the Responses wire."""
     qualified_name_owners: dict[str, Any] = {}
     deferred_top_level_name_owners: dict[str, Any] = {}
@@ -478,7 +480,13 @@ def validate_function_tool_lookup_configuration(tools: Sequence[Any]) -> None:
 
         prior_namespace = get_explicit_function_tool_namespace(prior_owner)
         if explicit_namespace is None and prior_namespace is None:
-            continue
+            if allow_bare_name_collisions:
+                continue
+            raise UserError(
+                "Ambiguous function tool configuration: the tool name "
+                f"`{qualified_name}` is used by multiple tools. Pass a unique "
+                "`name_override=` to one of them to avoid ambiguous dispatch."
+            )
 
         raise UserError(
             "Ambiguous function tool configuration: the qualified name "
@@ -488,9 +496,14 @@ def validate_function_tool_lookup_configuration(tools: Sequence[Any]) -> None:
         )
 
 
-def build_function_tool_lookup_map(tools: Sequence[Any]) -> dict[FunctionToolLookupKey, Any]:
-    """Build a function-tool lookup map using last-wins precedence."""
-    validate_function_tool_lookup_configuration(tools)
+def build_function_tool_lookup_map(
+    tools: Sequence[Any], *, allow_bare_name_collisions: bool = False
+) -> dict[FunctionToolLookupKey, Any]:
+    """Build a function-tool lookup map after validating its dispatch keys."""
+    validate_function_tool_lookup_configuration(
+        tools,
+        allow_bare_name_collisions=allow_bare_name_collisions,
+    )
     tool_map: dict[FunctionToolLookupKey, Any] = {}
     for tool in tools:
         for lookup_key in get_function_tool_lookup_keys(tool):

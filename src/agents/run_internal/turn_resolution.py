@@ -1331,7 +1331,10 @@ async def resolve_interrupted_turn(
     async def _rebuild_function_runs_from_approvals() -> list[ToolRunFunction]:
         if not pending_approval_items:
             return []
-        tool_map = build_function_tool_lookup_map(approval_rebuild_function_tools)
+        tool_map = build_function_tool_lookup_map(
+            approval_rebuild_function_tools,
+            allow_bare_name_collisions=True,
+        )
         existing_pending_call_ids: set[str] = set()
         for existing_pending in pending_interruptions:
             if isinstance(existing_pending, ToolApprovalItem):
@@ -1753,7 +1756,8 @@ def process_model_response(
     tools_used: list[str] = []
     handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
     function_map = build_function_tool_lookup_map(
-        [tool for tool in all_tools if isinstance(tool, FunctionTool)]
+        [tool for tool in all_tools if isinstance(tool, FunctionTool)],
+        allow_bare_name_collisions=True,
     )
     custom_tool_map = {tool.name: tool for tool in all_tools if isinstance(tool, CustomTool)}
     computer_tool = next((tool for tool in all_tools if isinstance(tool, ComputerTool)), None)
