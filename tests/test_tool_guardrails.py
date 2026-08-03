@@ -978,10 +978,17 @@ async def test_parallel_tripwire_reports_guardrails_from_a_cancelled_turn():
     assert _names(run_data.tool_input_guardrail_results) == ["input_allows"] * state["runs"]
 
 
+@pytest.mark.parametrize("tool_sleep", [0.0, 0.6], ids=["turn_already_done", "turn_still_pending"])
 @pytest.mark.asyncio
-async def test_parallel_tripwire_reports_guardrails_without_cancelling_the_turn():
-    """The no-cancel path (e.g. Temporal replay) still discards the turn, so harvest it."""
-    agent, state = _build_slow_tool_parallel_tripwire_agent(tool_sleep=0.0)
+async def test_parallel_tripwire_reports_guardrails_without_cancelling_the_turn(tool_sleep: float):
+    """The no-cancel path (e.g. Temporal replay) still discards the turn, so harvest it.
+
+    Parametrized over whether the turn has already settled when the tripwire arrives. A pending
+    turn has to be awaited, not skipped: its tool guardrail results stay in a local inside the tool
+    executor until it finishes, so testing only the settled case passes while the pending one drops
+    everything.
+    """
+    agent, state = _build_slow_tool_parallel_tripwire_agent(tool_sleep=tool_sleep)
 
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(

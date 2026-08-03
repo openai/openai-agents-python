@@ -1352,10 +1352,14 @@ class AgentRunner:
                                         model_outcome = await asyncio.gather(
                                             model_task, return_exceptions=True
                                         )
-                                    elif model_task.done():
+                                    else:
                                         # Not cancelling (e.g. Temporal replay compatibility) still
-                                        # discards the turn, so harvest a turn that already
-                                        # finished instead of dropping its guardrail results.
+                                        # discards the turn, so harvest it instead of dropping its
+                                        # guardrail results. A turn that is still pending is awaited
+                                        # rather than skipped: its tool guardrail results live in a
+                                        # local inside the tool executor until it settles, and this
+                                        # configuration has opted out of cancelling it, so letting
+                                        # it finish is also what keeps it from outliving the run.
                                         model_outcome = await asyncio.gather(
                                             model_task, return_exceptions=True
                                         )
