@@ -729,6 +729,81 @@ async def test_close_owned_client_is_closed() -> None:
         assert fake_client._closed
 
 
+def _make_owned_session(session_id: str = "owned") -> MongoDBSession:
+    """Create a from_uri session, which is the case where close() owns the client."""
+    MongoDBSession._init_state.clear()
+    with patch(
+        "agents.extensions.memory.mongodb_session.AsyncMongoClient",
+        return_value=FakeAsyncMongoClient(),
+    ):
+        return MongoDBSession.from_uri(session_id, uri="mongodb://localhost:27017", database="t")
+
+
+async def test_closed_operations_raise_runtime_error() -> None:
+    """Operations on a closed session must fail instead of running against a released client."""
+    session = _make_owned_session()
+    await session.add_items([{"role": "user", "content": "hi"}])
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await session.get_items()
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await session.add_items([{"role": "user", "content": "after close"}])
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await session.pop_item()
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await session.clear_session()
+
+
+async def test_closed_rejects_empty_add_items() -> None:
+    """add_items([]) must not bypass the closed check through the empty-list fast path."""
+    session = _make_owned_session()
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await session.add_items([])
+
+
+async def test_close_before_use_is_terminal() -> None:
+    """close() before the first operation must still be terminal."""
+    session = _make_owned_session()
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await session.get_items()
+
+
+async def test_close_is_idempotent() -> None:
+    """A second close() must be a no-op rather than raising."""
+    session = _make_owned_session()
+
+    await session.close()
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await session.get_items()
+
+
+async def test_ping_on_closed_session_raises() -> None:
+    """ping() swallows connectivity errors, so the closed check runs outside its try."""
+    session = _make_owned_session()
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="MongoDBSession is closed"):
+        await session.ping()
+
+
+async def test_external_client_session_stays_usable_after_close() -> None:
+    """An injected client is the caller's to manage, so close() must not be terminal."""
+    session = _make_session()
+    assert session._owns_client is False
+
+    await session.close()
+
+    await session.add_items([{"role": "user", "content": "still works"}])
+    assert len(await session.get_items()) == 1
+
+
 # ---------------------------------------------------------------------------
 # Runner integration
 # ---------------------------------------------------------------------------
