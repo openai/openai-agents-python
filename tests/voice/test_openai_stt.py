@@ -30,6 +30,7 @@ try:
     from agents.voice.models.openai_stt import (
         EVENT_INACTIVITY_TIMEOUT,
         ErrorSentinel,
+        WebsocketDoneSentinel,
         _audio_buffer_to_base64,
     )
 
@@ -612,7 +613,7 @@ async def test_timeout_waiting_for_created_event(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_session_error_event():
+async def test_session_error_event(monkeypatch: pytest.MonkeyPatch):
     """
     If the session receives an event with "type": "error", it should propagate an exception
     and put an ErrorSentinel in the output queue.
@@ -624,6 +625,10 @@ async def test_session_error_event():
             # Then an error from the server
             json.dumps({"type": "error", "error": "Simulated server error!"}),
         ]
+    )
+    monkeypatch.setattr(
+        "agents.voice.models.openai_stt.EVENT_INACTIVITY_TIMEOUT",
+        0.1,
     )
 
     with patch("websockets.connect", return_value=mock_ws):
@@ -638,13 +643,21 @@ async def test_session_error_event():
             trace_include_sensitive_data=False,
             trace_include_sensitive_audio_data=False,
         )
+        event_queue_put = AsyncMock(wraps=session._event_queue.put)
+        monkeypatch.setattr(session._event_queue, "put", event_queue_put)
 
         with pytest.raises(STTWebsocketConnectionError):
             turns = session.transcribe_turns()
             async for _ in turns:
                 pass
 
+        assert any(
+            isinstance(call.args[0], WebsocketDoneSentinel)
+            for call in event_queue_put.await_args_list
+        )
         await session.close()
+        assert session._process_events_task is not None
+        assert session._process_events_task.done()
 
 
 @pytest.mark.asyncio

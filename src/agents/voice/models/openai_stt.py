@@ -140,26 +140,28 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
     async def _event_listener(self) -> None:
         assert self._websocket is not None, "Websocket not initialized"
 
-        async for message in self._websocket:
-            try:
-                event = json.loads(message)
+        try:
+            async for message in self._websocket:
+                try:
+                    event = json.loads(message)
 
-                if event.get("type") == "error":
-                    raise STTWebsocketConnectionError(f"Error event: {event.get('error')}")
+                    if event.get("type") == "error":
+                        raise STTWebsocketConnectionError(f"Error event: {event.get('error')}")
 
-                if event.get("type") in [
-                    "session.updated",
-                    "transcription_session.updated",
-                    "session.created",
-                    "transcription_session.created",
-                ]:
-                    await self._state_queue.put(event)
+                    if event.get("type") in [
+                        "session.updated",
+                        "transcription_session.updated",
+                        "session.created",
+                        "transcription_session.created",
+                    ]:
+                        await self._state_queue.put(event)
 
-                await self._event_queue.put(event)
-            except Exception as e:
-                await self._output_queue.put(ErrorSentinel(e))
-                raise STTWebsocketConnectionError("Error parsing events") from e
-        await self._event_queue.put(WebsocketDoneSentinel())
+                    await self._event_queue.put(event)
+                except Exception as e:
+                    await self._output_queue.put(ErrorSentinel(e))
+                    raise STTWebsocketConnectionError("Error parsing events") from e
+        finally:
+            await self._event_queue.put(WebsocketDoneSentinel())
 
     async def _configure_session(self) -> None:
         assert self._websocket is not None, "Websocket not initialized"
