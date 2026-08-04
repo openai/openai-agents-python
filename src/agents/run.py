@@ -1174,12 +1174,18 @@ class AgentRunner:
                                 if session_input_items_for_persistence is not None
                                 else []
                             )
+                            # The synthesized item is a fresh one-item list, not the
+                            # cumulative turn item list, so the run state's per-turn
+                            # persisted count must not be applied as a slice offset here.
+                            # Pass the reasoning item id policy explicitly instead, the same
+                            # way `save_resumed_turn_items` does.
                             await save_result_to_session(
                                 session,
                                 handler_input_items_for_save,
                                 [synthesized_item],
-                                run_state,
+                                None,
                                 response_id=None,
+                                reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                                 store=store_setting,
                             )
                         result._original_input = copy_input_items(original_input)

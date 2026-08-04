@@ -14,6 +14,7 @@ from agents import (
     ModelRefusalError,
     RunErrorHandlerResult,
     Runner,
+    SQLiteSession,
     UserError,
 )
 from agents.stream_events import RunItemStreamEvent
@@ -487,3 +488,62 @@ async def test_streamed_max_turns_handler_list_output():
     assert run_item_events[0].name == "message_output_created"
     assert isinstance(run_item_events[0].item, MessageOutputItem)
     assert ItemHelpers.text_message_output(run_item_events[0].item) == '{"response":["a","b"]}'
+
+
+async def _run_max_turns_handler_with_session(streamed: bool) -> list[str]:
+    """Run one tool turn, trip max turns, and return the session's persisted item types."""
+    model = FakeModel()
+    agent = Agent(
+        name="test_1",
+        model=model,
+        tools=[get_function_tool("some_function", "result")],
+    )
+    model.add_multiple_turn_outputs(
+        [[get_function_tool_call("some_function", json.dumps({"a": "b"}))]]
+    )
+    session = SQLiteSession("max-turns-handler", ":memory:")
+    try:
+        if streamed:
+            streamed_result = Runner.run_streamed(
+                agent,
+                input="user_message",
+                max_turns=1,
+                session=session,
+                error_handlers={"max_turns": lambda data: "fallback answer"},
+            )
+            async for _ in streamed_result.stream_events():
+                pass
+            assert streamed_result.final_output == "fallback answer"
+        else:
+            run_result = await Runner.run(
+                agent,
+                input="user_message",
+                max_turns=1,
+                session=session,
+                error_handlers={"max_turns": lambda data: "fallback answer"},
+            )
+            assert run_result.final_output == "fallback answer"
+
+        return [str(item.get("type", item.get("role"))) for item in await session.get_items()]
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_non_streamed_max_turns_handler_persists_output_to_session():
+    """The synthesized max-turns final output must reach the session.
+
+    It is a brand new item, so the per-turn persisted-item count left over from the previous
+    turn must not be applied as an offset into the one-item list handed to the session save.
+    """
+    item_types = await _run_max_turns_handler_with_session(streamed=False)
+
+    assert item_types == ["user", "function_call", "function_call_output", "message"]
+
+
+@pytest.mark.asyncio
+async def test_streamed_max_turns_handler_persists_output_to_session():
+    """The streamed path already persists the synthesized output; keep both paths aligned."""
+    item_types = await _run_max_turns_handler_with_session(streamed=True)
+
+    assert item_types == ["user", "function_call", "function_call_output", "message"]
