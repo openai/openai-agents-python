@@ -606,6 +606,7 @@ async def start_streaming(
     session: Session | None,
     run_state: RunState[TContext] | None = None,
     *,
+    trace_workflow_name: str,
     is_resumed_state: bool = False,
     sandbox_runtime: SandboxRuntime[TContext] | None = None,
 ):
@@ -628,10 +629,9 @@ async def start_streaming(
             auto_previous_response_id=auto_previous_response_id,
         )
 
-    current_trace = streamed_result.trace or get_current_trace()
     use_task_and_turn_spans = include_task_and_turn_spans(run_config.tracing)
     current_task_span: Span[TaskSpanData] | None = (
-        task_span(name=current_trace.name) if current_trace and use_task_and_turn_spans else None
+        task_span(name=trace_workflow_name) if use_task_and_turn_spans else None
     )
     if current_task_span:
         current_task_span.start(mark_as_current=True)

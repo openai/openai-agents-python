@@ -993,6 +993,31 @@ async def test_wrapped_streaming_run_creates_root_task_span():
 
 
 @pytest.mark.asyncio
+async def test_wrapped_run_task_span_uses_run_workflow_name():
+    def _make_agent() -> Agent[None]:
+        return Agent(
+            name="test_agent",
+            model=FakeModel(initial_output=[get_text_message("first_test")]),
+        )
+
+    run_config = RunConfig(workflow_name="inner_workflow")
+
+    with trace(workflow_name="outer_workflow"):
+        await Runner.run(_make_agent(), input="first_test", run_config=run_config)
+        result = Runner.run_streamed(_make_agent(), input="first_test", run_config=run_config)
+        async for _ in result.stream_events():
+            pass
+
+    task_spans = [span.export() for span in fetch_ordered_spans() if span.span_data.type == "task"]
+    # A task span names one Runner invocation, so both runs must use their own workflow name
+    # rather than the enclosing trace's name.
+    assert [span["span_data"]["data"]["name"] for span in task_spans if span] == [
+        "inner_workflow",
+        "inner_workflow",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_wrapped_streaming_run_can_disable_task_and_turn_spans():
     agent = Agent(
         name="test_agent",

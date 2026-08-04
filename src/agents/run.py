@@ -1972,6 +1972,7 @@ class AgentRunner:
                 conversation_id=conversation_id,
                 session=session,
                 run_state=run_state,
+                trace_workflow_name=trace_workflow_name,
                 is_resumed_state=is_resumed_state,
                 sandbox_runtime=sandbox_runtime,
             )
