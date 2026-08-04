@@ -107,10 +107,10 @@ class OpenAIConversationsSession(SessionABC):
         return all_items  # type: ignore
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
-        session_id = await self._get_session_id()
         if not items:
             return
 
+        session_id = await self._get_session_id()
         await self._openai_client.conversations.items.create(
             conversation_id=session_id,
             items=items,
