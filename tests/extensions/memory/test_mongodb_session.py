@@ -8,12 +8,13 @@ dependency-free while exercising the full session logic.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -727,6 +728,115 @@ async def test_close_owned_client_is_closed() -> None:
 
         await s.close()
         assert fake_client._closed
+
+
+def _make_owned_session(session_id: str = "owned") -> MongoDBSession:
+    """Create a from_uri session, which is the case where close() owns the client."""
+    MongoDBSession._init_state.clear()
+    with patch(
+        "agents.extensions.memory.mongodb_session.AsyncMongoClient",
+        return_value=FakeAsyncMongoClient(),
+    ):
+        return MongoDBSession.from_uri(session_id, uri="mongodb://localhost:27017", database="t")
+
+
+async def test_closed_operations_raise_runtime_error() -> None:
+    """Operations on a closed session must fail instead of running against a released client."""
+    session = _make_owned_session()
+    await session.add_items([{"role": "user", "content": "hi"}])
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="^MongoDBSession is closed$"):
+        await session.get_items()
+    with pytest.raises(RuntimeError, match="^MongoDBSession is closed$"):
+        await session.add_items([{"role": "user", "content": "after close"}])
+    with pytest.raises(RuntimeError, match="^MongoDBSession is closed$"):
+        await session.pop_item()
+    with pytest.raises(RuntimeError, match="^MongoDBSession is closed$"):
+        await session.clear_session()
+
+
+async def test_closed_rejects_empty_add_items() -> None:
+    """add_items([]) must not bypass the closed check through the empty-list fast path."""
+    session = _make_owned_session()
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="^MongoDBSession is closed$"):
+        await session.add_items([])
+
+
+async def test_close_before_use_is_terminal() -> None:
+    """close() before the first operation must still be terminal."""
+    session = _make_owned_session()
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="^MongoDBSession is closed$"):
+        await session.get_items()
+
+
+async def test_repeated_close_remains_safe() -> None:
+    """Repeated close() calls must remain safe for callers."""
+    session = _make_owned_session()
+
+    await session.close()
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="^MongoDBSession is closed$"):
+        await session.get_items()
+
+
+async def test_failed_close_is_terminal_and_can_be_retried() -> None:
+    """A failed client release must leave the session terminal and cleanup retryable."""
+    session = _make_owned_session()
+    close_mock = AsyncMock(side_effect=[ConnectionError("close failed"), None])
+
+    with patch.object(session._client, "close", close_mock):
+        with pytest.raises(ConnectionError, match="close failed"):
+            await session.close()
+
+        with pytest.raises(RuntimeError, match="^MongoDBSession is closed$"):
+            await session.get_items()
+
+        await session.close()
+
+    assert close_mock.await_count == 2
+
+
+async def test_cancelled_close_is_terminal_and_can_be_retried() -> None:
+    """A cancelled client release must leave the session terminal and cleanup retryable."""
+    session = _make_owned_session()
+    close_mock = AsyncMock(side_effect=[asyncio.CancelledError(), None])
+
+    with patch.object(session._client, "close", close_mock):
+        with pytest.raises(asyncio.CancelledError):
+            await session.close()
+
+        with pytest.raises(RuntimeError, match="^MongoDBSession is closed$"):
+            await session.get_items()
+
+        await session.close()
+
+    assert close_mock.await_count == 2
+
+
+async def test_ping_on_closed_session_raises() -> None:
+    """ping() swallows connectivity errors, so the closed check runs outside its try."""
+    session = _make_owned_session()
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="^MongoDBSession is closed$"):
+        await session.ping()
+
+
+async def test_external_client_session_stays_usable_after_close() -> None:
+    """An injected client is the caller's to manage, so close() must not be terminal."""
+    session = _make_session()
+    assert session._owns_client is False
+
+    await session.close()
+
+    await session.add_items([{"role": "user", "content": "still works"}])
+    assert len(await session.get_items()) == 1
 
 
 # ---------------------------------------------------------------------------

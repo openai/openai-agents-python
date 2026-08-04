@@ -139,6 +139,7 @@ class MongoDBSession(SessionABC):
         )
         self._client = client
         self._owns_client = False
+        self._closed = False
 
         client.append_metadata(_DRIVER_INFO)
 
@@ -219,6 +220,11 @@ class MongoDBSession(SessionABC):
                 weakref.finalize(self._client, self._init_state.pop, self._client_id, None)
             per_client[self._init_sub_key] = True
 
+    def _check_not_closed(self) -> None:
+        """Raise if the session has already been closed."""
+        if self._closed:
+            raise RuntimeError("MongoDBSession is closed")
+
     async def _ensure_indexes(self) -> None:
         """Create required indexes the first time this (client, sub_key) is accessed.
 
@@ -226,7 +232,13 @@ class MongoDBSession(SessionABC):
         from different coroutines or event loops are safe — at most a redundant
         round-trip is issued.  The threading-lock-guarded boolean prevents that
         extra round-trip after the first call completes.
+
+        Session operations that require index initialization go through here, so
+        this is also where they reject a closed session. The empty ``add_items``
+        fast path and ``ping`` check the closed state directly.
         """
+        self._check_not_closed()
+
         if self._is_init_done():
             return
 
@@ -312,6 +324,10 @@ class MongoDBSession(SessionABC):
         Args:
             items: List of input items to append to the session.
         """
+        # Checked before the empty-list fast path, which would otherwise return
+        # successfully on a closed session.
+        self._check_not_closed()
+
         if not items:
             return
 
@@ -385,18 +401,32 @@ class MongoDBSession(SessionABC):
         """Close the underlying MongoDB connection.
 
         Only closes the client if this session owns it (i.e. it was created
-        via :meth:`from_uri`).  If the client was injected externally the
-        caller is responsible for managing its lifecycle.
+        via :meth:`from_uri`).  In that case the session becomes terminal and
+        subsequent operations raise ``RuntimeError``.  If the client was injected
+        externally the caller is responsible for managing its lifecycle and this
+        is a no-op.
+
+        The session is terminal from the first close attempt.  If releasing the
+        client fails or is cancelled, operations still raise and a later close()
+        retries the release, which ``AsyncMongoClient.close`` allows.
         """
-        if self._owns_client:
-            await self._client.close()
+        if not self._owns_client:
+            return
+
+        self._closed = True
+        await self._client.close()
 
     async def ping(self) -> bool:
         """Test MongoDB connectivity.
 
         Returns:
             ``True`` if the server is reachable, ``False`` otherwise.
+
+        Raises:
+            RuntimeError: If the session owns its client and has been closed.
         """
+        # Checked outside the try block; the except clause below would swallow it.
+        self._check_not_closed()
         try:
             await self._client.admin.command("ping")
             return True
