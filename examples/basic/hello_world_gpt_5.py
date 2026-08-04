@@ -14,8 +14,8 @@ from agents import Agent, ModelSettings, Runner
 
 async def main():
     agent = Agent(
-        name="Knowledgable GPT-5 Assistant",
-        instructions="You're a knowledgable assistant. You always provide an interesting answer.",
+        name="Knowledgeable GPT-5 Assistant",
+        instructions="You're a knowledgeable assistant. You always provide an interesting answer.",
         model="gpt-5.6-sol",
         model_settings=ModelSettings(
             reasoning=Reasoning(effort="low"),  # "none", "low", "medium", "high", "xhigh"
