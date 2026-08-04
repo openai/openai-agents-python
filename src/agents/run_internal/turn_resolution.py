@@ -1382,6 +1382,7 @@ async def resolve_interrupted_turn(
     }
 
     stable_function_call_sources: dict[int, ResponseFunctionToolCall] = {}
+    stable_function_nested_results: dict[int, Any] = {}
 
     def _snapshot_function_run(run: ToolRunFunction) -> ToolRunFunction:
         if run.tool_call.call_id in duplicate_queued_call_ids:
@@ -1393,11 +1394,7 @@ async def resolve_interrupted_turn(
             scope_id=tool_state_scope_id,
         )
         if nested_result is not None:
-            record_agent_tool_run_result(
-                stable_call,
-                nested_result,
-                scope_id=tool_state_scope_id,
-            )
+            stable_function_nested_results[id(stable_call)] = nested_result
         return ToolRunFunction(
             tool_call=stable_call,
             function_tool=run.function_tool,
@@ -1698,9 +1695,13 @@ async def resolve_interrupted_turn(
     pending_nested_drops: list[ResponseFunctionToolCall] = []
 
     def _cached_nested_result(run: ToolRunFunction) -> Any | None:
+        stable_result = stable_function_nested_results.get(id(run.tool_call))
+        if stable_result is not None:
+            return stable_result
         return peek_agent_tool_run_result(run.tool_call, scope_id=tool_state_scope_id)
 
     def _drop_stable_nested_result(call: ResponseFunctionToolCall) -> None:
+        stable_function_nested_results.pop(id(call), None)
         drop_agent_tool_run_result(call, scope_id=tool_state_scope_id)
         source_call = stable_function_call_sources.get(id(call))
         if source_call is not None:

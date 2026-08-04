@@ -333,7 +333,10 @@ async def test_missing_interrupted_agent_tool_preserves_nested_state_for_retry()
     assert calls == ["before"]
 
     outer_agent.tools = []
-    with pytest.raises(ModelBehaviorError, match="Tool lookup not found in agent outer"):
+    with pytest.raises(
+        ModelBehaviorError,
+        match="Tool lookup not found in agent outer",
+    ) as strict_error:
         await Runner.run(outer_agent, state)
 
     outer_agent.tools = [nested_tool]
@@ -341,6 +344,7 @@ async def test_missing_interrupted_agent_tool_preserves_nested_state_for_retry()
 
     assert resumed_result.final_output == "outer done"
     assert calls == ["before", "sensitive"]
+    assert strict_error.value is not None
 
 
 @pytest.mark.asyncio
