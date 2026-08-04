@@ -580,6 +580,118 @@ class TestTrimming:
         assert trimmed_item["type"] == "tool_search_output"
         assert "[Trimmed: tool_search output" in trimmed_item["results"][0]["text"]
 
+    def test_structured_output_preview_keeps_text_and_names_dropped_parts(self) -> None:
+        """A structured output is previewed from its text parts, not from its serialization.
+
+        The SDK emits this shape whenever a tool returns ToolOutputImage/ToolOutputText.
+        Slicing the serialized list spends the preview budget on a base64 data URL when the
+        image part comes first, so the caption the tool produced never reaches the model.
+        """
+        image_part = {
+            "type": "input_image",
+            "image_url": "data:image/png;base64," + "Q" * 3000,
+        }
+        caption = "Revenue chart: Q3 up 12% YoY, driven by EMEA."
+        items = [
+            _user("q1"),
+            _func_call("c1", "plot"),
+            {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": [image_part, {"type": "input_text", "text": caption}],
+            },
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(max_output_chars=500, preview_chars=200)
+        result = trimmer(_make_data(items))
+        trimmed = _output(result, 2)
+
+        assert isinstance(trimmed, str)
+        assert caption in trimmed
+        assert "base64," not in trimmed
+        assert "dropped 1 input_image" in trimmed
+        assert "[Trimmed: plot output" in trimmed
+
+    def test_structured_output_without_text_is_named_not_sliced(self) -> None:
+        """With no text part there is nothing to preview, so parts are named instead."""
+        items = [
+            _user("q1"),
+            _func_call("c1", "plot"),
+            {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": [
+                    {"type": "input_image", "image_url": "data:image/png;base64," + "Q" * 3000},
+                    {"type": "input_file", "file_id": "file-123", "filename": "report.pdf"},
+                ],
+            },
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(max_output_chars=500, preview_chars=200)
+        result = trimmer(_make_data(items))
+        trimmed = _output(result, 2)
+
+        assert "base64," not in trimmed
+        assert "dropped 1 input_file, 1 input_image" in trimmed
+        assert not trimmed.endswith("...")
+
+    def test_structured_output_with_malformed_parts_does_not_raise(self) -> None:
+        """History can hold anything a caller once put there; the filter must survive it."""
+        items = [
+            _user("q1"),
+            _func_call("c1", "plot"),
+            {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": [
+                    {"type": ["not", "a", "string"], "text": "x" * 600},
+                    "bare string part",
+                    {"type": "input_text", "text": "usable text"},
+                ],
+            },
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(max_output_chars=500, preview_chars=200)
+        result = trimmer(_make_data(items))
+        trimmed = _output(result, 2)
+
+        assert "usable text" in trimmed
+        assert "2 unknown" in trimmed
+
+    def test_small_structured_output_is_preserved(self) -> None:
+        """Structured outputs under the threshold are left exactly as they were."""
+        parts = [{"type": "input_text", "text": "short answer"}]
+        items = [
+            _user("q1"),
+            _func_call("c1", "plot"),
+            {"type": "function_call_output", "call_id": "c1", "output": parts},
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(max_output_chars=500, preview_chars=200)
+        result = trimmer(_make_data(items))
+
+        assert _output(result, 2) == parts
+
     def test_trims_all_tools_when_allowlist_is_none(self) -> None:
         """When trimmable_tools is None, all tools are eligible."""
         large = "x" * 1000

@@ -62,6 +62,11 @@ _NAME_KEYED_SCHEMA_MAPS = frozenset(
 # schema keyword, so they are copied through untouched.
 _DATA_SCHEMA_KEYWORDS = frozenset({"default", "const", "enum"})
 
+# Content parts of a structured tool output whose payload is model-readable text. Every other
+# part (image, file) carries an opaque payload — a base64 data URL or a file reference — that
+# says nothing about what the tool returned when it is sliced by character count.
+_TEXT_CONTENT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
+
 
 @dataclass
 class ToolOutputTrimmer:
@@ -223,6 +228,9 @@ class ToolOutputTrimmer:
     ) -> tuple[dict[str, Any] | None, int]:
         """Trim a function_call_output item when its serialized output is too large."""
         output = item.get("output", "")
+        if isinstance(output, list):
+            return self._trim_structured_function_call_output(item, output, tool_names)
+
         output_str = output if isinstance(output, str) else str(output)
         output_len = len(output_str)
         if output_len <= self.max_output_chars:
@@ -235,6 +243,66 @@ class ToolOutputTrimmer:
             f"[Trimmed: {display_name} output — {output_len} chars → "
             f"{self.preview_chars} char preview]\n{preview}..."
         )
+        if len(summary) >= output_len:
+            return None, 0
+
+        trimmed_item = dict(item)
+        trimmed_item["output"] = summary
+        return trimmed_item, output_len - len(summary)
+
+    def _trim_structured_function_call_output(
+        self,
+        item: dict[str, Any],
+        parts: list[Any],
+        tool_names: tuple[str, ...],
+    ) -> tuple[dict[str, Any] | None, int]:
+        """Trim a function_call_output that carries structured content parts.
+
+        The SDK emits this shape whenever a tool returns ``ToolOutputText``,
+        ``ToolOutputImage`` or ``ToolOutputFileContent``. Only text parts can be previewed
+        as characters: slicing the list's serialization instead spends the whole preview
+        budget on structural noise, and on a base64 data URL when an image part comes
+        first. Image and file parts are therefore dropped and named rather than sliced.
+
+        The trim threshold is left as it is for every other output: the serialized length
+        of the whole value.
+        """
+        output_len = len(str(parts))
+        if output_len <= self.max_output_chars:
+            return None, 0
+
+        text_segments: list[str] = []
+        dropped_part_types: dict[str, int] = {}
+        for part in parts:
+            # A history item can hold anything a caller once put there, so the part type is
+            # only trusted once it is known to be a string: an unhashable value would
+            # otherwise raise from the set membership test below.
+            raw_part_type = part.get("type") if isinstance(part, dict) else None
+            part_type = raw_part_type if isinstance(raw_part_type, str) else ""
+            if part_type in _TEXT_CONTENT_PART_TYPES:
+                text = cast(dict[str, Any], part).get("text")
+                if isinstance(text, str):
+                    text_segments.append(text)
+                    continue
+            dropped_part_types[part_type or "unknown"] = (
+                dropped_part_types.get(part_type or "unknown", 0) + 1
+            )
+
+        display_name = (tool_names[0] if tool_names else "") or "unknown_tool"
+        dropped_note = ""
+        if dropped_part_types:
+            dropped_note = "; dropped " + ", ".join(
+                f"{count} {label}" for label, count in sorted(dropped_part_types.items())
+            )
+        preview = "\n".join(text_segments)[: self.preview_chars]
+        # Only promise a preview when there is text to show; a structured output can carry
+        # no text part at all, and then the parts list is the whole message.
+        preview_note = f" → {self.preview_chars} char preview" if preview else ""
+        summary = (
+            f"[Trimmed: {display_name} output — {output_len} chars{preview_note}{dropped_note}]"
+        )
+        if preview:
+            summary = f"{summary}\n{preview}..."
         if len(summary) >= output_len:
             return None, 0
 
