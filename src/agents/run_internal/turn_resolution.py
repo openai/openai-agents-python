@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Container, Mapping, Sequence
+from copy import deepcopy
+from dataclasses import replace
 from typing import Any, Literal, cast
 
 from openai.types.responses import (
@@ -32,20 +34,26 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from .. import _debug
 from .._mcp_tool_metadata import collect_mcp_list_tools_metadata
 from .._tool_identity import (
+    FunctionToolLookupKey,
     build_function_tool_lookup_map,
     get_function_tool_lookup_key,
     get_function_tool_lookup_key_for_call,
     get_function_tool_lookup_key_for_tool,
-    get_function_tool_qualified_name,
     get_tool_call_namespace,
     get_tool_call_qualified_name,
     get_tool_call_trace_name,
-    normalize_tool_call_for_function_tool,
+    resolve_tool_name_collisions,
+    restore_tool_call_routing_identity,
     should_allow_bare_name_approval_alias,
 )
 from ..agent import Agent, ToolsToFinalOutputResult
 from ..agent_output import AgentOutputSchemaBase
-from ..agent_tool_state import get_agent_tool_state_scope, peek_agent_tool_run_result
+from ..agent_tool_state import (
+    drop_agent_tool_run_result,
+    get_agent_tool_state_scope,
+    peek_agent_tool_run_result,
+    record_agent_tool_run_result,
+)
 from ..exceptions import ModelBehaviorError, ModelRefusalError, UserError
 from ..handoffs import Handoff, HandoffInputData, HandoffInputFilter, nest_handoff_history
 from ..handoffs.history import (
@@ -150,7 +158,6 @@ from .tool_execution import (
     parse_apply_patch_function_args,
     process_hosted_mcp_approvals,
     resolve_approval_rejection_message,
-    resolve_enabled_function_tools,
     should_keep_hosted_mcp_item,
 )
 from .tool_planning import (
@@ -166,6 +173,7 @@ from .tool_planning import (
     _make_unique_item_appender,
     _select_function_tool_runs_for_resume,
 )
+from .turn_preparation import get_handoffs, get_output_schema
 
 _DEFAULT_NEST_HANDOFF_HISTORY = nest_handoff_history
 
@@ -1057,7 +1065,10 @@ async def resolve_interrupted_turn(
                 call_id=call_id,
                 tool_namespace=tool_namespace,
                 tool_lookup_key=get_function_tool_lookup_key_for_tool(function_tool),
-                existing_pending=approval_items_by_call_id.get(call_id),
+                existing_pending=(
+                    function_approval_items_by_call_id.get(call_id)
+                    or approval_items_by_call_id.get(call_id)
+                ),
             )
         rejected_function_outputs.append(
             function_rejection_item(
@@ -1102,6 +1113,7 @@ async def resolve_interrupted_turn(
     rerun_function_call_ids: set[str] = set()
     pending_interruptions: list[ToolApprovalItem] = []
     pending_interruption_keys: set[str] = set()
+    stable_function_approval_sources: dict[int, ToolApprovalItem] = {}
 
     output_index = _build_tool_output_index(original_pre_step_items)
 
@@ -1280,6 +1292,19 @@ async def resolve_interrupted_turn(
     def _add_pending_interruption(item: ToolApprovalItem | None) -> None:
         if item is None:
             return
+        source_item = stable_function_approval_sources.get(id(item))
+        if source_item is not None:
+            source_item.agent = item.agent
+            source_item.raw_item = cast(
+                ResponseFunctionToolCall,
+                item.raw_item,
+            ).model_copy(deep=True)
+            source_item.tool_name = item.tool_name
+            source_item.tool_namespace = item.tool_namespace
+            source_item.tool_origin = item.tool_origin
+            source_item.tool_lookup_key = item.tool_lookup_key
+            source_item._allow_bare_name_alias = item._allow_bare_name_alias
+            item = source_item
         call_id = extract_tool_call_id(item.raw_item)
         key = call_id or f"raw:{id(item.raw_item)}"
         if key in pending_interruption_keys:
@@ -1311,155 +1336,551 @@ async def resolve_interrupted_turn(
             return True
         return allow_legacy_name_agent_match and approval_agent.name == public_agent.name
 
-    available_function_tools = await resolve_enabled_function_tools(
-        execution_agent,
-        context_wrapper,
-    )
-    approval_rebuild_function_tools = available_function_tools
-    if pending_approval_items and execution_agent.mcp_servers:
-        approval_rebuild_function_tools = [
-            tool
-            for tool in await execution_agent.get_all_tools(context_wrapper)
-            if isinstance(tool, FunctionTool)
+    def _approval_persisted_lookup_key(
+        approval: ToolApprovalItem,
+    ) -> FunctionToolLookupKey | None:
+        persisted_key = approval.tool_lookup_key
+        if persisted_key is not None:
+            return persisted_key
+        if not approval.tool_name:
+            return None
+        return get_function_tool_lookup_key(
+            approval.tool_name,
+            approval.tool_namespace,
+        )
+
+    queued_call_id_counts: dict[str, int] = {}
+    queued_call_items = [
+        *(run.tool_call for run in processed_response.functions),
+        *(run.tool_call for run in processed_response.handoffs),
+        *(run.tool_call for run in processed_response.computer_actions),
+        *(run.tool_call for run in processed_response.custom_tool_calls),
+        *(run.tool_call for run in processed_response.local_shell_calls),
+        *(run.tool_call for run in processed_response.shell_calls),
+        *(run.tool_call for run in processed_response.apply_patch_calls),
+        *(run.request_item for run in processed_response.mcp_approval_requests),
+        *(run.tool_call for run in processed_response.function_tools_not_found),
+    ]
+    for queued_call_item in queued_call_items:
+        queued_call_id = extract_tool_call_id(queued_call_item)
+        if queued_call_id is not None:
+            queued_call_id_counts[queued_call_id] = queued_call_id_counts.get(queued_call_id, 0) + 1
+    duplicate_queued_call_ids = {
+        call_id for call_id, count in queued_call_id_counts.items() if count > 1
+    }
+    non_function_owned_call_ids = {
+        call_id
+        for call_item in [
+            *(run.tool_call for run in processed_response.computer_actions),
+            *(run.tool_call for run in processed_response.custom_tool_calls),
+            *(run.tool_call for run in processed_response.local_shell_calls),
+            *(run.tool_call for run in processed_response.shell_calls),
+            *(run.tool_call for run in processed_response.apply_patch_calls),
+            *(run.request_item for run in processed_response.mcp_approval_requests),
         ]
-    program_call_ids, completed_program_call_ids = _collect_program_parent_state(
-        [*original_pre_step_items, *new_response.output],
-        server_manages_conversation=server_manages_conversation,
-    )
-    programmatic_tool_present = any(
-        isinstance(tool, ProgrammaticToolCallingTool) for tool in execution_agent.tools
-    )
+        if (call_id := extract_tool_call_id(call_item)) is not None
+    }
 
-    async def _rebuild_function_runs_from_approvals() -> list[ToolRunFunction]:
-        if not pending_approval_items:
-            return []
-        tool_map = build_function_tool_lookup_map(approval_rebuild_function_tools)
-        existing_pending_call_ids: set[str] = set()
-        for existing_pending in pending_interruptions:
-            if isinstance(existing_pending, ToolApprovalItem):
-                existing_call_id = extract_tool_call_id(existing_pending.raw_item)
-                if existing_call_id:
-                    existing_pending_call_ids.add(existing_call_id)
-        rebuilt_runs: list[ToolRunFunction] = []
+    stable_function_call_sources: dict[int, ResponseFunctionToolCall] = {}
 
-        def _add_unmatched_pending(approval: ToolApprovalItem) -> None:
-            call_id = extract_tool_call_id(approval.raw_item)
-            if not call_id:
-                _add_pending_interruption(approval)
-                return
-            tool_name = approval.tool_name or ""
-            approval_status = context_wrapper.get_approval_status(
-                tool_name,
-                call_id,
-                tool_namespace=approval.tool_namespace,
-                existing_pending=approval,
+    def _snapshot_function_run(run: ToolRunFunction) -> ToolRunFunction:
+        if run.tool_call.call_id in duplicate_queued_call_ids:
+            return run
+        stable_call = run.tool_call.model_copy(deep=True)
+        stable_function_call_sources[id(stable_call)] = run.tool_call
+        nested_result = peek_agent_tool_run_result(
+            run.tool_call,
+            scope_id=tool_state_scope_id,
+        )
+        if nested_result is not None:
+            record_agent_tool_run_result(
+                stable_call,
+                nested_result,
+                scope_id=tool_state_scope_id,
             )
-            if approval_status is None:
-                _add_pending_interruption(approval)
+        return ToolRunFunction(
+            tool_call=stable_call,
+            function_tool=run.function_tool,
+        )
 
-        for approval in pending_approval_items:
-            if not isinstance(approval, ToolApprovalItem):
-                continue
-            if not _approval_matches_agent(approval):
-                _add_unmatched_pending(approval)
-                continue
-            raw = approval.raw_item
-            raw_type = get_mapping_or_attr(raw, "type")
-            if raw_type != "function_call":
-                _add_unmatched_pending(approval)
-                continue
-            name = get_mapping_or_attr(raw, "name")
-            namespace = get_tool_call_namespace(raw)
-            if namespace is None and isinstance(approval.tool_namespace, str):
-                namespace = approval.tool_namespace
-            approval_key = getattr(approval, "tool_lookup_key", None)
-            if approval_key is None:
-                approval_key = get_function_tool_lookup_key(name, namespace)
-            resolved_tool = tool_map.get(approval_key) if approval_key is not None else None
-            if not (isinstance(name, str) and resolved_tool is not None):
-                _add_unmatched_pending(approval)
-                continue
+    stable_function_runs = [_snapshot_function_run(run) for run in processed_response.functions]
+    stable_handoff_runs = [
+        run
+        if run.tool_call.call_id in duplicate_queued_call_ids
+        else ToolRunHandoff(
+            handoff=run.handoff,
+            tool_call=run.tool_call.model_copy(deep=True),
+        )
+        for run in processed_response.handoffs
+    ]
+    response_function_calls = [
+        output.model_copy(deep=True)
+        for output in new_response.output
+        if isinstance(output, ResponseFunctionToolCall)
+    ]
+    authoritative_response_function_calls = [
+        call for call in response_function_calls if call.call_id not in non_function_owned_call_ids
+    ]
+    response_call_positions: dict[str, int] = {}
+    for index, output in enumerate(new_response.output):
+        output_call_id = extract_tool_call_id(output)
+        if output_call_id is not None:
+            response_call_positions.setdefault(output_call_id, index)
 
-            rebuilt_call_id: str | None
-            arguments: str | None
-            tool_call: ResponseFunctionToolCall
-            if isinstance(raw, ResponseFunctionToolCall):
-                rebuilt_call_id = raw.call_id
-                arguments = raw.arguments
-                tool_call = raw
-            else:
-                rebuilt_call_id = extract_tool_call_id(raw)
-                arguments = get_mapping_or_attr(raw, "arguments") or "{}"
-                status = get_mapping_or_attr(raw, "status")
-                if not (isinstance(rebuilt_call_id, str) and isinstance(arguments, str)):
-                    _add_unmatched_pending(approval)
-                    continue
-                valid_status: Literal["in_progress", "completed", "incomplete"] | None = None
-                if isinstance(status, str) and status in (
-                    "in_progress",
-                    "completed",
-                    "incomplete",
-                ):
-                    valid_status = status  # type: ignore[assignment]
-                tool_call_payload: dict[str, Any] = {
-                    "type": "function_call",
-                    "name": name,
-                    "call_id": rebuilt_call_id,
-                    "arguments": arguments,
-                    "status": valid_status,
-                }
-                if namespace is not None:
-                    tool_call_payload["namespace"] = namespace
-                caller = get_mapping_or_attr(raw, "caller")
-                if caller is not None:
-                    tool_call_payload["caller"] = caller
-                tool_call = ResponseFunctionToolCall(**tool_call_payload)
-            tool_call = cast(
+    queued_function_call_ids_by_lookup_key: dict[FunctionToolLookupKey, set[str]] = {}
+    queued_function_lookup_keys_by_call_id: dict[str, set[FunctionToolLookupKey]] = {}
+    canonical_queued_function_calls: dict[str, ResponseFunctionToolCall] = {}
+    authoritative_function_calls = [
+        *(run.tool_call for run in stable_function_runs),
+        *authoritative_response_function_calls,
+    ]
+    for function_call in authoritative_function_calls:
+        lookup_key = get_function_tool_lookup_key_for_call(function_call)
+        if lookup_key is None:
+            continue
+        queued_function_call_ids_by_lookup_key.setdefault(lookup_key, set()).add(
+            function_call.call_id
+        )
+        queued_function_lookup_keys_by_call_id.setdefault(
+            function_call.call_id,
+            set(),
+        ).add(lookup_key)
+    for function_run in stable_function_runs:
+        if function_run.tool_call.call_id not in duplicate_queued_call_ids:
+            canonical_queued_function_calls[function_run.tool_call.call_id] = function_run.tool_call
+    for response_call in authoritative_response_function_calls:
+        if response_call.call_id not in duplicate_queued_call_ids:
+            canonical_queued_function_calls.setdefault(response_call.call_id, response_call)
+    queued_function_call_ids = {
+        call_id
+        for call_ids in queued_function_call_ids_by_lookup_key.values()
+        for call_id in call_ids
+    }
+
+    def _is_function_approval(approval: ToolApprovalItem) -> bool:
+        call_id = extract_tool_call_id(approval.raw_item)
+        if call_id in non_function_owned_call_ids and call_id not in queued_function_call_ids:
+            return False
+        if get_mapping_or_attr(approval.raw_item, "type") == "function_call":
+            return True
+        return approval.tool_lookup_key is not None or call_id in queued_function_call_ids
+
+    function_approval_items = [
+        approval
+        for approval in pending_approval_items
+        if _approval_matches_agent(approval) and _is_function_approval(approval)
+    ]
+
+    def _validate_approval_identity(approval: ToolApprovalItem) -> None:
+        persisted_key = _approval_persisted_lookup_key(approval)
+        raw_name = get_mapping_or_attr(approval.raw_item, "name")
+        if persisted_key is None or not isinstance(raw_name, str) or not raw_name:
+            return
+        raw_namespace = get_tool_call_namespace(approval.raw_item)
+        raw_key = get_function_tool_lookup_key(raw_name, raw_namespace)
+        if persisted_key[-1] == raw_name and (raw_namespace is None or persisted_key == raw_key):
+            return
+        raw_identity = get_tool_call_qualified_name(approval.raw_item) or raw_name
+        raise ModelBehaviorError(
+            f"Persisted tool identity {persisted_key!r} does not match raw tool call "
+            f"{raw_identity}. Restore a consistent RunState before resuming."
+        )
+
+    def _coerce_approval_call(
+        approval: ToolApprovalItem,
+    ) -> ResponseFunctionToolCall | None:
+        raw = approval.raw_item
+        if get_mapping_or_attr(raw, "type") != "function_call":
+            return None
+        name = get_mapping_or_attr(raw, "name")
+        call_id = get_mapping_or_attr(raw, "call_id")
+        arguments = get_mapping_or_attr(raw, "arguments")
+        if not (
+            isinstance(name, str)
+            and isinstance(call_id, str)
+            and call_id
+            and isinstance(arguments, str)
+        ):
+            return None
+        payload: dict[str, Any] = {
+            "type": "function_call",
+            "name": name,
+            "call_id": call_id,
+            "arguments": arguments,
+        }
+        status = get_mapping_or_attr(raw, "status")
+        if status in ("in_progress", "completed", "incomplete"):
+            payload["status"] = status
+        namespace = get_tool_call_namespace(raw)
+        if namespace is not None:
+            payload["namespace"] = namespace
+        caller = get_mapping_or_attr(raw, "caller")
+        if caller is not None:
+            payload["caller"] = deepcopy(caller)
+        item_id = get_mapping_or_attr(raw, "id")
+        if isinstance(item_id, str):
+            payload["id"] = item_id
+        call = ResponseFunctionToolCall(**payload)
+
+        persisted_key = _approval_persisted_lookup_key(approval)
+        if get_tool_call_namespace(call) is None and persisted_key is not None:
+            call = cast(
                 ResponseFunctionToolCall,
-                normalize_tool_call_for_function_tool(tool_call, resolved_tool),
+                restore_tool_call_routing_identity(call, persisted_key),
             )
-            ensure_programmatic_tool_call_parent(
-                tool_call=tool_call,
-                programmatic_tool_present=programmatic_tool_present,
-                program_call_ids=program_call_ids,
-                completed_program_call_ids=completed_program_call_ids,
-                agent_name=public_agent.name,
-            )
-            ensure_tool_caller_allowed(
-                tool_call=tool_call,
-                allowed_callers=resolved_tool.allowed_callers,
-                tool_name=get_function_tool_qualified_name(resolved_tool) or resolved_tool.name,
-                agent_name=public_agent.name,
-            )
+        return call
 
-            if not (isinstance(rebuilt_call_id, str) and isinstance(arguments, str)):
-                _add_unmatched_pending(approval)
-                continue
+    validated_function_approval_items: dict[ToolApprovalItem, ToolApprovalItem] = {}
+    malformed_function_approvals: list[ToolApprovalItem] = []
+    for approval in function_approval_items:
+        _validate_approval_identity(approval)
+        approval_call = _coerce_approval_call(approval)
+        if approval_call is None:
+            malformed_function_approvals.append(approval)
+            continue
+        persisted_key = _approval_persisted_lookup_key(approval)
+        queued_lookup_keys = queued_function_lookup_keys_by_call_id.get(
+            approval_call.call_id,
+            set(),
+        )
+        if queued_lookup_keys and (
+            persisted_key is None or persisted_key not in queued_lookup_keys
+        ):
+            malformed_function_approvals.append(approval)
+            continue
+        queued_call_ids = (
+            queued_function_call_ids_by_lookup_key.get(persisted_key, set())
+            if persisted_key is not None
+            else set()
+        )
+        if queued_call_ids and approval_call.call_id not in queued_call_ids:
+            malformed_function_approvals.append(approval)
+            continue
+        stable_approval = ToolApprovalItem(
+            agent=public_agent,
+            raw_item=approval_call,
+            tool_name=approval.tool_name,
+            tool_namespace=approval.tool_namespace,
+            tool_origin=approval.tool_origin,
+            tool_lookup_key=approval.tool_lookup_key,
+            _allow_bare_name_alias=approval._allow_bare_name_alias,
+        )
+        validated_function_approval_items[approval] = stable_approval
+        stable_function_approval_sources[id(stable_approval)] = approval
 
-            approval_status = context_wrapper.get_approval_status(
-                name,
-                rebuilt_call_id,
-                tool_namespace=namespace,
-                existing_pending=approval,
+    if malformed_function_approvals:
+        processed_response.interruptions = list(pending_approval_items)
+        return SingleStepResult(
+            original_input=original_input,
+            model_response=new_response,
+            pre_step_items=original_pre_step_items,
+            new_step_items=[],
+            next_step=NextStepInterruption(interruptions=list(pending_approval_items)),
+            tool_input_guardrail_results=[],
+            tool_output_guardrail_results=[],
+            processed_response=processed_response,
+        )
+
+    function_approval_items = list(validated_function_approval_items.values())
+    function_approval_items_by_call_id = {
+        cast(ResponseFunctionToolCall, approval.raw_item).call_id: approval
+        for approval in function_approval_items
+    }
+
+    classifier_context_items = [
+        deepcopy(output)
+        for output in new_response.output
+        if get_mapping_or_attr(output, "type") in ("program", "program_output")
+    ]
+    classifier_existing_items = cast(
+        Sequence[RunItem],
+        [deepcopy(getattr(item, "raw_item", item)) for item in original_pre_step_items],
+    )
+    classifier_server_managed_input_items = (
+        deepcopy(ItemHelpers.input_to_new_input_list(original_input))
+        if server_manages_conversation
+        else None
+    )
+
+    available_handoffs = await get_handoffs(execution_agent, context_wrapper)
+    with execution_agent._use_mcp_handoff_snapshot(available_handoffs):
+        current_tool_inventory = await execution_agent.get_all_tools(context_wrapper)
+    resolved_tools, resolved_handoffs = resolve_tool_name_collisions(
+        current_tool_inventory,
+        available_handoffs,
+        collision_policy=run_config.tool_name_collision_policy,
+    )
+    resolved_function_tools = [tool for tool in resolved_tools if isinstance(tool, FunctionTool)]
+    local_function_tool_ids = {
+        id(tool) for tool in execution_agent.tools if isinstance(tool, FunctionTool)
+    }
+    available_function_tools = [
+        tool for tool in resolved_function_tools if id(tool) in local_function_tool_ids
+    ]
+
+    stale_functions = {
+        run.tool_call.call_id: run
+        for run in stable_function_runs
+        if run.tool_call.call_id not in duplicate_queued_call_ids
+    }
+    executed_handoff_call_ids = {
+        executed_handoff_call_id
+        for item in original_pre_step_items
+        if isinstance(item, HandoffOutputItem)
+        and (executed_handoff_call_id := extract_tool_call_id(item.raw_item)) is not None
+    }
+
+    calls_to_reconcile: list[ResponseFunctionToolCall] = []
+    reconciled_call_ids: set[str] = set()
+
+    def _append_reconciliation_call(call: ResponseFunctionToolCall) -> None:
+        call_id = call.call_id
+        if (
+            call_id in duplicate_queued_call_ids
+            or call_id in reconciled_call_ids
+            or call_id in executed_handoff_call_ids
+        ):
+            return
+        stale_run = stale_functions.get(call_id)
+        nested_result = (
+            peek_agent_tool_run_result(stale_run.tool_call, scope_id=tool_state_scope_id)
+            if stale_run is not None
+            else None
+        )
+        if _has_output_item(call_id, "function_call_output") and not (
+            nested_result and getattr(nested_result, "interruptions", None)
+        ):
+            return
+        approval = function_approval_items_by_call_id.get(call_id)
+        queued_call = canonical_queued_function_calls.get(call_id)
+        if queued_call is not None:
+            call = queued_call.model_copy(deep=True)
+        elif approval is not None:
+            call = cast(ResponseFunctionToolCall, approval.raw_item)
+        reconciled_call_ids.add(call_id)
+        calls_to_reconcile.append(call)
+
+    for output in authoritative_response_function_calls:
+        _append_reconciliation_call(output)
+    for function_run in stable_function_runs:
+        _append_reconciliation_call(function_run.tool_call)
+    for handoff_run in stable_handoff_runs:
+        _append_reconciliation_call(handoff_run.tool_call)
+    for approval_item in function_approval_items:
+        _append_reconciliation_call(cast(ResponseFunctionToolCall, approval_item.raw_item))
+
+    classifier_tools: list[Tool] = [*resolved_function_tools]
+    classifier_tools.extend(
+        tool for tool in resolved_tools if isinstance(tool, ProgrammaticToolCallingTool)
+    )
+    classifier_response = ModelResponse(
+        output=cast(Any, [*classifier_context_items, *calls_to_reconcile]),
+        usage=new_response.usage,
+        response_id=new_response.response_id,
+        request_id=new_response.request_id,
+    )
+    classified = process_model_response(
+        agent=public_agent,
+        all_tools=classifier_tools,
+        response=classifier_response,
+        output_schema=get_output_schema(execution_agent),
+        handoffs=cast(list[Handoff], resolved_handoffs),
+        existing_items=classifier_existing_items,
+        run_config=replace(run_config, tool_not_found_behavior="return_error_to_model"),
+        server_manages_conversation=server_manages_conversation,
+        server_managed_input_items=classifier_server_managed_input_items,
+        allow_apply_patch_function_fallback=False,
+    )
+    current_functions = {run.tool_call.call_id: run for run in classified.functions}
+    current_handoffs = {run.tool_call.call_id: run for run in classified.handoffs}
+    current_missing = {run.tool_call.call_id: run for run in classified.function_tools_not_found}
+    pending_nested_transfers: list[tuple[ResponseFunctionToolCall, Any]] = []
+    pending_nested_drops: list[ResponseFunctionToolCall] = []
+
+    def _cached_nested_result(run: ToolRunFunction) -> Any | None:
+        return peek_agent_tool_run_result(run.tool_call, scope_id=tool_state_scope_id)
+
+    def _drop_stable_nested_result(call: ResponseFunctionToolCall) -> None:
+        drop_agent_tool_run_result(call, scope_id=tool_state_scope_id)
+        source_call = stable_function_call_sources.get(id(call))
+        if source_call is not None:
+            drop_agent_tool_run_result(source_call, scope_id=tool_state_scope_id)
+
+    def _pending_nested_result(run: ToolRunFunction) -> Any | None:
+        result = _cached_nested_result(run)
+        return result if result and getattr(result, "interruptions", None) else None
+
+    def _reject_nested_replacement(run: ToolRunFunction) -> None:
+        if _pending_nested_result(run) is None:
+            pending_nested_drops.append(run.tool_call)
+            return
+        qualified_name = get_tool_call_qualified_name(run.tool_call) or run.tool_call.name
+        # TODO: Persist Agent.as_tool() owner identity so replacement before RunState
+        # restoration can be detected and safely migrated.
+        raise ModelBehaviorError(
+            f"Cannot reconcile queued tool {qualified_name} with a new tool or handoff while "
+            "its Agent.as_tool() run is interrupted. Restore the original tool configuration "
+            "or start a new run."
+        )
+
+    def _rebind_function_run(
+        stale_run: ToolRunFunction | None,
+        current_run: ToolRunFunction,
+    ) -> ToolRunFunction:
+        if stale_run is None:
+            return current_run
+        cached_result = _cached_nested_result(stale_run)
+        pending_result = _pending_nested_result(stale_run)
+        if stale_run.function_tool is not current_run.function_tool:
+            stale_owner = getattr(stale_run.function_tool, "_agent_instance", None)
+            current_owner = getattr(current_run.function_tool, "_agent_instance", None)
+            if pending_result is not None and (
+                stale_owner is None or stale_owner is not current_owner
+            ):
+                _reject_nested_replacement(stale_run)
+            if cached_result is not None and pending_result is None:
+                pending_nested_drops.append(stale_run.tool_call)
+        if pending_result is not None and current_run.tool_call is not stale_run.tool_call:
+            pending_nested_transfers.append((current_run.tool_call, pending_result))
+            pending_nested_drops.append(stale_run.tool_call)
+        return current_run
+
+    reconciled_functions: list[ToolRunFunction] = [
+        run for run in stable_function_runs if run.tool_call.call_id not in reconciled_call_ids
+    ]
+    reconciled_handoffs: list[ToolRunHandoff] = [
+        run for run in stable_handoff_runs if run.tool_call.call_id not in reconciled_call_ids
+    ]
+    missing_function_tools: list[ToolRunFunctionNotFound] = []
+    missing_state_calls: list[ResponseFunctionToolCall] = []
+    missing_function_call_ids: set[str] = set()
+
+    for call in calls_to_reconcile:
+        call_id = call.call_id
+        approval_record = function_approval_items_by_call_id.get(call_id)
+        approval_status = (
+            context_wrapper.get_approval_status(
+                approval_record.tool_name or call.name,
+                call_id,
+                tool_namespace=approval_record.tool_namespace,
+                existing_pending=approval_record,
             )
-            if approval_status is False:
-                await _record_function_rejection(
-                    rebuilt_call_id,
-                    tool_call,
-                    resolved_tool,
+            if approval_record is not None
+            else True
+        )
+        stale_function = stale_functions.get(call_id)
+        current_function = current_functions.get(call_id)
+        if current_function is not None:
+            reconciled_functions.append(_rebind_function_run(stale_function, current_function))
+            continue
+
+        current_handoff = current_handoffs.get(call_id)
+        if current_handoff is not None and approval_status is True:
+            if stale_function is not None:
+                _reject_nested_replacement(stale_function)
+            reconciled_handoffs.append(current_handoff)
+            continue
+
+        missing = current_missing.get(call_id)
+        if missing is not None and approval_status is True:
+            if run_config.tool_not_found_behavior != "return_error_to_model":
+                qualified_name = (
+                    get_tool_call_qualified_name(missing.tool_call) or missing.tool_name
                 )
-                continue
-            if approval_status is None:
-                if rebuilt_call_id not in existing_pending_call_ids:
-                    _add_pending_interruption(approval)
-                    existing_pending_call_ids.add(rebuilt_call_id)
-                continue
-            rebuilt_runs.append(ToolRunFunction(function_tool=resolved_tool, tool_call=tool_call))
-        return rebuilt_runs
+                raise ModelBehaviorError(
+                    f"Tool {qualified_name} not found in agent {public_agent.name}"
+                )
+            cached_result = (
+                _cached_nested_result(stale_function)
+                if stale_function is not None
+                else peek_agent_tool_run_result(
+                    missing.tool_call,
+                    scope_id=tool_state_scope_id,
+                )
+            )
+            if cached_result is not None:
+                state_call = missing.tool_call
+                if stale_function is not None:
+                    reconciled_functions.append(stale_function)
+                    state_call = stale_function.tool_call
+                missing_state_calls.append(state_call)
+            missing_function_call_ids.add(call_id)
+            missing_function_tools.append(missing)
+            continue
 
+        if stale_function is not None:
+            reconciled_functions.append(stale_function)
+        elif approval_record is not None:
+            if approval_status is None:
+                _add_pending_interruption(approval_record)
+            elif approval_status is False:
+                rejection_call = cast(
+                    ResponseFunctionToolCall,
+                    approval_record.raw_item,
+                )
+                rejection_message = await resolve_approval_rejection_message(
+                    context_wrapper=context_wrapper,
+                    run_config=run_config,
+                    tool_type="function",
+                    tool_name=get_tool_call_trace_name(rejection_call) or rejection_call.name,
+                    call_id=call_id,
+                    tool_namespace=get_tool_call_namespace(rejection_call),
+                    tool_lookup_key=approval_record.tool_lookup_key,
+                    existing_pending=approval_record,
+                )
+                rejected_function_outputs.append(
+                    function_rejection_item(
+                        public_agent,
+                        rejection_call,
+                        rejection_message=rejection_message,
+                        output_json_schema=None,
+                        scope_id=tool_state_scope_id,
+                        tool_origin=approval_record.tool_origin,
+                    )
+                )
+                rejected_function_call_ids.add(call_id)
+
+    for original_approval in pending_approval_items:
+        approval_snapshot = validated_function_approval_items.get(original_approval)
+        if approval_snapshot is None:
+            approval = original_approval
+            approval_call_id = extract_tool_call_id(approval.raw_item)
+            if (
+                approval_call_id is None
+                or context_wrapper.get_approval_status(
+                    approval.tool_name or "",
+                    approval_call_id,
+                    tool_namespace=approval.tool_namespace,
+                    existing_pending=approval,
+                )
+                is None
+            ):
+                _add_pending_interruption(approval)
+            continue
+        approval_call_id = cast(
+            ResponseFunctionToolCall,
+            approval_snapshot.raw_item,
+        ).call_id
+        if (
+            approval_call_id not in reconciled_call_ids
+            and context_wrapper.get_approval_status(
+                approval_snapshot.tool_name or "",
+                approval_call_id,
+                tool_namespace=approval_snapshot.tool_namespace,
+                existing_pending=approval_snapshot,
+            )
+            is None
+        ):
+            _add_pending_interruption(approval_snapshot)
+
+    selectable_function_runs = [
+        run
+        for run in reconciled_functions
+        if run.tool_call.call_id not in missing_function_call_ids
+    ]
     function_tool_runs = await _select_function_tool_runs_for_resume(
-        processed_response.functions,
-        approval_items_by_call_id=approval_items_by_call_id,
+        selectable_function_runs,
+        approval_items_by_call_id=function_approval_items_by_call_id,
         context_wrapper=context_wrapper,
         needs_approval_checker=_function_requires_approval,
         output_exists_checker=_function_output_exists,
@@ -1478,21 +1899,6 @@ async def resolve_interrupted_turn(
             ),
         ),
     )
-
-    rebuilt_function_tool_runs = await _rebuild_function_runs_from_approvals()
-    if rebuilt_function_tool_runs:
-        existing_call_ids: set[str] = set()
-        for run in function_tool_runs:
-            call_id = extract_tool_call_id(run.tool_call)
-            if call_id:
-                existing_call_ids.add(call_id)
-        for run in rebuilt_function_tool_runs:
-            call_id = extract_tool_call_id(run.tool_call)
-            if call_id and call_id in existing_call_ids:
-                continue
-            function_tool_runs.append(run)
-            if call_id:
-                existing_call_ids.add(call_id)
 
     pending_computer_actions: list[ToolRunComputerAction] = []
     for action in processed_response.computer_actions:
@@ -1554,6 +1960,29 @@ async def resolve_interrupted_turn(
         apply_patch_calls=approved_apply_patch_calls,
     )
 
+    missing_output_items = await _build_tool_not_found_output_items(
+        agent=public_agent,
+        calls=missing_function_tools,
+        context_wrapper=context_wrapper,
+        run_config=run_config,
+    )
+
+    for current_call, nested_result in pending_nested_transfers:
+        record_agent_tool_run_result(
+            current_call,
+            nested_result,
+            scope_id=tool_state_scope_id,
+        )
+    processed_response.functions = reconciled_functions
+    processed_response.handoffs = reconciled_handoffs
+    processed_response.function_tools_not_found = missing_function_tools
+    dropped_nested_call_ids: set[int] = set()
+    for stale_call in pending_nested_drops:
+        if id(stale_call) in dropped_nested_call_ids:
+            continue
+        dropped_nested_call_ids.add(id(stale_call))
+        _drop_stable_nested_result(stale_call)
+
     (
         function_results,
         tool_input_guardrail_results,
@@ -1581,8 +2010,35 @@ async def resolve_interrupted_turn(
 
     new_items, append_if_new = _make_unique_item_appender(original_pre_step_items)
 
-    for item in _build_tool_result_items(
+    function_result_items = _build_tool_result_items(
         function_results=function_results,
+        computer_results=[],
+        custom_tool_results=[],
+        shell_results=[],
+        apply_patch_results=[],
+        local_shell_results=[],
+    )
+    call_positions = dict(response_call_positions)
+    next_call_position = len(new_response.output)
+    for call in calls_to_reconcile:
+        if call.call_id not in call_positions:
+            call_positions[call.call_id] = next_call_position
+            next_call_position += 1
+    function_outcomes = [
+        *function_result_items,
+        *missing_output_items,
+        *rejected_function_outputs,
+    ]
+    function_outcomes.sort(
+        key=lambda item: call_positions.get(
+            extract_tool_call_id(getattr(item, "raw_item", None)) or "",
+            len(call_positions),
+        )
+    )
+    for item in function_outcomes:
+        append_if_new(item)
+    for item in _build_tool_result_items(
+        function_results=[],
         computer_results=computer_results,
         custom_tool_results=custom_tool_results,
         shell_results=shell_results,
@@ -1590,8 +2046,6 @@ async def resolve_interrupted_turn(
         local_shell_results=[],
     ):
         append_if_new(item)
-    for rejection_item in rejected_function_outputs:
-        append_if_new(rejection_item)
     for pending_item in pending_interruptions:
         if pending_item:
             append_if_new(pending_item)
@@ -1604,19 +2058,32 @@ async def resolve_interrupted_turn(
     for approved_response in plan.approved_mcp_responses:
         append_if_new(approved_response)
 
+    def _commit_missing_state(result: SingleStepResult) -> SingleStepResult:
+        if missing_function_call_ids:
+            processed_response.functions = [
+                run
+                for run in processed_response.functions
+                if run.tool_call.call_id not in missing_function_call_ids
+            ]
+        for call in missing_state_calls:
+            _drop_stable_nested_result(call)
+        return result
+
     processed_response.interruptions = pending_interruptions
     if pending_interruptions:
-        return SingleStepResult(
-            original_input=original_input,
-            model_response=new_response,
-            pre_step_items=original_pre_step_items,
-            new_step_items=new_items,
-            next_step=NextStepInterruption(
-                interruptions=[item for item in pending_interruptions if item]
-            ),
-            tool_input_guardrail_results=tool_input_guardrail_results,
-            tool_output_guardrail_results=tool_output_guardrail_results,
-            processed_response=processed_response,
+        return _commit_missing_state(
+            SingleStepResult(
+                original_input=original_input,
+                model_response=new_response,
+                pre_step_items=original_pre_step_items,
+                new_step_items=new_items,
+                next_step=NextStepInterruption(
+                    interruptions=[item for item in pending_interruptions if item]
+                ),
+                tool_input_guardrail_results=tool_input_guardrail_results,
+                tool_output_guardrail_results=tool_output_guardrail_results,
+                processed_response=processed_response,
+            )
         )
 
     await _append_mcp_callback_results(
@@ -1672,13 +2139,6 @@ async def resolve_interrupted_turn(
             )
         ]
 
-    executed_handoff_call_ids: set[str] = set()
-    for item in original_pre_step_items:
-        if isinstance(item, HandoffOutputItem):
-            handoff_call_id = extract_tool_call_id(item.raw_item)
-            if handoff_call_id:
-                executed_handoff_call_ids.add(handoff_call_id)
-
     pending_handoffs = [
         handoff
         for handoff in processed_response.handoffs
@@ -1687,20 +2147,22 @@ async def resolve_interrupted_turn(
     ]
 
     if pending_handoffs:
-        return await execute_handoffs_call(
-            public_agent=public_agent,
-            original_input=original_input,
-            pre_step_items=pre_step_items,
-            new_step_items=new_items,
-            new_response=new_response,
-            run_handoffs=pending_handoffs,
-            hooks=hooks,
-            context_wrapper=context_wrapper,
-            run_config=run_config,
-            server_manages_conversation=server_manages_conversation,
-            nest_handoff_history_fn=nest_handoff_history_fn,
-            tool_input_guardrail_results=tool_input_guardrail_results,
-            tool_output_guardrail_results=tool_output_guardrail_results,
+        return _commit_missing_state(
+            await execute_handoffs_call(
+                public_agent=public_agent,
+                original_input=original_input,
+                pre_step_items=pre_step_items,
+                new_step_items=new_items,
+                new_response=new_response,
+                run_handoffs=pending_handoffs,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                run_config=run_config,
+                server_manages_conversation=server_manages_conversation,
+                nest_handoff_history_fn=nest_handoff_history_fn,
+                tool_input_guardrail_results=tool_input_guardrail_results,
+                tool_output_guardrail_results=tool_output_guardrail_results,
+            )
         )
 
     tool_final_output = await _maybe_finalize_from_tool_results(
@@ -1716,16 +2178,18 @@ async def resolve_interrupted_turn(
         tool_output_guardrail_results=tool_output_guardrail_results,
     )
     if tool_final_output is not None:
-        return tool_final_output
+        return _commit_missing_state(tool_final_output)
 
-    return SingleStepResult(
-        original_input=original_input,
-        model_response=new_response,
-        pre_step_items=pre_step_items,
-        new_step_items=new_items,
-        next_step=NextStepRunAgain(),
-        tool_input_guardrail_results=tool_input_guardrail_results,
-        tool_output_guardrail_results=tool_output_guardrail_results,
+    return _commit_missing_state(
+        SingleStepResult(
+            original_input=original_input,
+            model_response=new_response,
+            pre_step_items=pre_step_items,
+            new_step_items=new_items,
+            next_step=NextStepRunAgain(),
+            tool_input_guardrail_results=tool_input_guardrail_results,
+            tool_output_guardrail_results=tool_output_guardrail_results,
+        )
     )
 
 
@@ -1740,6 +2204,7 @@ def process_model_response(
     run_config: RunConfig | None = None,
     server_manages_conversation: bool = False,
     server_managed_input_items: Sequence[Any] | None = None,
+    allow_apply_patch_function_fallback: bool = True,
 ) -> ProcessedResponse:
     items: list[RunItem] = []
 
@@ -2307,6 +2772,7 @@ def process_model_response(
                 raise ModelBehaviorError(f"Tool {output.name} not found in agent {agent.name}")
         elif (
             isinstance(output, ResponseFunctionToolCall)
+            and allow_apply_patch_function_fallback
             and is_apply_patch_name(output.name, apply_patch_tool)
             and get_function_tool_lookup_key_for_call(output) not in function_map
         ):

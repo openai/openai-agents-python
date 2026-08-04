@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import dataclasses
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, cast
 
@@ -91,6 +93,11 @@ ToolsToFinalOutputFunction: TypeAlias = Callable[
 """A function that takes a run context and a list of tool results, and returns a
 `ToolsToFinalOutputResult`.
 """
+
+
+_mcp_handoff_snapshot: contextvars.ContextVar[
+    tuple[object, tuple[Handoff[Any, Any], ...]] | None
+] = contextvars.ContextVar("mcp_handoff_snapshot", default=None)
 
 
 def _validate_codex_tool_name_collisions(tools: list[Tool]) -> None:
@@ -205,6 +212,11 @@ class AgentBase(Generic[TContext]):
     ) -> set[str]:
         reserved_tool_names = {tool.name for tool in self.tools if isinstance(tool, FunctionTool)}
 
+        snapshot = _mcp_handoff_snapshot.get()
+        if snapshot is not None and snapshot[0] is self:
+            reserved_tool_names.update(handoff.tool_name for handoff in snapshot[1])
+            return reserved_tool_names
+
         async def _check_handoff_enabled(handoff_obj: Handoff[Any, Any]) -> bool:
             attr = handoff_obj.is_enabled
             if isinstance(attr, bool):
@@ -221,6 +233,18 @@ class AgentBase(Generic[TContext]):
             elif isinstance(handoff_item, AgentBase):
                 reserved_tool_names.add(Handoff.default_tool_name(handoff_item))
         return reserved_tool_names
+
+    @contextmanager
+    def _use_mcp_handoff_snapshot(
+        self,
+        enabled_handoffs: Sequence[Handoff[Any, Any]],
+    ) -> Iterator[None]:
+        """Keep MCP reserved-name generation on one enabled-handoff snapshot."""
+        token = _mcp_handoff_snapshot.set((self, tuple(enabled_handoffs)))
+        try:
+            yield
+        finally:
+            _mcp_handoff_snapshot.reset(token)
 
     async def get_mcp_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
         """Fetches the available tools from the MCP servers."""

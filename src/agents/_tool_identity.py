@@ -206,6 +206,34 @@ def _remove_tool_call_namespace(tool_call: Any) -> Any:
     return tool_call
 
 
+def restore_tool_call_routing_identity(
+    tool_call: Any,
+    lookup_key: FunctionToolLookupKey | None,
+) -> Any:
+    """Fill an absent call namespace from a persisted lookup key."""
+    if lookup_key is None or get_tool_call_name(tool_call) != lookup_key[-1]:
+        return tool_call
+    if get_tool_call_namespace(tool_call) is not None or lookup_key[0] == "bare":
+        return tool_call
+
+    namespace = lookup_key[1]
+    if isinstance(tool_call, dict):
+        restored = dict(tool_call)
+        restored["namespace"] = namespace
+        return restored
+
+    model_dump = getattr(tool_call, "model_dump", None)
+    if callable(model_dump):
+        payload = model_dump(exclude_unset=True)
+        if isinstance(payload, dict):
+            payload["namespace"] = namespace
+            try:
+                return type(tool_call)(**payload)
+            except Exception:
+                return payload
+    return tool_call
+
+
 def has_function_tool_shape(tool: Any) -> bool:
     """Return True when the object looks like a FunctionTool instance."""
     return callable(getattr(tool, "on_invoke_tool", None)) and isinstance(
