@@ -37,6 +37,7 @@ from openai.types.responses import (
 from agents import Agent, Runner, function_tool
 from agents.exceptions import ModelBehaviorError, UserError
 from agents.model_settings import ModelSettings
+from agents.models.chatcmpl_converter import Converter
 from agents.models.chatcmpl_stream_handler import (
     ChatCmplStreamHandler,
     Part,
@@ -884,8 +885,354 @@ async def test_stream_handler_preserves_thinking_blocks_with_reasoning_summary()
     assert isinstance(reasoning_item, ResponseReasoningItem)
     assert reasoning_item.summary[0].text == "summary"
     assert reasoning_item.content
-    assert cast(Any, reasoning_item.content[0]).text == "hidden one hidden two"
+    # Preserve the released normalized projection while provider_data retains exact blocks.
+    assert [cast(Any, part).text for part in reasoning_item.content] == ["hidden one hidden two"]
     assert reasoning_item.encrypted_content == "sig-2"
+    assert cast(Any, reasoning_item).provider_data["thinking_blocks"] == [
+        {"type": "thinking", "thinking": "hidden one ", "signature": "sig-1"},
+        {"type": "thinking", "thinking": "hidden two", "signature": "sig-2"},
+    ]
+
+
+def _thinking_chunk(**delta_kwargs: Any) -> ChatCompletionChunk:
+    return ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="anthropic/claude-4-opus",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta.model_construct(**delta_kwargs))],
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_segments_thinking_blocks_at_signature_deltas() -> None:
+    """A streamed block ends at its signature_delta, so each block keeps its own signature.
+
+    Anthropic streams a thinking block as a run of `thinking_delta` chunks terminated by one
+    `signature_delta`. Accumulating the text into a single scalar merged interleaved blocks and
+    kept only the last signature, which cannot be verified against the merged text on replay.
+    """
+    events = await _collect_handler_events(
+        _thinking_chunk(reasoning_content="summary"),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "step ", "signature": ""}]
+        ),
+        _thinking_chunk(thinking_blocks=[{"type": "thinking", "thinking": "one", "signature": ""}]),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "", "signature": "SIG-1"}]
+        ),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "step two", "signature": ""}]
+        ),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "", "signature": "SIG-2"}]
+        ),
+    )
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    reasoning_item = completed_event.response.output[0]
+    assert isinstance(reasoning_item, ResponseReasoningItem)
+    assert cast(Any, reasoning_item).provider_data["thinking_blocks"] == [
+        {"type": "thinking", "thinking": "step one", "signature": "SIG-1"},
+        {"type": "thinking", "thinking": "step two", "signature": "SIG-2"},
+    ]
+    assert [cast(Any, part).text for part in (reasoning_item.content or [])] == ["step onestep two"]
+    assert reasoning_item.encrypted_content == "SIG-2"
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_finalizes_thinking_blocks_before_item_done() -> None:
+    """The done event must carry the finalized item at the time it is yielded."""
+    snapshots = [
+        event.model_dump()
+        async for event in ChatCmplStreamHandler.handle_stream(
+            _empty_response(),
+            cast(
+                Any,
+                _completion_stream(
+                    _thinking_chunk(reasoning_content="summary"),
+                    _thinking_chunk(
+                        thinking_blocks=[
+                            {"type": "thinking", "thinking": "hidden", "signature": ""}
+                        ]
+                    ),
+                    _thinking_chunk(
+                        thinking_blocks=[{"type": "thinking", "thinking": "", "signature": "SIG"}]
+                    ),
+                ),
+            ),
+        )
+    ]
+
+    done_event = next(
+        event
+        for event in snapshots
+        if event["type"] == "response.output_item.done" and event["item"]["type"] == "reasoning"
+    )
+    completed_event = next(event for event in snapshots if event["type"] == "response.completed")
+    completed_reasoning_item = completed_event["response"]["output"][0]
+
+    assert done_event["item"] == completed_reasoning_item
+    assert done_event["item"]["provider_data"]["thinking_blocks"] == [
+        {"type": "thinking", "thinking": "hidden", "signature": "SIG"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_preserves_redacted_thinking_without_summary() -> None:
+    """LiteLLM emits redacted blocks without reasoning_content, so they need their own item."""
+    events = await _collect_handler_events(
+        _thinking_chunk(thinking_blocks=[{"type": "redacted_thinking", "data": "BLOB"}]),
+        _thinking_chunk(content="visible answer"),
+    )
+
+    reasoning_done_event = next(
+        event
+        for event in events
+        if event.type == "response.output_item.done"
+        and isinstance(event.item, ResponseReasoningItem)
+    )
+    assert reasoning_done_event.output_index == 0
+    assert cast(Any, reasoning_done_event.item).provider_data["thinking_blocks"] == [
+        {"type": "redacted_thinking", "data": "BLOB"}
+    ]
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    assert [item.type for item in completed_event.response.output] == ["reasoning", "message"]
+    assert cast(Any, completed_event.response.output[0]).provider_data["thinking_blocks"] == [
+        {"type": "redacted_thinking", "data": "BLOB"}
+    ]
+
+    text_events = [
+        event
+        for event in events
+        if event.type
+        in {
+            "response.content_part.added",
+            "response.output_text.delta",
+            "response.content_part.done",
+        }
+    ]
+    assert text_events
+    assert all(event.output_index == 1 and event.content_index == 0 for event in text_events)
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_places_refusal_after_redacted_thinking_item() -> None:
+    events = await _collect_handler_events(
+        _thinking_chunk(thinking_blocks=[{"type": "redacted_thinking", "data": "BLOB"}]),
+        _thinking_chunk(refusal="blocked"),
+    )
+
+    refusal_events = [
+        event
+        for event in events
+        if event.type
+        in {
+            "response.content_part.added",
+            "response.refusal.delta",
+            "response.content_part.done",
+        }
+    ]
+    assert refusal_events
+    assert all(event.output_index == 1 and event.content_index == 0 for event in refusal_events)
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    message = completed_event.response.output[1]
+    assert isinstance(message, ResponseOutputMessage)
+    assert message.content == [ResponseOutputRefusal(refusal="blocked", type="refusal")]
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_keeps_redacted_block_metadata_opaque() -> None:
+    """Additional redacted-block keys must not become normalized thinking fields."""
+    redacted_block = {
+        "type": "redacted_thinking",
+        "data": "BLOB",
+        "thinking": {"opaque": True},
+        "signature": {"opaque": True},
+    }
+
+    events = await _collect_handler_events(_thinking_chunk(thinking_blocks=[redacted_block]))
+
+    done_event = next(
+        event
+        for event in events
+        if event.type == "response.output_item.done"
+        and isinstance(event.item, ResponseReasoningItem)
+    )
+    reasoning_item = cast(ResponseReasoningItem, done_event.item)
+    assert cast(Any, reasoning_item).provider_data["thinking_blocks"] == [redacted_block]
+    assert reasoning_item.content is None
+    assert reasoning_item.encrypted_content is None
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_emits_complete_signed_thinking_only_lifecycle() -> None:
+    """Signed thinking without a summary must produce one complete reasoning item."""
+    snapshots = [
+        event.model_dump()
+        async for event in ChatCmplStreamHandler.handle_stream(
+            _empty_response(),
+            cast(
+                Any,
+                _completion_stream(
+                    _thinking_chunk(
+                        thinking_blocks=[
+                            {"type": "thinking", "thinking": "hidden", "signature": ""}
+                        ]
+                    ),
+                    _thinking_chunk(
+                        thinking_blocks=[{"type": "thinking", "thinking": "", "signature": "SIG"}]
+                    ),
+                ),
+            ),
+        )
+    ]
+
+    assert [event["type"] for event in snapshots] == [
+        "response.created",
+        "response.output_item.added",
+        "response.reasoning_text.done",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert snapshots[1]["output_index"] == 0
+    assert snapshots[2]["output_index"] == 0
+    assert snapshots[2]["text"] == "hidden"
+
+    done_item = snapshots[3]["item"]
+    assert snapshots[3]["output_index"] == 0
+    assert done_item["content"] == [{"text": "hidden", "type": "reasoning_text"}]
+    assert done_item["encrypted_content"] == "SIG"
+    assert done_item["provider_data"]["thinking_blocks"] == [
+        {"type": "thinking", "thinking": "hidden", "signature": "SIG"}
+    ]
+    assert snapshots[4]["response"]["output"] == [done_item]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("thinking", {"opaque": True}),
+        ("signature", {"opaque": True}),
+        ("thinking", None),
+        ("signature", None),
+    ],
+)
+async def test_stream_handler_rejects_non_string_thinking_fields(
+    field_name: str, field_value: Any
+) -> None:
+    block: dict[str, Any] = {"type": "thinking", "thinking": "", "signature": ""}
+    block[field_name] = field_value
+
+    with pytest.raises(
+        ModelBehaviorError,
+        match=rf"Expected streamed thinking block field '{field_name}' to be a string, "
+        rf"got {type(field_value).__name__}",
+    ):
+        await _collect_handler_events(_thinking_chunk(thinking_blocks=[block]))
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_ignores_explicit_null_thinking_block_type() -> None:
+    events = await _collect_handler_events(
+        _thinking_chunk(
+            thinking_blocks=[
+                {"type": None, "thinking": "hidden", "signature": "SIG"},
+            ]
+        )
+    )
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    assert completed_event.response.output == []
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_preserves_redacted_thinking_blocks() -> None:
+    """A redacted_thinking block carries neither text nor signature and was dropped entirely.
+
+    Anthropic requires redacted blocks to be replayed unmodified during tool-use continuation,
+    and the normalized content/encrypted_content pair cannot represent them.
+    """
+    events = await _collect_handler_events(
+        _thinking_chunk(reasoning_content="summary"),
+        _thinking_chunk(thinking_blocks=[{"type": "redacted_thinking", "data": "REDACTED-BLOB"}]),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "visible", "signature": ""}]
+        ),
+        _thinking_chunk(thinking_blocks=[{"type": "thinking", "thinking": "", "signature": "SIG"}]),
+    )
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    reasoning_item = completed_event.response.output[0]
+    assert isinstance(reasoning_item, ResponseReasoningItem)
+    assert cast(Any, reasoning_item).provider_data["thinking_blocks"] == [
+        {"type": "redacted_thinking", "data": "REDACTED-BLOB"},
+        {"type": "thinking", "thinking": "visible", "signature": "SIG"},
+    ]
+    # The redacted block contributes no reasoning_text and no signature.
+    assert [cast(Any, part).text for part in (reasoning_item.content or [])] == ["visible"]
+    assert reasoning_item.encrypted_content == "SIG"
+
+
+@pytest.mark.asyncio
+async def test_streamed_thinking_blocks_replay_through_the_converter() -> None:
+    """End-to-end: a streamed Anthropic response must replay as the same ordered blocks.
+
+    This covers the streaming counterpart of the non-streaming replay path, so a signed block
+    survives item serialization and reaches the outbound request unchanged.
+    """
+    events = await _collect_handler_events(
+        _thinking_chunk(reasoning_content="summary"),
+        _thinking_chunk(
+            thinking_blocks=[
+                {
+                    "type": "thinking",
+                    "thinking": "alpha",
+                    "signature": "",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        ),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "", "signature": "SIG-A"}]
+        ),
+        _thinking_chunk(thinking_blocks=[{"type": "redacted_thinking", "data": "BLOB"}]),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "beta", "signature": ""}]
+        ),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "", "signature": "SIG-B"}]
+        ),
+        _thinking_chunk(content="visible answer"),
+    )
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    stored_items = [item.model_dump() for item in completed_event.response.output]
+
+    messages = Converter.items_to_messages(
+        cast(Any, stored_items),
+        model="anthropic/claude-4-opus",
+        preserve_thinking_blocks=True,
+    )
+
+    assistant_messages = [msg for msg in messages if msg.get("role") == "assistant"]
+    assert len(assistant_messages) == 1
+    # The complete sequence replays through LiteLLM's native assistant thinking_blocks field,
+    # which round-trips redacted blocks and per-block signatures unchanged.
+    assert cast(Any, assistant_messages[0])["thinking_blocks"] == [
+        {
+            "type": "thinking",
+            "thinking": "alpha",
+            "signature": "SIG-A",
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "redacted_thinking", "data": "BLOB"},
+        {"type": "thinking", "thinking": "beta", "signature": "SIG-B"},
+    ]
+    assert assistant_messages[0].get("content") == "visible answer"
 
 
 @pytest.mark.asyncio
