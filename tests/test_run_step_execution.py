@@ -52,7 +52,7 @@ from agents import (
     trace,
 )
 from agents._public_agent import set_public_agent
-from agents.run_internal import run_loop, turn_resolution
+from agents.run_internal import run_loop, tool_execution, turn_resolution
 from agents.run_internal.agent_bindings import bind_execution_agent, bind_public_agent
 from agents.run_internal.run_loop import (
     NextStepFinalOutput,
@@ -2089,15 +2089,23 @@ async def test_multiple_tool_calls_surface_post_invoke_failure_unblocked_during_
 
 
 @pytest.mark.asyncio
-async def test_multiple_tool_calls_surface_sleeping_post_invoke_failure_before_sibling_error():
+async def test_multiple_tool_calls_surface_sleeping_post_invoke_failure_before_sibling_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
     loop = asyncio.get_running_loop()
     original_handler = loop.get_exception_handler()
     unhandled_contexts: list[dict[str, Any]] = []
+    post_invoke_started = asyncio.Event()
+
+    # Widen the post-invoke drain budget so the guardrail delay below stays well inside
+    # it. Otherwise a scheduling hiccup, not the runtime, decides which failure wins.
+    monkeypatch.setattr(tool_execution, "_FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS", 5.0)
 
     @tool_output_guardrail
     async def sleeping_tripwire_guardrail(
         _data: ToolOutputGuardrailData,
     ) -> ToolGuardrailFunctionOutput:
+        post_invoke_started.set()
         await asyncio.sleep(0.05)
         return ToolGuardrailFunctionOutput.raise_exception(output_info={"status": "sleep-tripwire"})
 
@@ -2105,6 +2113,8 @@ async def test_multiple_tool_calls_surface_sleeping_post_invoke_failure_before_s
         return "ok"
 
     async def _error_tool() -> str:
+        # Fail only once the sibling guardrail is provably in its post-invoke phase.
+        await post_invoke_started.wait()
         raise ValueError("boom")
 
     ok_tool = function_tool(
@@ -2135,7 +2145,7 @@ async def test_multiple_tool_calls_surface_sleeping_post_invoke_failure_before_s
     loop.set_exception_handler(_exception_handler)
     try:
         with pytest.raises(ToolOutputGuardrailTripwireTriggered):
-            await asyncio.wait_for(get_execute_result(agent, response), timeout=0.2)
+            await asyncio.wait_for(get_execute_result(agent, response), timeout=10)
         gc.collect()
         await asyncio.sleep(0)
     finally:
@@ -2150,13 +2160,18 @@ async def test_multiple_tool_calls_surface_sleeping_post_invoke_failure_before_s
 
 @pytest.mark.asyncio
 async def test_multiple_tool_calls_do_not_wait_indefinitely_for_sleeping_post_invoke_sibling():
+    post_invoke_started = asyncio.Event()
+    release_guardrail = asyncio.Event()
     guardrail_finished = asyncio.Event()
 
     @tool_output_guardrail
-    async def long_sleeping_guardrail(
+    async def blocked_post_invoke_guardrail(
         _data: ToolOutputGuardrailData,
     ) -> ToolGuardrailFunctionOutput:
-        await asyncio.sleep(0.3)
+        post_invoke_started.set()
+        # Outlast the post-invoke drain budget by construction: only the test can
+        # release this guardrail, and it does so after the sibling error propagated.
+        await release_guardrail.wait()
         guardrail_finished.set()
         return ToolGuardrailFunctionOutput.allow(output_info="done")
 
@@ -2164,13 +2179,15 @@ async def test_multiple_tool_calls_do_not_wait_indefinitely_for_sleeping_post_in
         return "ok"
 
     async def _error_tool() -> str:
+        # Fail only once the sibling guardrail is provably in its post-invoke phase.
+        await post_invoke_started.wait()
         raise ValueError("boom")
 
     ok_tool = function_tool(
         _ok_tool,
         name_override="ok_tool",
         failure_error_function=None,
-        tool_output_guardrails=[long_sleeping_guardrail],
+        tool_output_guardrails=[blocked_post_invoke_guardrail],
     )
     error_tool = function_tool(
         _error_tool,
@@ -2189,9 +2206,12 @@ async def test_multiple_tool_calls_do_not_wait_indefinitely_for_sleeping_post_in
     )
 
     with pytest.raises(UserError, match="Error running tool error_tool: boom"):
-        await asyncio.wait_for(get_execute_result(agent, response), timeout=0.2)
+        await asyncio.wait_for(get_execute_result(agent, response), timeout=5)
 
-    await asyncio.wait_for(guardrail_finished.wait(), timeout=0.5)
+    # The post-invoke sibling is still pending here, so the failure was raised without
+    # waiting for it, and it must still be allowed to finish in the background.
+    release_guardrail.set()
+    await asyncio.wait_for(guardrail_finished.wait(), timeout=5)
 
 
 @pytest.mark.asyncio
@@ -2401,7 +2421,7 @@ async def test_multiple_tool_calls_raise_late_fatal_sibling_exception_after_canc
     )
 
     with pytest.raises(ToolAborted, match=f"boom-{delay_ticks}"):
-        await asyncio.wait_for(get_execute_result(agent, response), timeout=0.2)
+        await asyncio.wait_for(get_execute_result(agent, response), timeout=5)
 
     assert sibling_cancelled.is_set()
 
@@ -2511,7 +2531,7 @@ async def test_multiple_tool_calls_report_late_cleanup_exception_from_cancelled_
     loop.set_exception_handler(_exception_handler)
     try:
         with pytest.raises(UserError, match="Error running tool error_tool: boom"):
-            await asyncio.wait_for(get_execute_result(agent, response), timeout=0.2)
+            await asyncio.wait_for(get_execute_result(agent, response), timeout=5)
 
         assert cleanup_blocked.is_set()
         release_cleanup.set()
