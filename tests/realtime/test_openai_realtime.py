@@ -10,7 +10,7 @@ import pytest
 import websockets
 from pydantic import TypeAdapter
 
-from agents import Agent, function_tool
+from agents import Agent, WebSearchTool, function_tool
 from agents.exceptions import UserError
 from agents.handoffs import handoff
 from agents.realtime.model import RealtimeModelConfig
@@ -337,6 +337,30 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
         # Verify internal state remains clean after failure
         assert model._websocket is None
         assert model._websocket_task is None
+
+    @pytest.mark.asyncio
+    async def test_connect_session_config_failure_releases_websocket(self, model, mock_websocket):
+        """A failure while sending the initial session config must not leak the connection."""
+        config: RealtimeModelConfig = {
+            "api_key": "test-key",
+            # A hosted tool is rejected by `_tools_to_session_tools`, which runs only after the
+            # websocket is open and the listener task has started.
+            "initial_model_settings": {"tools": [WebSearchTool()]},
+        }
+
+        async def async_websocket(*args, **kwargs):
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket):
+            with pytest.raises(UserError, match="Must be a function tool"):
+                await model.connect(config)
+
+        # The websocket and its listener task are owned by connect(), so a failure after they
+        # were acquired must release them. Otherwise the socket stays open and the model is
+        # permanently unusable because connect() asserts `_websocket is None`.
+        assert model._websocket is None
+        assert model._websocket_task is None
+        mock_websocket.close.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_connect_with_empty_transport_config(self, mock_websocket):

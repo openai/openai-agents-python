@@ -588,7 +588,14 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             transport_config=self._transport_config,
         )
         self._websocket_task = asyncio.create_task(self._listen_for_messages())
-        await self._update_session_config(model_settings)
+        try:
+            await self._update_session_config(model_settings)
+        except BaseException:
+            # The websocket and its listener task are owned by this method, so release them
+            # when the initial session config fails. Otherwise the connection stays open and
+            # the model can never be reconnected because of the asserts above.
+            await self.close()
+            raise
 
     async def _create_websocket_connection(
         self,
