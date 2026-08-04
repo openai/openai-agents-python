@@ -602,18 +602,14 @@ class TestBlaxelSandboxSession:
         from agents.extensions.sandbox.blaxel.sandbox import BlaxelTimeouts
 
         state = _make_state()
-        state.timeouts = BlaxelTimeouts(exec_timeout_s=1)
+        state.timeouts = BlaxelTimeouts.model_construct(exec_timeout_s=0.01)
         session = _make_session(fake_sandbox, state=state)
-
-        async def _raise_timeout(*args: object, **kw: object) -> None:
-            raise asyncio.TimeoutError
-
-        fake_sandbox.process.exec = _raise_timeout  # type: ignore[assignment]
+        fake_sandbox.process.delay = 10.0
 
         with pytest.raises(ExecTimeoutError) as exc_info:
             await session._exec_internal("sleep", "100")
 
-        assert exc_info.value.timeout_s == 1.0
+        assert exc_info.value.timeout_s == 0.01
 
     @pytest.mark.asyncio
     async def test_stop_calls_pty_terminate(self, fake_sandbox: _FakeSandboxInstance) -> None:
@@ -1729,23 +1725,14 @@ class TestPtyExec:
         from agents.extensions.sandbox.blaxel import sandbox as mod
 
         session = _make_session(fake_sandbox)
-        ws = _FakeWS()
-
-        async def _wait_for_cancellation(entry: object) -> None:
-            await asyncio.Event().wait()
+        output_msg = json.dumps({"type": "output", "data": "still running"})
+        ws = _FakeWS(messages=[_FakeWSMessage(_FakeAiohttp.WSMsgType.TEXT, output_msg)])
 
         try:
-            with (
-                patch.object(mod, "_import_aiohttp", return_value=_FakeAiohttp(ws=ws)),
-                patch.object(session, "_pty_ws_reader", side_effect=_wait_for_cancellation),
-                patch.object(
-                    session,
-                    "_collect_pty_output",
-                    new=AsyncMock(return_value=(b"", None)),
-                ),
-            ):
-                update = await session.pty_exec_start("echo", "hello")
+            with patch.object(mod, "_import_aiohttp", return_value=_FakeAiohttp(ws=ws)):
+                update = await session.pty_exec_start("echo", "hello", yield_time_s=0.01)
 
+            assert b"still running" in update.output
             assert update.process_id is not None
             assert session._pty_sessions[update.process_id].ws is ws
         finally:
@@ -1782,7 +1769,7 @@ class TestPtyExec:
         from agents.extensions.sandbox.blaxel.sandbox import BlaxelTimeouts
 
         state = _make_state()
-        state.timeouts = BlaxelTimeouts(exec_timeout_s=1)
+        state.timeouts = BlaxelTimeouts.model_construct(exec_timeout_s=0.01)
         session = _make_session(fake_sandbox, state=state)
 
         class _SlowAiohttp:
@@ -1791,7 +1778,7 @@ class TestPtyExec:
             def ClientSession(self) -> Any:
                 class _SlowSession:
                     async def ws_connect(self, url: str) -> None:
-                        raise asyncio.TimeoutError
+                        await asyncio.sleep(100)
 
                     async def close(self) -> None:
                         pass
@@ -1802,7 +1789,7 @@ class TestPtyExec:
             with pytest.raises(ExecTimeoutError) as exc_info:
                 await session.pty_exec_start("echo", "hello")
 
-        assert exc_info.value.timeout_s == 1.0
+        assert exc_info.value.timeout_s == 0.01
 
     @pytest.mark.asyncio
     async def test_pty_exec_start_connection_error(
