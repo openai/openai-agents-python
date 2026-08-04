@@ -29,6 +29,7 @@ from agents.sandbox.errors import (
     WorkspaceReadNotFoundError,
     WorkspaceWriteTypeError,
 )
+from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExposedPortEndpoint
 from agents.sandbox.util.tar_utils import validate_tar_bytes
@@ -351,14 +352,17 @@ class TestBlaxelSandboxSession:
 
     @pytest.mark.asyncio
     async def test_exec_transport_error(self, fake_sandbox: _FakeSandboxInstance) -> None:
+        from agents.extensions.sandbox.blaxel import sandbox as mod
+
         session = _make_session(fake_sandbox)
 
         async def _raise(*args: object, **kw: object) -> None:
             raise ConnectionError("transport error")
 
         fake_sandbox.process.exec = _raise  # type: ignore[assignment]
-        with pytest.raises(ExecTransportError) as exc_info:
-            await session._exec_internal("echo", "hello")
+        with patch.object(mod, "_import_sandbox_api_error", return_value=None):
+            with pytest.raises(ExecTransportError) as exc_info:
+                await session._exec_internal("echo", "hello")
         assert str(exc_info.value) == "Blaxel exec failed: ConnectionError: transport error"
         assert exc_info.value.context["backend"] == "blaxel"
         assert exc_info.value.context["provider_error"] == "ConnectionError: transport error"
@@ -600,7 +604,11 @@ class TestBlaxelSandboxSession:
         state = _make_state()
         state.timeouts = BlaxelTimeouts(exec_timeout_s=1)
         session = _make_session(fake_sandbox, state=state)
-        fake_sandbox.process.delay = 10.0
+
+        async def _raise_timeout(*args: object, **kw: object) -> None:
+            raise asyncio.TimeoutError
+
+        fake_sandbox.process.exec = _raise_timeout  # type: ignore[assignment]
 
         with pytest.raises(ExecTimeoutError) as exc_info:
             await session._exec_internal("sleep", "100")
@@ -1572,15 +1580,10 @@ class TestStartLifecycle:
             raise ConnectionError("mkdir failed")
 
         fake_sandbox.process.exec = _raise  # type: ignore[assignment]
-        # start() should suppress the mkdir error and call super().start().
-        # super().start() will try to materialize the manifest, which may
-        # also call process.exec. We just verify it does not raise from the
-        # initial mkdir.
-        try:
+        with patch.object(BaseSandboxSession, "start", new_callable=AsyncMock) as base_start:
             await session.start()
-        except Exception:
-            # May fail in super().start() but not from the mkdir.
-            pass
+
+        base_start.assert_awaited_once_with()
 
 
 # ---------------------------------------------------------------------------
@@ -1656,21 +1659,97 @@ class _FakeAiohttp:
 
 
 class TestPtyExec:
+    @pytest.mark.parametrize(
+        ("messages", "expected_output"),
+        [
+            pytest.param(
+                [
+                    _FakeWSMessage(
+                        _FakeAiohttp.WSMsgType.TEXT,
+                        json.dumps({"type": "output", "data": "hello from pty"}),
+                    )
+                ],
+                b"hello from pty",
+                id="text",
+            ),
+            pytest.param(
+                [
+                    _FakeWSMessage(
+                        _FakeAiohttp.WSMsgType.BINARY,
+                        json.dumps({"type": "output", "data": "binary-data"}).encode(),
+                    )
+                ],
+                b"binary-data",
+                id="binary",
+            ),
+            pytest.param(
+                [
+                    _FakeWSMessage(
+                        _FakeAiohttp.WSMsgType.TEXT,
+                        json.dumps({"Type": "output", "Data": "cap-data"}),
+                    )
+                ],
+                b"cap-data",
+                id="capitalized-keys",
+            ),
+            pytest.param(
+                [
+                    _FakeWSMessage(_FakeAiohttp.WSMsgType.TEXT, "not json"),
+                    _FakeWSMessage(
+                        _FakeAiohttp.WSMsgType.TEXT,
+                        json.dumps({"type": "output", "data": "valid"}),
+                    ),
+                ],
+                b"valid",
+                id="invalid-json-ignored",
+            ),
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_pty_exec_start_success(self, fake_sandbox: _FakeSandboxInstance) -> None:
+    async def test_pty_exec_start_decodes_output_messages(
+        self,
+        fake_sandbox: _FakeSandboxInstance,
+        messages: list[_FakeWSMessage],
+        expected_output: bytes,
+    ) -> None:
         from agents.extensions.sandbox.blaxel import sandbox as mod
 
-        output_msg = json.dumps({"type": "output", "data": "hello from pty"})
-        ws = _FakeWS(messages=[_FakeWSMessage(_FakeAiohttp.WSMsgType.TEXT, output_msg)])
+        ws = _FakeWS(messages=[*messages, _FakeWSMessage(_FakeAiohttp.WSMsgType.CLOSE, "")])
         fake_aiohttp = _FakeAiohttp(ws=ws)
-
         session = _make_session(fake_sandbox)
 
         with patch.object(mod, "_import_aiohttp", return_value=fake_aiohttp):
             update = await session.pty_exec_start("echo", "hello", yield_time_s=0.5)
-            assert update.output is not None
-            assert b"hello from pty" in update.output
-            # process_id may be None if the reader finishes before finalize (entry.done=True).
+            assert expected_output in update.output
+
+    @pytest.mark.asyncio
+    async def test_pty_exec_start_preserves_active_session(
+        self, fake_sandbox: _FakeSandboxInstance
+    ) -> None:
+        from agents.extensions.sandbox.blaxel import sandbox as mod
+
+        session = _make_session(fake_sandbox)
+        ws = _FakeWS()
+
+        async def _wait_for_cancellation(entry: object) -> None:
+            await asyncio.Event().wait()
+
+        try:
+            with (
+                patch.object(mod, "_import_aiohttp", return_value=_FakeAiohttp(ws=ws)),
+                patch.object(session, "_pty_ws_reader", side_effect=_wait_for_cancellation),
+                patch.object(
+                    session,
+                    "_collect_pty_output",
+                    new=AsyncMock(return_value=(b"", None)),
+                ),
+            ):
+                update = await session.pty_exec_start("echo", "hello")
+
+            assert update.process_id is not None
+            assert session._pty_sessions[update.process_id].ws is ws
+        finally:
+            await session.pty_terminate_all()
 
     @pytest.mark.asyncio
     async def test_pty_exec_start_timeout(self, fake_sandbox: _FakeSandboxInstance) -> None:
@@ -1712,7 +1791,7 @@ class TestPtyExec:
             def ClientSession(self) -> Any:
                 class _SlowSession:
                     async def ws_connect(self, url: str) -> None:
-                        await asyncio.sleep(100)
+                        raise asyncio.TimeoutError
 
                     async def close(self) -> None:
                         pass
@@ -1750,8 +1829,20 @@ class TestPtyExec:
             with pytest.raises(ExecTransportError):
                 await session.pty_exec_start("echo", "hello")
 
+    @pytest.mark.parametrize(
+        ("chars", "expected_send_count"),
+        [
+            pytest.param("input\n", 1, id="input"),
+            pytest.param("", 0, id="empty"),
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_pty_write_stdin(self, fake_sandbox: _FakeSandboxInstance) -> None:
+    async def test_pty_write_stdin_sends_only_nonempty_input(
+        self,
+        fake_sandbox: _FakeSandboxInstance,
+        chars: str,
+        expected_send_count: int,
+    ) -> None:
         from agents.extensions.sandbox.blaxel import sandbox as mod
         from agents.extensions.sandbox.blaxel.sandbox import _BlaxelPtySessionEntry
 
@@ -1765,31 +1856,28 @@ class TestPtyExec:
         session._pty_sessions[1] = entry
         session._reserved_pty_process_ids.add(1)
 
-        with patch.object(mod, "_import_aiohttp", return_value=_FakeAiohttp()):
-            update = await session.pty_write_stdin(session_id=1, chars="input\n", yield_time_s=0.2)
+        try:
+            with (
+                patch.object(mod, "_import_aiohttp", return_value=_FakeAiohttp()),
+                patch.object(asyncio, "sleep", new=AsyncMock()),
+                patch.object(
+                    session,
+                    "_collect_pty_output",
+                    new=AsyncMock(return_value=(b"", None)),
+                ),
+            ):
+                update = await session.pty_write_stdin(
+                    session_id=1,
+                    chars=chars,
+                    yield_time_s=0.2,
+                )
+
             assert update.output is not None
-            assert len(ws._sent) == 1
-
-    @pytest.mark.asyncio
-    async def test_pty_write_stdin_empty_chars(self, fake_sandbox: _FakeSandboxInstance) -> None:
-        from agents.extensions.sandbox.blaxel import sandbox as mod
-        from agents.extensions.sandbox.blaxel.sandbox import _BlaxelPtySessionEntry
-
-        session = _make_session(fake_sandbox)
-        ws = _FakeWS()
-        entry = _BlaxelPtySessionEntry(
-            ws_session_id="empty-write",
-            ws=ws,
-            http_session=_FakeHTTPSession(ws),
-        )
-        session._pty_sessions[1] = entry
-        session._reserved_pty_process_ids.add(1)
-
-        with patch.object(mod, "_import_aiohttp", return_value=_FakeAiohttp()):
-            update = await session.pty_write_stdin(session_id=1, chars="", yield_time_s=0.2)
-            assert update.output is not None
-            # Empty chars should not send anything.
-            assert len(ws._sent) == 0
+            assert update.process_id == 1
+            assert session._pty_sessions[1] is entry
+            assert len(ws._sent) == expected_send_count
+        finally:
+            await session.pty_terminate_all()
 
     @pytest.mark.asyncio
     async def test_pty_terminate_all(self, fake_sandbox: _FakeSandboxInstance) -> None:
@@ -1825,19 +1913,6 @@ class TestPtyExec:
             assert b"something failed" in update.output
 
     @pytest.mark.asyncio
-    async def test_pty_ws_reader_binary_message(self, fake_sandbox: _FakeSandboxInstance) -> None:
-        from agents.extensions.sandbox.blaxel import sandbox as mod
-
-        output_msg = json.dumps({"type": "output", "data": "binary-data"}).encode()
-        ws = _FakeWS(messages=[_FakeWSMessage(_FakeAiohttp.WSMsgType.BINARY, output_msg)])
-        fake_aiohttp = _FakeAiohttp(ws=ws)
-        session = _make_session(fake_sandbox)
-
-        with patch.object(mod, "_import_aiohttp", return_value=fake_aiohttp):
-            update = await session.pty_exec_start("echo", "test", yield_time_s=0.5)
-            assert b"binary-data" in update.output
-
-    @pytest.mark.asyncio
     async def test_pty_ws_reader_close_message(self, fake_sandbox: _FakeSandboxInstance) -> None:
         from agents.extensions.sandbox.blaxel import sandbox as mod
 
@@ -1855,27 +1930,6 @@ class TestPtyExec:
         with patch.object(mod, "_import_aiohttp", return_value=fake_aiohttp):
             update = await session.pty_exec_start("echo", "test", yield_time_s=0.5)
             assert b"hi" in update.output
-
-    @pytest.mark.asyncio
-    async def test_pty_ws_reader_invalid_json(self, fake_sandbox: _FakeSandboxInstance) -> None:
-        from agents.extensions.sandbox.blaxel import sandbox as mod
-
-        ws = _FakeWS(
-            messages=[
-                _FakeWSMessage(_FakeAiohttp.WSMsgType.TEXT, "not json"),
-                _FakeWSMessage(
-                    _FakeAiohttp.WSMsgType.TEXT,
-                    json.dumps({"type": "output", "data": "valid"}),
-                ),
-            ]
-        )
-        fake_aiohttp = _FakeAiohttp(ws=ws)
-        session = _make_session(fake_sandbox)
-
-        with patch.object(mod, "_import_aiohttp", return_value=fake_aiohttp):
-            update = await session.pty_exec_start("echo", "test", yield_time_s=0.5)
-            # Invalid JSON should be silently ignored; valid output should appear.
-            assert b"valid" in update.output
 
     @pytest.mark.asyncio
     async def test_pty_ws_reader_error_type_message(
@@ -2000,32 +2054,15 @@ class TestPtyExec:
                     _FakeAiohttp.WSMsgType.TEXT,
                     json.dumps({"type": "output", "data": "quick"}),
                 ),
+                _FakeWSMessage(_FakeAiohttp.WSMsgType.CLOSE, ""),
             ]
         )
         fake_aiohttp = _FakeAiohttp(ws=ws)
         session = _make_session(fake_sandbox)
 
         with patch.object(mod, "_import_aiohttp", return_value=fake_aiohttp):
-            # Pass yield_time_s=None to test default (10s), but with a short timeout.
-            # We use a small timeout to not wait 10 seconds.
-            update = await session.pty_exec_start("echo", "test", yield_time_s=0.1)
+            update = await session.pty_exec_start("echo", "test")
             assert b"quick" in update.output
-
-    @pytest.mark.asyncio
-    async def test_pty_ws_reader_capital_type_keys(
-        self, fake_sandbox: _FakeSandboxInstance
-    ) -> None:
-        from agents.extensions.sandbox.blaxel import sandbox as mod
-
-        # Test the alternative capitalized key paths (Type/Data).
-        output_msg = json.dumps({"Type": "output", "Data": "cap-data"})
-        ws = _FakeWS(messages=[_FakeWSMessage(_FakeAiohttp.WSMsgType.TEXT, output_msg)])
-        fake_aiohttp = _FakeAiohttp(ws=ws)
-        session = _make_session(fake_sandbox)
-
-        with patch.object(mod, "_import_aiohttp", return_value=fake_aiohttp):
-            update = await session.pty_exec_start("echo", "test", yield_time_s=0.5)
-            assert b"cap-data" in update.output
 
     @pytest.mark.asyncio
     async def test_pty_max_output_tokens(self, fake_sandbox: _FakeSandboxInstance) -> None:
@@ -2033,7 +2070,12 @@ class TestPtyExec:
 
         long_output = "x" * 10000
         output_msg = json.dumps({"type": "output", "data": long_output})
-        ws = _FakeWS(messages=[_FakeWSMessage(_FakeAiohttp.WSMsgType.TEXT, output_msg)])
+        ws = _FakeWS(
+            messages=[
+                _FakeWSMessage(_FakeAiohttp.WSMsgType.TEXT, output_msg),
+                _FakeWSMessage(_FakeAiohttp.WSMsgType.CLOSE, ""),
+            ]
+        )
         fake_aiohttp = _FakeAiohttp(ws=ws)
         session = _make_session(fake_sandbox)
 
@@ -2554,6 +2596,7 @@ class TestFinalCoverageGaps:
                     _FakeAiohttp.WSMsgType.TEXT,
                     json.dumps({"type": "output", "data": "pruned-test"}),
                 ),
+                _FakeWSMessage(_FakeAiohttp.WSMsgType.CLOSE, ""),
             ]
         )
         fake_aiohttp = _FakeAiohttp(ws=ws)
@@ -2587,6 +2630,7 @@ class TestFinalCoverageGaps:
                     _FakeAiohttp.WSMsgType.TEXT,
                     json.dumps({"type": "output", "data": "warn-test"}),
                 ),
+                _FakeWSMessage(_FakeAiohttp.WSMsgType.CLOSE, ""),
             ]
         )
         fake_aiohttp = _FakeAiohttp(ws=ws)

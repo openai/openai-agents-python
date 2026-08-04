@@ -36,20 +36,27 @@ def _run_python(script: str) -> dict[str, object]:
 def test_import_agents_has_no_tracing_side_effects() -> None:
     payload = _run_python(
         """
-import gc
 import json
 import httpx
 
-clients_before = sum(1 for obj in gc.get_objects() if isinstance(obj, httpx.Client))
+client_init_calls = 0
+original_client_init = httpx.Client.__init__
+
+def tracking_client_init(self, *args, **kwargs):
+    global client_init_calls
+    client_init_calls += 1
+    original_client_init(self, *args, **kwargs)
+
+httpx.Client.__init__ = tracking_client_init
+
 import agents  # noqa: F401
 from agents.tracing import processors as tracing_processors
 from agents.tracing import setup as tracing_setup
-clients_after = sum(1 for obj in gc.get_objects() if isinstance(obj, httpx.Client))
 
 print(
     json.dumps(
         {
-            "client_delta": clients_after - clients_before,
+            "client_init_calls": client_init_calls,
             "provider_initialized": tracing_setup.GLOBAL_TRACE_PROVIDER is not None,
             "exporter_initialized": tracing_processors._global_exporter is not None,
             "processor_initialized": tracing_processors._global_processor is not None,
@@ -60,7 +67,7 @@ print(
 """
     )
 
-    assert payload["client_delta"] == 0
+    assert payload["client_init_calls"] == 0
     assert payload["provider_initialized"] is False
     assert payload["exporter_initialized"] is False
     assert payload["processor_initialized"] is False

@@ -49,7 +49,7 @@ tests-asyncio-stability:
 
 .PHONY: tests-parallel
 tests-parallel:
-	uv run pytest -n auto --dist loadfile -m "not serial"
+	uv run pytest -n auto --dist worksteal -m "not serial"
 
 .PHONY: tests-serial
 tests-serial:

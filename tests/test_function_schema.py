@@ -1,9 +1,10 @@
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from enum import Enum
 from typing import Annotated, Any, Literal
 
 import pytest
 from pydantic import BaseModel, Field, ValidationError
+from pydantic.json_schema import PydanticJsonSchemaWarning
 from typing_extensions import TypedDict
 
 from agents import RunContextWrapper, function_tool
@@ -1101,31 +1102,38 @@ _ELEMENTWISE_DEFAULT = _ElementwiseEqual()
 _ALWAYS_EQUAL_DEFAULT = _AlwaysEqual()
 
 
-def test_default_with_elementwise_eq_does_not_crash():
-    """Defaults must be compared to the inspect sentinel by identity: a numpy-style
-    default whose ``==`` returns a non-boolean container used to crash schema creation."""
+def _function_with_elementwise_default(x: int, value: Any = _ELEMENTWISE_DEFAULT) -> int:
+    return x
 
-    def score(x: int, weights: Any = _ELEMENTWISE_DEFAULT) -> int:
-        return x
 
-    fs = function_schema(score, strict_json_schema=False)
-    assert "weights" not in fs.params_json_schema.get("required", [])
+def _function_with_always_equal_default(x: int, value: Any = _ALWAYS_EQUAL_DEFAULT) -> int:
+    return x
+
+
+@pytest.mark.parametrize(
+    ("func", "default_type"),
+    [
+        pytest.param(
+            _function_with_elementwise_default,
+            _ElementwiseEqual,
+            id="elementwise-equality",
+        ),
+        pytest.param(
+            _function_with_always_equal_default,
+            _AlwaysEqual,
+            id="always-true-equality",
+        ),
+    ],
+)
+def test_default_equality_is_not_used_for_sentinel_comparison(
+    func: Callable[..., Any], default_type: type[Any]
+) -> None:
+    """Defaults with non-boolean or always-true equality remain optional and are preserved."""
+    with pytest.warns(PydanticJsonSchemaWarning, match="is not JSON serializable"):
+        fs = function_schema(func, strict_json_schema=False)
+
+    assert fs.params_json_schema.get("required", []) == ["x"]
 
     parsed = fs.params_pydantic_model(x=1)
     args, kwargs = fs.to_call_args(parsed)
-    assert isinstance((args + list(kwargs.values()))[-1], _ElementwiseEqual)
-
-
-def test_default_with_always_true_eq_stays_optional():
-    """A default whose ``__eq__`` answers True used to be mistaken for the no-default
-    sentinel, silently marking the parameter required and discarding the default."""
-
-    def strip(text: str, punctuation: Any = _ALWAYS_EQUAL_DEFAULT) -> str:
-        return text
-
-    fs = function_schema(strip, strict_json_schema=False)
-    assert fs.params_json_schema.get("required", []) == ["text"]
-
-    parsed = fs.params_pydantic_model(text="hi")
-    args, kwargs = fs.to_call_args(parsed)
-    assert isinstance((args + list(kwargs.values()))[-1], _AlwaysEqual)
+    assert isinstance((args + list(kwargs.values()))[-1], default_type)

@@ -292,7 +292,7 @@ class ConcurrentCancellationSession:
         if tool_name == "slow":
             self._slow_task = cast(asyncio.Task[CallToolResult], asyncio.current_task())
             self._slow_started.set()
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0)
             return CallToolResult(content=[])
 
         await self._slow_started.wait()
@@ -384,6 +384,7 @@ class DummyStreamableHttpServer(MCPServerStreamableHttp):
             params={"url": "https://example.test/mcp"},
             client_session_timeout_seconds=None,
             max_retry_attempts=0,
+            retry_backoff_seconds_base=0,
         )
         self.session = cast(ClientSession, shared_session)
         self._isolated_session = cast(ClientSession, isolated_session)
@@ -597,7 +598,7 @@ class OverlapTrackingSession:
         self.in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self.in_flight)
         try:
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0)
             yield
         finally:
             self.in_flight -= 1

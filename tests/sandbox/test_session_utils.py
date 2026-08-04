@@ -6,6 +6,7 @@ import shlex
 import subprocess
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -353,17 +354,24 @@ def test_read_path_probe_resolves_symlinks_before_classifying_missing(tmp_path: 
         )
         return result.returncode
 
-    assert probe(dangling) == 1
-    assert probe(invalid_target) == 2
-    assert probe(dangling_parent / "child") == 1
-    assert probe(invalid_parent / "child") == 2
-    assert probe(loop) == 2
-    assert probe(newline_link) == 0
-    assert probe(workspace / "[a]") == 1
-    assert probe(workspace / "?") == 1
-    assert probe(workspace / "*") == 1
-    assert probe(workspace.joinpath(*symlink_parts, "missing")) == 2
-    assert probe(workspace / ("x" * 256)) == 2
+    probe_cases = [
+        (dangling, 1),
+        (invalid_target, 2),
+        (dangling_parent / "child", 1),
+        (invalid_parent / "child", 2),
+        (loop, 2),
+        (newline_link, 0),
+        (workspace / "[a]", 1),
+        (workspace / "?", 1),
+        (workspace / "*", 1),
+        (workspace.joinpath(*symlink_parts, "missing"), 2),
+        (workspace / ("x" * 256), 2),
+    ]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = executor.map(probe, (path for path, _expected in probe_cases))
+
+    for (path, expected), actual in zip(probe_cases, results, strict=True):
+        assert actual == expected, f"unexpected probe result for {path}"
 
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
