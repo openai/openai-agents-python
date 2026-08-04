@@ -223,7 +223,10 @@ class ToolOutputTrimmer:
     ) -> tuple[dict[str, Any] | None, int]:
         """Trim a function_call_output item when its serialized output is too large."""
         output = item.get("output", "")
-        output_str = output if isinstance(output, str) else str(output)
+        # A function_call_output may carry a list of content parts instead of a string.
+        # Serialize those as JSON so the preview stays readable to the model and the size
+        # check measures the payload rather than its Python repr.
+        output_str = output if isinstance(output, str) else self._serialize_json_like(output)
         output_len = len(output_str)
         if output_len <= self.max_output_chars:
             return None, 0

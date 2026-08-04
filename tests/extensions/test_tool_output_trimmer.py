@@ -203,6 +203,51 @@ class TestTrimming:
         assert "1000 chars" in trimmed
         assert len(trimmed) < len(large)
 
+    def test_trims_structured_output_as_json(self) -> None:
+        """List-shaped tool outputs should preview as JSON, not as a Python repr."""
+        structured = [{"type": "input_text", "text": "x" * 400}]
+        items = [
+            _user("q1"),
+            _func_call("c1", "search"),
+            {"type": "function_call_output", "call_id": "c1", "output": structured},
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+        trimmer = ToolOutputTrimmer(max_output_chars=100, preview_chars=60)
+        result = trimmer(_make_data(items))
+
+        serialized = json.dumps(structured, ensure_ascii=False, sort_keys=True, default=str)
+        assert _output(result, 2) == (
+            f"[Trimmed: search output — {len(serialized)} chars → 60 char preview]\n"
+            f"{serialized[:60]}..."
+        )
+
+    def test_structured_output_threshold_uses_serialized_size(self) -> None:
+        """The trim threshold should measure the JSON payload, not its Python repr."""
+        # repr leaves the embedded double quotes unescaped, so it under-reports the size
+        # of what actually reaches the model by one character per quote.
+        structured = [{"type": "input_text", "text": 'a"b' * 40}]
+        serialized = json.dumps(structured, ensure_ascii=False, sort_keys=True, default=str)
+        assert len(str(structured)) < 170 < len(serialized)
+
+        items = [
+            _user("q1"),
+            _func_call("c1", "search"),
+            {"type": "function_call_output", "call_id": "c1", "output": structured},
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+        trimmer = ToolOutputTrimmer(max_output_chars=170, preview_chars=40)
+        result = trimmer(_make_data(items))
+
+        assert _output(result, 2).startswith(f"[Trimmed: search output — {len(serialized)} chars")
+
     def test_preserves_small_old_output(self) -> None:
         """Small outputs should never be trimmed."""
         small = "x" * 100
