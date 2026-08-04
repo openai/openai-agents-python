@@ -2102,6 +2102,11 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         try:
             self._validate_required_parameters(tool_name=tool_name, arguments=arguments)
             retries_used = 0
+            # `retries_used` measures the retry budget, not elapsed backoffs: it is
+            # deliberately not advanced while `max_retry_attempts` is -1, and a single
+            # isolated-session retry charges it twice. Count backoffs separately so the
+            # delay follows the configured schedule in both cases.
+            backoffs_taken = 0
             first_attempt = True
             while True:
                 if not first_attempt and self.max_retry_attempts != -1:
@@ -2125,12 +2130,14 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                         if exc.__cause__ is not None:
                             raise exc.__cause__ from exc
                         raise
-                    backoff = self.retry_backoff_seconds_base * (2 ** (retries_used - 1))
+                    backoff = self.retry_backoff_seconds_base * (2**backoffs_taken)
+                    backoffs_taken += 1
                     await asyncio.sleep(backoff)
                 except Exception:
                     if self.max_retry_attempts != -1 and retries_used >= self.max_retry_attempts:
                         raise
-                    backoff = self.retry_backoff_seconds_base * (2**retries_used)
+                    backoff = self.retry_backoff_seconds_base * (2**backoffs_taken)
+                    backoffs_taken += 1
                     await asyncio.sleep(backoff)
                 first_attempt = False
         except httpx.HTTPStatusError as e:

@@ -696,3 +696,57 @@ async def test_streamable_http_serializes_call_tool_with_prompt_requests(prompt_
         assert isinstance(results[1], GetPromptResult)
     assert shared_session.max_in_flight == 1
     assert isolated_session.call_tool_attempts == 0
+
+
+class FlakyRuntimeErrorSession:
+    """Fails with an error that does not qualify for an isolated-session retry."""
+
+    def __init__(self, failures: int):
+        self.failures = failures
+        self.call_tool_attempts = 0
+
+    async def call_tool(self, tool_name, arguments, meta=None):
+        self.call_tool_attempts += 1
+        if self.call_tool_attempts <= self.failures:
+            raise RuntimeError("transient failure")
+        return CallToolResult(content=[])
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_backoff_grows_with_unlimited_retries(monkeypatch):
+    delays: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+
+    shared_session = FlakyRuntimeErrorSession(failures=3)
+    server = DummyStreamableHttpServer(shared_session, TimeoutSession())
+    server.max_retry_attempts = -1
+    server.retry_backoff_seconds_base = 1.0
+
+    await server.call_tool("tool", None)
+
+    assert delays == [1.0, 2.0, 4.0]
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_backoff_matches_generic_schedule_on_isolated_retry(monkeypatch):
+    delays: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+
+    shared_session = TimeoutSession("shared timed out")
+    isolated_session = TimeoutSession("isolated timed out")
+    server = DummyStreamableHttpServer(shared_session, isolated_session)
+    server.max_retry_attempts = 6
+    server.retry_backoff_seconds_base = 1.0
+
+    with pytest.raises(httpx.TimeoutException, match="shared timed out"):
+        await server.call_tool("tool", None)
+
+    assert delays == [1.0, 2.0, 4.0]
