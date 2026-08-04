@@ -95,6 +95,19 @@ from .utils.hitl import (
     reject_tool_call,
 )
 
+# Deadlock detector for the parent-cancellation tests below. It is deliberately far larger
+# than any bound the runtime itself applies (see `_FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS`)
+# so a slow machine can never turn it into a behavioral deadline; ordering is asserted with
+# events instead.
+_CANCELLATION_HANG_GUARD_SECONDS = 5.0
+
+
+async def _flush_loop_callbacks(loop: asyncio.AbstractEventLoop) -> None:
+    """Yield until every callback already queued on the loop has run."""
+    marker = loop.create_future()
+    loop.call_soon(marker.set_result, None)
+    await marker
+
 
 def _function_spans() -> list[dict[str, Any]]:
     function_spans: list[dict[str, Any]] = []
@@ -2616,15 +2629,23 @@ async def test_parent_cancellation_does_not_wait_for_tool_cleanup():
     )
 
     execution_task = asyncio.create_task(get_execute_result(agent, response))
-    await asyncio.wait_for(tool_started.wait(), timeout=0.2)
+    await asyncio.wait_for(tool_started.wait(), timeout=_CANCELLATION_HANG_GUARD_SECONDS)
 
     execution_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(execution_task, timeout=0.1)
 
-    await asyncio.wait_for(cleanup_started.wait(), timeout=0.2)
+    # Park the tool inside its cleanup first so the check below is ordered by an event rather
+    # than by whether the parent happens to settle within a short wall-clock deadline.
+    await asyncio.wait_for(cleanup_started.wait(), timeout=_CANCELLATION_HANG_GUARD_SECONDS)
+    assert not cleanup_finished.is_set()
+
+    # The parent must surface cancellation while the tool cleanup is still blocked on
+    # `allow_cleanup_exit`; a runtime that awaited the cleanup would hang here instead.
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(execution_task, timeout=_CANCELLATION_HANG_GUARD_SECONDS)
+    assert not cleanup_finished.is_set()
+
     allow_cleanup_exit.set()
-    await asyncio.wait_for(cleanup_finished.wait(), timeout=0.2)
+    await asyncio.wait_for(cleanup_finished.wait(), timeout=_CANCELLATION_HANG_GUARD_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -2661,6 +2682,7 @@ async def test_parent_cancellation_does_not_report_tool_failure_as_background_er
     original_handler = loop.get_exception_handler()
     reported_contexts: list[dict[str, Any]] = []
     tool_started = asyncio.Event()
+    tool_failed = asyncio.Event()
 
     def _exception_handler(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
         reported_contexts.append(context)
@@ -2668,6 +2690,7 @@ async def test_parent_cancellation_does_not_report_tool_failure_as_background_er
     async def _failing_tool() -> str:
         tool_started.set()
         await asyncio.sleep(0)
+        tool_failed.set()
         raise ValueError("boom")
 
     tool = function_tool(
@@ -2685,14 +2708,18 @@ async def test_parent_cancellation_does_not_report_tool_failure_as_background_er
     loop.set_exception_handler(_exception_handler)
     try:
         execution_task = asyncio.create_task(get_execute_result(agent, response))
-        await asyncio.wait_for(tool_started.wait(), timeout=0.2)
+        await asyncio.wait_for(tool_started.wait(), timeout=_CANCELLATION_HANG_GUARD_SECONDS)
 
         execution_task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await execution_task
+            await asyncio.wait_for(execution_task, timeout=_CANCELLATION_HANG_GUARD_SECONDS)
 
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        # The tool has to actually fail while the parent is cancelling, otherwise the
+        # assertion below would hold without ever reaching the reporting path.
+        await asyncio.wait_for(tool_failed.wait(), timeout=_CANCELLATION_HANG_GUARD_SECONDS)
+        # Any report is delivered from a done callback, so drain the loop queue instead of
+        # guessing how many iterations that takes.
+        await _flush_loop_callbacks(loop)
     finally:
         loop.set_exception_handler(original_handler)
 
