@@ -140,6 +140,13 @@ def is_mcp_timeout_error(error: BaseException) -> bool:
     return mcp_error_code(error) == mcp_request_timeout_code()
 
 
+def is_mcp_connection_closed_error(error: BaseException) -> bool:
+    if not MCP_V2:
+        return False
+    connection_closed = int(vars(import_module("mcp_types"))["CONNECTION_CLOSED"])
+    return mcp_error_code(error) == connection_closed
+
+
 def is_http_status_error(error: BaseException) -> bool:
     return isinstance(error, HTTP_STATUS_ERROR_TYPES)
 

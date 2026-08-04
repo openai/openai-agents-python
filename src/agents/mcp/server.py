@@ -64,6 +64,7 @@ from ._compat import (
     is_http_request_error,
     is_http_status_error,
     is_http_timeout_error,
+    is_mcp_connection_closed_error,
     is_mcp_timeout_error,
     resource_uri,
     result_next_cursor,
@@ -353,6 +354,8 @@ def _configure_v2_session_id_hook(
     on_session_id: Callable[[str], None] | None,
 ) -> None:
     async def handle_response(response: Any) -> None:
+        if response.status_code >= 500:
+            response.raise_for_status()
         method = _jsonrpc_request_method(response.request)
         if (
             on_session_id is not None
@@ -363,7 +366,7 @@ def _configure_v2_session_id_hook(
             if session_id:
                 on_session_id(session_id)
 
-    client.event_hooks.setdefault("response", []).insert(0, handle_response)
+    client.event_hooks.setdefault("response", []).append(handle_response)
 
 
 @asynccontextmanager
@@ -1202,13 +1205,58 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         async with AsyncExitStack() as exit_stack:
             if MCP_V2:
                 v2_timeout = cast(float | None, read_timeout)
-                client = create_v2_client(
-                    self.create_streams(),
-                    read_timeout_seconds=v2_timeout,
-                    message_handler=self.message_handler,
+                session_ready: asyncio.Future[ClientSession] = (
+                    asyncio.get_running_loop().create_future()
                 )
-                connected_client = await exit_stack.enter_async_context(client)
-                yield connected_client.session
+                close_client = asyncio.Event()
+
+                async def run_client() -> None:
+                    try:
+                        client = create_v2_client(
+                            self.create_streams(),
+                            read_timeout_seconds=v2_timeout,
+                            message_handler=self.message_handler,
+                        )
+                        async with client as connected_client:
+                            session_ready.set_result(connected_client.session)
+                            await close_client.wait()
+                    except BaseException as exc:
+                        if not session_ready.done():
+                            session_ready.set_exception(exc)
+                            return
+                        raise
+
+                client_task = asyncio.create_task(run_client())
+                try:
+                    try:
+                        session = await asyncio.shield(session_ready)
+                    except asyncio.CancelledError:
+                        session_ready.cancel()
+                        client_task.cancel()
+                        try:
+                            await client_task
+                        except BaseException:
+                            pass
+                        raise
+                    except BaseException:
+                        await client_task
+                        raise
+
+                    try:
+                        yield session
+                    finally:
+                        close_client.set()
+                        try:
+                            await client_task
+                        except asyncio.CancelledError:
+                            client_task.cancel()
+                            try:
+                                await client_task
+                            except BaseException:
+                                pass
+                            raise
+                finally:
+                    close_client.set()
                 return
 
             transport = await exit_stack.enter_async_context(self.create_streams())
@@ -2228,7 +2276,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         if is_http_status_error(exc):
             return http_status_code(exc) >= 500
         if isinstance(exc, MCPError):
-            return is_mcp_timeout_error(exc)
+            return is_mcp_timeout_error(exc) or is_mcp_connection_closed_error(exc)
         if isinstance(exc, BaseExceptionGroup):
             return bool(exc.exceptions) and all(
                 self._should_retry_in_isolated_session(inner) for inner in exc.exceptions

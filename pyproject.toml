@@ -229,12 +229,10 @@ format-command = "ruff format --stdin-filename {filename}"
 
 [tool.uv]
 exclude-newer = "7 days"
-# TODO: Remove the mcp and mcp-types exclusions seven days after the MCP 2.0 release.
-exclude-newer-package = { openai = false, mcp = false, mcp-types = false }
+exclude-newer-package = { openai = false }
 index-strategy = "first-index"
 
 [tool.uv.pip]
 exclude-newer = "7 days"
-# TODO: Remove the mcp and mcp-types exclusions seven days after the MCP 2.0 release.
-exclude-newer-package = { openai = false, mcp = false, mcp-types = false }
+exclude-newer-package = { openai = false }
 index-strategy = "first-index"
