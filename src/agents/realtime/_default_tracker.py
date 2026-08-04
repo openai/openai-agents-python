@@ -17,7 +17,6 @@ class ModelAudioState:
 @dataclass
 class ModelResponseAudioState:
     items: list[tuple[str, int]]
-    playback_started: bool = False
 
 
 class ModelAudioTracker:
@@ -76,17 +75,8 @@ class ModelAudioTracker:
         if interrupted_state is not None and self._last_audio_item in interrupted_state.items:
             self._last_audio_item = None
 
-    def on_playback_started(self, item_id: str, item_content_index: int) -> None:
-        """Record that playback reached the response containing an audio item."""
-        state = self._states.get((item_id, item_content_index))
-        if state is None or state.response_id is None:
-            return
-        response_state = self._audio_items_by_response_id.get(state.response_id)
-        if response_state is not None:
-            response_state.playback_started = True
-
     def on_response_done(self, response_id: str) -> None:
-        """Release response-scoped indexes after guardrails and playback settle."""
+        """Release response-scoped indexes after guardrails settle."""
         self._audio_items_by_response_id.pop(response_id, None)
 
     def clear_response_indexes(self) -> None:
@@ -105,8 +95,3 @@ class ModelAudioTracker:
         """Return every audio item received for a response in arrival order."""
         response_state = self._audio_items_by_response_id.get(response_id)
         return tuple(response_state.items) if response_state is not None else ()
-
-    def has_response_playback_started(self, response_id: str) -> bool:
-        """Return whether playback has reached any audio item for a response."""
-        response_state = self._audio_items_by_response_id.get(response_id)
-        return response_state.playback_started if response_state is not None else False

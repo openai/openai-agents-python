@@ -99,9 +99,11 @@ class RealtimeModelSendInterrupt:
     """Force sending a response.cancel event even if automatic cancellation is enabled."""
 
     response_id: str | None = None
-    """Limit response cancellation to this response ID, when supported by the model.
+    """Scope response cancellation and audio playback interruption to this response ID, when
+    supported by the model.
 
-    Audio playback is still interrupted unless `cancel_response_only` is set.
+    If the transport no longer has audio for this response, it must not interrupt unrelated current
+    playback. Audio playback is skipped when `cancel_response_only` is set.
     """
 
     cancel_response_only: bool = False

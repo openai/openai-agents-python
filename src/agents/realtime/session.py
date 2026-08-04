@@ -575,12 +575,12 @@ class RealtimeSession(RealtimeModelListener):
                 self._active_output_response_id = None
                 self._active_output_response_agent = None
 
-            await self._put_event(
-                RealtimeAgentEndEvent(
-                    agent=self._current_agent,
-                    info=self._event_info,
+                await self._put_event(
+                    RealtimeAgentEndEvent(
+                        agent=self._current_agent,
+                        info=self._event_info,
+                    )
                 )
-            )
         elif event.type == "exception":
             # Store the exception to be raised in __aiter__
             self._stored_exception = event.exception

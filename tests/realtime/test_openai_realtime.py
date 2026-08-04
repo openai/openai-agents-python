@@ -30,7 +30,11 @@ from agents.realtime.model_inputs import (
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
 )
-from agents.realtime.openai_realtime import OpenAIRealtimeWebSocketModel, TransportConfig
+from agents.realtime.openai_realtime import (
+    OpenAIRealtimeWebSocketModel,
+    TransportConfig,
+    _RealtimeInterruptError,
+)
 
 
 class TestOpenAIRealtimeWebSocketModel:
@@ -1207,6 +1211,94 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert model._audio_state_tracker.get_last_audio_item() == ("audio_item", 0)
 
     @pytest.mark.asyncio
+    async def test_concurrent_response_only_interrupts_cancel_response_once(
+        self, model, monkeypatch
+    ):
+        await model._mark_response_created()
+        send_started = asyncio.Event()
+        allow_send = asyncio.Event()
+        sent_events = []
+
+        async def send_raw(event):
+            sent_events.append(event)
+            send_started.set()
+            await allow_send.wait()
+
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        interrupt = RealtimeModelSendInterrupt(
+            force_response_cancel=True,
+            response_id="response_1",
+            cancel_response_only=True,
+        )
+
+        first = asyncio.create_task(model.send_event(interrupt))
+        await send_started.wait()
+        second = asyncio.create_task(model.send_event(interrupt))
+        await asyncio.sleep(0)
+        allow_send.set()
+        await asyncio.gather(first, second)
+
+        assert [(event.type, event.response_id) for event in sent_events] == [
+            ("response.cancel", "response_1")
+        ]
+        assert model._response_cancel_sends_in_flight == set()
+        assert model._response_control == "free"
+
+    @pytest.mark.asyncio
+    async def test_response_only_interrupt_can_retry_after_send_failure(self, model, monkeypatch):
+        await model._mark_response_created()
+        send_error = RuntimeError("cancel failed")
+        send_raw = AsyncMock(side_effect=[send_error, None])
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        interrupt = RealtimeModelSendInterrupt(
+            force_response_cancel=True,
+            response_id="response_1",
+            cancel_response_only=True,
+        )
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await model.send_event(interrupt)
+        await model.send_event(interrupt)
+
+        assert exc_info.value is send_error
+        assert send_raw.await_count == 2
+        assert model._response_control == "free"
+
+    @pytest.mark.asyncio
+    async def test_response_only_interrupt_can_retry_after_send_cancellation(
+        self, model, monkeypatch
+    ):
+        await model._mark_response_created()
+        send_started = asyncio.Event()
+
+        async def blocked_send(_event):
+            send_started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(model, "_send_raw_message", blocked_send)
+        interrupt = RealtimeModelSendInterrupt(
+            force_response_cancel=True,
+            response_id="response_1",
+            cancel_response_only=True,
+        )
+
+        first = asyncio.create_task(model.send_event(interrupt))
+        await send_started.wait()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        assert model._response_cancel_sends_in_flight == set()
+        retry_send = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", retry_send)
+
+        await model.send_event(interrupt)
+
+        retry_send.assert_awaited_once()
+        assert retry_send.await_args is not None
+        assert retry_send.await_args.args[0].response_id == "response_1"
+
+    @pytest.mark.asyncio
     async def test_response_only_interrupt_skips_cancel_after_response_done(
         self, model, monkeypatch
     ):
@@ -1342,6 +1434,139 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert model._playback_tracker.get_state()["current_item_id"] == "new_audio_item"
 
     @pytest.mark.asyncio
+    async def test_response_scoped_interrupt_does_not_consume_new_response_cancel_state(
+        self, model, monkeypatch
+    ):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "old_audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="old_response",
+        )
+        model._audio_state_tracker.on_audio_delta(
+            "new_audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="new_response",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("old_audio_item", 0, 50)
+        await model._mark_response_created()
+
+        async def advance_response(_event):
+            await model._mark_response_done()
+            await model._mark_response_created()
+            model._playback_tracker.on_play_ms("new_audio_item", 0, 25)
+
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock(side_effect=advance_response))
+
+        await model._send_interrupt(
+            RealtimeModelSendInterrupt(
+                force_response_cancel=True,
+                response_id="old_response",
+            )
+        )
+
+        assert model._response_control == "free"
+        assert model._response_cancel_sends_in_flight == set()
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._send_interrupt(
+            RealtimeModelSendInterrupt(
+                force_response_cancel=True,
+                response_id="new_response",
+            )
+        )
+
+        cancel_events = [
+            call.args[0]
+            for call in send_raw.await_args_list
+            if call.args[0].type == "response.cancel"
+        ]
+        assert [event.response_id for event in cancel_events] == [
+            "old_response",
+            "new_response",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_interrupt_preserves_single_failure_after_attempting_cancel(
+        self, model, monkeypatch
+    ):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="response_1",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("audio_item", 0, 50)
+        await model._mark_response_created()
+
+        listener_error = RuntimeError("listener failed")
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock(side_effect=listener_error))
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await model._send_interrupt(
+                RealtimeModelSendInterrupt(
+                    force_response_cancel=True,
+                    response_id="response_1",
+                )
+            )
+
+        assert exc_info.value is listener_error
+        assert [call.args[0].type for call in send_raw.await_args_list] == [
+            "conversation.item.truncate",
+            "response.cancel",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_interrupt_aggregates_failures_in_operation_order(self, model, monkeypatch):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="response_1",
+        )
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("audio_item", 0, 50)
+        await model._mark_response_created()
+
+        listener_error = RuntimeError("listener failed")
+        truncate_error = RuntimeError("truncate failed")
+        cancel_error = RuntimeError("cancel failed")
+
+        async def fail_raw_message(event):
+            if event.type == "conversation.item.truncate":
+                raise truncate_error
+            if event.type == "response.cancel":
+                raise cancel_error
+            raise AssertionError(f"Unexpected event type: {event.type}")
+
+        monkeypatch.setattr(model, "_send_raw_message", AsyncMock(side_effect=fail_raw_message))
+        monkeypatch.setattr(model, "_emit_event", AsyncMock(side_effect=listener_error))
+
+        with pytest.raises(_RealtimeInterruptError) as exc_info:
+            await model._send_interrupt(
+                RealtimeModelSendInterrupt(
+                    force_response_cancel=True,
+                    response_id="response_1",
+                )
+            )
+
+        assert exc_info.value.errors == (
+            ("emit_audio_interrupted", listener_error),
+            ("truncate_audio", truncate_error),
+            ("cancel_response", cancel_error),
+        )
+
+    @pytest.mark.asyncio
     async def test_response_scoped_interrupt_suppresses_late_source_audio_until_done(
         self, model, monkeypatch
     ):
@@ -1409,10 +1634,9 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
             model._retire_response_audio(response_id)
 
         assert model._audio_state_tracker._audio_items_by_response_id == {}
-        assert model._pending_audio_response_retirements == {}
         assert model._audio_state_tracker.get_state("item_19", 0) is not None
 
-    def test_custom_playback_retains_index_until_last_response_item_finishes(self, model):
+    def test_custom_playback_that_never_starts_releases_response_index(self, model):
         model._audio_state_tracker.set_audio_format("pcm16")
         model._audio_state_tracker.on_audio_delta(
             "first_item",
@@ -1427,48 +1651,9 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
             response_id="response_1",
         )
         model._playback_tracker = RealtimePlaybackTracker()
-
         model._retire_response_audio("response_1")
-        assert model._audio_state_tracker.get_audio_items_for_response("response_1")
-
-        model._playback_tracker.on_play_ms("first_item", 0, 100)
-        assert model._audio_state_tracker.get_audio_items_for_response("response_1")
-        model._playback_tracker.on_play_ms("second_item", 0, 100)
 
         assert model._audio_state_tracker.get_audio_items_for_response("response_1") == ()
-        assert model._pending_audio_response_retirements == {}
-        assert model._playback_tracker._progress_listeners == set()
-
-    @pytest.mark.asyncio
-    async def test_custom_playback_started_before_retirement_releases_source_index(
-        self, model, monkeypatch
-    ):
-        model._playback_tracker = RealtimePlaybackTracker()
-        monkeypatch.setattr(model, "_emit_event", AsyncMock())
-
-        await model._handle_audio_delta(
-            SimpleNamespace(
-                response_id="old_response",
-                item_id="old_item",
-                content_index=0,
-                delta="dGVzdA==",
-            )
-        )
-        await model._handle_audio_delta(
-            SimpleNamespace(
-                response_id="new_response",
-                item_id="new_item",
-                content_index=0,
-                delta="dGVzdA==",
-            )
-        )
-
-        model._playback_tracker.on_play_ms("old_item", 0, 1)
-        model._playback_tracker.on_play_ms("new_item", 0, 1)
-        model._retire_response_audio("old_response")
-
-        assert model._audio_state_tracker.get_audio_items_for_response("old_response") == ()
-        assert model._pending_audio_response_retirements == {}
 
     @pytest.mark.asyncio
     async def test_close_releases_pending_response_audio_indexes(self, model):
@@ -1479,16 +1664,33 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
             b"\x00" * 4800,
             response_id="response_1",
         )
-        model._playback_tracker = RealtimePlaybackTracker()
-        model._playback_tracker.on_play_ms("audio_item", 0, 50)
-        model._retire_response_audio("response_1")
+        model._interrupted_audio_response_ids.add("response_1")
 
         await model.close()
 
         assert model._audio_state_tracker.get_audio_items_for_response("response_1") == ()
-        assert model._pending_audio_response_retirements == {}
         assert model._interrupted_audio_response_ids == set()
-        assert model._playback_tracker._progress_listeners == set()
+
+    @pytest.mark.asyncio
+    async def test_close_failure_releases_pending_response_audio_indexes(self, model):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="response_1",
+        )
+        model._interrupted_audio_response_ids.add("response_1")
+        close_error = RuntimeError("close failed")
+        model._websocket = AsyncMock()
+        model._websocket.close.side_effect = close_error
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await model.close()
+
+        assert exc_info.value is close_error
+        assert model._audio_state_tracker.get_audio_items_for_response("response_1") == ()
+        assert model._interrupted_audio_response_ids == set()
 
     @pytest.mark.asyncio
     async def test_response_only_interrupt_requires_response_id(self, model):

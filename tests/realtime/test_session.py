@@ -3981,6 +3981,10 @@ class TestGuardrailFunctionality:
         assert session._active_output_response_agent is active_agent
         assert session._item_transcripts == {"new_item": "still active"}
         assert session._item_guardrail_run_counts == {"new_item": 0}
+        queued_events = []
+        while not session._event_queue.empty():
+            queued_events.append(await session._event_queue.get())
+        assert not any(isinstance(event, RealtimeAgentEndEvent) for event in queued_events)
 
     @pytest.mark.asyncio
     async def test_interrupted_response_audio_delta_is_not_forwarded(self, mock_model, mock_agent):
