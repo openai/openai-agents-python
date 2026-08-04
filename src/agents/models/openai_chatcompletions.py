@@ -306,6 +306,23 @@ class OpenAIChatCompletionsModel(Model):
                 "output_tokens_details": usage.output_tokens_details.model_dump(),
             }
 
+            # Surface content-filter refusals explicitly. Some providers (for example Azure
+            # OpenAI content filtering, or Bedrock-backed Chat Completions proxies) signal a
+            # safety block only via ``finish_reason == "content_filter"`` with an empty message
+            # and no ``refusal`` field. Without this the message converts to zero output items
+            # and the caller sees an indistinguishable "empty turn", which drives agent loops
+            # into fruitless retries. The streamed path already synthesizes the same refusal,
+            # so keep both paths aligned.
+            if (
+                message is not None
+                and first_choice is not None
+                and first_choice.finish_reason == "content_filter"
+                and not message.content
+                and not message.refusal
+                and not message.tool_calls
+            ):
+                message.refusal = "Response withheld by the provider's content filter."
+
             # Build provider_data for provider_specific_fields
             provider_data = {"model": self.model}
             if message is not None and hasattr(response, "id"):
