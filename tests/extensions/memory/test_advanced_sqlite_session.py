@@ -182,6 +182,32 @@ async def test_create_branch_logging_respects_model_data_policy(monkeypatch, red
         session.close()
 
 
+async def test_create_branch_rejects_existing_branch_id():
+    session = AdvancedSQLiteSession(session_id="s4150", create_tables=True)
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "a"},
+                {"role": "user", "content": "two"},
+                {"role": "assistant", "content": "b"},
+            ]
+        )
+        await session.create_branch_from_turn(2, "dup")
+        # Return to a branch where turn 2 still resolves, so the only thing
+        # left for the second call to object to is the duplicate branch id.
+        await session.switch_to_branch("main")
+        before = {b["branch_id"]: b["message_count"] for b in await session.list_branches()}
+
+        with pytest.raises(ValueError, match="already exists"):
+            await session.create_branch_from_turn(2, "dup")
+
+        after = {b["branch_id"]: b["message_count"] for b in await session.list_branches()}
+        assert after == before, "a rejected branch creation must not modify any branch"
+    finally:
+        session.close()
+
+
 async def test_advanced_session_respects_custom_table_names():
     """AdvancedSQLiteSession should consistently use configured table names."""
     session = AdvancedSQLiteSession(

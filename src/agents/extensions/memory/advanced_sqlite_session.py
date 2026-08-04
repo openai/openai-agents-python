@@ -863,6 +863,11 @@ class AdvancedSQLiteSession(SQLiteSession):
         if branch_name is None:
             timestamp = int(time.time())
             branch_name = f"branch_from_turn_{turn_number}_{timestamp}"
+        elif await self._branch_exists(branch_name):
+            raise ValueError(
+                f"Branch '{branch_name}' already exists in session '{self.session_id}'. "
+                "Pass a different branch_name, or omit it to generate one."
+            )
 
         # Copy messages before the branch point to the new branch
         await self._copy_messages_to_new_branch(branch_name, turn_number)
@@ -1086,6 +1091,25 @@ class AdvancedSQLiteSession(SQLiteSession):
                     return branches
 
         return await asyncio.to_thread(_list_branches_sync)
+
+    async def _branch_exists(self, branch_id: str) -> bool:
+        """Whether any message in this session is already tagged with ``branch_id``."""
+
+        def _branch_exists_sync() -> bool:
+            with self._locked_connection() as conn:
+                with closing(conn.cursor()) as cursor:
+                    cursor.execute(
+                        """
+                        SELECT 1
+                        FROM message_structure
+                        WHERE session_id = ? AND branch_id = ?
+                        LIMIT 1
+                        """,
+                        (self.session_id, branch_id),
+                    )
+                    return cursor.fetchone() is not None
+
+        return await asyncio.to_thread(_branch_exists_sync)
 
     async def _copy_messages_to_new_branch(self, new_branch_id: str, from_turn_number: int) -> None:
         """Copy messages before the branch point to the new branch.
