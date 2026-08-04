@@ -30,6 +30,7 @@ try:
     from agents.voice.models.openai_stt import (
         EVENT_INACTIVITY_TIMEOUT,
         ErrorSentinel,
+        WebsocketDoneSentinel,
         _audio_buffer_to_base64,
     )
 
@@ -612,18 +613,28 @@ async def test_timeout_waiting_for_created_event(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_session_error_event():
+async def test_session_error_event(monkeypatch: pytest.MonkeyPatch):
     """
-    If the session receives an event with "type": "error", it should propagate an exception
-    and put an ErrorSentinel in the output queue.
+    If the session receives an event with "type": "error", it should emit preceding transcripts,
+    drain the event processor, and then propagate an exception.
     """
     mock_ws = create_mock_websocket(
         [
             json.dumps({"type": "transcription_session.created"}),
             json.dumps({"type": "transcription_session.updated"}),
+            json.dumps(
+                {
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "transcript": "Transcript before error",
+                }
+            ),
             # Then an error from the server
             json.dumps({"type": "error", "error": "Simulated server error!"}),
         ]
+    )
+    monkeypatch.setattr(
+        "agents.voice.models.openai_stt.EVENT_INACTIVITY_TIMEOUT",
+        0.1,
     )
 
     with patch("websockets.connect", return_value=mock_ws):
@@ -638,13 +649,95 @@ async def test_session_error_event():
             trace_include_sensitive_data=False,
             trace_include_sensitive_audio_data=False,
         )
+        event_queue_put = AsyncMock(wraps=session._event_queue.put)
+        monkeypatch.setattr(session._event_queue, "put", event_queue_put)
 
+        collected_turns: list[str] = []
         with pytest.raises(STTWebsocketConnectionError):
             turns = session.transcribe_turns()
-            async for _ in turns:
+            async for turn in turns:
+                collected_turns.append(turn)
+
+        assert collected_turns == ["Transcript before error"]
+        assert any(
+            isinstance(call.args[0], WebsocketDoneSentinel)
+            for call in event_queue_put.await_args_list
+        )
+        await session.close()
+        assert session._process_events_task is not None
+        assert session._process_events_task.done()
+        assert not session._process_events_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_session_error_event_before_session_created():
+    mock_ws = create_mock_websocket(
+        [json.dumps({"type": "error", "error": "Simulated setup error!"})]
+    )
+
+    with patch("websockets.connect", return_value=mock_ws):
+        audio_input = await FakeStreamedAudioInput.get(count=2)
+        session = OpenAISTTTranscriptionSession(
+            input=audio_input,
+            client=AsyncMock(api_key="FAKE_KEY"),
+            model="whisper-1",
+            settings=STTModelSettings(),
+            trace_include_sensitive_data=False,
+            trace_include_sensitive_audio_data=False,
+        )
+
+        async def consume_turns() -> None:
+            async for _ in session.transcribe_turns():
                 pass
 
-        await session.close()
+        with pytest.raises(STTWebsocketConnectionError):
+            await asyncio.wait_for(consume_turns(), timeout=1)
+
+        assert session._process_events_task is not None
+        assert session._process_events_task.done()
+        assert not session._process_events_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_listener_timeout_drains_buffered_transcript_before_setup():
+    messages = [
+        json.dumps(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "Transcript before listener timeout",
+            }
+        )
+    ]
+
+    async def messages_then_timeout() -> AsyncGenerator[str, None]:
+        for message in messages:
+            yield message
+        raise TimeoutError("Simulated listener timeout")
+
+    mock_ws = AsyncMock()
+    mock_ws.__aenter__.return_value = mock_ws
+    mock_ws.__aiter__.side_effect = messages_then_timeout
+
+    with patch("websockets.connect", return_value=mock_ws):
+        audio_input = await FakeStreamedAudioInput.get(count=2)
+        session = OpenAISTTTranscriptionSession(
+            input=audio_input,
+            client=AsyncMock(api_key="FAKE_KEY"),
+            model="whisper-1",
+            settings=STTModelSettings(),
+            trace_include_sensitive_data=False,
+            trace_include_sensitive_audio_data=False,
+        )
+
+        collected_turns: list[str] = []
+        with pytest.raises(STTWebsocketConnectionError):
+            async for turn in session.transcribe_turns():
+                collected_turns.append(turn)
+
+        assert collected_turns == ["Transcript before listener timeout"]
+        assert session._process_events_task is not None
+        assert session._process_events_task.done()
+        assert not session._process_events_task.cancelled()
 
 
 @pytest.mark.asyncio
