@@ -493,8 +493,12 @@ async def test_parallel_guardrail_may_not_prevent_tool_execution():
     guardrail_executed = False
     tool_executed = asyncio.Event()
 
+    # Async so the tool body runs on the event-loop thread. A sync tool is dispatched
+    # through asyncio.to_thread, and asyncio.Event is not thread-safe, so setting it
+    # from the worker thread would be the new race. This test covers guardrail/tool
+    # ordering, not sync-tool offloading.
     @function_tool
-    def fast_tool() -> str:
+    async def fast_tool() -> str:
         nonlocal tool_was_executed
         tool_was_executed = True
         tool_executed.set()
@@ -850,8 +854,12 @@ async def test_parallel_guardrail_may_not_prevent_tool_execution_streaming():
     guardrail_executed = False
     tool_executed = asyncio.Event()
 
+    # Async so the tool body runs on the event-loop thread. A sync tool is dispatched
+    # through asyncio.to_thread, and asyncio.Event is not thread-safe, so setting it
+    # from the worker thread would be the new race. This test covers guardrail/tool
+    # ordering, not sync-tool offloading.
     @function_tool
-    def fast_tool() -> str:
+    async def fast_tool() -> str:
         nonlocal tool_was_executed
         tool_was_executed = True
         tool_executed.set()
