@@ -40,6 +40,10 @@ class WebsocketDoneSentinel:
     pass
 
 
+class _ListenerError(Exception):
+    pass
+
+
 def _audio_to_base64(audio_data: list[npt.NDArray[np.int16 | np.float32]]) -> str:
     return _audio_buffer_to_base64(np.concatenate(audio_data))
 
@@ -55,7 +59,9 @@ def _audio_buffer_to_base64(buffer: npt.NDArray[np.int16 | np.float32]) -> str:
 
 
 async def _wait_for_event(
-    event_queue: asyncio.Queue[dict[str, Any]], expected_types: list[str], timeout: float
+    event_queue: asyncio.Queue[dict[str, Any] | ErrorSentinel],
+    expected_types: list[str],
+    timeout: float,
 ):
     """
     Wait for an event from event_queue whose type is in expected_types within the specified timeout.
@@ -66,6 +72,8 @@ async def _wait_for_event(
         if remaining <= 0:
             raise TimeoutError(f"Timeout waiting for event(s): {expected_types}")
         evt = await asyncio.wait_for(event_queue.get(), timeout=remaining)
+        if isinstance(evt, ErrorSentinel):
+            raise _ListenerError("Websocket listener failed") from evt.error
         evt_type = evt.get("type", "")
         if evt_type in expected_types:
             return evt
@@ -98,8 +106,10 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             asyncio.Queue()
         )
         self._websocket: websockets.ClientConnection | None = None
-        self._event_queue: asyncio.Queue[dict[str, Any] | WebsocketDoneSentinel] = asyncio.Queue()
-        self._state_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._event_queue: asyncio.Queue[dict[str, Any] | ErrorSentinel | WebsocketDoneSentinel] = (
+            asyncio.Queue()
+        )
+        self._state_queue: asyncio.Queue[dict[str, Any] | ErrorSentinel] = asyncio.Queue()
         self._turn_audio_buffer: list[npt.NDArray[np.int16 | np.float32]] = []
         self._tracing_span: Span[TranscriptionSpanData] | None = None
 
@@ -142,24 +152,24 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
 
         try:
             async for message in self._websocket:
-                try:
-                    event = json.loads(message)
+                event = json.loads(message)
 
-                    if event.get("type") == "error":
-                        raise STTWebsocketConnectionError(f"Error event: {event.get('error')}")
+                if event.get("type") == "error":
+                    raise STTWebsocketConnectionError(f"Error event: {event.get('error')}")
 
-                    if event.get("type") in [
-                        "session.updated",
-                        "transcription_session.updated",
-                        "session.created",
-                        "transcription_session.created",
-                    ]:
-                        await self._state_queue.put(event)
+                if event.get("type") in [
+                    "session.updated",
+                    "transcription_session.updated",
+                    "session.created",
+                    "transcription_session.created",
+                ]:
+                    await self._state_queue.put(event)
 
-                    await self._event_queue.put(event)
-                except Exception as e:
-                    await self._output_queue.put(ErrorSentinel(e))
-                    raise STTWebsocketConnectionError("Error parsing events") from e
+                await self._event_queue.put(event)
+        except Exception as e:
+            error = ErrorSentinel(e)
+            await self._event_queue.put(error)
+            await self._state_queue.put(error)
         finally:
             await self._event_queue.put(WebsocketDoneSentinel())
 
@@ -193,6 +203,8 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                 ["session.created", "transcription_session.created"],
                 SESSION_CREATION_TIMEOUT,
             )
+        except _ListenerError:
+            raise
         except TimeoutError as e:
             wrapped_err = STTWebsocketConnectionError(
                 "Timeout waiting for transcription_session.created event"
@@ -215,6 +227,8 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                 logger.debug("Session updated")
             else:
                 logger.debug("Session updated: %s", event)
+        except _ListenerError:
+            raise
         except TimeoutError as e:
             wrapped_err = STTWebsocketConnectionError(
                 "Timeout waiting for transcription_session.updated event"
@@ -234,6 +248,8 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                 if isinstance(event, WebsocketDoneSentinel):
                     # processed all events and websocket is done
                     break
+                if isinstance(event, ErrorSentinel):
+                    raise STTWebsocketConnectionError("Error parsing events") from event.error
 
                 event_type = event.get("type", "unknown")
                 if event_type in [
@@ -300,6 +316,11 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                 else:
                     logger.error("Listener task not initialized")
                     raise AgentsException("Listener task not initialized")
+        except _ListenerError as e:
+            if self._process_events_task is None:
+                self._process_events_task = asyncio.create_task(self._handle_events())
+            await self._process_events_task
+            raise STTWebsocketConnectionError("Error parsing events") from e.__cause__
         except Exception as e:
             await self._output_queue.put(ErrorSentinel(e))
             raise
