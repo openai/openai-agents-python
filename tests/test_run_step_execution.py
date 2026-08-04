@@ -52,7 +52,7 @@ from agents import (
     trace,
 )
 from agents._public_agent import set_public_agent
-from agents.run_internal import run_loop, turn_resolution
+from agents.run_internal import run_loop, tool_execution, turn_resolution
 from agents.run_internal.agent_bindings import bind_execution_agent, bind_public_agent
 from agents.run_internal.run_loop import (
     NextStepFinalOutput,
@@ -98,15 +98,8 @@ from .utils.hitl import (
 # Deadlock detector for the parent-cancellation tests below. It is deliberately far larger
 # than any bound the runtime itself applies (see `_FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS`)
 # so a slow machine can never turn it into a behavioral deadline; ordering is asserted with
-# events instead.
+# events and runtime instrumentation instead.
 _CANCELLATION_HANG_GUARD_SECONDS = 5.0
-
-
-async def _flush_loop_callbacks(loop: asyncio.AbstractEventLoop) -> None:
-    """Yield until every callback already queued on the loop has run."""
-    marker = loop.create_future()
-    loop.call_soon(marker.set_result, None)
-    await marker
 
 
 def _function_spans() -> list[dict[str, Any]]:
@@ -2598,11 +2591,28 @@ async def test_multiple_tool_calls_cancel_pending_tasks_when_parent_cancelled():
 
 
 @pytest.mark.asyncio
-async def test_parent_cancellation_does_not_wait_for_tool_cleanup():
+async def test_parent_cancellation_does_not_wait_for_tool_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+):
     tool_started = asyncio.Event()
     cleanup_started = asyncio.Event()
     cleanup_finished = asyncio.Event()
     allow_cleanup_exit = asyncio.Event()
+
+    # Instrument the only bounded settle/drain primitive the function-tool runtime has.
+    # Both `_drain_cancelled_function_tool_tasks` and
+    # `_wait_pending_function_tool_tasks_for_timeout` go through it, so a regression that
+    # waits for cancelled tool tasks before re-raising parent cancellation is recorded here
+    # even when that wait is short enough to finish inside every timeout below. Without this,
+    # only an unbounded wait would be caught, and then only by wall-clock.
+    settle_calls: list[set[asyncio.Task[Any]]] = []
+    original_settle = tool_execution._settle_pending_function_tool_tasks
+
+    async def _recording_settle(*args: Any, **kwargs: Any) -> tuple[Any, set[asyncio.Task[Any]]]:
+        settle_calls.append(set(kwargs["pending_tasks"]))
+        return await original_settle(*args, **kwargs)
+
+    monkeypatch.setattr(tool_execution, "_settle_pending_function_tool_tasks", _recording_settle)
 
     async def _slow_cancel_tool() -> str:
         tool_started.set()
@@ -2633,15 +2643,17 @@ async def test_parent_cancellation_does_not_wait_for_tool_cleanup():
 
     execution_task.cancel()
 
-    # Park the tool inside its cleanup first so the check below is ordered by an event rather
-    # than by whether the parent happens to settle within a short wall-clock deadline.
-    await asyncio.wait_for(cleanup_started.wait(), timeout=_CANCELLATION_HANG_GUARD_SECONDS)
-    assert not cleanup_finished.is_set()
-
-    # The parent must surface cancellation while the tool cleanup is still blocked on
-    # `allow_cleanup_exit`; a runtime that awaited the cleanup would hang here instead.
+    # An unbounded wait for the cleanup deadlocks here, because only this test can release
+    # `allow_cleanup_exit` and it has not done so yet.
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(execution_task, timeout=_CANCELLATION_HANG_GUARD_SECONDS)
+
+    # A bounded wait for the cleanup is caught here instead of by the clock: the tool did
+    # reach its cleanup, so a drain would have had tasks to settle.
+    await asyncio.wait_for(cleanup_started.wait(), timeout=_CANCELLATION_HANG_GUARD_SECONDS)
+    assert settle_calls == []
+
+    # The cleanup is still parked on `allow_cleanup_exit`, so it never ran to completion.
     assert not cleanup_finished.is_set()
 
     allow_cleanup_exit.set()
@@ -2677,21 +2689,42 @@ async def test_parent_cancellation_wins_when_shield_raises_after_tool_finishes(
 
 
 @pytest.mark.asyncio
-async def test_parent_cancellation_does_not_report_tool_failure_as_background_error():
+async def test_parent_cancellation_does_not_report_tool_failure_as_background_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
     loop = asyncio.get_running_loop()
     original_handler = loop.get_exception_handler()
     reported_contexts: list[dict[str, Any]] = []
     tool_started = asyncio.Event()
-    tool_failed = asyncio.Event()
+    background_callback_ran = asyncio.Event()
 
     def _exception_handler(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
         reported_contexts.append(context)
 
+    # The reporting decision under test happens inside this done callback, which parent
+    # cancellation attaches to the tasks it detaches. Waiting on it is what proves the
+    # background path actually ran, rather than assuming a number of loop iterations.
+    original_consume = tool_execution._consume_function_tool_task_result
+
+    def _recording_consume(task: asyncio.Task[Any], **kwargs: Any) -> None:
+        try:
+            original_consume(task, **kwargs)
+        finally:
+            background_callback_ran.set()
+
+    monkeypatch.setattr(tool_execution, "_consume_function_tool_task_result", _recording_consume)
+
     async def _failing_tool() -> str:
         tool_started.set()
-        await asyncio.sleep(0)
-        tool_failed.set()
-        raise ValueError("boom")
+        try:
+            await asyncio.Future()
+            return "unreachable"
+        except asyncio.CancelledError:
+            # Fail from cancellation cleanup so the failure cannot exist before parent
+            # cancellation has detached this tool. Failing any earlier lets the runtime
+            # consume the exception from an already-completed task, and the background
+            # reporting path asserted below is never reached.
+            raise ValueError("boom") from None
 
     tool = function_tool(
         _failing_tool,
@@ -2714,12 +2747,11 @@ async def test_parent_cancellation_does_not_report_tool_failure_as_background_er
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(execution_task, timeout=_CANCELLATION_HANG_GUARD_SECONDS)
 
-        # The tool has to actually fail while the parent is cancelling, otherwise the
-        # assertion below would hold without ever reaching the reporting path.
-        await asyncio.wait_for(tool_failed.wait(), timeout=_CANCELLATION_HANG_GUARD_SECONDS)
-        # Any report is delivered from a done callback, so drain the loop queue instead of
-        # guessing how many iterations that takes.
-        await _flush_loop_callbacks(loop)
+        # The detached task's done callback is where the report would be emitted, so the
+        # negative assertion below only means something once it has actually run.
+        await asyncio.wait_for(
+            background_callback_ran.wait(), timeout=_CANCELLATION_HANG_GUARD_SECONDS
+        )
     finally:
         loop.set_exception_handler(original_handler)
 
