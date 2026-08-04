@@ -166,6 +166,8 @@ The OpenAI Agents Python repository provides the Python Agents SDK, examples, an
 
 Before submitting changes, ensure relevant checks pass and extend tests when you touch code.
 
+Before adding or changing async, retry, timeout, subprocess, PTY, warning, or xdist-sensitive tests, read [Performance and determinism](tests/README.md#performance-and-determinism) and preserve the applicable behavioral and lifecycle coverage while optimizing execution.
+
 When `$code-change-verification` applies, run it to execute the required verification stack from the repository root. Rerun the full stack after applying fixes.
 
 #### Unit tests and type checking
