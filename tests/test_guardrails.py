@@ -1245,15 +1245,17 @@ async def test_blocking_guardrail_passes_agent_continues_streaming():
 
 @pytest.mark.asyncio
 async def test_mixed_blocking_and_parallel_guardrails():
-    timestamps = {}
+    blocking_finished = asyncio.Event()
+    model_called = asyncio.Event()
+    parallel_finished = asyncio.Event()
+    observed: dict[str, bool] = {}
 
     @input_guardrail(run_in_parallel=False)
     async def blocking_check(
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
-        timestamps["blocking_start"] = time.time()
         await asyncio.sleep(MEDIUM_DELAY)
-        timestamps["blocking_end"] = time.time()
+        blocking_finished.set()
         return GuardrailFunctionOutput(
             output_info="blocking_passed",
             tripwire_triggered=False,
@@ -1263,9 +1265,12 @@ async def test_mixed_blocking_and_parallel_guardrails():
     async def parallel_check(
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
-        timestamps["parallel_start"] = time.time()
-        await asyncio.sleep(MEDIUM_DELAY)
-        timestamps["parallel_end"] = time.time()
+        observed["blocking_finished_at_parallel_start"] = blocking_finished.is_set()
+        # Stay in flight until the model is invoked. If the runner ever waited for this
+        # guardrail before calling the model, the wait would time out instead of relying
+        # on wall-clock margins to detect the missing overlap.
+        await asyncio.wait_for(model_called.wait(), timeout=1)
+        parallel_finished.set()
         return GuardrailFunctionOutput(
             output_info="parallel_passed",
             tripwire_triggered=False,
@@ -1276,7 +1281,9 @@ async def test_mixed_blocking_and_parallel_guardrails():
     original_get_response = model.get_response
 
     async def tracked_get_response(*args, **kwargs):
-        timestamps["model_called"] = time.time()
+        observed["blocking_finished_at_model_call"] = blocking_finished.is_set()
+        observed["parallel_finished_at_model_call"] = parallel_finished.is_set()
+        model_called.set()
         return await original_get_response(*args, **kwargs)
 
     agent = Agent(
@@ -1293,21 +1300,16 @@ async def test_mixed_blocking_and_parallel_guardrails():
     assert result.final_output is not None
     assert len(result.input_guardrail_results) == 2
 
-    assert "blocking_start" in timestamps
-    assert "blocking_end" in timestamps
-    assert "parallel_start" in timestamps
-    assert "parallel_end" in timestamps
-    assert "model_called" in timestamps
-
-    assert timestamps["blocking_end"] <= timestamps["parallel_start"], (
+    assert observed["blocking_finished_at_parallel_start"] is True, (
         "Blocking must complete before parallel starts"
     )
-    assert timestamps["blocking_end"] <= timestamps["model_called"], (
+    assert observed["blocking_finished_at_model_call"] is True, (
         "Blocking must complete before model is called"
     )
-    assert timestamps["model_called"] <= timestamps["parallel_end"], (
+    assert observed["parallel_finished_at_model_call"] is False, (
         "Model called while parallel guardrail still running"
     )
+    assert parallel_finished.is_set() is True, "Parallel guardrail should have completed"
     assert model.first_turn_args is not None, (
         "Model should have been called after blocking guardrails passed"
     )
@@ -1315,15 +1317,17 @@ async def test_mixed_blocking_and_parallel_guardrails():
 
 @pytest.mark.asyncio
 async def test_mixed_blocking_and_parallel_guardrails_streaming():
-    timestamps = {}
+    blocking_finished = asyncio.Event()
+    model_called = asyncio.Event()
+    parallel_finished = asyncio.Event()
+    observed: dict[str, bool] = {}
 
     @input_guardrail(run_in_parallel=False)
     async def blocking_check(
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
-        timestamps["blocking_start"] = time.time()
         await asyncio.sleep(MEDIUM_DELAY)
-        timestamps["blocking_end"] = time.time()
+        blocking_finished.set()
         return GuardrailFunctionOutput(
             output_info="blocking_passed",
             tripwire_triggered=False,
@@ -1333,9 +1337,12 @@ async def test_mixed_blocking_and_parallel_guardrails_streaming():
     async def parallel_check(
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
-        timestamps["parallel_start"] = time.time()
-        await asyncio.sleep(MEDIUM_DELAY)
-        timestamps["parallel_end"] = time.time()
+        observed["blocking_finished_at_parallel_start"] = blocking_finished.is_set()
+        # Stay in flight until the model is invoked. If the runner ever waited for this
+        # guardrail before calling the model, the wait would time out instead of relying
+        # on wall-clock margins to detect the missing overlap.
+        await asyncio.wait_for(model_called.wait(), timeout=1)
+        parallel_finished.set()
         return GuardrailFunctionOutput(
             output_info="parallel_passed",
             tripwire_triggered=False,
@@ -1346,7 +1353,9 @@ async def test_mixed_blocking_and_parallel_guardrails_streaming():
     original_stream_response = model.stream_response
 
     async def tracked_stream_response(*args, **kwargs):
-        timestamps["model_called"] = time.time()
+        observed["blocking_finished_at_model_call"] = blocking_finished.is_set()
+        observed["parallel_finished_at_model_call"] = parallel_finished.is_set()
+        model_called.set()
         async for event in original_stream_response(*args, **kwargs):
             yield event
 
@@ -1366,21 +1375,17 @@ async def test_mixed_blocking_and_parallel_guardrails_streaming():
             received_events = True
 
     assert received_events is True
-    assert "blocking_start" in timestamps
-    assert "blocking_end" in timestamps
-    assert "parallel_start" in timestamps
-    assert "parallel_end" in timestamps
-    assert "model_called" in timestamps
 
-    assert timestamps["blocking_end"] <= timestamps["parallel_start"], (
+    assert observed["blocking_finished_at_parallel_start"] is True, (
         "Blocking must complete before parallel starts"
     )
-    assert timestamps["blocking_end"] <= timestamps["model_called"], (
+    assert observed["blocking_finished_at_model_call"] is True, (
         "Blocking must complete before model is called"
     )
-    assert timestamps["model_called"] <= timestamps["parallel_end"], (
+    assert observed["parallel_finished_at_model_call"] is False, (
         "Model called while parallel guardrail still running"
     )
+    assert parallel_finished.is_set() is True, "Parallel guardrail should have completed"
     assert model.first_turn_args is not None, (
         "Model should have been called after blocking guardrails passed"
     )
