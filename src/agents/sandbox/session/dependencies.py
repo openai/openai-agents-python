@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -73,7 +74,10 @@ class Dependencies:
     def __init__(self) -> None:
         self._bindings: dict[DependencyKey, _Binding] = {}
         self._cache: dict[DependencyKey, object] = {}
+        self._pending: dict[DependencyKey, asyncio.Task[object]] = {}
+        self._active_tasks: set[asyncio.Task[object]] = set()
         self._owned_results: list[object] = []
+        self._close_task: asyncio.Task[None] | None = None
         self._closed = False
 
     @classmethod
@@ -144,6 +148,9 @@ class Dependencies:
             raise DependenciesBindingError(f"Dependency `{key}` is already bound")
         self._bindings[key] = binding
         self._cache.pop(key, None)
+        pending = self._pending.pop(key, None)
+        if pending is not None:
+            pending.cancel()
 
     async def get(self, key: DependencyKey) -> object | None:
         binding = self._bindings.get(key)
@@ -173,24 +180,92 @@ class Dependencies:
             return binding.value
 
         assert isinstance(binding, _FactoryBinding)
+        if self._closed:
+            raise DependenciesError(f"Dependencies container is closed; cannot resolve `{key}`")
         if binding.cache and key in self._cache:
             return self._cache[key]
 
+        if binding.cache:
+            task = self._pending.get(key)
+            if task is not None and task.done():
+                self._pending.pop(key, None)
+                task = None
+            if task is None:
+                task = self._create_factory_task(key, binding)
+                self._pending[key] = task
+            return await self._await_factory_task(key, binding, task, shield=True)
+
+        task = self._create_factory_task(key, binding)
+        return await self._await_factory_task(key, binding, task, shield=False)
+
+    def _create_factory_task(
+        self, key: DependencyKey, binding: _FactoryBinding
+    ) -> asyncio.Task[object]:
+        task = asyncio.create_task(self._run_factory(key, binding))
+        self._active_tasks.add(task)
+        task.add_done_callback(lambda completed: self._factory_task_done(key, completed))
+        return task
+
+    async def _run_factory(self, key: DependencyKey, binding: _FactoryBinding) -> object:
         produced = binding.factory(self)
         value = (
             await cast(Awaitable[object], produced) if inspect.isawaitable(produced) else produced
         )
 
-        if binding.cache:
-            self._cache[key] = value
         if binding.owns_result:
             self._owned_results.append(value)
+        self._raise_if_factory_invalid(key, binding)
+        if binding.cache:
+            self._cache[key] = value
         return value
 
-    async def aclose(self) -> None:
+    async def _await_factory_task(
+        self,
+        key: DependencyKey,
+        binding: _FactoryBinding,
+        task: asyncio.Task[object],
+        *,
+        shield: bool,
+    ) -> object:
+        try:
+            value = await asyncio.shield(task) if shield else await task
+        except asyncio.CancelledError:
+            if task.cancelled():
+                self._raise_if_factory_invalid(key, binding)
+            raise
+
+        self._raise_if_factory_invalid(key, binding)
+        return value
+
+    def _raise_if_factory_invalid(self, key: DependencyKey, binding: _FactoryBinding) -> None:
         if self._closed:
-            return
-        self._closed = True
+            raise DependenciesError(f"Dependencies container closed while resolving `{key}`")
+        if self._bindings.get(key) is not binding:
+            raise DependenciesBindingError(
+                f"Dependency `{key}` was rebound while its factory was resolving"
+            )
+
+    def _factory_task_done(self, key: DependencyKey, task: asyncio.Task[object]) -> None:
+        self._active_tasks.discard(task)
+        if self._pending.get(key) is task:
+            self._pending.pop(key, None)
+        if not task.cancelled():
+            task.exception()
+
+    async def aclose(self) -> None:
+        task = self._close_task
+        if task is None:
+            self._closed = True
+            task = asyncio.create_task(self._close())
+            self._close_task = task
+        await asyncio.shield(task)
+
+    async def _close(self) -> None:
+        active_tasks = tuple(self._active_tasks)
+        for task in active_tasks:
+            task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
 
         seen_ids: set[int] = set()
         for value in reversed(self._owned_results):
@@ -199,3 +274,8 @@ class Dependencies:
                 continue
             seen_ids.add(value_id)
             await _close_best_effort(value)
+
+        self._pending.clear()
+        self._active_tasks.clear()
+        self._cache.clear()
+        self._owned_results.clear()
