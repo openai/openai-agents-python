@@ -4,6 +4,7 @@ import asyncio
 import sqlite3
 import tempfile
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -691,6 +692,40 @@ async def test_sqlite_session_file_lock_is_shared_across_instances():
         session_2.close()
         assert lock_path not in SQLiteSession._file_lock_counts
         assert lock_path not in SQLiteSession._file_locks
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_failed_add_items_releases_write_lock():
+    """A failed add_items must not leave an open write transaction on the cached connection."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_rollback.db"
+        session = SQLiteSession("rollback_test", db_path)
+
+        # json.dumps() fails only after _insert_items() has already opened a write
+        # transaction with the sessions-table upsert.
+        unserializable = cast(TResponseInputItem, {"role": "user", "content": object()})
+        with pytest.raises(TypeError):
+            await session.add_items([unserializable])
+
+        # timeout=0 disables the busy handler, so this raises immediately if the failed
+        # write is still holding the SQLite write lock.
+        probe = sqlite3.connect(str(db_path), timeout=0)
+        try:
+            probe.execute("INSERT INTO agent_sessions (session_id) VALUES ('probe')")
+            probe.commit()
+            rolled_back = probe.execute(
+                "SELECT COUNT(*) FROM agent_sessions WHERE session_id = 'rollback_test'"
+            ).fetchone()[0]
+        finally:
+            probe.close()
+
+        assert rolled_back == 0
+
+        # The session must remain usable after the failure.
+        await session.add_items([{"role": "user", "content": "after failure"}])
+        assert [item.get("content") for item in await session.get_items()] == ["after failure"]
+
+        session.close()
 
 
 @pytest.mark.asyncio

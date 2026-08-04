@@ -288,8 +288,17 @@ class SQLiteSession(SessionABC):
 
         def _add_items_sync():
             with self._locked_connection() as conn:
-                self._insert_items(conn, items)
-                conn.commit()
+                try:
+                    self._insert_items(conn, items)
+                    conn.commit()
+                except Exception:
+                    # _locked_connection() does not manage transactions; roll back
+                    # explicitly so a failure partway through the insert never leaves a
+                    # partial mutation or an open transaction on this cached connection.
+                    # An open write transaction would hold the SQLite write lock for the
+                    # lifetime of the connection and block every later writer.
+                    conn.rollback()
+                    raise
 
         await asyncio.to_thread(_add_items_sync)
 
