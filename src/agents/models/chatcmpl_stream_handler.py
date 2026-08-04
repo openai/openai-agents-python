@@ -75,12 +75,46 @@ class StreamingState:
     # Fields for real-time function call streaming
     function_call_streaming: dict[int, bool] = field(default_factory=dict)
     ignored_tool_call_indexes: set[int] = field(default_factory=set)
-    # Store accumulated thinking text and signature for Anthropic compatibility
-    thinking_text: str = ""
-    thinking_signature: str | None = None
+    # Store the ordered Anthropic thinking block sequence for replay. Text and signatures
+    # cannot be flattened into scalars: each block carries its own signature, and a
+    # redacted_thinking block carries neither text nor signature.
+    thinking_blocks: list[dict[str, Any]] = field(default_factory=list)
     # Store provider data for all output items
     provider_data: dict[str, Any] = field(default_factory=dict)
     has_warned_unsupported_choice: bool = False
+
+    def accumulate_thinking_block(self, block: dict[str, Any]) -> None:
+        """Fold one streamed thinking delta into the ordered block sequence.
+
+        Anthropic streams a thinking block as a run of `thinking_delta` chunks terminated by a
+        single `signature_delta`, so a signature both belongs to the block being accumulated and
+        marks its end. A `redacted_thinking` block arrives whole and is kept verbatim.
+        """
+        if block.get("type") == "redacted_thinking":
+            self.thinking_blocks.append(dict(block))
+            return
+
+        thinking_text = block.get("thinking") or ""
+        signature = block.get("signature") or ""
+        if not thinking_text and not signature:
+            return
+
+        current = self._open_thinking_block()
+        if thinking_text:
+            current["thinking"] = f"{current.get('thinking', '')}{thinking_text}"
+        if signature:
+            # A signature closes the block, so later text starts a new one.
+            current["signature"] = signature
+
+    def _open_thinking_block(self) -> dict[str, Any]:
+        """Return the thinking block still accepting deltas, creating one when needed."""
+        if self.thinking_blocks:
+            last_block = self.thinking_blocks[-1]
+            if last_block.get("type") == "thinking" and "signature" not in last_block:
+                return last_block
+        new_block: dict[str, Any] = {"type": "thinking", "thinking": ""}
+        self.thinking_blocks.append(new_block)
+        return new_block
 
 
 @dataclass
@@ -578,14 +612,7 @@ class ChatCmplStreamHandler:
             if hasattr(delta, "thinking_blocks") and delta.thinking_blocks:
                 for block in delta.thinking_blocks:
                     if isinstance(block, dict):
-                        # Accumulate thinking text
-                        thinking_text = block.get("thinking", "")
-                        if thinking_text:
-                            state.thinking_text += thinking_text
-                        # Store signature if present
-                        signature = block.get("signature")
-                        if signature:
-                            state.thinking_signature = signature
+                        state.accumulate_thinking_block(block)
 
             # Handle reasoning content for reasoning summaries
             if hasattr(delta, "reasoning_content"):
@@ -1099,17 +1126,31 @@ class ChatCmplStreamHandler:
         # include Reasoning item if it exists
         if state.reasoning_content_index_and_output:
             reasoning_item = state.reasoning_content_index_and_output[1]
-            # Store thinking text in content and signature in encrypted_content
-            if state.thinking_text:
-                # Add thinking text as a Content object
-                if not reasoning_item.content:
-                    reasoning_item.content = []
-                reasoning_item.content.append(
-                    Content(text=state.thinking_text, type="reasoning_text")
-                )
-            # Store signature in encrypted_content
-            if state.thinking_signature:
-                reasoning_item.encrypted_content = state.thinking_signature
+            if state.thinking_blocks:
+                # The normalized reasoning fields below cannot represent per-block signatures,
+                # empty thinking text, or redacted_thinking blocks. Keep the complete provider
+                # sequence as the replay source of truth while retaining those released fields
+                # as derived data, matching the non-streaming converter.
+                reasoning_provider_data = dict(getattr(reasoning_item, "provider_data", None) or {})
+                reasoning_provider_data["thinking_blocks"] = [
+                    dict(block) for block in state.thinking_blocks
+                ]
+                reasoning_item.provider_data = reasoning_provider_data  # type: ignore[attr-defined]
+
+                # Retain the released normalized representation for callers and legacy replay.
+                signatures: list[str] = []
+                for block in state.thinking_blocks:
+                    thinking_text = block.get("thinking") or ""
+                    if thinking_text:
+                        if not reasoning_item.content:
+                            reasoning_item.content = []
+                        reasoning_item.content.append(
+                            Content(text=thinking_text, type="reasoning_text")
+                        )
+                    if signature := block.get("signature"):
+                        signatures.append(signature)
+                if signatures:
+                    reasoning_item.encrypted_content = "\n".join(signatures)
             outputs.append(reasoning_item)
 
         outputs.extend(output_layout.function_calls_before_message(state))

@@ -37,6 +37,7 @@ from openai.types.responses import (
 from agents import Agent, Runner, function_tool
 from agents.exceptions import ModelBehaviorError, UserError
 from agents.model_settings import ModelSettings
+from agents.models.chatcmpl_converter import Converter
 from agents.models.chatcmpl_stream_handler import (
     ChatCmplStreamHandler,
     Part,
@@ -884,8 +885,135 @@ async def test_stream_handler_preserves_thinking_blocks_with_reasoning_summary()
     assert isinstance(reasoning_item, ResponseReasoningItem)
     assert reasoning_item.summary[0].text == "summary"
     assert reasoning_item.content
-    assert cast(Any, reasoning_item.content[0]).text == "hidden one hidden two"
-    assert reasoning_item.encrypted_content == "sig-2"
+    # Each block keeps its own signature: merging the text would leave the pair unverifiable.
+    assert [cast(Any, part).text for part in reasoning_item.content] == [
+        "hidden one ",
+        "hidden two",
+    ]
+    assert reasoning_item.encrypted_content == "sig-1\nsig-2"
+    assert cast(Any, reasoning_item).provider_data["thinking_blocks"] == [
+        {"type": "thinking", "thinking": "hidden one ", "signature": "sig-1"},
+        {"type": "thinking", "thinking": "hidden two", "signature": "sig-2"},
+    ]
+
+
+def _thinking_chunk(**delta_kwargs: Any) -> ChatCompletionChunk:
+    return ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="anthropic/claude-4-opus",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta.model_construct(**delta_kwargs))],
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_segments_thinking_blocks_at_signature_deltas() -> None:
+    """A streamed block ends at its signature_delta, so each block keeps its own signature.
+
+    Anthropic streams a thinking block as a run of `thinking_delta` chunks terminated by one
+    `signature_delta`. Accumulating the text into a single scalar merged interleaved blocks and
+    kept only the last signature, which cannot be verified against the merged text on replay.
+    """
+    events = await _collect_handler_events(
+        _thinking_chunk(reasoning_content="summary"),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "step ", "signature": ""}]
+        ),
+        _thinking_chunk(thinking_blocks=[{"type": "thinking", "thinking": "one", "signature": ""}]),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "", "signature": "SIG-1"}]
+        ),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "step two", "signature": ""}]
+        ),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "", "signature": "SIG-2"}]
+        ),
+    )
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    reasoning_item = completed_event.response.output[0]
+    assert isinstance(reasoning_item, ResponseReasoningItem)
+    assert cast(Any, reasoning_item).provider_data["thinking_blocks"] == [
+        {"type": "thinking", "thinking": "step one", "signature": "SIG-1"},
+        {"type": "thinking", "thinking": "step two", "signature": "SIG-2"},
+    ]
+    assert reasoning_item.encrypted_content == "SIG-1\nSIG-2"
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_preserves_redacted_thinking_blocks() -> None:
+    """A redacted_thinking block carries neither text nor signature and was dropped entirely.
+
+    Anthropic requires redacted blocks to be replayed unmodified during tool-use continuation,
+    and the normalized content/encrypted_content pair cannot represent them.
+    """
+    events = await _collect_handler_events(
+        _thinking_chunk(reasoning_content="summary"),
+        _thinking_chunk(thinking_blocks=[{"type": "redacted_thinking", "data": "REDACTED-BLOB"}]),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "visible", "signature": ""}]
+        ),
+        _thinking_chunk(thinking_blocks=[{"type": "thinking", "thinking": "", "signature": "SIG"}]),
+    )
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    reasoning_item = completed_event.response.output[0]
+    assert isinstance(reasoning_item, ResponseReasoningItem)
+    assert cast(Any, reasoning_item).provider_data["thinking_blocks"] == [
+        {"type": "redacted_thinking", "data": "REDACTED-BLOB"},
+        {"type": "thinking", "thinking": "visible", "signature": "SIG"},
+    ]
+    # The redacted block contributes no reasoning_text and no signature.
+    assert [cast(Any, part).text for part in (reasoning_item.content or [])] == ["visible"]
+    assert reasoning_item.encrypted_content == "SIG"
+
+
+@pytest.mark.asyncio
+async def test_streamed_thinking_blocks_replay_through_the_converter() -> None:
+    """End-to-end: a streamed Anthropic response must replay as the same ordered blocks.
+
+    This covers the streaming counterpart of the non-streaming replay path, so a signed block
+    survives item serialization and reaches the outbound request unchanged.
+    """
+    events = await _collect_handler_events(
+        _thinking_chunk(reasoning_content="summary"),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "alpha", "signature": ""}]
+        ),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "", "signature": "SIG-A"}]
+        ),
+        _thinking_chunk(thinking_blocks=[{"type": "redacted_thinking", "data": "BLOB"}]),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "beta", "signature": ""}]
+        ),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "", "signature": "SIG-B"}]
+        ),
+        _thinking_chunk(content="visible answer"),
+    )
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    stored_items = [item.model_dump() for item in completed_event.response.output]
+
+    messages = Converter.items_to_messages(
+        cast(Any, stored_items),
+        model="anthropic/claude-4-opus",
+        preserve_thinking_blocks=True,
+    )
+
+    assistant_messages = [msg for msg in messages if msg.get("role") == "assistant"]
+    assert len(assistant_messages) == 1
+    # The complete sequence replays through LiteLLM's native assistant thinking_blocks field,
+    # which round-trips redacted blocks and per-block signatures unchanged.
+    assert cast(Any, assistant_messages[0])["thinking_blocks"] == [
+        {"type": "thinking", "thinking": "alpha", "signature": "SIG-A"},
+        {"type": "redacted_thinking", "data": "BLOB"},
+        {"type": "thinking", "thinking": "beta", "signature": "SIG-B"},
+    ]
+    assert assistant_messages[0].get("content") == "visible answer"
 
 
 @pytest.mark.asyncio
