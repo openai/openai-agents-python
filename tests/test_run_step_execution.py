@@ -101,6 +101,11 @@ from .utils.hitl import (
     reject_tool_call,
 )
 
+# Deadlock detector for the parent-cancellation tests below. It is deliberately far larger
+# than any bound the runtime itself applies (see `_FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS`),
+# so it cannot become the behavioral assertion.
+_CANCELLATION_HANG_GUARD_SECONDS = 5.0
+
 
 def _function_spans() -> list[dict[str, Any]]:
     function_spans: list[dict[str, Any]] = []
@@ -2622,11 +2627,22 @@ async def test_multiple_tool_calls_cancel_pending_tasks_when_parent_cancelled():
 
 
 @pytest.mark.asyncio
-async def test_parent_cancellation_does_not_wait_for_tool_cleanup():
+async def test_parent_cancellation_does_not_wait_for_tool_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+):
     tool_started = asyncio.Event()
     cleanup_started = asyncio.Event()
     cleanup_finished = asyncio.Event()
     allow_cleanup_exit = asyncio.Event()
+
+    settle_calls: list[set[asyncio.Task[Any]]] = []
+    original_settle = tool_execution._settle_pending_function_tool_tasks
+
+    async def _recording_settle(*args: Any, **kwargs: Any) -> tuple[Any, set[asyncio.Task[Any]]]:
+        settle_calls.append(set(kwargs["pending_tasks"]))
+        return await original_settle(*args, **kwargs)
+
+    monkeypatch.setattr(tool_execution, "_settle_pending_function_tool_tasks", _recording_settle)
 
     async def _slow_cancel_tool() -> str:
         tool_started.set()
@@ -2653,15 +2669,20 @@ async def test_parent_cancellation_does_not_wait_for_tool_cleanup():
     )
 
     execution_task = asyncio.create_task(get_execute_result(agent, response))
-    await asyncio.wait_for(tool_started.wait(), timeout=0.2)
+    await asyncio.wait_for(tool_started.wait(), timeout=_CANCELLATION_HANG_GUARD_SECONDS)
 
     execution_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(execution_task, timeout=0.1)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(execution_task, timeout=_CANCELLATION_HANG_GUARD_SECONDS)
 
-    await asyncio.wait_for(cleanup_started.wait(), timeout=0.2)
-    allow_cleanup_exit.set()
-    await asyncio.wait_for(cleanup_finished.wait(), timeout=0.2)
+        await asyncio.wait_for(cleanup_started.wait(), timeout=_CANCELLATION_HANG_GUARD_SECONDS)
+        assert settle_calls == []
+        assert not cleanup_finished.is_set()
+    finally:
+        allow_cleanup_exit.set()
+
+    await asyncio.wait_for(cleanup_finished.wait(), timeout=_CANCELLATION_HANG_GUARD_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -2693,19 +2714,50 @@ async def test_parent_cancellation_wins_when_shield_raises_after_tool_finishes(
 
 
 @pytest.mark.asyncio
-async def test_parent_cancellation_does_not_report_tool_failure_as_background_error():
+async def test_parent_cancellation_does_not_report_tool_failure_as_background_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
     loop = asyncio.get_running_loop()
     original_handler = loop.get_exception_handler()
     reported_contexts: list[dict[str, Any]] = []
     tool_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    allow_cleanup_failure = asyncio.Event()
+    background_callback_ran = asyncio.Event()
+    background_task: asyncio.Task[Any] | None = None
+    background_exception: UserError | None = None
 
     def _exception_handler(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
         reported_contexts.append(context)
 
+    original_consume = tool_execution._consume_function_tool_task_result
+
+    def _recording_consume(task: asyncio.Task[Any], **kwargs: Any) -> None:
+        nonlocal background_task, background_exception
+        try:
+            original_consume(task, **kwargs)
+        finally:
+            if not task.cancelled():
+                exception = task.exception()
+                if (
+                    isinstance(exception, UserError)
+                    and str(exception) == "Error running tool failing_tool: boom"
+                ):
+                    background_task = task
+                    background_exception = exception
+                    background_callback_ran.set()
+
+    monkeypatch.setattr(tool_execution, "_consume_function_tool_task_result", _recording_consume)
+
     async def _failing_tool() -> str:
         tool_started.set()
-        await asyncio.sleep(0)
-        raise ValueError("boom")
+        try:
+            await asyncio.Future()
+            return "unreachable"
+        except asyncio.CancelledError:
+            cleanup_started.set()
+            await allow_cleanup_failure.wait()
+            raise ValueError("boom") from None
 
     tool = function_tool(
         _failing_tool,
@@ -2722,23 +2774,25 @@ async def test_parent_cancellation_does_not_report_tool_failure_as_background_er
     loop.set_exception_handler(_exception_handler)
     try:
         execution_task = asyncio.create_task(get_execute_result(agent, response))
-        await asyncio.wait_for(tool_started.wait(), timeout=0.2)
+        await asyncio.wait_for(tool_started.wait(), timeout=_CANCELLATION_HANG_GUARD_SECONDS)
 
         execution_task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await execution_task
+            await asyncio.wait_for(execution_task, timeout=_CANCELLATION_HANG_GUARD_SECONDS)
 
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        await asyncio.wait_for(cleanup_started.wait(), timeout=_CANCELLATION_HANG_GUARD_SECONDS)
+        allow_cleanup_failure.set()
+        await asyncio.wait_for(
+            background_callback_ran.wait(), timeout=_CANCELLATION_HANG_GUARD_SECONDS
+        )
     finally:
+        allow_cleanup_failure.set()
         loop.set_exception_handler(original_handler)
 
+    assert background_task is not None
+    assert background_exception is not None
     assert not any(
-        context.get("message")
-        == "Background function tool task raised during cancellation cleanup after failure "
-        "propagation."
-        and isinstance(context.get("exception"), UserError)
-        and str(context["exception"]) == "Error running tool failing_tool: boom"
+        context.get("task") is background_task and context.get("exception") is background_exception
         for context in reported_contexts
     )
 
