@@ -580,9 +580,13 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def connect(self, options: RealtimeModelConfig) -> None:
         """Establish a connection to the model and keep it alive."""
-        assert not self._connection_attempt_active, "Already connected"
-        assert self._websocket is None, "Already connected"
-        assert self._websocket_task is None, "Already connected"
+        if (
+            self._connection_attempt_active
+            or self._websocket is not None
+            or self._websocket_task is not None
+        ):
+            raise AssertionError("Already connected")
+        previous_model = self.model
         self._connection_attempt_active = True
 
         try:
@@ -635,8 +639,17 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 self._websocket_task = asyncio.create_task(self._listen_for_messages())
                 await self._update_session_config(model_settings)
             except BaseException:
-                await self.close()
+                try:
+                    await self.close()
+                except BaseException:
+                    logger.warning(
+                        "Failed to clean up after Realtime connection setup failure",
+                        exc_info=True,
+                    )
                 raise
+        except BaseException:
+            self.model = previous_model
+            raise
         finally:
             self._connection_attempt_active = False
 
@@ -1229,18 +1242,36 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         """Close the session."""
         try:
             await self._cancel_response_create_tasks()
+            cleanup_error: BaseException | None = None
+
             if self._websocket:
-                await self._websocket.close()
-                self._websocket = None
+                try:
+                    await self._websocket.close()
+                except BaseException as exc:
+                    cleanup_error = exc
+                finally:
+                    self._websocket = None
+
             if self._websocket_task:
                 self._websocket_task.cancel()
                 try:
                     await self._websocket_task
                 except asyncio.CancelledError:
                     pass
-                self._websocket_task = None
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+                finally:
+                    self._websocket_task = None
             else:
-                await self._release_response_waiters()
+                try:
+                    await self._release_response_waiters()
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+
+            if cleanup_error is not None:
+                raise cleanup_error
         finally:
             self._clear_response_audio_indexes()
 
