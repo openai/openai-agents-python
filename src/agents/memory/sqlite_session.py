@@ -120,10 +120,14 @@ class SQLiteSession(SessionABC):
         with self._lock:
             yield self._get_connection()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """Get a database connection."""
+    def _check_not_closed(self) -> None:
+        """Raise if the session has already been closed."""
         if self._closed:
             raise RuntimeError("SQLiteSession is closed")
+
+    def _get_connection(self) -> sqlite3.Connection:
+        """Get a database connection."""
+        self._check_not_closed()
 
         if self._is_memory_db:
             # Use shared connection for in-memory database to avoid thread isolation
@@ -283,6 +287,9 @@ class SQLiteSession(SessionABC):
         Args:
             items: List of input items to add to the history
         """
+        # Checked before the empty-list fast path, which would otherwise return
+        # successfully on a closed session.
+        self._check_not_closed()
         if not items:
             return
 

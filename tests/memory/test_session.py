@@ -235,6 +235,18 @@ async def test_sqlite_session_close_closes_worker_thread_connections():
 
 
 @pytest.mark.asyncio
+async def test_sqlite_session_closed_rejects_empty_add_items():
+    """add_items([]) must not bypass the closed check through the empty-list fast path."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "closed_empty_add.db"
+        session = SQLiteSession("closed_empty_add_test", db_path)
+        session.close()
+
+        with pytest.raises(RuntimeError, match="SQLiteSession is closed"):
+            await session.add_items([])
+
+
+@pytest.mark.asyncio
 async def test_sqlite_session_memory_pop_item():
     """Test SQLiteSession pop_item functionality."""
     with tempfile.TemporaryDirectory() as temp_dir:

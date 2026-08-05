@@ -170,6 +170,9 @@ class AdvancedSQLiteSession(SQLiteSession):
         Args:
             items: The items to add to the session
         """
+        # Checked before the empty-list fast path, which would otherwise return
+        # successfully on a closed session.
+        self._check_not_closed()
         if not items:
             return
 

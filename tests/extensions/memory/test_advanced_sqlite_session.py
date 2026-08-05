@@ -328,6 +328,21 @@ async def test_add_items_failure_preserves_existing_history():
         session.close()
 
 
+async def test_advanced_sqlite_session_closed_rejects_empty_add_items():
+    """add_items([]) must not bypass the closed check through the empty-list fast path."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "closed_empty_add.db"
+        session = AdvancedSQLiteSession(
+            session_id="advanced_closed_empty_add",
+            db_path=db_path,
+            create_tables=True,
+        )
+        session.close()
+
+        with pytest.raises(RuntimeError, match="SQLiteSession is closed"):
+            await session.add_items([])
+
+
 async def test_add_items_rolls_back_partial_structure_metadata_write():
     """Partial metadata writes should roll back with the message rows in the same batch."""
     session = PartiallyFailingStructureMetadataSession(
