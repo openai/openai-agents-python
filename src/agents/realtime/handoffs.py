@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Iterable
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast, overload
 
 from pydantic import TypeAdapter
@@ -10,11 +11,8 @@ from typing_extensions import TypeVar
 from ..exceptions import (
     ModelBehaviorError,
     UserError,
-    _detach_data_redacted_error_traceback,
-    _is_error_data_redacted,
-    _raise_data_redacted_error,
 )
-from ..handoffs import Handoff
+from ..handoffs import Handoff, _invoke_handoff_with_redaction
 from ..run_context import RunContextWrapper, TContext
 from ..strict_schema import ensure_strict_json_schema
 from ..tracing.spans import SpanError
@@ -184,23 +182,6 @@ def realtime_handoff(
 
         return agent
 
-    async def _invoke_handoff(
-        ctx: RunContextWrapper[Any], input_json: str | None = None
-    ) -> RealtimeAgent[TContext]:
-        redacted_error: ModelBehaviorError | None = None
-        try:
-            return await _invoke_handoff_impl(ctx, input_json)
-        except ModelBehaviorError as error:
-            if not _is_error_data_redacted(error):
-                raise
-            _detach_data_redacted_error_traceback(error)
-            redacted_error = error
-
-        ctx = cast(Any, None)
-        input_json = "<redacted>"
-        assert redacted_error is not None
-        _raise_data_redacted_error(redacted_error)
-
     tool_name = tool_name_override or Handoff.default_tool_name(agent)
     tool_description = tool_description_override or Handoff.default_tool_description(agent)
 
@@ -220,7 +201,7 @@ def realtime_handoff(
         tool_name=tool_name,
         tool_description=tool_description,
         input_json_schema=input_json_schema,
-        on_invoke_handoff=_invoke_handoff,
+        on_invoke_handoff=partial(_invoke_handoff_with_redaction, _invoke_handoff_impl),
         input_filter=None,  # Not supported for RealtimeAgent handoffs
         agent_name=agent.name,
         is_enabled=_is_enabled if callable(is_enabled) else is_enabled,

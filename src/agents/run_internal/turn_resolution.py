@@ -423,7 +423,7 @@ async def _resolve_invalid_final_output(
     new_items: list[RunItem],
     context_wrapper: RunContextWrapper[TContext],
 ) -> tuple[Any, MessageOutputItem | None] | None:
-    redacted = _is_error_data_redacted(error)
+    redacted = _is_error_data_redacted(error) or _debug.DONT_LOG_MODEL_DATA
     run_error_data = build_run_error_data(
         input=original_input,
         new_items=new_items,
@@ -451,18 +451,19 @@ async def _resolve_invalid_final_output(
         message_item = (
             create_message_output_item(
                 public_agent,
-                format_final_output_text(public_agent, final_output),
+                format_final_output_text(
+                    public_agent,
+                    final_output,
+                    data_redacted=redacted,
+                ),
             )
             if handler_result.include_in_history
             else None
         )
         return final_output, message_item
-    except Exception as handler_error:
+    except Exception:
         if not redacted:
             raise
-        handler_error.__traceback__ = None
-        handler_error.__cause__ = None
-        handler_error.__context__ = None
         safe_error = UserError(_DATA_REDACTED_ERROR_MESSAGE)
         _mark_error_data_redacted(safe_error)
 

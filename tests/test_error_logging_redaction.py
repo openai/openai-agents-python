@@ -24,7 +24,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 from openai import AsyncOpenAI
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, SkipValidation, ValidationError
 
 import agents._debug as _debug
 from agents import (
@@ -39,6 +39,7 @@ from agents import (
     RunConfig,
     RunContextWrapper,
     RunErrorHandlerInput,
+    RunErrorHandlerResult,
     Runner,
     UserError,
     function_tool,
@@ -97,6 +98,11 @@ class _HostileException(Exception):
         if name in {"__class__", "__traceback__"}:
             raise AssertionError(f"redacted logging inspected {name}")
         return super().__getattribute__(name)
+
+
+class _HostileAttributeWriteException(Exception):
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise RuntimeError("redacted handling mutated the handler exception")
 
 
 class _TruthinessException(Exception):
@@ -889,6 +895,11 @@ class _RequiredOutput(BaseModel):
     count: int
 
 
+class _PermissiveFallbackOutput(BaseModel):
+    payload: SkipValidation[str]
+    count: int
+
+
 def _assert_secret_absent_from_agents_traceback(
     error: BaseException,
     secret: str,
@@ -921,6 +932,22 @@ def _agents_traceback_frame_locals(error: BaseException) -> list[dict[str, Any]]
             frame_locals.append(traceback_object.tb_frame.f_locals)
         traceback_object = traceback_object.tb_next
     return frame_locals
+
+
+def _assert_handoff_closure_absent_from_traceback(
+    error: BaseException,
+    *,
+    callback: Any,
+    schema_secret: str,
+) -> None:
+    for frame_locals in _agents_traceback_frame_locals(error):
+        for value in frame_locals.values():
+            closure = getattr(value, "__closure__", None)
+            if closure is None:
+                continue
+            closure_values = [cell.cell_contents for cell in closure]
+            assert all(item is not callback for item in closure_values)
+            assert schema_secret not in repr(closure_values)
 
 
 @pytest.mark.parametrize(
@@ -1087,6 +1114,11 @@ async def test_handoff_redaction_omits_sensitive_schema_metadata(
         _SENSITIVE_SCHEMA_SECRET,
         require_agents_frames=False,
     )
+    _assert_handoff_closure_absent_from_traceback(
+        error,
+        callback=on_handoff,
+        schema_secret=_SENSITIVE_SCHEMA_SECRET,
+    )
 
 
 @pytest.mark.asyncio
@@ -1119,6 +1151,11 @@ async def test_realtime_handoff_redaction_omits_sensitive_schema_metadata(
         error,
         _SENSITIVE_SCHEMA_SECRET,
         require_agents_frames=False,
+    )
+    _assert_handoff_closure_absent_from_traceback(
+        error,
+        callback=on_handoff,
+        schema_secret=_SENSITIVE_SCHEMA_SECRET,
     )
 
 
@@ -1480,6 +1517,120 @@ async def test_invalid_final_output_handler_invalid_fallback_preserves_redaction
 
 
 @pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("redacted", [True, False])
+@pytest.mark.asyncio
+async def test_invalid_final_output_handler_fallback_serialization_follows_redaction_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+    redacted: bool,
+) -> None:
+    fallback_secret = "PERMISSIVE_HANDLER_FALLBACK_SECRET"
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
+    model = FakeModel(
+        initial_output=[
+            get_text_message(f'{{"payload": "{_MODEL_OUTPUT_SECRET}", "count": "invalid"}}')
+        ]
+    )
+    agent = Agent(name="A", model=model, output_type=_PermissiveFallbackOutput)
+
+    def permissive_fallback(_data: RunErrorHandlerInput[None]) -> _PermissiveFallbackOutput:
+        return _PermissiveFallbackOutput(
+            payload=cast(Any, {"secret": fallback_secret}),
+            count=1,
+        )
+
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        if streamed:
+            streaming_result = Runner.run_streamed(
+                agent,
+                "go",
+                error_handlers={"invalid_final_output": permissive_fallback},
+            )
+            async for _ in streaming_result.stream_events():
+                pass
+            actual_final_output = streaming_result.final_output
+        else:
+            run_result = await Runner.run(
+                agent,
+                "go",
+                error_handlers={"invalid_final_output": permissive_fallback},
+            )
+            actual_final_output = run_result.final_output
+
+    rendered_warnings = "\n".join(str(warning.message) for warning in caught_warnings)
+    if redacted:
+        assert not caught_warnings
+    else:
+        assert fallback_secret in rendered_warnings
+    assert actual_final_output == _PermissiveFallbackOutput(
+        payload=cast(Any, {"secret": fallback_secret}),
+        count=1,
+    )
+
+
+@pytest.mark.parametrize(
+    ("streamed", "include_in_history", "redacted"),
+    [
+        (False, True, True),
+        (False, False, True),
+        (True, True, True),
+        (True, False, True),
+        (False, True, False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_empty_final_output_handler_fallback_serialization_follows_redaction_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+    include_in_history: bool,
+    redacted: bool,
+) -> None:
+    fallback_secret = "EMPTY_HANDLER_FALLBACK_SECRET"
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
+    model = FakeModel(initial_output=[])
+    agent = Agent(name="A", model=model, output_type=_PermissiveFallbackOutput)
+
+    def permissive_fallback(_data: RunErrorHandlerInput[None]) -> RunErrorHandlerResult:
+        return RunErrorHandlerResult(
+            final_output=_PermissiveFallbackOutput(
+                payload=cast(Any, {"secret": fallback_secret}),
+                count=1,
+            ),
+            include_in_history=include_in_history,
+        )
+
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        if streamed:
+            streaming_result = Runner.run_streamed(
+                agent,
+                "go",
+                error_handlers={"invalid_final_output": permissive_fallback},
+            )
+            async for _ in streaming_result.stream_events():
+                pass
+            actual_final_output = streaming_result.final_output
+        else:
+            run_result = await Runner.run(
+                agent,
+                "go",
+                error_handlers={"invalid_final_output": permissive_fallback},
+            )
+            actual_final_output = run_result.final_output
+
+    rendered_warnings = "\n".join(str(warning.message) for warning in caught_warnings)
+    if redacted:
+        assert not caught_warnings
+    else:
+        assert fallback_secret in rendered_warnings
+    assert actual_final_output == _PermissiveFallbackOutput(
+        payload=cast(Any, {"secret": fallback_secret}),
+        count=1,
+    )
+
+
+@pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.asyncio
 async def test_invalid_final_output_handler_failure_preserves_redaction(
     monkeypatch: pytest.MonkeyPatch,
@@ -1515,6 +1666,46 @@ async def test_invalid_final_output_handler_failure_preserves_redaction(
     assert error.__cause__ is None
     assert error.__context__ is None
     _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_invalid_final_output_handler_hostile_failure_preserves_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+) -> None:
+    handler_secret = "HOSTILE_HANDLER_FAILURE_SECRET"
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    model = FakeModel(initial_output=[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    agent = Agent(name="A", model=model, output_type=_RequiredOutput)
+
+    def fail(_data: RunErrorHandlerInput[None]) -> None:
+        raise _HostileAttributeWriteException(handler_secret)
+
+    if streamed:
+        result = Runner.run_streamed(
+            agent,
+            "go",
+            error_handlers={"invalid_final_output": fail},
+        )
+        with pytest.raises(UserError) as exc_info:
+            async for _ in result.stream_events():
+                pass
+    else:
+        with pytest.raises(UserError) as exc_info:
+            await Runner.run(
+                agent,
+                "go",
+                error_handlers={"invalid_final_output": fail},
+            )
+
+    error = exc_info.value
+    assert str(error) == "Error details are redacted."
+    assert error.run_data is None
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+    _assert_secret_absent_from_agents_traceback(error, handler_secret)
 
 
 @pytest.mark.parametrize("streamed", [False, True])
