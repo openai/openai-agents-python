@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from openai import omit
 
 try:
     from agents.voice import OpenAITTSModel, TTSModelSettings
@@ -44,12 +45,19 @@ async def test_openai_tts_default_voice_and_instructions() -> None:
     captured: dict[str, object] = {}
 
     def fake_create(
-        *, model: str, voice: str, input: str, response_format: str, extra_body: dict[str, Any]
+        *,
+        model: str,
+        voice: str,
+        input: str,
+        response_format: str,
+        speed: Any,
+        extra_body: dict[str, Any],
     ) -> _FakeStreamResponse:
         captured["model"] = model
         captured["voice"] = voice
         captured["input"] = input
         captured["response_format"] = response_format
+        captured["speed"] = speed
         captured["extra_body"] = extra_body
         return _FakeStreamResponse(chunks)
 
@@ -64,6 +72,7 @@ async def test_openai_tts_default_voice_and_instructions() -> None:
     assert captured["voice"] == "ash"
     assert captured["input"] == "hello world"
     assert captured["response_format"] == "pcm"
+    assert captured["speed"] is omit
     assert captured["extra_body"] == {"instructions": settings.instructions}
 
 
@@ -74,12 +83,19 @@ async def test_openai_tts_custom_voice_and_instructions() -> None:
     captured: dict[str, object] = {}
 
     def fake_create(
-        *, model: str, voice: str, input: str, response_format: str, extra_body: dict[str, Any]
+        *,
+        model: str,
+        voice: str,
+        input: str,
+        response_format: str,
+        speed: Any,
+        extra_body: dict[str, Any],
     ) -> _FakeStreamResponse:
         captured["model"] = model
         captured["voice"] = voice
         captured["input"] = input
         captured["response_format"] = response_format
+        captured["speed"] = speed
         captured["extra_body"] = extra_body
         return _FakeStreamResponse(chunks)
 
@@ -92,3 +108,31 @@ async def test_openai_tts_custom_voice_and_instructions() -> None:
     assert out == chunks
     assert captured["voice"] == "fable"
     assert captured["extra_body"] == {"instructions": "Custom instructions"}
+
+
+@pytest.mark.asyncio
+async def test_openai_tts_forwards_speed() -> None:
+    """A configured speed is forwarded to the OpenAI speech API."""
+    chunks = [b"y"]
+    captured: dict[str, object] = {}
+
+    def fake_create(
+        *,
+        model: str,
+        voice: str,
+        input: str,
+        response_format: str,
+        speed: Any,
+        extra_body: dict[str, Any],
+    ) -> _FakeStreamResponse:
+        captured["speed"] = speed
+        return _FakeStreamResponse(chunks)
+
+    client = _make_fake_openai_client(fake_create)
+    tts_model = OpenAITTSModel(model="my-model", openai_client=client)  # type: ignore[arg-type]
+    settings = TTSModelSettings(speed=1.5)
+    out: list[bytes] = []
+    async for b in tts_model.run("hi", settings):
+        out.append(b)
+    assert out == chunks
+    assert captured["speed"] == 1.5
