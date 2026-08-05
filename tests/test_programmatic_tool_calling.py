@@ -487,7 +487,8 @@ async def test_schema_backed_direct_tool_preserves_argument_error_formatter() ->
     result = await failing_tool.on_invoke_tool(context, "{}")
 
     assert result.startswith("An error occurred while running the tool. Please try again. Error:")
-    assert "sku" in result
+    assert "Invalid JSON input for tool failing_tool" in result
+    assert "sku" not in result
 
 
 @pytest.mark.asyncio

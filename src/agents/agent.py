@@ -13,6 +13,7 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from typing_extensions import NotRequired, TypedDict
 
+from . import _debug
 from ._tool_identity import get_function_tool_approval_keys
 from .agent_output import AgentOutputSchemaBase
 from .agent_tool_input import (
@@ -681,10 +682,17 @@ class Agent(AgentBase, Generic[TContext]):
             )
             _log_function_tool_invocation(tool_name=tool_name, input_json=input_json)
 
+            base_message = f"Invalid JSON input for tool {tool_name}"
+            validation_failed = False
             try:
                 parsed_params = params_adapter.validate_python(json_data)
             except ValidationError as exc:
-                raise ModelBehaviorError(f"Invalid JSON input for tool {tool_name}: {exc}") from exc
+                if not _debug.DONT_LOG_TOOL_DATA:
+                    raise ModelBehaviorError(f"{base_message}: {exc}") from exc
+                validation_failed = True
+
+            if validation_failed:
+                raise ModelBehaviorError(base_message)
 
             params_data = _normalize_tool_input(parsed_params, tool_name)
             resolved_input = await resolve_agent_tool_input(

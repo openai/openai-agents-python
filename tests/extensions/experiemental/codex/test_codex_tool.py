@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import pytest
 from openai.types.responses import ResponseFunctionToolCall
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 import agents._debug as _debug
 from agents import Agent, function_tool
@@ -2055,3 +2055,56 @@ def test_codex_tool_coerce_options_rejects_empty_run_context_key() -> None:
                 "run_context_thread_id_key": " ",
             }
         )
+
+
+_CODEX_TOOL_ARGUMENT_SECRET = "SECRET_CODEX_TOOL_ARGUMENT_123"
+
+
+@pytest.mark.parametrize(
+    "input_json, cause_type",
+    [
+        (
+            f'{{"inputs": "{_CODEX_TOOL_ARGUMENT_SECRET}"}}',
+            ValidationError,
+        ),
+        (
+            f"not valid json {_CODEX_TOOL_ARGUMENT_SECRET}",
+            json.JSONDecodeError,
+        ),
+    ],
+    ids=["validation", "json_decode"],
+)
+@pytest.mark.parametrize("redact", [True, False], ids=["redacted", "diagnostic"])
+@pytest.mark.asyncio
+async def test_codex_tool_argument_errors_respect_tool_data_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+    input_json: str,
+    cause_type: type[Exception],
+    redact: bool,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redact)
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(CodexMockState())),
+            failure_error_function=None,
+        )
+    )
+    context = ToolContext(
+        None,
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await tool.on_invoke_tool(context, input_json)
+
+    error = exc_info.value
+    if redact:
+        assert str(error) == "Invalid JSON input for codex tool"
+        assert _CODEX_TOOL_ARGUMENT_SECRET not in str(error)
+        assert error.__cause__ is None
+        assert error.__context__ is None
+    else:
+        assert _CODEX_TOOL_ARGUMENT_SECRET in str(error)
+        assert isinstance(error.__cause__, cause_type)

@@ -2600,6 +2600,8 @@ def function_tool(
             json_data = _parse_function_tool_json_input(tool_name=tool_name, input_json=input)
             _log_function_tool_invocation(tool_name=tool_name, input_json=input)
 
+            base_message = f"Invalid JSON input for tool {tool_name}"
+            validation_failed = False
             try:
                 parsed = (
                     schema.params_pydantic_model(**json_data)
@@ -2607,7 +2609,12 @@ def function_tool(
                     else schema.params_pydantic_model()
                 )
             except ValidationError as e:
-                raise ModelBehaviorError(f"Invalid JSON input for tool {tool_name}: {e}") from e
+                if not _debug.DONT_LOG_TOOL_DATA:
+                    raise ModelBehaviorError(f"{base_message}: {e}") from e
+                validation_failed = True
+
+            if validation_failed:
+                raise ModelBehaviorError(base_message)
 
             args, kwargs_dict = schema.to_call_args(parsed)
 

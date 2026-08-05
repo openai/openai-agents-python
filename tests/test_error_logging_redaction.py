@@ -20,15 +20,18 @@ from unittest.mock import patch
 import httpx
 import pytest
 from openai import AsyncOpenAI
+from pydantic import BaseModel, ValidationError
 
 import agents._debug as _debug
 from agents import (
     Agent,
+    ModelBehaviorError,
     ModelSettings,
     ModelTracing,
     OpenAIResponsesModel,
     RunConfig,
     RunContextWrapper,
+    function_tool,
     trace,
 )
 from agents.logger import (
@@ -48,6 +51,7 @@ from agents.run_internal.tool_execution import (
     resolve_approval_rejection_message,
 )
 from agents.run_state import _deserialize_items
+from agents.tool_context import ToolContext
 from agents.tracing.processor_interface import TracingProcessor
 from agents.tracing.provider import SynchronousMultiTracingProcessor
 from agents.tracing.spans import Span
@@ -753,3 +757,104 @@ async def test_approval_rejection_formatter_error_logs_full_when_enabled(
     assert record.__dict__["openai_agents_diagnostic_context"] == {"tool_name": tool_name}
     assert record.exc_info is not None
     assert "SECRET_FMT_123" in caplog.text
+
+
+_TOOL_ARGUMENT_SECRET = "SECRET_TOOL_ARGUMENT_123"
+
+
+def _requires_integer_argument(value: int) -> str:
+    return str(value)
+
+
+@pytest.mark.asyncio
+async def test_function_tool_validation_error_redacts_payload_when_tool_data_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+    tool = function_tool(_requires_integer_argument, failure_error_function=None)
+    payload = f'{{"value": "{_TOOL_ARGUMENT_SECRET}"}}'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await tool.on_invoke_tool(
+            ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=payload),
+            payload,
+        )
+
+    error = exc_info.value
+    assert str(error) == f"Invalid JSON input for tool {tool.name}"
+    assert _TOOL_ARGUMENT_SECRET not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_function_tool_validation_error_preserves_diagnostics_when_tool_data_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    tool = function_tool(_requires_integer_argument, failure_error_function=None)
+    payload = f'{{"value": "{_TOOL_ARGUMENT_SECRET}"}}'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await tool.on_invoke_tool(
+            ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=payload),
+            payload,
+        )
+
+    error = exc_info.value
+    assert _TOOL_ARGUMENT_SECRET in str(error)
+    assert isinstance(error.__cause__, ValidationError)
+
+
+class _AgentToolParameters(BaseModel):
+    value: int
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_validation_error_redacts_payload_when_tool_data_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+    tool = Agent(name="worker").as_tool(
+        tool_name="worker_tool",
+        tool_description="Runs the worker agent.",
+        parameters=_AgentToolParameters,
+        failure_error_function=None,
+    )
+    payload = f'{{"value": "{_TOOL_ARGUMENT_SECRET}"}}'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await tool.on_invoke_tool(
+            ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=payload),
+            payload,
+        )
+
+    error = exc_info.value
+    assert str(error) == f"Invalid JSON input for tool {tool.name}"
+    assert _TOOL_ARGUMENT_SECRET not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_validation_error_preserves_diagnostics_when_tool_data_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    tool = Agent(name="worker").as_tool(
+        tool_name="worker_tool",
+        tool_description="Runs the worker agent.",
+        parameters=_AgentToolParameters,
+        failure_error_function=None,
+    )
+    payload = f'{{"value": "{_TOOL_ARGUMENT_SECRET}"}}'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await tool.on_invoke_tool(
+            ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=payload),
+            payload,
+        )
+
+    error = exc_info.value
+    assert _TOOL_ARGUMENT_SECRET in str(error)
+    assert isinstance(error.__cause__, ValidationError)
