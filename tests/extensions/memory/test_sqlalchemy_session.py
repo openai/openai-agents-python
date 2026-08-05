@@ -237,6 +237,91 @@ async def test_pop_from_empty_session():
     assert popped is None
 
 
+async def test_concurrent_pop_item_returns_each_row_once(monkeypatch: pytest.MonkeyPatch):
+    """A caller that loses the DELETE race must retry instead of returning the same row."""
+    session = SQLAlchemySession.from_url("concurrent_pop", url=DB_URL, create_tables=False)
+    rows = {
+        1: json.dumps({"role": "user", "content": "first"}),
+        2: json.dumps({"role": "assistant", "content": "second"}),
+    }
+    first_reads = 0
+    both_read_newest = asyncio.Event()
+    first_payload_reads = 0
+    both_read_newest_payload = asyncio.Event()
+
+    class FakeResult:
+        def __init__(self, scalar: Any = None, rowcount: int = -1) -> None:
+            self._scalar = scalar
+            self.rowcount = rowcount
+
+        def scalar_one_or_none(self) -> Any:
+            return self._scalar
+
+    class FakeTransaction:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakeSession:
+        selected_row_id: int | None = None
+        selected_row: str | None = None
+
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        def begin(self) -> FakeTransaction:
+            return FakeTransaction()
+
+        async def execute(self, statement: Any) -> FakeResult:
+            nonlocal first_payload_reads, first_reads
+            if isinstance(statement, Select):
+                selected_columns = list(statement.selected_columns.keys())
+                if selected_columns == ["id"]:
+                    self.selected_row_id = max(rows, default=None)
+                    if first_reads < 2:
+                        first_reads += 1
+                        if first_reads == 2:
+                            both_read_newest.set()
+                        await both_read_newest.wait()
+                    return FakeResult(self.selected_row_id)
+                assert selected_columns == ["message_data"]
+                assert self.selected_row_id is not None
+                self.selected_row = rows.get(self.selected_row_id)
+                if first_payload_reads < 2:
+                    first_payload_reads += 1
+                    if first_payload_reads == 2:
+                        both_read_newest_payload.set()
+                    await both_read_newest_payload.wait()
+                return FakeResult(self.selected_row)
+
+            assert self.selected_row_id is not None
+            if self.selected_row_id in rows:
+                del rows[self.selected_row_id]
+                return FakeResult(rowcount=1)
+            return FakeResult(rowcount=0)
+
+    class FakeSessionFactory:
+        def __call__(self) -> FakeSession:
+            return FakeSession()
+
+    async def tables_ready() -> None:
+        return None
+
+    monkeypatch.setattr(session, "_ensure_tables", tables_ready)
+    monkeypatch.setattr(session, "_session_factory", FakeSessionFactory())
+
+    popped = await asyncio.gather(session.pop_item(), session.pop_item())
+
+    contents = {cast(dict[str, Any], item)["content"] for item in popped if item is not None}
+    assert contents == {"first", "second"}
+    assert rows == {}
+
+
 async def test_pop_item_skips_corrupt_most_recent():
     """pop_item skips corrupt newest rows and returns the next valid item."""
     session = SQLAlchemySession.from_url("pop_corrupt", url=DB_URL, create_tables=True)

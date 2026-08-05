@@ -334,6 +334,23 @@ class DaprSession(SessionABC):
         async with self._lock:
             self._check_not_closed()
             serialized_items: list[str] = [await self._serialize_item(item) for item in items]
+
+            # Persist ancillary metadata before the authoritative history so a metadata
+            # failure cannot make a committed batch look safe to retry.
+            now = str(int(time.time()))
+            metadata = {
+                "session_id": self.session_id,
+                "created_at": now,
+                "updated_at": now,
+            }
+            await self._dapr_client.save_state(
+                store_name=self._state_store_name,
+                key=self._metadata_key,
+                value=json.dumps(metadata),
+                state_metadata=self._get_metadata(),
+                options=self._get_state_options(),
+            )
+
             attempt = 0
             while True:
                 attempt += 1
@@ -361,20 +378,6 @@ class DaprSession(SessionABC):
                     if should_retry:
                         continue
                     raise
-
-            # Update metadata
-            metadata = {
-                "session_id": self.session_id,
-                "created_at": str(int(time.time())),
-                "updated_at": str(int(time.time())),
-            }
-            await self._dapr_client.save_state(
-                store_name=self._state_store_name,
-                key=self._metadata_key,
-                value=json.dumps(metadata),
-                state_metadata=self._get_metadata(),
-                options=self._get_state_options(),
-            )
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.

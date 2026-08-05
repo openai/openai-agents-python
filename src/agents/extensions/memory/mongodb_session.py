@@ -73,19 +73,22 @@ _DRIVER_INFO = DriverInfo(name="openai-agents", version=_VERSION)
 class MongoDBSession(SessionABC):
     """MongoDB implementation of [`Session`][agents.memory.session.Session].
 
-    Conversation items are stored as individual documents in a ``messages``
-    collection.  A lightweight ``sessions`` collection tracks metadata
-    (creation time, last-updated time) for each session.
+    Conversation items are stored as logical-batch documents in a ``messages``
+    collection. Legacy per-item documents remain readable. A lightweight
+    ``sessions`` collection tracks metadata (creation time, last-updated time)
+    for each session. Each logical batch must fit within MongoDB's single-document
+    size limit; an oversized batch fails atomically without storing a partial batch.
 
     Indexes are created once per ``(client, database, sessions_collection,
     messages_collection)`` combination on the first call to any of the
     session protocol methods.  Subsequent calls skip the setup entirely.
 
-    Each message document carries a ``seq`` field — an integer assigned by
-    atomically incrementing a counter on the session metadata document.  This
-    guarantees a strictly monotonic insertion order that is safe across
-    multiple writers and processes, unlike sorting by ``_id`` / ObjectId which
-    is only second-level accurate and non-monotonic across machines.
+    Each message document carries a ``seq`` field for the final item in that
+    document. Sequence ranges are assigned by atomically incrementing a counter
+    on the session metadata document. This guarantees a strictly monotonic
+    insertion order that is safe across multiple writers and processes, unlike
+    sorting by ``_id`` / ObjectId which is only second-level accurate and
+    non-monotonic across machines.
     """
 
     # Class-level registry so index creation runs only once per unique
@@ -125,8 +128,9 @@ class MongoDBSession(SessionABC):
                 Defaults to ``"agents"``.
             sessions_collection: Name of the collection that stores session
                 metadata. Defaults to ``"agent_sessions"``.
-            messages_collection: Name of the collection that stores individual
-                conversation items. Defaults to ``"agent_messages"``.
+            messages_collection: Name of the collection that stores logical
+                conversation batches and legacy per-item records. Defaults to
+                ``"agent_messages"``.
             session_settings: Optional session configuration. When ``None`` a
                 default [`SessionSettings`][agents.memory.session_settings.SessionSettings]
                 is used (no item limit).
@@ -292,11 +296,14 @@ class MongoDBSession(SessionABC):
         async def _decode_docs(docs: list[Any]) -> list[TResponseInputItem]:
             items: list[TResponseInputItem] = []
             for doc in docs:
-                try:
-                    items.append(await self._deserialize_item(doc["message_data"]))
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    # Skip corrupted or malformed documents (including non-string BSON values).
-                    continue
+                raw = doc.get("message_data")
+                raw_items = raw if isinstance(raw, list) else [raw]
+                for raw_item in raw_items:
+                    try:
+                        items.append(await self._deserialize_item(raw_item))
+                    except (json.JSONDecodeError, TypeError):
+                        # Skip corrupted or malformed entries, including legacy non-string values.
+                        continue
             return items
 
         if session_limit is None:
@@ -333,6 +340,7 @@ class MongoDBSession(SessionABC):
 
         await self._ensure_indexes()
 
+        serialized_items = [await self._serialize_item(item) for item in items]
         now = datetime.now(timezone.utc)
 
         # Atomically reserve a block of sequence numbers for this batch.
@@ -350,16 +358,15 @@ class MongoDBSession(SessionABC):
         )
         next_seq: int = (result["_seq"] if result else len(items)) - len(items)
 
-        payload = [
+        # One document is the commit boundary for the logical batch. This keeps
+        # standalone MongoDB deployments failure-atomic without requiring transactions.
+        await self._messages.insert_one(
             {
                 "session_id": self.session_id,
-                "seq": next_seq + i,
-                "message_data": await self._serialize_item(item),
+                "seq": next_seq + len(serialized_items) - 1,
+                "message_data": serialized_items,
             }
-            for i, item in enumerate(items)
-        ]
-
-        await self._messages.insert_many(payload, ordered=True)
+        )
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
@@ -367,23 +374,52 @@ class MongoDBSession(SessionABC):
         Returns:
             The most recent item if it exists, ``None`` if the session is empty.
 
-        Corrupt documents (invalid JSON, missing/non-string ``message_data``)
-        are silently discarded and the next-most-recent item is returned.  This
-        matches :meth:`get_items`, which also skips corrupt documents, so a
-        single bad row cannot make a non-empty session look empty to callers.
+        New list-valued logical batches and legacy string-valued items are both
+        supported. Malformed entries (invalid JSON, missing ``message_data``, or
+        other value types) are silently discarded and the next-most-recent item
+        is returned. This matches :meth:`get_items`, which also skips malformed
+        entries, so one bad record cannot make a non-empty session look empty.
         """
         await self._ensure_indexes()
 
         while True:
-            doc = await self._messages.find_one_and_delete(
-                {"session_id": self.session_id},
-                sort=[("seq", -1)],
+            docs = await (
+                self._messages.find(
+                    {
+                        "session_id": self.session_id,
+                        "message_data": {"$ne": []},
+                    }
+                )
+                .sort("seq", -1)
+                .limit(1)
+                .to_list()
             )
-            if doc is None:
+            if not docs:
                 return None
+            candidate = docs[0]
+            raw = candidate.get("message_data")
+
+            if isinstance(raw, list):
+                doc = await self._messages.find_one_and_update(
+                    {"_id": candidate["_id"], "message_data": {"$ne": []}},
+                    {"$pop": {"message_data": 1}},
+                    return_document=False,
+                )
+                if doc is None:
+                    continue
+                claimed_batch = doc.get("message_data")
+                if not isinstance(claimed_batch, list) or not claimed_batch:
+                    continue
+                raw = claimed_batch[-1]
+            else:
+                doc = await self._messages.find_one_and_delete({"_id": candidate["_id"]})
+                if doc is None:
+                    continue
+                raw = doc.get("message_data")
+
             try:
-                return await self._deserialize_item(doc["message_data"])
-            except (json.JSONDecodeError, KeyError, TypeError):
+                return await self._deserialize_item(raw)
+            except (json.JSONDecodeError, TypeError):
                 # Corrupt — drop it and try the next-most-recent document.
                 continue
 

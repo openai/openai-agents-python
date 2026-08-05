@@ -157,6 +157,35 @@ class ConflictFakeDaprClient(FakeDaprClient):
         )
 
 
+class FailingMetadataFakeDaprClient(FakeDaprClient):
+    """Fake client that rejects the next metadata write."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_metadata_save = True
+
+    async def save_state(
+        self,
+        store_name: str,
+        key: str,
+        value: str | bytes,
+        state_metadata: dict[str, str] | None = None,
+        options: Any = None,
+        etag: str | None = None,
+    ) -> None:
+        if key.endswith(":metadata") and self.fail_metadata_save:
+            self.fail_metadata_save = False
+            raise RuntimeError("metadata write failed")
+        await super().save_state(
+            store_name=store_name,
+            key=key,
+            value=value,
+            state_metadata=state_metadata,
+            options=options,
+            etag=etag,
+        )
+
+
 @pytest.fixture
 def conflict_dapr_client() -> ConflictFakeDaprClient:
     """Fixture for fake client that forces concurrency conflicts."""
@@ -1327,3 +1356,22 @@ async def test_dapr_session_operation_waiting_behind_close_raises():
                 task.cancel()
                 with suppress(asyncio.CancelledError, RuntimeError):
                     await task
+
+
+async def test_metadata_failure_does_not_commit_messages() -> None:
+    """An ancillary metadata failure must happen before conversation history is committed."""
+    client = FailingMetadataFakeDaprClient()
+    session = DaprSession(
+        session_id="metadata_failure",
+        state_store_name="statestore",
+        dapr_client=client,  # type: ignore[arg-type]
+    )
+    item: TResponseInputItem = {"role": "user", "content": "once"}
+
+    with pytest.raises(RuntimeError, match="metadata write failed"):
+        await session.add_items([item])
+
+    assert await session.get_items() == []
+
+    await session.add_items([item])
+    assert await session.get_items() == [item]

@@ -9,11 +9,13 @@ dependency-free while exercising the full session logic.
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
 import sys
 import types
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -117,21 +119,38 @@ class FakeAsyncCollection:
                 doc["_id"] = FakeObjectId()
             self._docs[id(doc["_id"])] = dict(doc)
 
+    async def insert_one(self, document: dict[str, Any]) -> Any:
+        if "_id" not in document:
+            document["_id"] = FakeObjectId()
+        stored = dict(document)
+        if isinstance(stored.get("message_data"), list):
+            stored["message_data"] = list(stored["message_data"])
+        self._docs[id(document["_id"])] = stored
+
     async def find_one_and_update(
         self,
         query: dict[str, Any],
         update: dict[str, Any],
         upsert: bool = False,
         return_document: bool = False,
+        sort: list[tuple[str, int]] | None = None,
     ) -> dict[str, Any] | None:
-        for doc in self._docs.values():
-            if self._matches(doc, query):
-                # Apply $inc fields.
-                for field, delta in update.get("$inc", {}).items():
-                    doc[field] = doc.get(field, 0) + delta
-                for field, value in update.get("$set", {}).items():
-                    doc[field] = value
-                return dict(doc) if return_document else None
+        matches = [doc for doc in self._docs.values() if self._matches(doc, query)]
+        if sort:
+            for field, direction in reversed(sort):
+                matches.sort(key=lambda doc: doc.get(field, 0), reverse=(direction == -1))
+        if matches:
+            doc = matches[0]
+            before = copy.deepcopy(doc)
+            for field, delta in update.get("$inc", {}).items():
+                doc[field] = doc.get(field, 0) + delta
+            for field, value in update.get("$set", {}).items():
+                doc[field] = value
+            for field, direction in update.get("$pop", {}).items():
+                values = doc.get(field)
+                if isinstance(values, list) and values:
+                    values.pop(-1 if direction == 1 else 0)
+            return copy.deepcopy(doc) if return_document else before
         if upsert:
             new_doc: dict[str, Any] = {"_id": FakeObjectId()}
             new_doc.update(update.get("$setOnInsert", {}))
@@ -169,7 +188,15 @@ class FakeAsyncCollection:
 
     @staticmethod
     def _matches(doc: dict[str, Any], query: dict[str, Any]) -> bool:
-        return all(doc.get(k) == v for k, v in query.items())
+        for key, expected in query.items():
+            actual = doc.get(key)
+            if isinstance(expected, dict):
+                if "$ne" in expected and actual == expected["$ne"]:
+                    return False
+                continue
+            if actual != expected:
+                return False
+        return True
 
 
 class FakeAsyncDatabase:
@@ -974,3 +1001,125 @@ async def test_caller_supplied_driver_info_is_not_overwritten() -> None:
 
     # The caller's value must be preserved — setdefault must not overwrite it.
     assert captured_kwargs["driver"] is custom_info
+
+
+async def test_add_items_serializes_before_reserving_sequence_numbers() -> None:
+    """Serialization failure must not advance the durable sequence counter."""
+
+    class FailingSerializationSession(MongoDBSession):
+        async def _serialize_item(self, item: TResponseInputItem) -> str:
+            if item.get("content") == "fail":
+                raise TypeError("serialization failed")
+            return await super()._serialize_item(item)
+
+    MongoDBSession._init_state.clear()
+    client = FakeAsyncMongoClient()
+    session = FailingSerializationSession(
+        "serialize-first",
+        client=client,  # type: ignore[arg-type]
+        database="agents_test",
+    )
+
+    with pytest.raises(TypeError, match="serialization failed"):
+        await session.add_items(
+            [
+                {"role": "user", "content": "valid"},
+                {"role": "assistant", "content": "fail"},
+            ]
+        )
+
+    assert not session._sessions._docs
+    assert await session.get_items() == []
+
+
+async def test_add_items_is_invisible_until_single_document_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed batch must remain invisible while its single-document insert is pending."""
+    MongoDBSession._init_state.clear()
+    client = FakeAsyncMongoClient()
+    session = MongoDBSession(
+        "partial-batch",
+        client=client,  # type: ignore[arg-type]
+        database="agents_test",
+    )
+    seed: TResponseInputItem = {"role": "user", "content": "seed"}
+    await session.add_items([seed])
+
+    real_insert_one = session._messages.insert_one
+    insert_started = asyncio.Event()
+    allow_failure = asyncio.Event()
+
+    async def pause_then_fail(document: dict[str, Any]) -> None:
+        insert_started.set()
+        await allow_failure.wait()
+        raise RuntimeError("insert failed")
+
+    monkeypatch.setattr(session._messages, "insert_one", pause_then_fail)
+    batch: list[TResponseInputItem] = [
+        {"role": "assistant", "content": "first"},
+        {"role": "user", "content": "second"},
+    ]
+    add_task = asyncio.create_task(session.add_items(batch))
+
+    await insert_started.wait()
+    assert await session.get_items() == [seed]
+    allow_failure.set()
+    with pytest.raises(RuntimeError, match="insert failed"):
+        await add_task
+
+    assert await session.get_items() == [seed]
+
+    monkeypatch.setattr(session._messages, "insert_one", real_insert_one)
+    await session.add_items(batch)
+    assert await session.get_items() == [seed, *batch]
+
+
+async def test_concurrent_pop_item_claims_distinct_items_from_batch() -> None:
+    """Atomic array pops must return each item in a logical batch at most once."""
+    MongoDBSession._init_state.clear()
+    client = FakeAsyncMongoClient()
+    session = MongoDBSession(
+        "concurrent-pop",
+        client=client,  # type: ignore[arg-type]
+        database="agents_test",
+    )
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "second"},
+        {"role": "user", "content": "third"},
+    ]
+    await session.add_items(items)
+
+    popped = await asyncio.gather(*(session.pop_item() for _ in items))
+
+    contents = {cast(dict[str, Any], item).get("content") for item in popped if item is not None}
+    assert contents == {
+        "first",
+        "second",
+        "third",
+    }
+    assert await session.get_items() == []
+
+
+async def test_reads_legacy_item_documents_with_new_batch_documents() -> None:
+    """New readers must preserve histories written by released per-item storage."""
+    MongoDBSession._init_state.clear()
+    client = FakeAsyncMongoClient()
+    session = MongoDBSession(
+        "legacy-read",
+        client=client,  # type: ignore[arg-type]
+        database="agents_test",
+    )
+    await session.add_items([{"role": "assistant", "content": "new"}])
+    legacy_doc = {
+        "_id": FakeObjectId(),
+        "session_id": session.session_id,
+        "seq": -1,
+        "message_data": json.dumps({"role": "user", "content": "legacy"}),
+    }
+    session._messages._docs[id(legacy_doc["_id"])] = legacy_doc
+
+    assert [item.get("content") for item in await session.get_items()] == ["legacy", "new"]
+    assert (await session.pop_item() or {}).get("content") == "new"
+    assert (await session.pop_item() or {}).get("content") == "legacy"

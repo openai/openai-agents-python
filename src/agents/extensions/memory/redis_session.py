@@ -31,6 +31,7 @@ from ._optional_imports import raise_optional_dependency_error
 try:
     import redis.asyncio as redis
     from redis.asyncio import Redis
+    from redis.exceptions import ResponseError, WatchError
 except ImportError as e:
     raise_optional_dependency_error(
         "RedisSession",
@@ -46,6 +47,62 @@ from ...memory.session_settings import (
     coerce_session_settings,
     resolve_session_limit,
 )
+
+
+async def _reset_pipeline(pipe: Any) -> asyncio.CancelledError | None:
+    """Finish releasing a watched pipeline despite repeated caller cancellation."""
+    reset_task = asyncio.create_task(pipe.reset())
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(reset_task)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+            if reset_task.done():
+                reset_task.result()
+                return cancellation
+        else:
+            return cancellation
+
+
+async def _execute_pipeline(
+    pipe: Any,
+) -> tuple[BaseException | None, asyncio.CancelledError | None, bool]:
+    """Wait for transaction outcome and driver cleanup despite caller cancellation."""
+    execute_transaction = pipe._execute_transaction
+    transaction_succeeded = False
+
+    async def execute_transaction_and_mark(*args: Any, **kwargs: Any) -> Any:
+        nonlocal transaction_succeeded
+        result = await execute_transaction(*args, **kwargs)
+        transaction_succeeded = True
+        return result
+
+    pipe._execute_transaction = execute_transaction_and_mark
+    execute_task = asyncio.create_task(pipe.execute())
+    cancellation: asyncio.CancelledError | None = None
+    try:
+        while True:
+            try:
+                await asyncio.shield(execute_task)
+            except asyncio.CancelledError as exc:
+                if cancellation is None:
+                    cancellation = exc
+                if not execute_task.done():
+                    continue
+            except BaseException as exc:
+                return exc, cancellation, transaction_succeeded
+            else:
+                return None, cancellation, transaction_succeeded
+
+            try:
+                execute_task.result()
+            except BaseException as exc:
+                return exc, cancellation, transaction_succeeded
+            return None, cancellation, transaction_succeeded
+    finally:
+        pipe._execute_transaction = execute_transaction
 
 
 class RedisSession(SessionABC):
@@ -70,7 +127,8 @@ class RedisSession(SessionABC):
             key_prefix (str, optional): Prefix for Redis keys to avoid collisions.
                 Defaults to "agents:session".
             ttl (int | None, optional): Time-to-live in seconds for session data.
-                If None, data persists indefinitely. Defaults to None.
+                If None, data persists indefinitely. Values outside Redis's supported expiration
+                range raise ValueError when adding items. Defaults to None.
             session_settings (SessionSettings | None): Session configuration settings including
                 default limit for retrieving items. If None, uses default SessionSettings().
         """
@@ -143,14 +201,6 @@ class RedisSession(SessionABC):
         result = await self._redis.incr(self._counter_key)
         return int(result)
 
-    async def _set_ttl_if_configured(self, *keys: str) -> None:
-        """Set TTL on keys if configured."""
-        if self._ttl is not None:
-            pipe = self._redis.pipeline()
-            for key in keys:
-                pipe.expire(key, self._ttl)
-            await pipe.execute()
-
     # ------------------------------------------------------------------
     # Session protocol implementation
     # ------------------------------------------------------------------
@@ -159,6 +209,81 @@ class RedisSession(SessionABC):
         """Raise if the session has already been closed."""
         if self._closed:
             raise RuntimeError("RedisSession is closed")
+
+    @staticmethod
+    def _key_type_name(key_type: Any) -> str:
+        """Normalize Redis TYPE responses from bytes and decoded clients."""
+        if isinstance(key_type, bytes):
+            return key_type.decode("utf-8")
+        return str(key_type)
+
+    async def _write_items(
+        self,
+        serialized_items: list[str],
+    ) -> None:
+        """Validate key types and atomically write one batch with optimistic locking."""
+        keys = (self._session_key, self._messages_key, self._counter_key)
+        while True:
+            pipe = self._redis.pipeline()
+            committed = False
+            try:
+                await pipe.watch(*keys)
+                session_key_type = self._key_type_name(await pipe.type(self._session_key))
+                messages_key_type = self._key_type_name(await pipe.type(self._messages_key))
+                if session_key_type not in ("none", "hash"):
+                    raise ResponseError("WRONGTYPE session metadata key must contain a hash")
+                if messages_key_type not in ("none", "list"):
+                    raise ResponseError("WRONGTYPE session messages key must contain a list")
+
+                if self._ttl is None:
+                    now = str(int(time.time()))
+                    expiration_time_ms = None
+                else:
+                    server_seconds, server_microseconds = await pipe.time()
+                    now = str(int(server_seconds))
+                    expiration_time_ms = (
+                        int(server_seconds) * 1000
+                        + int(server_microseconds) // 1000
+                        + self._ttl * 1000
+                    )
+                    min_int64 = -(2**63)
+                    max_int64 = 2**63 - 1
+                    if not min_int64 <= expiration_time_ms <= max_int64:
+                        raise ValueError("ttl is outside Redis's supported expiration range")
+
+                pipe.multi()
+                pipe.hset(self._session_key, "session_id", self.session_id)
+                pipe.hsetnx(self._session_key, "created_at", now)
+                pipe.rpush(self._messages_key, *serialized_items)
+                pipe.hset(self._session_key, "updated_at", now)
+                if expiration_time_ms is not None:
+                    for key in keys:
+                        pipe.pexpireat(key, expiration_time_ms)
+                (
+                    execute_error,
+                    execute_cancellation,
+                    transaction_succeeded,
+                ) = await _execute_pipeline(pipe)
+                if transaction_succeeded:
+                    committed = True
+                    return
+                if isinstance(execute_error, WatchError):
+                    if execute_cancellation is not None:
+                        raise execute_cancellation
+                    continue
+                if execute_error is not None:
+                    raise execute_error
+                committed = True
+                return
+            finally:
+                try:
+                    reset_cancellation = await _reset_pipeline(pipe)
+                except BaseException:
+                    if not committed:
+                        raise
+                else:
+                    if reset_cancellation is not None and not committed:
+                        raise reset_cancellation
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
@@ -224,32 +349,12 @@ class RedisSession(SessionABC):
 
         async with self._lock:
             self._check_not_closed()
-            pipe = self._redis.pipeline()
-            now = str(int(time.time()))
-
-            # Set session metadata, preserving created_at across subsequent writes.
-            pipe.hset(self._session_key, "session_id", self.session_id)
-            pipe.hsetnx(self._session_key, "created_at", now)
-
-            # Add all items to the messages list
             serialized_items = []
             for item in items:
                 serialized = await self._serialize_item(item)
                 serialized_items.append(serialized)
 
-            if serialized_items:
-                pipe.rpush(self._messages_key, *serialized_items)
-
-            # Update the session timestamp
-            pipe.hset(self._session_key, "updated_at", now)
-
-            # Execute all commands
-            await pipe.execute()
-
-            # Set TTL if configured
-            await self._set_ttl_if_configured(
-                self._session_key, self._messages_key, self._counter_key
-            )
+            await self._write_items(serialized_items)
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.

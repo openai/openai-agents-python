@@ -421,9 +421,9 @@ class SQLAlchemySession(SessionABC):
             The most recent item if it exists, None if the session is empty
         """
         await self._ensure_tables()
-        async with self._session_factory() as sess:
-            async with sess.begin():
-                while True:
+        while True:
+            async with self._session_factory() as sess:
+                async with sess.begin():
                     # Fallback for all dialects - get ID first, then delete
                     subq = (
                         select(self._messages.c.id)
@@ -443,7 +443,13 @@ class SQLAlchemySession(SessionABC):
                         select(self._messages.c.message_data).where(self._messages.c.id == row_id)
                     )
                     row = res_data.scalar_one_or_none()
-                    await sess.execute(delete(self._messages).where(self._messages.c.id == row_id))
+                    delete_result = await sess.execute(
+                        delete(self._messages).where(self._messages.c.id == row_id)
+                    )
+                    if delete_result.rowcount == 0:
+                        # A concurrent caller claimed this row. Start a new transaction so
+                        # dialects with repeatable-read snapshots can observe the next row.
+                        continue
 
                     if row is None:
                         continue
