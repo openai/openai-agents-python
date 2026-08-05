@@ -30,7 +30,13 @@ async def _rollback_on_failure(conn: aiosqlite.Connection) -> AsyncIterator[None
     try:
         yield
     except BaseException:
-        await conn.rollback()
+        # Rollback is best-effort cleanup. If it fails too -- a closed or otherwise unusable
+        # connection -- the original failure is the one worth reporting, so never let the
+        # cleanup error replace it.
+        try:
+            await conn.rollback()
+        except Exception:
+            pass
         raise
 
 

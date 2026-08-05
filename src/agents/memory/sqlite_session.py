@@ -26,7 +26,13 @@ def _rollback_on_failure(conn: sqlite3.Connection) -> Iterator[None]:
     try:
         yield
     except BaseException:
-        conn.rollback()
+        # Rollback is best-effort cleanup. If it fails too -- a closed or otherwise unusable
+        # connection -- the original failure is the one worth reporting, so never let the
+        # cleanup error replace it.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         raise
 
 

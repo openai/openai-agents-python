@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import tempfile
@@ -582,6 +583,46 @@ async def test_failed_pop_item_releases_write_lock():
             await session.pop_item()
 
         conn = await session._get_connection()
+        assert conn.in_transaction is False
+        assert _write_lock_is_free(db_path)
+
+        await session.close()
+
+
+async def test_cancelled_write_still_releases_write_lock(tmp_path: Path):
+    """Cancellation must still roll back, or the guard fails in the case it exists for.
+
+    An unshielded `await conn.rollback()` inside the cancellation handler is itself cancelled
+    immediately, so the transaction would stay open and keep holding the write lock.
+    """
+    if True:
+        db_path = tmp_path / "cancel_rollback.db"
+        session = AsyncSQLiteSession("cancel_rollback", db_path=db_path)
+        await session.add_items([{"role": "user", "content": "kept"}])
+
+        conn = await session._get_connection()
+        real_execute = conn.execute
+        started = asyncio.Event()
+
+        async def hang_after_first_write(*args: Any, **kwargs: Any) -> Any:
+            # Let the sessions-table upsert open the write transaction, then stall so the
+            # caller can cancel mid-write.
+            cursor = await real_execute(*args, **kwargs)
+            started.set()
+            await asyncio.sleep(3600)
+            return cursor
+
+        conn.execute = hang_after_first_write  # type: ignore[method-assign]
+        task = asyncio.create_task(session.add_items([{"role": "user", "content": "cancelled"}]))
+        await started.wait()
+        task.cancel()
+        with pytest.raises((asyncio.CancelledError, asyncio.TimeoutError)):
+            await asyncio.wait_for(task, timeout=5)
+
+        conn.execute = real_execute  # type: ignore[method-assign]
+        # Give the shielded rollback a turn to finish before asserting.
+        await asyncio.sleep(0.1)
+
         assert conn.in_transaction is False
         assert _write_lock_is_free(db_path)
 
