@@ -44,23 +44,44 @@ logger = logging.getLogger(__name__)
 # still call the tool without them.
 _PROSE_SCHEMA_KEYWORDS = frozenset({"description", "title", "$comment", "examples"})
 
-# Keywords whose value is a map keyed by *user-chosen names* — parameter names, definition
-# names, regexes — rather than by schema keywords. Their keys must survive even when they
-# spell one of the prose keywords above, so they are recursed into by value only.
-_NAME_KEYED_SCHEMA_MAPS = frozenset(
+# Keywords whose value is itself a schema. Unknown keywords are intentionally not traversed:
+# preserving unfamiliar data is safer than treating every nested mapping as a schema and
+# accidentally deleting user-controlled values.
+_SCHEMA_VALUE_KEYWORDS = frozenset(
     {
-        "properties",
-        "patternProperties",
-        "$defs",
-        "definitions",
-        "dependentSchemas",
-        "dependentRequired",
+        "additionalItems",
+        "additionalProperties",
+        "contains",
+        "contentSchema",
+        "else",
+        "if",
+        "items",
+        "not",
+        "propertyNames",
+        "then",
+        "unevaluatedItems",
+        "unevaluatedProperties",
     }
 )
 
-# Keywords whose value is instance *data* rather than a subschema. Nothing inside them is a
-# schema keyword, so they are copied through untouched.
-_DATA_SCHEMA_KEYWORDS = frozenset({"default", "const", "enum"})
+# Keywords whose value is a list of schemas.
+_SCHEMA_LIST_KEYWORDS = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
+
+# Keywords whose value is a map keyed by user-chosen names and whose values are schemas.
+_SCHEMA_MAP_KEYWORDS = frozenset(
+    {"$defs", "definitions", "dependentSchemas", "patternProperties", "properties"}
+)
+
+# The legacy ``dependencies`` keyword is also name-keyed, but each value may be either a
+# schema or a list of property names.
+_SCHEMA_OR_PROPERTY_LIST_MAP_KEYWORDS = frozenset({"dependencies"})
+
+_STRUCTURED_OUTPUT_FIELDS = {
+    "input_text": frozenset({"type", "text"}),
+    "input_image": frozenset({"type", "image_url", "file_id", "detail"}),
+    "input_file": frozenset({"type", "file_data", "file_url", "file_id", "filename"}),
+}
+_IMAGE_DETAILS = frozenset({"low", "high", "auto"})
 
 
 @dataclass
@@ -76,9 +97,12 @@ class ToolOutputTrimmer:
         recent_turns: Number of recent user messages whose surrounding items are never
             trimmed. Defaults to 2.
         max_output_chars: Tool outputs above this character count are candidates for
-            trimming. Defaults to 500.
-        preview_chars: How many characters of the original output to preserve as a
-            preview when trimming. Defaults to 200.
+            trimming. Structured outputs count their model-facing string payloads without
+            Python or JSON representation overhead, and their replacements fit within this
+            budget. Defaults to 500.
+        preview_chars: Maximum number of characters of a string output, or the text parts of
+            a structured output, to preserve as a preview when trimming. Structured previews
+            may be shorter when needed to fit ``max_output_chars``. Defaults to 200.
         trimmable_tools: Optional tool name or set of tool names whose outputs can be trimmed.
             For namespaced tools, both bare names and qualified ``namespace.name`` entries are
             supported. If ``None``, all tool outputs are eligible for trimming. Defaults
@@ -223,6 +247,9 @@ class ToolOutputTrimmer:
     ) -> tuple[dict[str, Any] | None, int]:
         """Trim a function_call_output item when its serialized output is too large."""
         output = item.get("output", "")
+        if isinstance(output, list):
+            return self._trim_structured_function_call_output(item, output, tool_names)
+
         output_str = output if isinstance(output, str) else str(output)
         output_len = len(output_str)
         if output_len <= self.max_output_chars:
@@ -241,6 +268,126 @@ class ToolOutputTrimmer:
         trimmed_item = dict(item)
         trimmed_item["output"] = summary
         return trimmed_item, output_len - len(summary)
+
+    def _trim_structured_function_call_output(
+        self,
+        item: dict[str, Any],
+        parts: list[Any],
+        tool_names: tuple[str, ...],
+    ) -> tuple[dict[str, Any] | None, int]:
+        """Trim a canonical structured function output without previewing opaque payloads."""
+        details = self._structured_output_details(parts)
+        if details is None:
+            return None, 0
+
+        output_len, text_content, dropped_part_types = details
+        if output_len <= self.max_output_chars:
+            return None, 0
+
+        display_name = (tool_names[0] if tool_names else "") or "unknown_tool"
+        dropped_note = ""
+        if dropped_part_types:
+            dropped_note = "; dropped " + ", ".join(
+                f"{count} {part_type}" for part_type, count in sorted(dropped_part_types.items())
+            )
+
+        minimal_header = "[Trimmed]"
+        if self.max_output_chars < len(minimal_header):
+            summary = minimal_header[: self.max_output_chars]
+        else:
+            preview_budget = self.max_output_chars - len(minimal_header) - 1
+            preview_len = min(len(text_content), self.preview_chars, max(0, preview_budget))
+            body = f"\n{text_content[:preview_len]}" if preview_len else ""
+            if (
+                preview_len < len(text_content)
+                and len(minimal_header) + len(body) + len("...") <= self.max_output_chars
+            ):
+                body += "..."
+
+            preview_note = f"; preview {preview_len}" if text_content else ""
+            headers = [
+                f"[Trimmed: {display_name}; payload {output_len}{preview_note}{dropped_note}]"
+            ]
+            if dropped_part_types:
+                dropped_types = ", ".join(sorted(dropped_part_types))
+                headers.extend(
+                    [
+                        f"[Trimmed: {display_name}{dropped_note}]",
+                        f"[Trimmed{dropped_note}]",
+                        f"[Trimmed: {dropped_types}]",
+                        f"[Trimmed: dropped {sum(dropped_part_types.values())} opaque]",
+                    ]
+                )
+            headers.extend(
+                [
+                    f"[Trimmed: payload {output_len}]",
+                    f"[Trimmed: {display_name}]",
+                    minimal_header,
+                ]
+            )
+            summary = next(
+                header + body
+                for header in headers
+                if len(header) + len(body) <= self.max_output_chars
+            )
+
+        trimmed_item = dict(item)
+        trimmed_item["output"] = summary
+        return trimmed_item, output_len - len(summary)
+
+    def _structured_output_details(
+        self,
+        parts: list[Any],
+    ) -> tuple[int, str, dict[str, int]] | None:
+        """Return payload size, readable text, and dropped-part counts for canonical parts."""
+        if not parts:
+            return None
+
+        output_len = 0
+        text_segments: list[str] = []
+        dropped_part_types: dict[str, int] = {}
+
+        for part in parts:
+            if not isinstance(part, dict):
+                return None
+
+            part_type = part.get("type")
+            if not isinstance(part_type, str):
+                return None
+            allowed_fields = _STRUCTURED_OUTPUT_FIELDS.get(part_type)
+            if allowed_fields is None or not set(part).issubset(allowed_fields):
+                return None
+            if any(key != "type" and not isinstance(value, str) for key, value in part.items()):
+                return None
+
+            if part_type == "input_text":
+                text = part.get("text")
+                if not isinstance(text, str):
+                    return None
+                text_segments.append(text)
+            elif part_type == "input_image":
+                if not isinstance(part.get("image_url"), str) and not isinstance(
+                    part.get("file_id"), str
+                ):
+                    return None
+                if "detail" in part and part["detail"] not in _IMAGE_DETAILS:
+                    return None
+                dropped_part_types[part_type] = dropped_part_types.get(part_type, 0) + 1
+            elif part_type == "input_file":
+                if not any(
+                    isinstance(part.get(field), str)
+                    for field in ("file_data", "file_url", "file_id")
+                ):
+                    return None
+                dropped_part_types[part_type] = dropped_part_types.get(part_type, 0) + 1
+
+            output_len += sum(
+                len(value)
+                for key, value in part.items()
+                if key != "type" and isinstance(value, str)
+            )
+
+        return output_len, "\n".join(text_segments), dropped_part_types
 
     def _trim_tool_search_output(self, item: dict[str, Any]) -> tuple[dict[str, Any] | None, int]:
         """Trim a tool_search_output item while keeping a valid replayable shape."""
@@ -311,31 +458,40 @@ class ToolOutputTrimmer:
         """Remove verbose prose from a JSON schema while preserving its structure."""
         trimmed_schema: dict[str, Any] = {}
         for key, value in schema.items():
-            # A name-keyed map is keyed by parameter/definition names, not by schema
-            # keywords, so recurse into its values while keeping its keys verbatim.
-            # Dropping a key here would delete a declared parameter or dangle a $ref.
-            if key in _NAME_KEYED_SCHEMA_MAPS and isinstance(value, dict):
+            if key in _PROSE_SCHEMA_KEYWORDS:
+                continue
+            if key in _SCHEMA_VALUE_KEYWORDS:
+                if isinstance(value, dict):
+                    trimmed_schema[key] = self._trim_json_schema(value)
+                elif key == "items" and isinstance(value, list):
+                    trimmed_schema[key] = [
+                        self._trim_json_schema(item) if isinstance(item, dict) else item
+                        for item in value
+                    ]
+                else:
+                    trimmed_schema[key] = value
+                continue
+            if key in _SCHEMA_LIST_KEYWORDS and isinstance(value, list):
+                trimmed_schema[key] = [
+                    self._trim_json_schema(item) if isinstance(item, dict) else item
+                    for item in value
+                ]
+                continue
+            if key in _SCHEMA_MAP_KEYWORDS and isinstance(value, dict):
                 trimmed_schema[key] = {
                     name: self._trim_json_schema(sub) if isinstance(sub, dict) else sub
                     for name, sub in value.items()
                 }
                 continue
-            # These hold instance data. A "title" key inside a default value is part of the
-            # value, so trimming it would silently change the tool's contract.
-            if key in _DATA_SCHEMA_KEYWORDS:
-                trimmed_schema[key] = value
+            if key in _SCHEMA_OR_PROPERTY_LIST_MAP_KEYWORDS and isinstance(value, dict):
+                trimmed_schema[key] = {
+                    name: self._trim_json_schema(dependency)
+                    if isinstance(dependency, dict)
+                    else dependency
+                    for name, dependency in value.items()
+                }
                 continue
-            if key in _PROSE_SCHEMA_KEYWORDS:
-                continue
-            if isinstance(value, dict):
-                trimmed_schema[key] = self._trim_json_schema(value)
-            elif isinstance(value, list):
-                trimmed_schema[key] = [
-                    self._trim_json_schema(item) if isinstance(item, dict) else item
-                    for item in value
-                ]
-            else:
-                trimmed_schema[key] = value
+            trimmed_schema[key] = value
         return trimmed_schema
 
     def _serialize_json_like(self, value: Any) -> str:

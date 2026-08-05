@@ -10,8 +10,11 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+from openai.types.responses import ResponseFunctionToolCall
 
+from agents import ItemHelpers, ToolOutputFileContent, ToolOutputImage, ToolOutputText
 from agents.extensions.tool_output_trimmer import ToolOutputTrimmer
+from agents.models.chatcmpl_converter import Converter
 from agents.run_config import CallModelData, ModelInputData
 
 # ---------------------------------------------------------------------------
@@ -34,7 +37,7 @@ def _func_call(call_id: str, name: str, *, namespace: str | None = None) -> dict
     return item
 
 
-def _func_output(call_id: str, output: str) -> dict[str, Any]:
+def _func_output(call_id: str, output: Any) -> dict[str, Any]:
     return {"type": "function_call_output", "call_id": call_id, "output": output}
 
 
@@ -219,6 +222,329 @@ class TestTrimming:
         trimmer = ToolOutputTrimmer(max_output_chars=500)
         result = trimmer(_make_data(items))
         assert _output(result, 2) == small
+
+    @pytest.mark.parametrize("opaque_first", [True, False])
+    def test_structured_output_previews_text_and_drops_opaque_parts(
+        self, opaque_first: bool
+    ) -> None:
+        """Canonical structured outputs use text content instead of representation order."""
+        caption = "Revenue chart: Q3 up 12% YoY, driven by EMEA."
+        image_part = {
+            "type": "input_image",
+            "image_url": "data:image/png;base64," + "Q" * 3000,
+            "detail": "auto",
+        }
+        text_part = {"type": "input_text", "text": caption}
+        parts = [image_part, text_part] if opaque_first else [text_part, image_part]
+        items = [
+            _user("q1"),
+            _func_call("c1", "plot"),
+            _func_output("c1", parts),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(max_output_chars=500, preview_chars=200)
+        result = trimmer(_make_data(items))
+        trimmed = _output(result, 2)
+
+        assert isinstance(trimmed, str)
+        assert caption in trimmed
+        assert "base64," not in trimmed
+        assert f"preview {len(caption)}" in trimmed
+        assert "dropped 1 input_image" in trimmed
+        assert not trimmed.endswith("...")
+
+        repeated = trimmer(_make_data(result.input))
+        assert repeated.input == result.input
+
+    def test_structured_output_truncates_long_text_with_exact_preview_length(self) -> None:
+        """The summary reports and marks truncation only when text itself is shortened."""
+        text = "abcdefghij" * 40
+        parts = [{"type": "input_text", "text": text}]
+        items = [
+            _user("q1"),
+            _func_call("c1", "search"),
+            _func_output("c1", parts),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(max_output_chars=100, preview_chars=40)
+        result = trimmer(_make_data(items))
+        trimmed = _output(result, 2)
+
+        assert len(trimmed) <= 100
+        assert "payload 400" in trimmed
+        assert "preview 40" in trimmed
+        assert trimmed.endswith(f"{'abcdefghij' * 4}...")
+
+        repeated = trimmer(_make_data(result.input))
+        assert repeated.input == result.input
+
+    def test_structured_output_prioritizes_text_at_tight_budget(self) -> None:
+        """A tight structured budget preserves feasible text before optional metadata."""
+        text = "abcdefghijklmnopqrstuvwxyz" * 10
+        items = [
+            _user("q1"),
+            _func_call("c1", "search"),
+            _func_output("c1", [{"type": "input_text", "text": text}]),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(max_output_chars=40, preview_chars=100)
+        result = trimmer(_make_data(items))
+        trimmed = _output(result, 2)
+
+        assert isinstance(trimmed, str)
+        assert len(trimmed) <= 40
+        assert trimmed.startswith("[Trimmed]\n")
+        assert text[:20] in trimmed
+
+        repeated = trimmer(_make_data(result.input))
+        assert repeated.input == result.input
+
+    def test_structured_output_without_text_names_dropped_parts(self) -> None:
+        """Image-only and file-only outputs are summarized without leaking their payloads."""
+        parts = [
+            {"type": "input_image", "image_url": "data:image/png;base64," + "Q" * 1000},
+            {"type": "input_file", "file_data": "R" * 1000, "filename": "report.pdf"},
+        ]
+        items = [
+            _user("q1"),
+            _func_call("c1", "render"),
+            _func_output("c1", parts),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(max_output_chars=500, preview_chars=200)
+        result = trimmer(_make_data(items))
+        trimmed = _output(result, 2)
+
+        assert "base64," not in trimmed
+        assert "report.pdf" not in trimmed
+        assert "dropped 1 input_file, 1 input_image" in trimmed
+        assert "char preview" not in trimmed
+        assert not trimmed.endswith("...")
+
+    def test_structured_output_prioritizes_text_over_opaque_metadata(self) -> None:
+        """Mixed outputs retain their feasible text before optional dropped-part details."""
+        text = "useful-text-preview-more"
+        parts = [
+            {"type": "input_text", "text": text},
+            {"type": "input_image", "image_url": "image-payload-" + "Q" * 1000},
+            {"type": "input_file", "file_data": "file-payload-" + "R" * 1000},
+        ]
+        items = [
+            _user("q1"),
+            _func_call("c1", "render"),
+            _func_output("c1", parts),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(max_output_chars=70, preview_chars=20)
+        result = trimmer(_make_data(items))
+        trimmed = _output(result, 2)
+
+        assert isinstance(trimmed, str)
+        assert len(trimmed) <= 70
+        assert text[:20] in trimmed
+        assert "image-payload" not in trimmed
+        assert "file-payload" not in trimmed
+
+        repeated = trimmer(_make_data(result.input))
+        assert repeated.input == result.input
+
+    @pytest.mark.parametrize(
+        "part,payload_fragment",
+        [
+            ({"type": "input_image", "image_url": "image-payload-12345"}, "image-payload"),
+            ({"type": "input_file", "file_data": "file-payload-12345"}, "file-payload"),
+        ],
+    )
+    def test_structured_opaque_output_respects_tight_budget(
+        self, part: dict[str, str], payload_fragment: str
+    ) -> None:
+        """Canonical opaque payloads become stable bounded summaries at tight budgets."""
+        items = [
+            _user("q1"),
+            _func_call("c1", "render"),
+            _func_output("c1", [part]),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(max_output_chars=10, preview_chars=0)
+        result = trimmer(_make_data(items))
+        trimmed = _output(result, 2)
+
+        assert isinstance(trimmed, str)
+        assert len(trimmed) <= 10
+        assert payload_fragment not in trimmed
+
+        repeated = trimmer(_make_data(result.input))
+        assert repeated.input == result.input
+
+    def test_structured_opaque_output_uses_exact_type_header_when_it_fits(self) -> None:
+        """A compact summary reports the exact omitted type before generic metadata."""
+        part = {"type": "input_image", "image_url": "image-payload-" + "Q" * 1000}
+        items = [
+            _user("q1"),
+            _func_call("c1", "render"),
+            _func_output("c1", [part]),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+        expected = "[Trimmed: input_image]"
+
+        result = ToolOutputTrimmer(max_output_chars=len(expected), preview_chars=0)(
+            _make_data(items)
+        )
+
+        assert _output(result, 2) == expected
+
+    @pytest.mark.parametrize(
+        "max_output_chars",
+        [1, len("[Trimmed]"), len("[Trimmed: input_image]"), 70, 200],
+    )
+    def test_canonical_structured_output_replays_through_chat_completions(
+        self, max_output_chars: int
+    ) -> None:
+        """SDK-produced structured output stays bounded and replayable after trimming."""
+        call = ResponseFunctionToolCall(
+            id="fc1",
+            call_id="c1",
+            name="render",
+            arguments="{}",
+            type="function_call",
+        )
+        output_item = ItemHelpers.tool_call_output_item(
+            call,
+            [
+                ToolOutputText(text="useful-text-preview-" + "T" * 1000),
+                ToolOutputImage(
+                    image_url="image-payload-" + "I" * 1000,
+                    file_id="image-file-id",
+                    detail="high",
+                ),
+                ToolOutputFileContent(
+                    file_data="file-payload-" + "F" * 1000,
+                    file_url="https://example.com/report.pdf",
+                    file_id="file-id",
+                    filename="report.pdf",
+                ),
+            ],
+        )
+        produced_output = output_item["output"]
+        assert isinstance(produced_output, list)
+        assert produced_output[1] == {
+            "type": "input_image",
+            "image_url": "image-payload-" + "I" * 1000,
+            "file_id": "image-file-id",
+            "detail": "high",
+        }
+        assert produced_output[2] == {
+            "type": "input_file",
+            "file_data": "file-payload-" + "F" * 1000,
+            "file_url": "https://example.com/report.pdf",
+            "file_id": "file-id",
+            "filename": "report.pdf",
+        }
+
+        items = [
+            _user("q1"),
+            _func_call("c1", "render"),
+            output_item,
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+        original = copy.deepcopy(items)
+        trimmer = ToolOutputTrimmer(max_output_chars=max_output_chars, preview_chars=20)
+        result = trimmer(_make_data(items))
+        trimmed = _output(result, 2)
+
+        assert isinstance(trimmed, str)
+        assert len(trimmed) <= max_output_chars
+        assert "image-payload" not in trimmed
+        assert "file-payload" not in trimmed
+        assert items == original
+        assert trimmer(_make_data(result.input)).input == result.input
+
+        messages = Converter.items_to_messages([result.input[2]])
+        assert messages == [{"role": "tool", "tool_call_id": "c1", "content": trimmed}]
+
+    def test_structured_output_threshold_uses_payload_characters(self) -> None:
+        """Structured syntax and field names do not cause a small payload to be trimmed."""
+        parts = [{"type": "input_text", "text": "short"}]
+        items = [
+            _user("q1"),
+            _func_call("c1", "search"),
+            _func_output("c1", parts),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(max_output_chars=5, preview_chars=2)
+        result = trimmer(_make_data(items))
+
+        assert _output(result, 2) == parts
+
+    @pytest.mark.parametrize(
+        "parts",
+        [
+            [{"type": "output_text", "text": "x" * 1000}],
+            [{"type": "input_text", "text": "x" * 1000, "metadata": "unsupported"}],
+            [{"type": "input_image", "image_url": "x" * 1000, "detail": "invalid"}],
+            ["not a content part"],
+        ],
+    )
+    def test_unsupported_structured_output_is_preserved(self, parts: list[Any]) -> None:
+        """The built-in trimmer does not infer semantics for non-canonical list shapes."""
+        items = [
+            _user("q1"),
+            _func_call("c1", "search"),
+            _func_output("c1", parts),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(max_output_chars=100, preview_chars=40)
+        result = trimmer(_make_data(items))
+
+        assert _output(result, 2) == parts
 
     def test_respects_trimmable_tools_allowlist(self) -> None:
         """Only outputs from tools in trimmable_tools should be trimmed."""
@@ -441,6 +767,10 @@ class TestTrimming:
             "patternProperties": {"title": {"type": "string"}},
             "dependentSchemas": {"title": {"required": ["note"]}},
             "dependentRequired": {"title": ["note"]},
+            "dependencies": {
+                "description": ["note"],
+                "title": {"type": "string", "description": "dependency prose " * 200},
+            },
             "properties": {
                 "note": {"$ref": "#/$defs/description"},
                 "prio": {"$ref": "#/$defs/Priority"},
@@ -451,6 +781,10 @@ class TestTrimming:
                 },
                 "mode": {"const": {"title": "A", "kind": "fast"}},
                 "choice": {"enum": [{"title": "A", "id": 1}, {"title": "B", "id": 2}]},
+            },
+            "x-tool-metadata": {
+                "description": "application data",
+                "nested": {"title": "must survive"},
             },
             "required": ["note"],
         }
@@ -492,6 +826,8 @@ class TestTrimming:
         assert sorted(trimmed["patternProperties"]) == ["title"]
         assert sorted(trimmed["dependentSchemas"]) == ["title"]
         assert trimmed["dependentRequired"] == {"title": ["note"]}
+        assert sorted(trimmed["dependencies"]) == ["description", "title"]
+        assert "description" not in trimmed["dependencies"]["title"]
 
         # Instance data is preserved byte for byte.
         assert trimmed["properties"]["opts"]["default"] == {
@@ -504,6 +840,10 @@ class TestTrimming:
             {"title": "A", "id": 1},
             {"title": "B", "id": 2},
         ]
+        assert trimmed["x-tool-metadata"] == {
+            "description": "application data",
+            "nested": {"title": "must survive"},
+        }
 
         # Prose is still trimmed, at the schema level and inside a nested subschema.
         assert "description" not in trimmed
@@ -524,6 +864,7 @@ class TestTrimming:
                     "propertyNames": {"pattern": "^x", "description": "a key " * 200},
                 },
             },
+            "allOf": [{"type": "object", "description": "combined schema " * 200}],
         }
         items = [
             _user("q1"),
@@ -554,6 +895,7 @@ class TestTrimming:
 
         assert trimmed["properties"]["tags"]["items"] == {"type": "string"}
         assert trimmed["properties"]["bag"]["propertyNames"] == {"pattern": "^x"}
+        assert trimmed["allOf"] == [{"type": "object"}]
 
     def test_trims_legacy_tool_search_output_results(self) -> None:
         """Legacy tool_search_output snapshots with free-text results should still trim."""
