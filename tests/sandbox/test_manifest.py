@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 from typing import ClassVar, Literal
@@ -451,23 +452,30 @@ def test_duplicate_env_value_type_registration_raises() -> None:
 
 
 class _BlockingEnvValue(EnvValue):
-    """Stands in for a user resolver that reaches a secret store or the network."""
+    """Stands in for a user resolver that reaches a secret store or the network.
+
+    Blocks on a test-owned release signal rather than forever, so a failed
+    assertion (or a future regression) cannot leave this task pending for the rest
+    of the session.
+    """
 
     type: Literal["test.blocking"] = "test.blocking"
 
     _started: ClassVar[asyncio.Event]
+    _release: ClassVar[asyncio.Event]
+    _finished: ClassVar[asyncio.Event]
     _cancelled: ClassVar[bool]
-    _finished: ClassVar[bool]
 
     async def resolve(self) -> str:
-        type(self)._started.set()
+        cls = type(self)
+        cls._started.set()
         try:
-            await asyncio.Event().wait()
+            await cls._release.wait()
         except asyncio.CancelledError:
-            type(self)._cancelled = True
+            cls._cancelled = True
             raise
         finally:
-            type(self)._finished = True
+            cls._finished.set()
         return "unreachable"
 
 
@@ -492,19 +500,26 @@ async def test_environment_resolve_cancels_siblings_when_one_resolver_fails() ->
     failed.
     """
     _BlockingEnvValue._started = asyncio.Event()
+    _BlockingEnvValue._release = asyncio.Event()
+    _BlockingEnvValue._finished = asyncio.Event()
     _BlockingEnvValue._cancelled = False
-    _BlockingEnvValue._finished = False
 
     environment = Environment(
         value={"BLOCKING": _BlockingEnvValue(), "FAILING": _FailingEnvValue()}
     )
 
-    with pytest.raises(RuntimeError, match="secret backend rejected the request"):
-        await environment.resolve()
+    try:
+        with pytest.raises(RuntimeError, match="secret backend rejected the request"):
+            await environment.resolve()
 
-    assert _BlockingEnvValue._cancelled, "sibling resolver was not cancelled"
-    assert _BlockingEnvValue._finished, "sibling resolver did not finish unwinding"
-    assert not [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+        assert _BlockingEnvValue._cancelled, "sibling resolver was not cancelled"
+        await asyncio.wait_for(_BlockingEnvValue._finished.wait(), timeout=1)
+    finally:
+        # Release the resolver whether or not the assertions held, so running this
+        # against the base revision drains its task instead of stranding it.
+        _BlockingEnvValue._release.set()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(_BlockingEnvValue._finished.wait(), timeout=1)
 
 
 @pytest.mark.asyncio
