@@ -26,15 +26,21 @@ def _finish_on_generator_exit(trace: Trace) -> None:
     finalizing cannot rewrite the caller's context, and the caller keeps seeing this trace
     as current until its own scope ends. Raising would only add a crash on top of that.
 
-    The tolerance is deliberately limited to this path. An explicit ``finish`` from the
-    wrong context is a context-ownership violation rather than an unavoidable one, so it
-    still raises.
+    The tolerance is deliberately limited to this path, and within it to the reset itself.
+    An explicit ``finish`` from the wrong context is a context-ownership violation rather
+    than an unavoidable one, so it still raises, and a processor that fails during
+    ``finish`` still surfaces rather than being mistaken for a foreign token.
     """
+    trace.finish(reset_current=False)
+
+    token: contextvars.Token[Trace | None] | None = trace._prev_context_token  # type: ignore[attr-defined]
+    if token is None:
+        return
+    trace._prev_context_token = None  # type: ignore[attr-defined]
     try:
-        trace.finish(reset_current=True)
+        Scope.reset_current_trace(token)
     except ValueError:
         logger.debug("Skipping trace context reset, token belongs to another context")
-        trace._prev_context_token = None  # type: ignore[attr-defined]
 
 
 class Trace(abc.ABC):

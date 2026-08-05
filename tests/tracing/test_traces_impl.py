@@ -237,3 +237,40 @@ def test_reattached_trace_restores_scope_without_reemitting_processor_events() -
     assert processor.started == ["trace-123"]
     assert processor.ended == ["trace-123"]
     assert Scope.get_current_trace() is None
+
+
+async def test_generator_close_surfaces_processor_failure() -> None:
+    """A processor failing during close must not be mistaken for a foreign token.
+
+    ``finish`` calls ``on_trace_end`` before resetting the scope, so catching every
+    ``ValueError`` around the whole call would swallow a processor failure, drop the saved
+    token, and leave the finished trace current for everything that ran afterwards.
+    """
+    Scope.set_current_trace(None)
+
+    class FailingProcessor(DummyProcessor):
+        def on_trace_end(self, trace: Trace) -> None:
+            raise ValueError("processor exploded")
+
+    trace = TraceImpl(
+        name="processor-failure",
+        trace_id="trace-processor-failure",
+        group_id=None,
+        metadata=None,
+        processor=cast(Any, FailingProcessor()),
+    )
+
+    async def stream() -> AsyncGenerator[int, None]:
+        with trace:
+            yield 1
+
+    generator = stream()
+    assert await generator.asend(None) == 1
+
+    with pytest.raises(ValueError, match="processor exploded"):
+        await generator.aclose()
+
+    # The reset never ran, so the token must still be there rather than silently dropped.
+    assert trace._prev_context_token is not None
+
+    Scope.set_current_trace(None)
