@@ -16,13 +16,17 @@ from .scope import Scope
 
 
 def _reset_current_trace(token: contextvars.Token[Trace | None]) -> None:
-    """Restore the previously current trace, tolerating a foreign context.
+    """Restore the previously current trace when the token belongs to this context.
 
-    An abandoned async generator is finalized from whichever task happens to run its
-    ``aclose``, so the generator body resumes in a context that never set this token and
-    ``ContextVar.reset`` raises ``ValueError``. There is nothing to restore in that
-    context, so the failure is expected and ignored. Every other case, including a
-    generator closed from the same task, resets normally.
+    A generator closed from the same task resets normally, which is the common case.
+
+    An abandoned async generator is instead finalized from whichever task happens to run
+    its ``aclose``, so the body resumes in a context that never set this token and
+    ``ContextVar.reset`` raises ``ValueError``. Nothing can be done about that from here:
+    a ``Token`` is only valid in the ``Context`` that created it, so the task doing the
+    finalizing cannot rewrite the caller's context, and the caller keeps seeing this trace
+    as current until its own scope ends. Raising would only add a crash on top of that, so
+    the error is swallowed rather than treated as a successful restore.
     """
     try:
         Scope.reset_current_trace(token)
