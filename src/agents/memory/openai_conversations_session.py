@@ -86,9 +86,17 @@ class OpenAIConversationsSession(SessionABC):
         self._session_id = None
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
-        session_id = await self._get_session_id()
-
         session_limit = resolve_session_limit(limit, self.session_settings)
+
+        # A limit of 0 is the supported "no history" request that the runner makes for
+        # RunConfig(session_settings=SessionSettings(limit=0)). The Conversations items API only
+        # accepts a page size of 1 through 100, so no request can express it. Answer it here, and
+        # do so before resolving the session id, so asking for no history does not create a remote
+        # conversation as a side effect.
+        if session_limit is not None and session_limit <= 0:
+            return []
+
+        session_id = await self._get_session_id()
 
         all_items = []
         if session_limit is None:

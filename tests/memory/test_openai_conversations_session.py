@@ -754,3 +754,47 @@ class TestOpenAIConversationsSessionItemPageSize:
 
         assert items.requested_limits == [5]
         assert [item["content"] for item in retrieved] == ["m195", "m196", "m197", "m198", "m199"]
+
+    @pytest.mark.asyncio
+    async def test_get_items_returns_no_history_for_a_zero_limit(self, mock_openai_client):
+        """A limit of 0 is the runner's no-history request, and 0 is not a valid page size."""
+        items = _FakeConversationItems(total=200)
+        mock_openai_client.conversations.items = items
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+
+        retrieved = await session.get_items(limit=0)
+
+        assert retrieved == []
+        assert items.requested_limits == []
+
+    @pytest.mark.asyncio
+    async def test_get_items_honors_a_zero_limit_from_session_settings(self, mock_openai_client):
+        from agents.memory import SessionSettings
+
+        items = _FakeConversationItems(total=200)
+        mock_openai_client.conversations.items = items
+        session = OpenAIConversationsSession(
+            conversation_id="test_id",
+            openai_client=mock_openai_client,
+            session_settings=SessionSettings(limit=0),
+        )
+
+        retrieved = await session.get_items()
+
+        assert retrieved == []
+        assert items.requested_limits == []
+
+    @pytest.mark.asyncio
+    async def test_zero_limit_does_not_create_a_conversation(self, mock_openai_client):
+        """Asking for no history must not lazily create a remote conversation."""
+        items = _FakeConversationItems(total=200)
+        mock_openai_client.conversations.items = items
+        session = OpenAIConversationsSession(openai_client=mock_openai_client)
+
+        retrieved = await session.get_items(limit=0)
+
+        assert retrieved == []
+        assert items.requested_limits == []
+        mock_openai_client.conversations.create.assert_not_awaited()
