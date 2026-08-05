@@ -4,8 +4,11 @@ import asyncio
 import contextlib
 import json
 import logging
+import sqlite3
 import tempfile
 import threading
+import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import Mock, patch
@@ -648,6 +651,139 @@ async def test_branching_functionality(agent: Agent):
     assert branches_after_delete[0]["branch_id"] == "main"
 
     session.close()
+
+
+def _branch_collision_items() -> list[TResponseInputItem]:
+    """Return three user turns with assistant replies for branch collision tests."""
+    return [
+        {"role": "user", "content": "Turn one question"},
+        {"role": "assistant", "content": "Turn one answer"},
+        {"role": "user", "content": "Turn two question"},
+        {"role": "assistant", "content": "Turn two answer"},
+        {"role": "user", "content": "Turn three question"},
+        {"role": "assistant", "content": "Turn three answer"},
+    ]
+
+
+@pytest.mark.parametrize("branch_id", ["main", "existing_branch"])
+async def test_create_branch_rejects_populated_branch_id(branch_id: str):
+    """Creating a branch must not append history to a populated branch."""
+    session = AdvancedSQLiteSession(
+        session_id=f"branch_collision_{branch_id}",
+        create_tables=True,
+    )
+    items = _branch_collision_items()
+
+    try:
+        await session.add_items(items)
+        if branch_id != "main":
+            await session.create_branch_from_turn(3, branch_id)
+            await session.switch_to_branch("main")
+
+        branch_items_before = await session.get_items(branch_id=branch_id)
+
+        with pytest.raises(ValueError, match="already exists"):
+            await session.create_branch_from_turn(2, branch_id)
+
+        assert session._current_branch_id == "main"
+        assert await session.get_items(branch_id=branch_id) == branch_items_before
+        assert await session.get_items(branch_id="main") == items
+    finally:
+        session.close()
+
+
+async def test_generated_branch_ids_do_not_merge_within_the_same_second(monkeypatch):
+    """Repeated generated IDs must not merge copied branch histories."""
+    monkeypatch.setattr(time, "time", lambda: 1_700_000_000.0)
+    session = AdvancedSQLiteSession(
+        session_id="generated_branch_collision",
+        create_tables=True,
+    )
+    items = _branch_collision_items()
+
+    try:
+        await session.add_items(items)
+        first_branch = await session.create_branch_from_turn(3)
+        await session.switch_to_branch("main")
+        second_branch = await session.create_branch_from_turn(3)
+
+        assert first_branch == "branch_from_turn_3_1700000000"
+        assert second_branch == "branch_from_turn_3_1700000000_2"
+        assert await session.get_items(branch_id=first_branch) == items[:4]
+        assert await session.get_items(branch_id=second_branch) == items[:4]
+        assert await session.get_items(branch_id="main") == items
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("branch_name", [None, "shared_branch"])
+async def test_branch_allocation_is_serialized_across_sessions(
+    tmp_path: Path,
+    monkeypatch,
+    branch_name: str | None,
+):
+    """Sessions sharing one file must serialize branch ID checks and copies."""
+
+    class InstrumentedBranchCheckSession(AdvancedSQLiteSession):
+        def __init__(self, **kwargs: Any) -> None:
+            self._lock_state = threading.local()
+            super().__init__(**kwargs)
+
+        @contextlib.contextmanager
+        def _locked_connection(self) -> Iterator[sqlite3.Connection]:
+            with super()._locked_connection() as conn:
+                self._lock_state.active = True
+                try:
+                    yield conn
+                finally:
+                    self._lock_state.active = False
+
+        def _branch_id_exists(self, cursor: Any, branch_id: str) -> bool:
+            assert getattr(self._lock_state, "active", False)
+            return super()._branch_id_exists(cursor, branch_id)
+
+    monkeypatch.setattr(time, "time", lambda: 1_700_000_000.0)
+    db_path = tmp_path / "branch_allocation.db"
+    session_id = f"branch_allocation_{branch_name}"
+    first_session = InstrumentedBranchCheckSession(
+        session_id=session_id,
+        db_path=db_path,
+        create_tables=True,
+    )
+    second_session = InstrumentedBranchCheckSession(
+        session_id=session_id,
+        db_path=db_path,
+    )
+    items = _branch_collision_items()
+
+    try:
+        assert first_session._lock is second_session._lock
+        await first_session.add_items(items)
+        results = await asyncio.gather(
+            first_session.create_branch_from_turn(3, branch_name),
+            second_session.create_branch_from_turn(3, branch_name),
+            return_exceptions=True,
+        )
+
+        successful_ids = [result for result in results if isinstance(result, str)]
+        if branch_name is None:
+            assert not [result for result in results if isinstance(result, BaseException)]
+            assert sorted(successful_ids) == [
+                "branch_from_turn_3_1700000000",
+                "branch_from_turn_3_1700000000_2",
+            ]
+        else:
+            assert successful_ids == [branch_name]
+            errors = [result for result in results if isinstance(result, ValueError)]
+            assert len(errors) == 1
+            assert "already exists" in str(errors[0])
+
+        for branch_id in successful_ids:
+            assert await first_session.get_items(branch_id=branch_id) == items[:4]
+        assert await first_session.get_items(branch_id="main") == items
+    finally:
+        first_session.close()
+        second_session.close()
 
 
 async def test_delete_branch_removes_branch_only_messages():
