@@ -24,13 +24,14 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from ._optional_imports import raise_optional_dependency_error
 
 try:
     import redis.asyncio as redis
-    from redis.asyncio import Redis
+    from redis.asyncio import BlockingConnectionPool, ConnectionPool, Redis
     from redis.exceptions import ResponseError, WatchError
 except ImportError as e:
     raise_optional_dependency_error(
@@ -49,60 +50,146 @@ from ...memory.session_settings import (
 )
 
 
-async def _reset_pipeline(pipe: Any) -> asyncio.CancelledError | None:
-    """Finish releasing a watched pipeline despite repeated caller cancellation."""
-    reset_task = asyncio.create_task(pipe.reset())
+@dataclass
+class _PipelineAttemptOutcome:
+    committed: bool
+    operation_error: BaseException | None
+    cleanup_error: BaseException | None
+    settled: bool
+
+
+class _PipelineConnectionPool:
+    """Track one pipeline's connection release without changing the shared pool."""
+
+    def __init__(self, pool: Any):
+        self._pool = pool
+        self.release_started = False
+        self.release_completed = False
+        release_implementation = getattr(pool.release, "__func__", None)
+        if release_implementation not in {
+            ConnectionPool.release,
+            BlockingConnectionPool.release,
+        }:
+            raise RuntimeError(
+                "RedisSession requires the standard redis-py connection pool release method"
+            )
+        self._uses_standard_release = release_implementation is ConnectionPool.release
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._pool, name)
+
+    async def notify_capacity_available(self) -> None:
+        if isinstance(self._pool, BlockingConnectionPool):
+            async with self._pool._condition:
+                self._pool._condition.notify()
+
+    async def release(self, connection: Any) -> None:
+        self.release_started = True
+        was_in_use = connection in self._pool._in_use_connections
+        try:
+            await self._pool.release(connection)
+        except BaseException:
+            if was_in_use and connection in self._pool._available_connections:
+                self.release_completed = True
+                await self.notify_capacity_available()
+            elif (
+                was_in_use
+                and self._uses_standard_release
+                and connection in self._pool._in_use_connections
+            ):
+                self.release_completed = True
+            raise
+        else:
+            self.release_completed = True
+
+
+async def _finish_pipeline(
+    pipe: Any,
+    connection_pool: _PipelineConnectionPool,
+) -> tuple[BaseException | None, bool, Any | None]:
+    """Reset a pipeline and prove whether its connection left pipeline ownership."""
+    if connection_pool.release_completed:
+        pipe.connection = None
+        return None, True, None
+
+    reset_error: BaseException | None = None
+    try:
+        await pipe.reset()
+    except BaseException as exc:
+        reset_error = exc
+
+    if connection_pool.release_completed:
+        pipe.connection = None
+        return reset_error, True, None
+
+    connection = getattr(pipe, "connection", None)
+    if connection is None:
+        return reset_error, True, None
+
+    if (
+        connection_pool.release_started
+        and connection not in connection_pool._pool._in_use_connections
+    ):
+        try:
+            connection._close()
+        except BaseException as close_error:
+            pipe.connection = None
+            return close_error, True, connection
+        await connection_pool.notify_capacity_available()
+        pipe.connection = None
+        if reset_error is None:
+            reset_error = RuntimeError("Redis pipeline release did not complete")
+        return reset_error, True, None
+
+    try:
+        connection.mark_for_reconnect()
+    except BaseException as reconnect_error:
+        return reconnect_error, False, None
+
+    try:
+        await connection_pool.release(connection)
+    except BaseException as release_error:
+        if (
+            not connection_pool.release_completed
+            and connection not in connection_pool._pool._in_use_connections
+        ):
+            try:
+                connection._close()
+            except BaseException as close_error:
+                pipe.connection = None
+                return close_error, True, connection
+            await connection_pool.notify_capacity_available()
+            connection_pool.release_completed = True
+        pipe.connection = None
+        return release_error, connection_pool.release_completed, None
+
+    pipe.connection = None
+    return reset_error, True, None
+
+
+async def _await_pipeline_attempt(
+    attempt: asyncio.Task[_PipelineAttemptOutcome],
+    completion_owned: asyncio.Event,
+) -> tuple[_PipelineAttemptOutcome, asyncio.CancelledError | None]:
+    """Wait for an attempt while preserving only caller-originated cancellation."""
     cancellation: asyncio.CancelledError | None = None
+    attempt_cancelled = False
+
     while True:
         try:
-            await asyncio.shield(reset_task)
+            outcome = await asyncio.shield(attempt)
         except asyncio.CancelledError as exc:
+            if attempt.done() and attempt.cancelled():
+                if cancellation is not None:
+                    raise cancellation from None
+                raise
             if cancellation is None:
                 cancellation = exc
-            if reset_task.done():
-                reset_task.result()
-                return cancellation
+            if not completion_owned.is_set() and not attempt_cancelled:
+                attempt.cancel()
+                attempt_cancelled = True
         else:
-            return cancellation
-
-
-async def _execute_pipeline(
-    pipe: Any,
-) -> tuple[BaseException | None, asyncio.CancelledError | None, bool]:
-    """Wait for transaction outcome and driver cleanup despite caller cancellation."""
-    execute_transaction = pipe._execute_transaction
-    transaction_succeeded = False
-
-    async def execute_transaction_and_mark(*args: Any, **kwargs: Any) -> Any:
-        nonlocal transaction_succeeded
-        result = await execute_transaction(*args, **kwargs)
-        transaction_succeeded = True
-        return result
-
-    pipe._execute_transaction = execute_transaction_and_mark
-    execute_task = asyncio.create_task(pipe.execute())
-    cancellation: asyncio.CancelledError | None = None
-    try:
-        while True:
-            try:
-                await asyncio.shield(execute_task)
-            except asyncio.CancelledError as exc:
-                if cancellation is None:
-                    cancellation = exc
-                if not execute_task.done():
-                    continue
-            except BaseException as exc:
-                return exc, cancellation, transaction_succeeded
-            else:
-                return None, cancellation, transaction_succeeded
-
-            try:
-                execute_task.result()
-            except BaseException as exc:
-                return exc, cancellation, transaction_succeeded
-            return None, cancellation, transaction_succeeded
-    finally:
-        pipe._execute_transaction = execute_transaction
+            return outcome, cancellation
 
 
 class RedisSession(SessionABC):
@@ -145,6 +232,7 @@ class RedisSession(SessionABC):
         self._owns_client = False  # Track if we own the Redis client
         self._closed = False
         self._client_released = False
+        self._detached_connections: set[Any] = set()
 
         # Redis key patterns
         self._session_key = f"{self._key_prefix}:{self.session_id}"
@@ -217,15 +305,37 @@ class RedisSession(SessionABC):
             return key_type.decode("utf-8")
         return str(key_type)
 
-    async def _write_items(
+    async def _write_items_attempt(
         self,
+        pipe: Any,
+        keys: tuple[str, str, str],
         serialized_items: list[str],
-    ) -> None:
-        """Validate key types and atomically write one batch with optimistic locking."""
-        keys = (self._session_key, self._messages_key, self._counter_key)
-        while True:
-            pipe = self._redis.pipeline()
-            committed = False
+        completion_owned: asyncio.Event,
+    ) -> _PipelineAttemptOutcome:
+        """Run one watched write attempt and finish its pipeline before returning."""
+        committed = False
+        operation_error: BaseException | None = None
+        batch_response_index: int | None = None
+        raise_first_error = pipe.raise_first_error
+        raw_connection_pool = pipe.connection_pool
+        connection_pool = _PipelineConnectionPool(raw_connection_pool)
+        pipe.connection_pool = connection_pool
+
+        def raise_first_error_and_mark(*args: Any, **kwargs: Any) -> Any:
+            nonlocal committed
+            response = args[1] if len(args) > 1 else kwargs.get("response")
+            if (
+                batch_response_index is not None
+                and isinstance(response, list)
+                and batch_response_index < len(response)
+                and not isinstance(response[batch_response_index], BaseException)
+            ):
+                committed = True
+            result = raise_first_error(*args, **kwargs)
+            committed = True
+            return result
+
+        try:
             try:
                 await pipe.watch(*keys)
                 session_key_type = self._key_type_name(await pipe.type(self._session_key))
@@ -254,36 +364,69 @@ class RedisSession(SessionABC):
                 pipe.multi()
                 pipe.hset(self._session_key, "session_id", self.session_id)
                 pipe.hsetnx(self._session_key, "created_at", now)
+                batch_response_index = len(pipe.command_stack)
                 pipe.rpush(self._messages_key, *serialized_items)
                 pipe.hset(self._session_key, "updated_at", now)
                 if expiration_time_ms is not None:
                     for key in keys:
                         pipe.pexpireat(key, expiration_time_ms)
-                (
-                    execute_error,
-                    execute_cancellation,
-                    transaction_succeeded,
-                ) = await _execute_pipeline(pipe)
-                if transaction_succeeded:
-                    committed = True
-                    return
-                if isinstance(execute_error, WatchError):
-                    if execute_cancellation is not None:
-                        raise execute_cancellation
-                    continue
-                if execute_error is not None:
-                    raise execute_error
+
+                pipe.raise_first_error = raise_first_error_and_mark
+                completion_owned.set()
+                await pipe.execute()
                 committed = True
+            except WatchError as exc:
+                operation_error = exc
+            except BaseException as exc:
+                operation_error = exc
+        finally:
+            completion_owned.set()
+            pipe.raise_first_error = raise_first_error
+            cleanup_error, settled, detached_connection = await _finish_pipeline(
+                pipe, connection_pool
+            )
+            if detached_connection is not None:
+                self._detached_connections.add(detached_connection)
+            pipe.connection_pool = raw_connection_pool
+
+        return _PipelineAttemptOutcome(
+            committed=committed,
+            operation_error=operation_error,
+            cleanup_error=cleanup_error,
+            settled=settled,
+        )
+
+    async def _write_items(
+        self,
+        serialized_items: list[str],
+    ) -> None:
+        """Validate key types and atomically write one batch with optimistic locking."""
+        keys = (self._session_key, self._messages_key, self._counter_key)
+        while True:
+            pipe = self._redis.pipeline()
+            completion_owned = asyncio.Event()
+            attempt = asyncio.create_task(
+                self._write_items_attempt(pipe, keys, serialized_items, completion_owned)
+            )
+            outcome, cancellation = await _await_pipeline_attempt(attempt, completion_owned)
+
+            if not outcome.settled:
+                if outcome.cleanup_error is not None:
+                    raise outcome.cleanup_error
+                raise RuntimeError("Redis pipeline cleanup did not settle its connection")
+            if outcome.committed:
+                if cancellation is not None:
+                    raise cancellation
                 return
-            finally:
-                try:
-                    reset_cancellation = await _reset_pipeline(pipe)
-                except BaseException:
-                    if not committed:
-                        raise
-                else:
-                    if reset_cancellation is not None and not committed:
-                        raise reset_cancellation
+            if cancellation is not None:
+                raise cancellation
+            if outcome.cleanup_error is not None:
+                raise outcome.cleanup_error
+            if isinstance(outcome.operation_error, WatchError):
+                continue
+            if outcome.operation_error is not None:
+                raise outcome.operation_error
+            return
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
@@ -408,12 +551,26 @@ class RedisSession(SessionABC):
         concurrent calls are safe no-ops.
         """
         async with self._lock:
+            detached_error: BaseException | None = None
+            for connection in tuple(self._detached_connections):
+                try:
+                    connection._close()
+                except BaseException as exc:
+                    if detached_error is None:
+                        detached_error = exc
+                else:
+                    self._detached_connections.discard(connection)
+
             if not self._owns_client:
+                if detached_error is not None:
+                    raise detached_error
                 return
             self._closed = True
             if not self._client_released:
                 await self._redis.aclose()
                 self._client_released = True
+            if detached_error is not None:
+                raise detached_error
 
     async def ping(self) -> bool:
         """Test Redis connectivity.

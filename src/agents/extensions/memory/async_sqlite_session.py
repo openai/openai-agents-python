@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, cast
 
 import aiosqlite
 
@@ -17,19 +17,6 @@ from ...memory.session_settings import (
     resolve_session_limit,
 )
 from ...memory.sqlite_session import _await_mutation
-
-_T = TypeVar("_T")
-
-
-async def _await_cleanup(awaitable: Awaitable[_T]) -> _T:
-    """Keep ownership of cleanup until it finishes despite repeated cancellation."""
-    task = asyncio.ensure_future(awaitable)
-    while True:
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if task.done():
-                return task.result()
 
 
 class AsyncSQLiteSession(SessionABC):
@@ -120,19 +107,41 @@ class AsyncSQLiteSession(SessionABC):
                 connect_task = asyncio.ensure_future(aiosqlite.connect(str(self.db_path)))
                 try:
                     connection = await asyncio.shield(connect_task)
-                except BaseException:
+                except BaseException as acquisition_error:
+                    connection = None
+                    cleanup_cancellation: asyncio.CancelledError | None = None
                     try:
-                        connection = await _await_cleanup(connect_task)
+                        connection = await _await_mutation(connect_task)
+                    except asyncio.CancelledError as exc:
+                        cleanup_cancellation = exc
+                        try:
+                            connection = connect_task.result()
+                        except BaseException:
+                            pass
                     except BaseException:
                         pass
-                    else:
+                    close_error = (
                         await self._close_owned_connection(connection)
+                        if connection is not None
+                        else None
+                    )
+                    if isinstance(acquisition_error, asyncio.CancelledError):
+                        raise
+                    if cleanup_cancellation is not None:
+                        raise cleanup_cancellation from None
+                    if isinstance(close_error, asyncio.CancelledError):
+                        raise close_error from None
                     raise
+                assert connection is not None
                 try:
                     await connection.execute("PRAGMA journal_mode=WAL")
                     await self._init_db_for_connection(connection)
-                except BaseException:
-                    await self._close_owned_connection(connection)
+                except BaseException as initialization_error:
+                    close_error = await self._close_owned_connection(connection)
+                    if isinstance(initialization_error, asyncio.CancelledError):
+                        raise
+                    if isinstance(close_error, asyncio.CancelledError):
+                        raise close_error from None
                     raise
                 self._connection = connection
 
@@ -157,31 +166,64 @@ class AsyncSQLiteSession(SessionABC):
         async with self._locked_connection() as conn:
             try:
                 yield conn
-            except BaseException:
+            except BaseException as operation_error:
+                rollback_task = asyncio.create_task(conn.rollback())
+                rollback_error: BaseException | None = None
+                rollback_cancellation: asyncio.CancelledError | None = None
                 try:
-                    await _await_cleanup(conn.rollback())
-                except BaseException:
-                    await self._invalidate_connection(conn)
+                    await _await_mutation(rollback_task)
+                except asyncio.CancelledError as exc:
+                    rollback_cancellation = exc
+                    try:
+                        rollback_task.result()
+                    except BaseException as outcome_error:
+                        rollback_error = outcome_error
+                except BaseException as exc:
+                    rollback_error = exc
+
+                invalidation_error = None
+                if rollback_error is not None:
+                    invalidation_error = await self._invalidate_connection(conn)
+
+                if isinstance(operation_error, asyncio.CancelledError):
+                    raise
+                if rollback_cancellation is not None:
+                    raise rollback_cancellation from None
+                if isinstance(invalidation_error, asyncio.CancelledError):
+                    raise invalidation_error from None
                 raise
 
-    async def _invalidate_connection(self, conn: aiosqlite.Connection) -> None:
+    async def _invalidate_connection(self, conn: aiosqlite.Connection) -> BaseException | None:
         """Close and evict a connection that could not roll back safely."""
         close_error = await self._close_owned_connection(conn)
         if self._connection is conn:
             self._connection = None
         if str(self.db_path) == ":memory:" or close_error is not None:
             self._closed = True
+        return close_error
 
     async def _close_owned_connection(self, conn: aiosqlite.Connection) -> BaseException | None:
         """Close an owned connection or retain it for a later cleanup retry."""
+        close_task = asyncio.create_task(conn.close())
+        cancellation: asyncio.CancelledError | None = None
+        close_error: BaseException | None = None
         try:
-            await _await_cleanup(conn.close())
+            await _await_mutation(close_task)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+            try:
+                close_task.result()
+            except BaseException as outcome_error:
+                close_error = outcome_error
         except BaseException as exc:
+            close_error = exc
+
+        if close_error is not None:
             self._quarantined_connections.add(conn)
             self._closed = True
-            return exc
-        self._quarantined_connections.discard(conn)
-        return None
+        else:
+            self._quarantined_connections.discard(conn)
+        return cancellation or close_error
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
@@ -382,7 +424,10 @@ class AsyncSQLiteSession(SessionABC):
                 except asyncio.CancelledError as exc:
                     if cancellation is None:
                         cancellation = exc
-                    close_error = await _await_cleanup(close_task)
+                    try:
+                        close_error = await _await_mutation(close_task)
+                    except asyncio.CancelledError:
+                        close_error = close_task.result()
                 if close_error is None:
                     if self._connection is connection:
                         self._connection = None

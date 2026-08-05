@@ -560,6 +560,111 @@ async def test_post_commit_cancellation_propagates_after_known_mutation_outcome(
     session.close()
 
 
+@pytest.mark.parametrize("operation", ["create_branch", "delete_branch", "cleanup", "usage"])
+async def test_auxiliary_mutation_cancellation_waits_for_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    usage_data: Usage,
+    operation: str,
+):
+    """Branch and ancillary mutations must settle before cancellation propagates."""
+
+    class PausingCommitConnection(sqlite3.Connection):
+        pause_commit = False
+        commit_finished = threading.Event()
+        allow_return = threading.Event()
+
+        def commit(self) -> None:
+            super().commit()
+            if self.pause_commit:
+                self.pause_commit = False
+                self.commit_finished.set()
+                assert self.allow_return.wait(timeout=10)
+
+    session = AdvancedSQLiteSession(
+        session_id=f"advanced_auxiliary_cancel_{operation}",
+        db_path=tmp_path / f"advanced_auxiliary_cancel_{operation}.db",
+        create_tables=True,
+    )
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+    mutation: asyncio.Task[Any] | None = None
+
+    try:
+        if operation in {"create_branch", "delete_branch"}:
+            await session.add_items(items)
+        if operation == "delete_branch":
+            await session.create_branch_from_turn(2, "cancelled_branch")
+            await session.switch_to_branch("main")
+        elif operation == "cleanup":
+            with session._write_connection() as setup_connection:
+                session._insert_items(
+                    setup_connection,
+                    [{"role": "user", "content": "orphan"}],
+                )
+                setup_connection.commit()
+        elif operation == "usage":
+            await session.add_items([{"role": "user", "content": "usage turn"}])
+
+        connection = sqlite3.connect(
+            str(session.db_path),
+            check_same_thread=False,
+            factory=PausingCommitConnection,
+        )
+        with session._connections_lock:
+            session._connections.add(connection)
+        monkeypatch.setattr(session, "_get_connection", lambda: connection)
+        connection.pause_commit = True
+
+        if operation == "create_branch":
+            mutation = asyncio.create_task(session.create_branch_from_turn(2, "cancelled_branch"))
+        elif operation == "delete_branch":
+            mutation = asyncio.create_task(session.delete_branch("cancelled_branch"))
+        elif operation == "cleanup":
+            mutation = asyncio.create_task(session._cleanup_orphaned_messages())
+        else:
+            mutation = asyncio.create_task(
+                session.store_run_usage(create_mock_run_result(usage_data))
+            )
+
+        assert await asyncio.to_thread(connection.commit_finished.wait, 10)
+        mutation.cancel("first-caller-cancel")
+        await asyncio.sleep(0)
+        mutation.cancel("second-caller-cancel")
+        await asyncio.sleep(0)
+        connection.allow_return.set()
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await mutation
+
+        assert exc_info.value.args == ("first-caller-cancel",)
+        assert mutation.cancelled()
+
+        if operation == "create_branch":
+            branches = await session.list_branches()
+            assert {branch["branch_id"] for branch in branches} == {"main", "cancelled_branch"}
+            assert session._current_branch_id == "main"
+        elif operation == "delete_branch":
+            branches = await session.list_branches()
+            assert {branch["branch_id"] for branch in branches} == {"main"}
+        elif operation == "cleanup":
+            assert _count_rows(session, session.messages_table) == 0
+        else:
+            turn_usage = await session.get_turn_usage(1)
+            assert isinstance(turn_usage, dict)
+            assert turn_usage["total_tokens"] == usage_data.total_tokens
+    finally:
+        PausingCommitConnection.allow_return.set()
+        if mutation is not None and not mutation.done():
+            mutation.cancel()
+            await asyncio.gather(mutation, return_exceptions=True)
+        session.close()
+
+
 async def test_message_structure_tracking(agent: Agent):
     """Test that message structure is properly tracked."""
     session_id = "structure_test"

@@ -579,7 +579,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 conn.commit()
 
         try:
-            await asyncio.to_thread(_add_structure_sync)
+            await _await_mutation(asyncio.to_thread(_add_structure_sync))
         except Exception as exc:
             log_model_and_tool_action_error(
                 self._logger,
@@ -697,7 +697,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 conn.commit()
                 return deleted_count
 
-        return await asyncio.to_thread(_cleanup_sync)
+        return await _await_mutation(asyncio.to_thread(_cleanup_sync))
 
     def _cleanup_orphaned_messages_sync(self, conn: sqlite3.Connection) -> int:
         with closing(conn.cursor()) as cursor:
@@ -834,7 +834,9 @@ class AdvancedSQLiteSession(SQLiteSession):
         # Switch to new branch under the lock; skipped if a clear_session has
         # committed since `generation` was captured (its reset to 'main' wins),
         # so we never point at a branch that clear removed.
-        await asyncio.to_thread(self._commit_branch_pointer, branch_name, generation)
+        await _await_mutation(
+            asyncio.to_thread(self._commit_branch_pointer, branch_name, generation)
+        )
 
         if _debug.DONT_LOG_MODEL_DATA:
             self._logger.debug(
@@ -914,7 +916,9 @@ class AdvancedSQLiteSession(SQLiteSession):
         old_branch = self._current_branch_id
         # Update the pointer under the lock; a no-op if a clear_session has
         # committed since `generation` was captured (its reset to 'main' wins).
-        switched = await asyncio.to_thread(self._commit_branch_pointer, branch_id, generation)
+        switched = await _await_mutation(
+            asyncio.to_thread(self._commit_branch_pointer, branch_id, generation)
+        )
         if switched:
             self._logger.info("Switched from branch '%s' to '%s'", old_branch, branch_id)
 
@@ -996,8 +1000,8 @@ class AdvancedSQLiteSession(SQLiteSession):
 
                 return usage_deleted, structure_deleted, orphaned_messages_deleted
 
-        usage_deleted, structure_deleted, orphaned_messages_deleted = await asyncio.to_thread(
-            _delete_sync
+        usage_deleted, structure_deleted, orphaned_messages_deleted = await _await_mutation(
+            asyncio.to_thread(_delete_sync)
         )
 
         self._logger.info(
@@ -1242,7 +1246,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 conn.commit()
                 return branch_id, turn_content
 
-        return await asyncio.to_thread(_copy_sync)
+        return await _await_mutation(asyncio.to_thread(_copy_sync))
 
     async def get_conversation_turns(self, branch_id: str | None = None) -> list[dict[str, Any]]:
         """Get user turns with content for easy browsing and branching decisions.
@@ -1705,4 +1709,4 @@ class AdvancedSQLiteSession(SQLiteSession):
                     )
                     conn.commit()
 
-        await asyncio.to_thread(_update_sync)
+        await _await_mutation(asyncio.to_thread(_update_sync))
