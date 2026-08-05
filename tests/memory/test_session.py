@@ -569,6 +569,43 @@ async def test_session_callback_prepared_input(runner_method):
             session.close()
 
 
+@pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
+@pytest.mark.asyncio
+async def test_session_callback_repeating_history_does_not_grow_session(runner_method):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_memory.db"
+        model = FakeModel()
+        agent = Agent(name="test", model=model)
+        session = SQLiteSession("session_repeat", db_path)
+
+        def repeat_first(history, new_input):
+            if not history:
+                return new_input
+            return history + [history[0]] + new_input
+
+        try:
+            for turn in range(3):
+                model.set_next_output([get_text_message(f"assistant {turn}")])
+                await run_agent_async(
+                    runner_method,
+                    agent,
+                    f"user {turn}",
+                    session=session,
+                    run_config=RunConfig(session_input_callback=repeat_first),
+                )
+
+            stored = await session.get_items()
+            user_messages = [item for item in stored if item.get("role") == "user"]
+            assert [item.get("content") for item in user_messages] == [
+                "user 0",
+                "user 1",
+                "user 2",
+            ]
+            assert len(stored) == 6
+        finally:
+            session.close()
+
+
 @pytest.mark.asyncio
 async def test_sqlite_session_unicode_content():
     """Test that session correctly stores and retrieves unicode/non-ASCII content."""

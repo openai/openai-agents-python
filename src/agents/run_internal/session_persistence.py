@@ -217,6 +217,10 @@ async def prepare_input_with_session(
             )
         history_for_callback = copy.deepcopy(converted_history)
         new_items_for_callback = copy.deepcopy(new_input_list)
+        # Keep the original history objects alive so their identities remain valid even if the
+        # callback removes them from the list it receives.
+        original_history_objects = list(history_for_callback)
+        original_history_object_ids = {id(item) for item in original_history_objects}
         combined = session_input_callback(history_for_callback, new_items_for_callback)
         if inspect.isawaitable(combined):
             combined = await combined
@@ -246,10 +250,16 @@ async def prepare_input_with_session(
             new_key = _session_item_key(item)
             if _consume_reference(new_refs, new_key, item):
                 new_counts[new_key] = max(new_counts.get(new_key, 0) - 1, 0)
-                appended.append(item)
+                if id(item) in original_history_object_ids:
+                    prune_history_indexes.add(combined_index)
+                else:
+                    appended.append(item)
                 continue
             if _consume_reference(history_refs, history_key, item):
                 history_counts[history_key] = max(history_counts.get(history_key, 0) - 1, 0)
+                prune_history_indexes.add(combined_index)
+                continue
+            if id(item) in original_history_object_ids:
                 prune_history_indexes.add(combined_index)
                 continue
             if history_counts.get(history_key, 0) > 0:
