@@ -293,18 +293,6 @@ class OpenAIChatCompletionsModel(Model):
                 if response.usage
                 else Usage()
             )
-            if tracing.include_data():
-                span_generation.span_data.output = (
-                    [message.model_dump()] if message is not None else []
-                )
-            span_generation.span_data.usage = {
-                "requests": usage.requests,
-                "input_tokens": usage.input_tokens,
-                "output_tokens": usage.output_tokens,
-                "total_tokens": usage.total_tokens,
-                "input_tokens_details": usage.input_tokens_details.model_dump(),
-                "output_tokens_details": usage.output_tokens_details.model_dump(),
-            }
 
             # Some providers signal a filtered non-streaming completion only through
             # finish_reason="content_filter" and an otherwise empty message. Preserve
@@ -318,6 +306,19 @@ class OpenAIChatCompletionsModel(Model):
                 and not message.tool_calls
             ):
                 message.refusal = "Response withheld by the provider's content filter."
+
+            if tracing.include_data():
+                span_generation.span_data.output = (
+                    [message.model_dump()] if message is not None else []
+                )
+            span_generation.span_data.usage = {
+                "requests": usage.requests,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+                "input_tokens_details": usage.input_tokens_details.model_dump(),
+                "output_tokens_details": usage.output_tokens_details.model_dump(),
+            }
 
             # Build provider_data for provider_specific_fields
             provider_data = {"model": self.model}

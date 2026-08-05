@@ -46,11 +46,13 @@ from agents import (
     Runner,
     __version__,
     generation_span,
+    trace,
 )
 from agents.exceptions import UserError
 from agents.models._retry_runtime import provider_managed_retries_disabled
 from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE, ChatCmplHelpers
 from agents.models.fake_id import FAKE_RESPONSES_ID
+from tests.testing_processor import fetch_ordered_spans
 
 
 def _minimal_chat_completion(content: str = "ok") -> ChatCompletion:
@@ -173,7 +175,9 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
 
 
 async def _get_response_for_choice(
-    monkeypatch: pytest.MonkeyPatch, choice: Choice
+    monkeypatch: pytest.MonkeyPatch,
+    choice: Choice,
+    tracing: ModelTracing = ModelTracing.DISABLED,
 ) -> ModelResponse:
     chat = ChatCompletion(
         id="resp-id",
@@ -195,7 +199,7 @@ async def _get_response_for_choice(
         tools=[],
         output_schema=None,
         handoffs=[],
-        tracing=ModelTracing.DISABLED,
+        tracing=tracing,
         previous_response_id=None,
         conversation_id=None,
         prompt=None,
@@ -220,6 +224,31 @@ async def test_get_response_surfaces_empty_content_filter_as_refusal(monkeypatch
     assert isinstance(resp.output[0].content[0], ResponseOutputRefusal)
     assert (
         resp.output[0].content[0].refusal == "Response withheld by the provider's content filter."
+    )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_traces_synthesized_content_filter_refusal(monkeypatch) -> None:
+    with trace(workflow_name="content-filter-refusal"):
+        await _get_response_for_choice(
+            monkeypatch,
+            Choice(
+                index=0,
+                finish_reason="content_filter",
+                message=ChatCompletionMessage(role="assistant", content=None),
+            ),
+            tracing=ModelTracing.ENABLED,
+        )
+
+    generation_spans = [
+        span for span in fetch_ordered_spans() if span.span_data.type == "generation"
+    ]
+    assert len(generation_spans) == 1
+    exported_span = generation_spans[0].export()
+    assert exported_span is not None
+    assert exported_span["span_data"]["output"][0]["refusal"] == (
+        "Response withheld by the provider's content filter."
     )
 
 
