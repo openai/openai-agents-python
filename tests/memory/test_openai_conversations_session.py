@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -680,6 +680,11 @@ class TestOpenAIConversationsSessionSettings:
         assert session.session_settings.limit == 0
 
 
+def _contents(items: list[TResponseInputItem]) -> list[str]:
+    """Read the ``content`` of each retrieved item, which is a message here."""
+    return [cast(dict[str, Any], item)["content"] for item in items]
+
+
 class _FakeConversationItem:
     """Minimal stand-in for a Conversations item returned by the API."""
 
@@ -739,8 +744,8 @@ class TestOpenAIConversationsSessionItemPageSize:
 
         assert items.requested_limits == [_FakeConversationItems.MAX_PAGE_SIZE]
         assert len(retrieved) == 150
-        assert retrieved[0]["content"] == "m50"
-        assert retrieved[-1]["content"] == "m199"
+        assert _contents(retrieved)[0] == "m50"
+        assert _contents(retrieved)[-1] == "m199"
 
     @pytest.mark.asyncio
     async def test_get_items_forwards_limits_within_the_api_page_size(self, mock_openai_client):
@@ -753,7 +758,7 @@ class TestOpenAIConversationsSessionItemPageSize:
         retrieved = await session.get_items(limit=5)
 
         assert items.requested_limits == [5]
-        assert [item["content"] for item in retrieved] == ["m195", "m196", "m197", "m198", "m199"]
+        assert _contents(retrieved) == ["m195", "m196", "m197", "m198", "m199"]
 
     @pytest.mark.asyncio
     async def test_get_items_returns_no_history_for_a_zero_limit(self, mock_openai_client):
