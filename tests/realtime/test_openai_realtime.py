@@ -10,7 +10,7 @@ import pytest
 import websockets
 from pydantic import TypeAdapter
 
-from agents import Agent, function_tool
+from agents import Agent, WebSearchTool, function_tool
 from agents.exceptions import UserError
 from agents.handoffs import handoff
 from agents.realtime.model import RealtimeModelConfig, RealtimePlaybackTracker
@@ -341,6 +341,61 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
         # Verify internal state remains clean after failure
         assert model._websocket is None
         assert model._websocket_task is None
+
+    @pytest.mark.asyncio
+    async def test_connect_session_config_failure_releases_websocket(self, model, mock_websocket):
+        """A failed initial session update must release the connection."""
+        invalid_config: RealtimeModelConfig = {
+            "api_key": "test-key",
+            "initial_model_settings": {"tools": [WebSearchTool()]},
+        }
+
+        async def async_websocket(*args, **kwargs):
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket) as mock_connect:
+            with pytest.raises(UserError, match="Must be a function tool"):
+                await model.connect(invalid_config)
+
+            assert model._websocket is None
+            assert model._websocket_task is None
+            mock_websocket.close.assert_awaited_once()
+
+            await model.connect({"api_key": "test-key"})
+            assert mock_connect.call_count == 2
+
+        await model.close()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_connect_is_rejected_before_acquiring_another_websocket(
+        self, model, mock_websocket
+    ):
+        """A connection attempt must own the model before its first suspension point."""
+        connection_started = asyncio.Event()
+        allow_connection = asyncio.Event()
+
+        async def async_websocket(*args, **kwargs):
+            connection_started.set()
+            await allow_connection.wait()
+            return mock_websocket
+
+        config: RealtimeModelConfig = {"api_key": "test-key"}
+        with patch("websockets.connect", side_effect=async_websocket) as mock_connect:
+            first_connect = asyncio.create_task(model.connect(config))
+            try:
+                await asyncio.wait_for(connection_started.wait(), timeout=1)
+
+                with pytest.raises(AssertionError, match="Already connected"):
+                    await model.connect(config)
+
+                mock_connect.assert_called_once()
+            finally:
+                allow_connection.set()
+
+            await asyncio.wait_for(first_connect, timeout=1)
+
+        assert model._websocket is mock_websocket
+        await model.close()
 
     @pytest.mark.asyncio
     async def test_connect_with_empty_transport_config(self, mock_websocket):

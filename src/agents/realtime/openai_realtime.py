@@ -547,6 +547,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self.model = DEFAULT_REALTIME_MODEL
         self._websocket: ClientConnection | None = None
         self._websocket_task: asyncio.Task[None] | None = None
+        self._connection_attempt_active = False
         self._response_create_tasks: set[asyncio.Task[None]] = set()
         self._user_input_lock = asyncio.Lock()
         self._listeners: list[RealtimeModelListener] = []
@@ -579,56 +580,65 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def connect(self, options: RealtimeModelConfig) -> None:
         """Establish a connection to the model and keep it alive."""
+        assert not self._connection_attempt_active, "Already connected"
         assert self._websocket is None, "Already connected"
         assert self._websocket_task is None, "Already connected"
+        self._connection_attempt_active = True
 
-        model_settings: RealtimeSessionModelSettings = options.get("initial_model_settings", {})
+        try:
+            model_settings: RealtimeSessionModelSettings = options.get("initial_model_settings", {})
 
-        self._playback_tracker = options.get("playback_tracker", None)
+            self._playback_tracker = options.get("playback_tracker", None)
 
-        call_id = options.get("call_id")
-        model_name = model_settings.get("model_name")
-        if call_id and model_name:
-            error_message = (
-                "Cannot specify both `call_id` and `model_name` "
-                "when attaching to an existing realtime call."
+            call_id = options.get("call_id")
+            model_name = model_settings.get("model_name")
+            if call_id and model_name:
+                error_message = (
+                    "Cannot specify both `call_id` and `model_name` "
+                    "when attaching to an existing realtime call."
+                )
+                raise UserError(error_message)
+
+            if model_name:
+                self.model = model_name
+
+            self._call_id = call_id
+            api_key = await get_api_key(options.get("api_key"))
+
+            if "tracing" in model_settings:
+                self._tracing_config = model_settings["tracing"]
+            else:
+                self._tracing_config = "auto"
+
+            if call_id:
+                url = options.get("url", f"wss://api.openai.com/v1/realtime?call_id={call_id}")
+            else:
+                url = options.get("url", f"wss://api.openai.com/v1/realtime?model={self.model}")
+
+            headers: dict[str, str] = {}
+            if options.get("headers") is not None:
+                # For customizing request headers
+                headers.update(options["headers"])
+            else:
+                # OpenAI's Realtime API
+                if not api_key:
+                    raise UserError("API key is required but was not provided.")
+
+                headers.update({"Authorization": f"Bearer {api_key}"})
+
+            self._websocket = await self._create_websocket_connection(
+                url=url,
+                headers=headers,
+                transport_config=self._transport_config,
             )
-            raise UserError(error_message)
-
-        if model_name:
-            self.model = model_name
-
-        self._call_id = call_id
-        api_key = await get_api_key(options.get("api_key"))
-
-        if "tracing" in model_settings:
-            self._tracing_config = model_settings["tracing"]
-        else:
-            self._tracing_config = "auto"
-
-        if call_id:
-            url = options.get("url", f"wss://api.openai.com/v1/realtime?call_id={call_id}")
-        else:
-            url = options.get("url", f"wss://api.openai.com/v1/realtime?model={self.model}")
-
-        headers: dict[str, str] = {}
-        if options.get("headers") is not None:
-            # For customizing request headers
-            headers.update(options["headers"])
-        else:
-            # OpenAI's Realtime API
-            if not api_key:
-                raise UserError("API key is required but was not provided.")
-
-            headers.update({"Authorization": f"Bearer {api_key}"})
-
-        self._websocket = await self._create_websocket_connection(
-            url=url,
-            headers=headers,
-            transport_config=self._transport_config,
-        )
-        self._websocket_task = asyncio.create_task(self._listen_for_messages())
-        await self._update_session_config(model_settings)
+            try:
+                self._websocket_task = asyncio.create_task(self._listen_for_messages())
+                await self._update_session_config(model_settings)
+            except BaseException:
+                await self.close()
+                raise
+        finally:
+            self._connection_attempt_active = False
 
     async def _create_websocket_connection(
         self,
