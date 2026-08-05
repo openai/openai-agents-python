@@ -3713,6 +3713,7 @@ async def test_execute_tool_plan_drains_function_tools_on_sibling_failure() -> N
             await asyncio.sleep(0)
             tool_unwound.set()
             raise
+        return "unreachable"
 
     async def reject_once_tool_is_running(_data: Any) -> bool:
         await tool_started.wait()
@@ -3859,6 +3860,7 @@ async def test_execute_tool_plan_parent_cancellation_does_not_wait_for_function_
             await allow_cleanup_exit.wait()
             cleanup_finished.set()
             raise
+        return "unreachable"
 
     agent: Agent[Any] = Agent(name="test", tools=[slow_tool])
     plan = ToolExecutionPlan(
@@ -3919,6 +3921,7 @@ async def test_execute_tool_plan_parent_cancellation_interrupts_sibling_failure_
             await allow_cleanup_exit.wait()
             cleanup_finished.set()
             raise RuntimeError("late cleanup failure") from None
+        return "unreachable"
 
     async def reject_once_tool_is_running(_data: Any) -> bool:
         await tool_started.wait()
