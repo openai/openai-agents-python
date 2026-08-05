@@ -1433,7 +1433,7 @@ async def test_add_items_survives_metadata_write_giving_up(
             await session.add_items([{"role": "user", "content": "kept"}])
 
         items = await session.get_items()
-        assert [item["content"] for item in items] == ["kept"]
+        assert [item.get("content") for item in items] == ["kept"]
 
         warnings = [
             record for record in caplog.records if "could not update" in record.getMessage()
