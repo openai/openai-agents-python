@@ -833,3 +833,38 @@ async def test_manager_async_with_cleans_cancelled_server_when_unsuppressed() ->
     assert server.cleanup_calls == 1
     assert cancelled_server.cleanup_calls == 1
     assert cancelled_server.resource_open is False
+
+
+def test_manager_accepts_one_shot_iterables() -> None:
+    server_a = FlakyServer(failures=0)
+    server_b = FlakyServer(failures=0)
+
+    manager = MCPServerManager(iter([server_a, server_b]))
+
+    assert manager.all_servers == [server_a, server_b]
+    assert manager.active_servers == [server_a, server_b]
+
+
+@pytest.mark.asyncio
+async def test_manager_connects_servers_from_a_one_shot_iterable() -> None:
+    server_a = CleanupAwareServer()
+    server_b = CleanupAwareServer()
+
+    async with MCPServerManager(server for server in (server_a, server_b)) as manager:
+        assert manager.active_servers == [server_a, server_b]
+        assert server_a.connect_calls == 1
+        assert server_b.connect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_manager_restores_one_shot_iterable_servers_after_a_failed_connect() -> None:
+    server = FlakyServer(failures=1)
+
+    manager = MCPServerManager(iter([server]), strict=True, drop_failed_servers=False)
+
+    with pytest.raises(RuntimeError):
+        await manager.connect_all()
+
+    # drop_failed_servers=False keeps failed servers active, so the restored list must match
+    # what an equivalent list argument produces.
+    assert manager.active_servers == [server]
