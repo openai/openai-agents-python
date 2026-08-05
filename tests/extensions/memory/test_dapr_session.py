@@ -1333,21 +1333,68 @@ async def test_add_items_preserves_created_at_metadata(
     fake_dapr_client: FakeDaprClient, monkeypatch: pytest.MonkeyPatch
 ):
     """`created_at` must be set once and not overwritten by subsequent add_items calls."""
-    import agents.extensions.memory.dapr_session as dapr_session_module
-
     session = await _create_test_session(fake_dapr_client)
 
     try:
-        monkeypatch.setattr(dapr_session_module.time, "time", lambda: 1000.0)
+        monkeypatch.setattr("agents.extensions.memory.dapr_session.time.time", lambda: 1000.0)
         await session.add_items([{"role": "user", "content": "first"}])
         first = json.loads(fake_dapr_client._state[session._metadata_key].decode("utf-8"))
         assert first["created_at"] == "1000"
         assert first["updated_at"] == "1000"
 
-        monkeypatch.setattr(dapr_session_module.time, "time", lambda: 2000.0)
+        monkeypatch.setattr("agents.extensions.memory.dapr_session.time.time", lambda: 2000.0)
         await session.add_items([{"role": "user", "content": "second"}])
         second = json.loads(fake_dapr_client._state[session._metadata_key].decode("utf-8"))
         assert second["created_at"] == "1000"
         assert second["updated_at"] == "2000"
     finally:
         await session.close()
+
+
+async def test_concurrent_first_add_items_does_not_regress_created_at(
+    fake_dapr_client: FakeDaprClient, monkeypatch: pytest.MonkeyPatch
+):
+    """A racing first write must not overwrite `created_at` with its own later timestamp.
+
+    Two processes appending to the same new session can both read the metadata key before
+    either save is visible, so both pick their own `now`. The metadata save is conditional on
+    the etag that was read, so the loser retries and adopts the winner's `created_at`.
+    """
+    session_id = "shared_session_created_at_race"
+    winner = await _create_test_session(fake_dapr_client, session_id=session_id)
+    loser = await _create_test_session(fake_dapr_client, session_id=session_id)
+
+    try:
+        # Capture the state the loser observes before the winner's metadata save lands: the
+        # metadata key does not exist yet, so there is no created_at and no etag.
+        stale_read = (None, None)
+        real_read = loser._read_created_at
+        calls = 0
+
+        async def read_stale_once() -> tuple[str | None, str | None]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return stale_read
+            return await real_read()
+
+        monkeypatch.setattr("agents.extensions.memory.dapr_session.time.time", lambda: 1000.0)
+        await winner.add_items([{"role": "user", "content": "winner"}])
+        assert (
+            json.loads(fake_dapr_client._state[winner._metadata_key].decode("utf-8"))["created_at"]
+            == "1000"
+        )
+
+        monkeypatch.setattr(loser, "_read_created_at", read_stale_once)
+        monkeypatch.setattr("agents.extensions.memory.dapr_session.time.time", lambda: 2000.0)
+        await loser.add_items([{"role": "user", "content": "loser"}])
+
+        final = json.loads(fake_dapr_client._state[loser._metadata_key].decode("utf-8"))
+        # The stale save is rejected, so the retry reads the winner's value and keeps it.
+        assert final["created_at"] == "1000"
+        assert final["updated_at"] == "2000"
+        # Two reads means the conditional save actually rejected the stale one and retried.
+        assert calls == 2
+    finally:
+        await winner.close()
+        await loser.close()

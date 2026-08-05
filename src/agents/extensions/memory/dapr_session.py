@@ -184,24 +184,29 @@ class DaprSession(SessionABC):
             metadata["ttlInSeconds"] = str(self._ttl)
         return metadata
 
-    async def _read_created_at(self) -> str | None:
-        """Return the stored creation timestamp, or None when it is missing or unreadable."""
+    async def _read_created_at(self) -> tuple[str | None, str | None]:
+        """Return the stored creation timestamp and the metadata etag backing it.
+
+        The timestamp is None when it is missing or unreadable. The etag is returned so the
+        caller can write the metadata conditionally against the same revision it read.
+        """
         response = await self._dapr_client.get_state(
             store_name=self._state_store_name,
             key=self._metadata_key,
             state_metadata=self._get_read_metadata(),
         )
+        etag = response.etag
         data = response.data
         if not data:
-            return None
+            return None, etag
         try:
             stored = json.loads(data.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
-            return None
+            return None, etag
         if not isinstance(stored, dict):
-            return None
+            return None, etag
         created_at = stored.get("created_at")
-        return created_at if isinstance(created_at, str) and created_at else None
+        return (created_at if isinstance(created_at, str) and created_at else None), etag
 
     async def _serialize_item(self, item: TResponseInputItem) -> str:
         """Serialize an item to JSON string. Can be overridden by subclasses."""
@@ -381,20 +386,35 @@ class DaprSession(SessionABC):
                         continue
                     raise
 
-            # Update metadata, preserving created_at across subsequent writes.
-            now = str(int(time.time()))
-            metadata = {
-                "session_id": self.session_id,
-                "created_at": await self._read_created_at() or now,
-                "updated_at": now,
-            }
-            await self._dapr_client.save_state(
-                store_name=self._state_store_name,
-                key=self._metadata_key,
-                value=json.dumps(metadata),
-                state_metadata=self._get_metadata(),
-                options=self._get_state_options(),
-            )
+            # Update metadata, preserving created_at across subsequent writes. This mirrors the
+            # etag-guarded loop used for the messages key above. A plain write would let two
+            # processes appending to the same new session each read no metadata, pick their own
+            # now, and have the later save overwrite created_at with the later timestamp.
+            attempt = 0
+            while True:
+                attempt += 1
+                stored_created_at, metadata_etag = await self._read_created_at()
+                now = str(int(time.time()))
+                metadata = {
+                    "session_id": self.session_id,
+                    "created_at": stored_created_at or now,
+                    "updated_at": now,
+                }
+                try:
+                    await self._dapr_client.save_state(
+                        store_name=self._state_store_name,
+                        key=self._metadata_key,
+                        value=json.dumps(metadata),
+                        etag=metadata_etag,
+                        state_metadata=self._get_metadata(),
+                        options=self._get_state_options(concurrency=Concurrency.first_write),
+                    )
+                    break
+                except Exception as error:
+                    should_retry = await self._handle_concurrency_conflict(error, attempt)
+                    if should_retry:
+                        continue
+                    raise
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
