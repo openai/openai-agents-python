@@ -40,7 +40,7 @@ from .run_steps import (
     NextStepRunAgain,
     ProcessedResponse,
 )
-from .session_persistence import save_result_to_session
+from .session_persistence import save_result_to_session, save_resumed_turn_items
 from .tool_use_tracker import AgentToolUseTracker, serialize_tool_use_tracker
 
 __all__ = [
@@ -59,6 +59,7 @@ __all__ = [
     "resolve_trace_settings",
     "resolve_processed_response",
     "resolve_resumed_context",
+    "save_final_turn_items_after_guardrails",
     "save_turn_items_if_needed",
     "should_cancel_parallel_model_task_on_input_guardrail_trip",
     "update_run_state_for_interruption",
@@ -480,6 +481,41 @@ async def save_turn_items_if_needed(
     if input_guardrails_triggered(input_guardrail_results):
         return
     if run_state is not None and run_state._current_turn_persisted_item_count > 0:
+        return
+    await save_result_to_session(
+        session,
+        [],
+        list(items),
+        run_state,
+        response_id=response_id,
+        store=store,
+    )
+
+
+async def save_final_turn_items_after_guardrails(
+    *,
+    session: Session | None,
+    run_state: RunState | None,
+    session_persistence_enabled: bool,
+    input_guardrail_results: list[InputGuardrailResult],
+    items: list[RunItem],
+    response_id: str | None,
+    store: bool | None = None,
+) -> None:
+    """Persist deferred final-turn items without skipping a partially persisted resumed turn."""
+    if not session_persistence_enabled or not items:
+        return
+    if input_guardrails_triggered(input_guardrail_results):
+        return
+    if run_state is not None and run_state._current_turn_persisted_item_count > 0:
+        run_state._current_turn_persisted_item_count = await save_resumed_turn_items(
+            session=session,
+            items=items,
+            persisted_count=run_state._current_turn_persisted_item_count,
+            response_id=response_id,
+            reasoning_item_id_policy=run_state._reasoning_item_id_policy,
+            store=store,
+        )
         return
     await save_result_to_session(
         session,

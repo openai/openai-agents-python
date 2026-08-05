@@ -2152,13 +2152,10 @@ async def test_stop_on_first_tool_final_persists_committed_tool_items_on_tripwir
     ]
 
 
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
 @pytest.mark.asyncio
-async def test_streamed_blocked_message_final_output_is_not_persisted() -> None:
-    """Control for the committed-tool case: a rejected message is still withheld from the session.
-
-    Streamed-only on purpose. The non-streamed path persists a turn before its output guardrails
-    run, so it keeps the rejected message today; that difference is out of scope here.
-    """
+async def test_blocked_message_final_output_is_not_persisted(mode: str) -> None:
+    """Control for the committed-tool case: a rejected message is withheld from the session."""
 
     def output_guardrail(
         _context: RunContextWrapper[Any],
@@ -2177,16 +2174,20 @@ async def test_streamed_blocked_message_final_output_is_not_persisted() -> None:
     session = SimpleListSession()
 
     with pytest.raises(OutputGuardrailTripwireTriggered):
-        result = Runner.run_streamed(agent, "user_message", session=session)
-        await consume_stream(result)
+        if mode == "non_streamed":
+            await Runner.run(agent, "user_message", session=session)
+        else:
+            result = Runner.run_streamed(agent, "user_message", session=session)
+            await consume_stream(result)
 
     saved_items = await session.get_items()
     saved = [item.get("type") or item.get("role") for item in saved_items if isinstance(item, dict)]
     assert saved == ["user"]
 
 
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
 @pytest.mark.asyncio
-async def test_streamed_blocked_final_persists_tool_items_but_not_the_message() -> None:
+async def test_blocked_final_persists_tool_items_but_not_the_message(mode: str) -> None:
     """A mixed final turn splits: the tool record is kept, the blocked message is not."""
 
     @function_tool(name_override="commit_tool")
@@ -2216,8 +2217,11 @@ async def test_streamed_blocked_final_persists_tool_items_but_not_the_message() 
     session = SimpleListSession()
 
     with pytest.raises(OutputGuardrailTripwireTriggered):
-        result = Runner.run_streamed(agent, "Use commit_tool", session=session)
-        await consume_stream(result)
+        if mode == "non_streamed":
+            await Runner.run(agent, "Use commit_tool", session=session)
+        else:
+            result = Runner.run_streamed(agent, "Use commit_tool", session=session)
+            await consume_stream(result)
 
     saved_items = await session.get_items()
     saved = [item.get("type") or item.get("role") for item in saved_items if isinstance(item, dict)]
@@ -2282,7 +2286,7 @@ async def test_mixed_final_turn_session_order_and_committed_items(
     saved_items = await session.get_items()
     saved = [item.get("type") or item.get("role") for item in saved_items if isinstance(item, dict)]
 
-    if tripwire and mode == "streamed":
+    if tripwire:
         # The undeliverable message is withheld; the tool that already ran is not.
         assert saved == ["user", "function_call", "function_call_output"]
     else:
@@ -2368,8 +2372,11 @@ async def test_blocked_tool_final_keeps_reasoning_context_with_the_committed_cal
     assert replayed == ["reasoning", "function_call", "function_call_output"]
 
 
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
 @pytest.mark.asyncio
-async def test_blocked_tool_final_drops_reasoning_tied_to_the_rejected_message() -> None:
+async def test_blocked_tool_final_drops_reasoning_tied_to_the_rejected_message(
+    mode: str,
+) -> None:
     """Only the reasoning tied to a retained call survives; the message's reasoning goes with it.
 
     The turn is `reasoning_for_message -> message -> reasoning_for_call -> function_call`. A
@@ -2377,10 +2384,7 @@ async def test_blocked_tool_final_drops_reasoning_tied_to_the_rejected_message()
     whenever the turn happens to contain a tool call would leave the rejected message's reasoning
     dangling in the next request.
 
-    Streamed only: on a tripwire the non-streamed path persists the whole turn - the rejected
-    message included - which predates this change and is a separate bug (see the PR discussion).
     """
-    mode = "streamed"
 
     @function_tool(name_override="commit_tool")
     def commit_tool() -> str:

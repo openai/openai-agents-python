@@ -14,6 +14,7 @@ from .exceptions import (
     AgentsException,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
+    OutputGuardrailTripwireTriggered,
     RunErrorDetails,
     UserError,
 )
@@ -61,6 +62,7 @@ from .run_internal.agent_runner_helpers import (
     resolve_processed_response,
     resolve_resumed_context,
     resolve_trace_settings,
+    save_final_turn_items_after_guardrails,
     save_turn_items_if_needed,
     should_cancel_parallel_model_task_on_input_guardrail_trip,
     snapshot_usage,
@@ -85,6 +87,7 @@ from .run_internal.oai_conversation import OpenAIServerConversationTracker
 from .run_internal.prompt_cache_key import PromptCacheKeyResolver
 from .run_internal.run_grouping import resolve_run_grouping_id
 from .run_internal.run_loop import (
+    _retained_items_for_blocked_output,
     cleanup_models_after_run,
     get_all_tools,
     get_output_schema,
@@ -1378,15 +1381,6 @@ class AgentRunner:
 
                     items_to_save_turn = list(turn_session_items)
                     if not isinstance(turn_result.next_step, NextStepInterruption):
-                        # When resuming a turn we have already persisted the tool_call items;
-                        if (
-                            is_resumed_state
-                            and run_state
-                            and run_state._current_turn_persisted_item_count > 0
-                        ):
-                            items_to_save_turn = [
-                                item for item in items_to_save_turn if item.type != "tool_call_item"
-                            ]
                         if session_persistence_enabled:
                             output_call_ids = {
                                 item.raw_item.get("call_id")
@@ -1418,7 +1412,9 @@ class AgentRunner:
                                     )
                                 ):
                                     items_to_save_turn.append(item)
-                            if items_to_save_turn:
+                            if items_to_save_turn and not isinstance(
+                                turn_result.next_step, NextStepFinalOutput
+                            ):
                                 logger.debug(
                                     "Persisting turn items (types=%s)",
                                     [item.type for item in items_to_save_turn],
@@ -1452,13 +1448,48 @@ class AgentRunner:
 
                     try:
                         if isinstance(turn_result.next_step, NextStepFinalOutput):
-                            await run_output_guardrails(
-                                current_agent.output_guardrails
-                                + (run_config.output_guardrails or []),
-                                current_agent,
-                                turn_result.next_step.output,
-                                context_wrapper,
-                                output_guardrail_results,
+                            try:
+                                await run_output_guardrails(
+                                    current_agent.output_guardrails
+                                    + (run_config.output_guardrails or []),
+                                    current_agent,
+                                    turn_result.next_step.output,
+                                    context_wrapper,
+                                    output_guardrail_results,
+                                )
+                            except OutputGuardrailTripwireTriggered:
+                                await save_final_turn_items_after_guardrails(
+                                    session=session,
+                                    run_state=run_state,
+                                    session_persistence_enabled=session_persistence_enabled,
+                                    input_guardrail_results=input_guardrail_results,
+                                    items=_retained_items_for_blocked_output(items_to_save_turn),
+                                    response_id=turn_result.model_response.response_id,
+                                    store=store_setting,
+                                )
+                                raise
+                            except (Exception, asyncio.CancelledError):
+                                # Preserve the released non-stream behavior for guardrail errors
+                                # and cancellation: the completed final turn remains replayable.
+                                await save_final_turn_items_after_guardrails(
+                                    session=session,
+                                    run_state=run_state,
+                                    session_persistence_enabled=session_persistence_enabled,
+                                    input_guardrail_results=input_guardrail_results,
+                                    items=items_to_save_turn,
+                                    response_id=turn_result.model_response.response_id,
+                                    store=store_setting,
+                                )
+                                raise
+
+                            await save_final_turn_items_after_guardrails(
+                                session=session,
+                                run_state=run_state,
+                                session_persistence_enabled=session_persistence_enabled,
+                                input_guardrail_results=input_guardrail_results,
+                                items=items_to_save_turn,
+                                response_id=turn_result.model_response.response_id,
+                                store=store_setting,
                             )
 
                             # Ensure starting_input is not None and not RunState
@@ -1489,15 +1520,6 @@ class AgentRunner:
                                 result._current_turn_persisted_item_count = (
                                     run_state._current_turn_persisted_item_count
                                 )
-                            await save_turn_items_if_needed(
-                                session=session,
-                                run_state=run_state,
-                                session_persistence_enabled=session_persistence_enabled,
-                                input_guardrail_results=input_guardrail_results,
-                                items=session_items_for_turn(turn_result),
-                                response_id=turn_result.model_response.response_id,
-                                store=store_setting,
-                            )
                             result._original_input = copy_input_items(original_input)
                             return _finalize_result(result)
                         elif isinstance(turn_result.next_step, NextStepInterruption):

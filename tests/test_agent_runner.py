@@ -3863,6 +3863,9 @@ async def test_session_persists_only_new_step_items(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         "agents.run_internal.session_persistence.save_result_to_session", save_wrapper
     )
+    monkeypatch.setattr(
+        "agents.run_internal.agent_runner_helpers.save_result_to_session", save_wrapper
+    )
     monkeypatch.setattr("agents.run.run_single_turn", fake_run_single_turn)
     monkeypatch.setattr("agents.run_internal.run_loop.run_single_turn", fake_run_single_turn)
     monkeypatch.setattr("agents.run.run_output_guardrails", fake_run_output_guardrails)
@@ -3913,6 +3916,201 @@ async def test_output_guardrail_tripwire_triggered_causes_exception():
 
     with pytest.raises(OutputGuardrailTripwireTriggered):
         await Runner.run(agent, input="user_message")
+
+
+def test_output_guardrail_tripwire_does_not_save_assistant_message_to_session_sync() -> None:
+    def guardrail_function(
+        _context: RunContextWrapper[Any], _agent: Agent[Any], _agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    session = SimpleListSession()
+    model = FakeModel()
+    model.set_next_output([get_text_message("should_not_be_saved")])
+    agent = Agent(
+        name="test",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        Runner.run_sync(agent, input="user_message", session=session)
+
+    items = asyncio.run(session.get_items())
+    assert [
+        cast(dict[str, Any], item).get("type") or cast(dict[str, Any], item).get("role")
+        for item in items
+    ] == ["user"]
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_error_preserves_final_output_in_session() -> None:
+    def guardrail_function(
+        _context: RunContextWrapper[Any], _agent: Agent[Any], _agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        raise RuntimeError("guardrail failed")
+
+    session = SimpleListSession()
+    model = FakeModel()
+    model.set_next_output([get_text_message("preserved_on_guardrail_error")])
+    agent = Agent(
+        name="test",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    with pytest.raises(RuntimeError, match="guardrail failed"):
+        await Runner.run(agent, input="user_message", session=session)
+
+    items = await session.get_items()
+    assert [
+        cast(dict[str, Any], item).get("type") or cast(dict[str, Any], item).get("role")
+        for item in items
+    ] == ["user", "message"]
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_cancellation_preserves_final_output_in_session() -> None:
+    guardrail_started = asyncio.Event()
+
+    async def guardrail_function(
+        _context: RunContextWrapper[Any], _agent: Agent[Any], _agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        guardrail_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    session = SimpleListSession()
+    model = FakeModel()
+    model.set_next_output([get_text_message("preserved_on_guardrail_cancellation")])
+    agent = Agent(
+        name="test",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    run_task = asyncio.create_task(Runner.run(agent, input="user_message", session=session))
+    await guardrail_started.wait()
+    run_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+
+    items = await session.get_items()
+    assert [
+        cast(dict[str, Any], item).get("type") or cast(dict[str, Any], item).get("role")
+        for item in items
+    ] == ["user", "message"]
+
+
+@pytest.mark.asyncio
+async def test_resumed_final_output_persists_once_after_passing_output_guardrail() -> None:
+    def guardrail_function(
+        _context: RunContextWrapper[Any], _agent: Agent[Any], _agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    @function_tool
+    def foo(a: str) -> str:
+        return f"result:{a}"
+
+    session = SimpleListSession()
+    model = FakeModel()
+    model.set_next_output([get_function_tool_call("foo", json.dumps({"a": "b"}))])
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[foo],
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    streamed = Runner.run_streamed(agent, input="user_message", session=session)
+    async for event in streamed.stream_events():
+        if event.type == "run_item_stream_event" and event.name == "tool_output":
+            streamed.cancel(mode="after_turn")
+
+    items_before_resume = await session.get_items()
+    state = streamed.to_state()
+    state._current_turn_persisted_item_count = 2
+
+    model.set_next_output([get_text_message("accepted_final")])
+    resumed = await Runner.run(agent, state, session=session)
+    assert resumed.final_output == "accepted_final"
+
+    items_after_resume = await session.get_items()
+    assert items_after_resume[: len(items_before_resume)] == items_before_resume
+    assistant_messages = [
+        item
+        for item in items_after_resume
+        if cast(dict[str, Any], item).get("role") == "assistant"
+        and cast(dict[str, Any], item).get("type") == "message"
+    ]
+    assert len(assistant_messages) == 1
+    content = cast(dict[str, Any], assistant_messages[0]).get("content")
+    assert isinstance(content, list)
+    assert any(isinstance(part, dict) and part.get("text") == "accepted_final" for part in content)
+
+
+@pytest.mark.parametrize("tripwire_triggered", [False, True])
+@pytest.mark.asyncio
+async def test_resumed_final_tool_persists_call_and_output_after_output_guardrail(
+    tripwire_triggered: bool,
+) -> None:
+    def guardrail_function(
+        _context: RunContextWrapper[Any], _agent: Agent[Any], _agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=tripwire_triggered,
+        )
+
+    @function_tool(name_override="commit_tool")
+    def commit_tool() -> str:
+        return "committed-result"
+
+    session = SimpleListSession()
+    model = FakeModel()
+    model.set_next_output([get_function_tool_call("commit_tool", "{}", call_id="call-first")])
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[commit_tool],
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    streamed = Runner.run_streamed(agent, input="user_message", session=session)
+    async for event in streamed.stream_events():
+        if event.type == "run_item_stream_event" and event.name == "tool_output":
+            streamed.cancel(mode="after_turn")
+
+    state = streamed.to_state()
+    assert state._current_turn_persisted_item_count == 2
+
+    agent.tool_use_behavior = "stop_on_first_tool"
+    model.set_next_output([get_function_tool_call("commit_tool", "{}", call_id="call-second")])
+
+    if tripwire_triggered:
+        with pytest.raises(OutputGuardrailTripwireTriggered):
+            await Runner.run(agent, state, session=session)
+    else:
+        result = await Runner.run(agent, state, session=session)
+        assert result.final_output == "committed-result"
+
+    assert state._current_turn_persisted_item_count == 4
+    items = await session.get_items()
+    assert [
+        (
+            cast(dict[str, Any], item).get("type") or cast(dict[str, Any], item).get("role"),
+            cast(dict[str, Any], item).get("call_id"),
+        )
+        for item in items
+    ] == [
+        ("user", None),
+        ("function_call", "call-first"),
+        ("function_call_output", "call-first"),
+        ("function_call", "call-second"),
+        ("function_call_output", "call-second"),
+    ]
 
 
 @pytest.mark.asyncio
