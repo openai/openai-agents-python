@@ -15,23 +15,26 @@ from .processor_interface import TracingProcessor
 from .scope import Scope
 
 
-def _reset_current_trace(token: contextvars.Token[Trace | None]) -> None:
-    """Restore the previously current trace when the token belongs to this context.
+def _finish_on_generator_exit(trace: Trace) -> None:
+    """Finish a trace whose ``with`` block is unwinding because of ``GeneratorExit``.
 
-    A generator closed from the same task resets normally, which is the common case.
-
-    An abandoned async generator is instead finalized from whichever task happens to run
-    its ``aclose``, so the body resumes in a context that never set this token and
+    A generator closed from the task that advanced it resets normally, which is the common
+    case. An abandoned async generator is instead finalized from whichever task happens to
+    run its ``aclose``, so the body resumes in a context that never set the token and
     ``ContextVar.reset`` raises ``ValueError``. Nothing can be done about that from here:
     a ``Token`` is only valid in the ``Context`` that created it, so the task doing the
     finalizing cannot rewrite the caller's context, and the caller keeps seeing this trace
-    as current until its own scope ends. Raising would only add a crash on top of that, so
-    the error is swallowed rather than treated as a successful restore.
+    as current until its own scope ends. Raising would only add a crash on top of that.
+
+    The tolerance is deliberately limited to this path. An explicit ``finish`` from the
+    wrong context is a context-ownership violation rather than an unavoidable one, so it
+    still raises.
     """
     try:
-        Scope.reset_current_trace(token)
+        trace.finish(reset_current=True)
     except ValueError:
         logger.debug("Skipping trace context reset, token belongs to another context")
+        trace._prev_context_token = None  # type: ignore[attr-defined]
 
 
 class Trace(abc.ABC):
@@ -345,7 +348,7 @@ class ReattachedTrace(Trace):
             return
 
         if reset_current and self._prev_context_token is not None:
-            _reset_current_trace(self._prev_context_token)
+            Scope.reset_current_trace(self._prev_context_token)
             self._prev_context_token = None
 
     def __enter__(self) -> Trace:
@@ -358,7 +361,10 @@ class ReattachedTrace(Trace):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.finish(reset_current=True)
+        if exc_type is GeneratorExit:
+            _finish_on_generator_exit(self)
+        else:
+            self.finish(reset_current=True)
 
     def export(self) -> dict[str, Any] | None:
         return {
@@ -418,7 +424,10 @@ class NoOpTrace(Trace):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.finish(reset_current=True)
+        if exc_type is GeneratorExit:
+            _finish_on_generator_exit(self)
+        else:
+            self.finish(reset_current=True)
 
     def start(self, mark_as_current: bool = False):
         if mark_as_current:
@@ -426,7 +435,7 @@ class NoOpTrace(Trace):
 
     def finish(self, reset_current: bool = False):
         if reset_current and self._prev_context_token is not None:
-            _reset_current_trace(self._prev_context_token)
+            Scope.reset_current_trace(self._prev_context_token)
             self._prev_context_token = None
 
     @property
@@ -527,7 +536,7 @@ class TraceImpl(Trace):
         self._processor.on_trace_end(self)
 
         if reset_current and self._prev_context_token is not None:
-            _reset_current_trace(self._prev_context_token)
+            Scope.reset_current_trace(self._prev_context_token)
             self._prev_context_token = None
 
     def __enter__(self) -> Trace:
@@ -540,7 +549,10 @@ class TraceImpl(Trace):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.finish(reset_current=True)
+        if exc_type is GeneratorExit:
+            _finish_on_generator_exit(self)
+        else:
+            self.finish(reset_current=True)
 
     def export(self) -> dict[str, Any] | None:
         return {

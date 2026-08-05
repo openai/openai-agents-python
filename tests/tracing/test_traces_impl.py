@@ -8,7 +8,14 @@ import pytest
 from agents.tracing.processor_interface import TracingProcessor
 from agents.tracing.scope import Scope
 from agents.tracing.spans import Span
-from agents.tracing.traces import NoOpTrace, Trace, TraceImpl, TraceState, reattach_trace
+from agents.tracing.traces import (
+    NoOpTrace,
+    ReattachedTrace,
+    Trace,
+    TraceImpl,
+    TraceState,
+    reattach_trace,
+)
 
 
 class DummyProcessor(TracingProcessor):
@@ -49,6 +56,19 @@ def _new_trace_impl() -> Trace:
     )
 
 
+def _new_reattached_trace() -> Trace:
+    return ReattachedTrace(
+        name="generator-exit",
+        trace_id="trace-generator-exit",
+        group_id=None,
+        metadata=None,
+        tracing_api_key=None,
+    )
+
+
+_TRACE_FACTORIES = [_new_no_op_trace, _new_trace_impl, _new_reattached_trace]
+
+
 def _traced_stream(new_trace: Callable[[], Trace]) -> AsyncGenerator[int, None]:
     async def stream() -> AsyncGenerator[int, None]:
         with new_trace():
@@ -58,7 +78,7 @@ def _traced_stream(new_trace: Callable[[], Trace]) -> AsyncGenerator[int, None]:
     return stream()
 
 
-@pytest.mark.parametrize("new_trace", [_new_no_op_trace, _new_trace_impl])
+@pytest.mark.parametrize("new_trace", _TRACE_FACTORIES)
 async def test_generator_close_in_the_same_task_releases_the_trace_scope(
     new_trace: Callable[[], Trace],
 ) -> None:
@@ -77,7 +97,7 @@ async def test_generator_close_in_the_same_task_releases_the_trace_scope(
     assert Scope.get_current_trace() is None
 
 
-@pytest.mark.parametrize("new_trace", [_new_no_op_trace, _new_trace_impl])
+@pytest.mark.parametrize("new_trace", _TRACE_FACTORIES)
 async def test_generator_close_from_another_task_does_not_raise(
     new_trace: Callable[[], Trace],
 ) -> None:
@@ -93,6 +113,34 @@ async def test_generator_close_from_another_task_does_not_raise(
     generator = _traced_stream(new_trace)
     assert await generator.asend(None) == 1
     await asyncio.create_task(generator.aclose())
+
+    # The caller's own context still holds the trace, which is the documented residue of
+    # finalizing from another task. Clear it so later tests do not inherit it.
+    Scope.set_current_trace(None)
+
+
+@pytest.mark.parametrize("new_trace", _TRACE_FACTORIES)
+async def test_explicit_finish_from_another_context_still_raises(
+    new_trace: Callable[[], Trace],
+) -> None:
+    """Only ``GeneratorExit`` cleanup tolerates a foreign token.
+
+    An explicit ``finish`` from a context that never set the token is a context-ownership
+    violation rather than an unavoidable one, so it must surface instead of silently
+    discarding the saved token.
+    """
+    Scope.set_current_trace(None)
+
+    trace = new_trace()
+    trace.start(mark_as_current=True)
+
+    async def finish_elsewhere() -> None:
+        with pytest.raises(ValueError):
+            trace.finish(reset_current=True)
+
+    await asyncio.create_task(finish_elsewhere())
+
+    Scope.set_current_trace(None)
 
 
 def test_no_op_trace_double_enter_logs_error(caplog) -> None:
