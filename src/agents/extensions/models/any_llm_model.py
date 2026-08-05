@@ -592,6 +592,19 @@ class AnyLLMModel(Model):
                 else Usage()
             )
 
+            # Some providers signal a filtered non-streaming completion only through
+            # finish_reason="content_filter" and an otherwise empty message. Preserve
+            # that terminal signal as a refusal instead of returning an empty output.
+            if (
+                message is not None
+                and first_choice is not None
+                and first_choice.finish_reason == "content_filter"
+                and not message.content
+                and not message.refusal
+                and not message.tool_calls
+            ):
+                message.refusal = "Response withheld by the provider's content filter."
+
             if tracing.include_data():
                 span_generation.span_data.output = (
                     [message.model_dump()] if message is not None else []
