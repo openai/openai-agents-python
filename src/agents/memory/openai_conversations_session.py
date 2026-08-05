@@ -55,13 +55,14 @@ class OpenAIConversationsSession(SessionABC):
 
         Raises:
             ValueError: If the session has not been initialized yet.
-                Call any session method (get_items, add_items, etc.) first
-                to trigger lazy initialization.
+                Call a session method that accesses the remote conversation, such as
+                get_items() or add_items() with a non-empty list, to initialize it.
         """
         if self._session_id is None:
             raise ValueError(
                 "Session ID not yet available. The session is lazily initialized "
-                "on first API call. Call get_items(), add_items(), or similar first."
+                "on first API call. Call get_items(), add_items() with a non-empty list, "
+                "or a similar method first."
             )
         return self._session_id
 
@@ -107,10 +108,10 @@ class OpenAIConversationsSession(SessionABC):
         return all_items  # type: ignore
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
-        session_id = await self._get_session_id()
         if not items:
             return
 
+        session_id = await self._get_session_id()
         await self._openai_client.conversations.items.create(
             conversation_id=session_id,
             items=items,

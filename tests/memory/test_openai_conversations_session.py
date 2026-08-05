@@ -231,6 +231,31 @@ class TestOpenAIConversationsSessionBasicOperations:
         )
 
     @pytest.mark.asyncio
+    async def test_add_items_empty_does_not_create_session(self, mock_openai_client):
+        """Test that add_items with no items does not create a remote conversation."""
+        session = OpenAIConversationsSession(openai_client=mock_openai_client)
+
+        await session.add_items([])
+
+        mock_openai_client.conversations.create.assert_not_called()
+        mock_openai_client.conversations.items.create.assert_not_called()
+        with pytest.raises(ValueError, match="add_items\\(\\) with a non-empty list"):
+            _ = session.session_id
+
+    @pytest.mark.asyncio
+    async def test_add_items_empty_keeps_existing_session_id(self, mock_openai_client):
+        """Test that add_items with no items leaves an initialized session untouched."""
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+
+        await session.add_items([])
+
+        mock_openai_client.conversations.create.assert_not_called()
+        mock_openai_client.conversations.items.create.assert_not_called()
+        assert session.session_id == "test_id"
+
+    @pytest.mark.asyncio
     async def test_pop_item_with_items(self, mock_openai_client):
         """Test popping item when items exist using method patching."""
         session = OpenAIConversationsSession(
