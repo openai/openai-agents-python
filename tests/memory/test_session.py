@@ -955,3 +955,71 @@ async def test_runner_with_session_settings_override():
         assert len(history_items) == 2
 
         session.close()
+
+
+def _drop_table(db_path: Path, table: str) -> None:
+    """Drop a table from an independent connection to make a later statement fail."""
+    helper = sqlite3.connect(str(db_path))
+    try:
+        helper.execute(f"DROP TABLE {table}")
+        helper.commit()
+    finally:
+        helper.close()
+
+
+def _write_lock_is_free(db_path: Path) -> bool:
+    """Return whether an independent writer can still take the SQLite write lock."""
+    # timeout=0 disables the busy handler, so this fails immediately if the lock is held.
+    probe = sqlite3.connect(str(db_path), timeout=0)
+    try:
+        probe.execute("CREATE TABLE IF NOT EXISTS probe_lock (x INTEGER)")
+        probe.commit()
+        return True
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        probe.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_failed_clear_session_releases_write_lock():
+    """A clear_session that fails on its second DELETE must not strand the write lock.
+
+    clear_session issues two DELETEs under one commit, so a failure on the second leaves the
+    first applied inside an open transaction. That transaction holds the SQLite write lock for
+    the lifetime of the cached connection and blocks every later writer.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "clear_rollback.db"
+        session = SQLiteSession("clear_rollback", db_path)
+        await session.add_items([{"role": "user", "content": "kept"}])
+
+        # The messages DELETE succeeds, then the sessions DELETE fails.
+        _drop_table(db_path, "agent_sessions")
+
+        with pytest.raises(sqlite3.OperationalError):
+            await session.clear_session()
+
+        assert all(not conn.in_transaction for conn in session._connections)
+        assert _write_lock_is_free(db_path)
+
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_failed_pop_item_releases_write_lock():
+    """A pop_item whose statement fails must not strand the write lock."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "pop_rollback.db"
+        session = SQLiteSession("pop_rollback", db_path)
+        await session.add_items([{"role": "user", "content": "kept"}])
+
+        _drop_table(db_path, "agent_messages")
+
+        with pytest.raises(sqlite3.OperationalError):
+            await session.pop_item()
+
+        assert all(not conn.in_transaction for conn in session._connections)
+        assert _write_lock_is_free(db_path)
+
+        session.close()

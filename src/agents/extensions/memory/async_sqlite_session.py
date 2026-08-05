@@ -18,6 +18,22 @@ from ...memory.session_settings import (
 )
 
 
+@asynccontextmanager
+async def _rollback_on_failure(conn: aiosqlite.Connection) -> AsyncIterator[None]:
+    """Roll back a partially applied write when the operation fails.
+
+    `_locked_connection()` does not manage transactions, so a statement that fails partway
+    through a write would otherwise leave both a partial mutation and an open transaction on
+    this shared connection. An open write transaction holds the SQLite write lock for the
+    lifetime of the connection and blocks every later writer, including other processes.
+    """
+    try:
+        yield
+    except BaseException:
+        await conn.rollback()
+        raise
+
+
 class AsyncSQLiteSession(SessionABC):
     """Async SQLite-based implementation of session storage.
 
@@ -206,7 +222,7 @@ class AsyncSQLiteSession(SessionABC):
         if not items:
             return
 
-        async with self._locked_connection() as conn:
+        async with self._locked_connection() as conn, _rollback_on_failure(conn):
             await conn.execute(
                 f"""
                 INSERT OR IGNORE INTO {self.sessions_table} (session_id) VALUES (?)
@@ -239,7 +255,7 @@ class AsyncSQLiteSession(SessionABC):
         Returns:
             The most recent item if it exists, None if the session is empty
         """
-        async with self._locked_connection() as conn:
+        async with self._locked_connection() as conn, _rollback_on_failure(conn):
             cursor = await conn.execute(
                 f"""
                 DELETE FROM {self.messages_table}
@@ -284,7 +300,7 @@ class AsyncSQLiteSession(SessionABC):
 
     async def clear_session(self) -> None:
         """Clear all items for this session."""
-        async with self._locked_connection() as conn:
+        async with self._locked_connection() as conn, _rollback_on_failure(conn):
             await conn.execute(
                 f"DELETE FROM {self.messages_table} WHERE session_id = ?",
                 (self.session_id,),

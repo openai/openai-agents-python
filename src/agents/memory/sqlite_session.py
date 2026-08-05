@@ -14,6 +14,22 @@ from .session import SessionABC
 from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
 
 
+@contextmanager
+def _rollback_on_failure(conn: sqlite3.Connection) -> Iterator[None]:
+    """Roll back a partially applied write when the operation fails.
+
+    `_locked_connection()` does not manage transactions, so a statement that fails partway
+    through a write would otherwise leave both a partial mutation and an open transaction on
+    this cached connection. An open write transaction holds the SQLite write lock for the
+    lifetime of the connection and blocks every later writer, including other processes.
+    """
+    try:
+        yield
+    except BaseException:
+        conn.rollback()
+        raise
+
+
 class SQLiteSession(SessionABC):
     """SQLite-based implementation of session storage.
 
@@ -287,18 +303,9 @@ class SQLiteSession(SessionABC):
             return
 
         def _add_items_sync():
-            with self._locked_connection() as conn:
-                try:
-                    self._insert_items(conn, items)
-                    conn.commit()
-                except Exception:
-                    # _locked_connection() does not manage transactions; roll back
-                    # explicitly so a failure partway through the insert never leaves a
-                    # partial mutation or an open transaction on this cached connection.
-                    # An open write transaction would hold the SQLite write lock for the
-                    # lifetime of the connection and block every later writer.
-                    conn.rollback()
-                    raise
+            with self._locked_connection() as conn, _rollback_on_failure(conn):
+                self._insert_items(conn, items)
+                conn.commit()
 
         await asyncio.to_thread(_add_items_sync)
 
@@ -310,7 +317,7 @@ class SQLiteSession(SessionABC):
         """
 
         def _pop_item_sync():
-            with self._locked_connection() as conn:
+            with self._locked_connection() as conn, _rollback_on_failure(conn):
                 # Use DELETE with RETURNING to atomically delete and return the most recent item
                 cursor = conn.execute(
                     f"""
@@ -360,7 +367,7 @@ class SQLiteSession(SessionABC):
         """Clear all items for this session."""
 
         def _clear_session_sync():
-            with self._locked_connection() as conn:
+            with self._locked_connection() as conn, _rollback_on_failure(conn):
                 conn.execute(
                     f"DELETE FROM {self.messages_table} WHERE session_id = ?",
                     (self.session_id,),
