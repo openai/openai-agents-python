@@ -13,6 +13,7 @@ from agents.memory.openai_conversations_session import (
     OpenAIConversationsSession,
     start_openai_conversations_session,
 )
+from agents.memory.session_settings import SessionSettings
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 
@@ -195,6 +196,29 @@ class TestOpenAIConversationsSessionLifecycle:
 
 class TestOpenAIConversationsSessionBasicOperations:
     """Test basic CRUD operations with simple mocking."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("limit", "session_settings"),
+        [
+            pytest.param(0, None, id="explicit-limit"),
+            pytest.param(None, SessionSettings(limit=0), id="session-settings"),
+        ],
+    )
+    async def test_get_items_zero_limit_skips_remote_conversation(
+        self,
+        mock_openai_client,
+        limit: int | None,
+        session_settings: SessionSettings | None,
+    ):
+        session = OpenAIConversationsSession(
+            openai_client=mock_openai_client,
+            session_settings=session_settings,
+        )
+
+        assert await session.get_items(limit=limit) == []
+        mock_openai_client.conversations.create.assert_not_called()
+        mock_openai_client.conversations.items.list.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_add_items_simple(self, mock_openai_client):

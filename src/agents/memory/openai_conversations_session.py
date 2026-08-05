@@ -81,9 +81,11 @@ class OpenAIConversationsSession(SessionABC):
         self._session_id = None
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
-        session_id = await self._get_session_id()
-
         session_limit = resolve_session_limit(limit, self.session_settings)
+        if session_limit == 0:
+            return []
+
+        session_id = await self._get_session_id()
 
         all_items = []
         if session_limit is None:
