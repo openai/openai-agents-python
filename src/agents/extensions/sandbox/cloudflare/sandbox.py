@@ -231,8 +231,13 @@ class _SSELineDecoder:
                 if cr + 1 < length and raw[cr + 1 : cr + 2] == b"\n":
                     i = cr + 2
                 elif cr + 1 == length:
-                    self._buf = b"\r"
-                    lines.append(line.decode("utf-8"))
+                    # The CR is the last byte available, so it is either a lone CR
+                    # terminator or the first half of a CRLF split across chunks. Keep the
+                    # unterminated line and decide once the next chunk arrives. Emitting it
+                    # now would leave the following LF to be read as an empty line, and an
+                    # empty line dispatches the event, splitting one multi-line SSE event
+                    # into several.
+                    self._buf = raw[i:]
                     break
                 else:
                     i = cr + 1
@@ -247,11 +252,13 @@ class _SSELineDecoder:
     def flush(self) -> list[str]:
         buf = self._buf
         self._buf = b""
-        if buf == b"\r":
-            return [""]
-        if buf:
-            return [buf.decode("utf-8")]
-        return []
+        if not buf:
+            return []
+        if buf.endswith(b"\r"):
+            # A CR held back by decode() turned out to end the stream, so it is a lone CR
+            # terminator and the line it closes is the last one.
+            return [buf[:-1].decode("utf-8")]
+        return [buf.decode("utf-8")]
 
 
 class _SSEDecoder:

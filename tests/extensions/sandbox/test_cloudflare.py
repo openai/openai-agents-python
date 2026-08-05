@@ -19,7 +19,11 @@ from agents.extensions.sandbox.cloudflare import (
     CloudflareSandboxSession,
     CloudflareSandboxSessionState,
 )
-from agents.extensions.sandbox.cloudflare.sandbox import _CloudflarePtyProcessEntry
+from agents.extensions.sandbox.cloudflare.sandbox import (
+    _CloudflarePtyProcessEntry,
+    _SSEDecoder,
+    _SSELineDecoder,
+)
 from agents.sandbox.entries import Dir, GCSMount, R2Mount, S3Mount
 from agents.sandbox.errors import (
     ConfigurationError,
@@ -1567,3 +1571,66 @@ async def test_cloudflare_shutdown_logs_respect_tool_data_policy(
     )
     assert has_detail is not redacted
     assert response.read_calls == (0 if redacted else 1)
+
+
+def _decode_in_chunks(stream: str, size: int) -> list[str]:
+    decoder = _SSELineDecoder()
+    lines: list[str] = []
+    for index in range(0, len(stream), size):
+        lines.extend(decoder.decode(stream[index : index + size]))
+    lines.extend(decoder.flush())
+    return lines
+
+
+def _events(lines: list[str]) -> list[tuple[str, str]]:
+    decoder = _SSEDecoder()
+    collected: list[tuple[str, str]] = []
+    for line in lines:
+        event = decoder.decode(line)
+        if event is not None:
+            collected.append((event.event, event.data))
+    return collected
+
+
+@pytest.mark.parametrize(
+    "stream",
+    [
+        "data: a\ndata: b\n\n",
+        "data: a\r\ndata: b\r\n\r\n",
+        "data: a\rdata: b\r\r",
+        "data: a\r\ndata: b\n\r\n",
+        "data:\r\n\r\n",
+        "data: a\r",
+        "\r\n",
+    ],
+    ids=["lf", "crlf", "cr", "mixed", "empty_data", "trailing_cr", "bare_crlf"],
+)
+def test_sse_line_decoder_matches_splitlines_for_every_chunk_boundary(stream: str) -> None:
+    """Line splitting must not depend on how the transport chunks the stream.
+
+    A chunk that ends on a CR cannot be classified yet: the next chunk may start with LF,
+    and CRLF is a single terminator. Emitting the line early left that LF to be read as a
+    blank line, and a blank line dispatches an SSE event.
+    """
+    expected = stream.splitlines()
+    for size in range(1, len(stream) + 1):
+        assert _decode_in_chunks(stream, size) == expected, f"chunk size {size}"
+
+
+def test_sse_event_is_not_split_when_crlf_straddles_a_chunk_boundary() -> None:
+    """One multi-line event must stay one event regardless of chunking."""
+    stream = "data: a\r\ndata: b\r\n\r\n"
+
+    whole = _events(_decode_in_chunks(stream, len(stream)))
+    assert whole == [("message", "a\nb")]
+
+    for size in range(1, len(stream) + 1):
+        assert _events(_decode_in_chunks(stream, size)) == whole, f"chunk size {size}"
+
+
+def test_sse_line_decoder_flush_does_not_emit_a_phantom_line_for_a_trailing_cr() -> None:
+    """A stream ending on a lone CR closes its line without adding a blank one."""
+    decoder = _SSELineDecoder()
+
+    assert decoder.decode("data: a\r") == []
+    assert decoder.flush() == ["data: a"]
