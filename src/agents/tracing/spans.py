@@ -46,7 +46,7 @@ class Span(abc.ABC, Generic[TSpanData]):
             "table": "users"
         }) as span:
             results = await db.query("SELECT * FROM users")
-            span.set_output({"count": len(results)})
+            span.span_data.data["output"] = {"count": len(results)}
 
         # Handling errors in spans
         with custom_span("risky_operation") as span:

@@ -273,6 +273,24 @@ def test_spans_with_setters() -> None:
     )
 
 
+def test_custom_span_records_output_in_data() -> None:
+    with trace(workflow_name="test"):
+        with custom_span("database_query", {"operation": "SELECT", "table": "users"}) as span:
+            span.span_data.data["output"] = {"count": 2}
+
+    exported = span.export()
+    assert exported is not None
+    assert exported["span_data"] == {
+        "type": "custom",
+        "name": "database_query",
+        "data": {
+            "operation": "SELECT",
+            "table": "users",
+            "output": {"count": 2},
+        },
+    }
+
+
 def disabled_tracing():
     with trace(workflow_name="test", trace_id="123", group_id="456", disabled=True):
         with agent_span(name="agent_1"):
