@@ -668,19 +668,25 @@ class RealtimeSession(RealtimeModelListener):
             agent,
             tool_lookup_key=tool_lookup_key,
         )
-
-        needs_approval = await self._function_needs_approval(function_tool, tool_call)
-        if self._closing or self._closed:
-            return None
-        if not needs_approval:
-            return True
-
         approval_status = self._context_wrapper.get_approval_status(
             function_tool.name,
             tool_call.call_id,
             existing_pending=approval_item,
             tool_lookup_key=tool_lookup_key,
         )
+        if approval_status is None:
+            needs_approval = await self._function_needs_approval(function_tool, tool_call)
+            if self._closing or self._closed:
+                return None
+            approval_status = self._context_wrapper.get_approval_status(
+                function_tool.name,
+                tool_call.call_id,
+                existing_pending=approval_item,
+                tool_lookup_key=tool_lookup_key,
+            )
+            if approval_status is None and not needs_approval:
+                return True
+
         if approval_status is True:
             return True
         if approval_status is False:
@@ -694,6 +700,16 @@ class RealtimeSession(RealtimeModelListener):
             )
             if self._closing or self._closed:
                 return None
+            approval_status = self._context_wrapper.get_approval_status(
+                function_tool.name,
+                tool_call.call_id,
+                existing_pending=approval_item,
+                tool_lookup_key=tool_lookup_key,
+            )
+            if approval_status is True:
+                return True
+            if approval_status is False:
+                return False
             if rejected_message is not None:
                 return self._build_realtime_tool_output(
                     tool=function_tool,

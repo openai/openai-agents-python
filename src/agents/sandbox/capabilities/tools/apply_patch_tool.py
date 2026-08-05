@@ -202,13 +202,15 @@ class SandboxApplyPatchTool(CustomTool):
             return False
 
         for operation in operations:
-            if await evaluate_needs_approval_setting(
+            needs_approval = await evaluate_needs_approval_setting(
                 self.needs_approval,
                 ctx_wrapper,
                 operation,
                 call_id,
-            ):
-                return True
+            )
+            approval_status = ctx_wrapper.get_approval_status(self.name, call_id)
+            if approval_status is not None or needs_approval:
+                return needs_approval
         return False
 
     async def _on_invoke_tool(self, ctx: ToolContext[Any], raw_input: str) -> str:

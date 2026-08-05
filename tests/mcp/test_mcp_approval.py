@@ -191,7 +191,7 @@ async def test_mcp_require_approval_callable_can_allow_and_block_by_tool_name():
     assert not second.interruptions, "safe should bypass approval via callable policy"
     assert second.final_output == "safe done"
 
-    assert seen == ["guarded", "guarded", "safe"]
+    assert seen == ["guarded", "safe"]
 
 
 @pytest.mark.asyncio
@@ -236,7 +236,6 @@ async def test_mcp_require_approval_async_callable_uses_run_context():
     assert second.final_output == "no approval path"
 
     assert seen_contexts == [
-        {"needs_approval": True},
         {"needs_approval": True},
         {"needs_approval": False},
     ]

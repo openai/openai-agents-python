@@ -404,6 +404,20 @@ async def _collect_runs_by_approval(
         if output_exists_checker and output_exists_checker(call_id):
             continue
 
+        needs_approval = True
+        if approval_status is None and needs_approval_checker:
+            try:
+                needs_approval = await needs_approval_checker(run)
+            except UserError:
+                raise
+            except Exception:
+                needs_approval = True
+            approval_status = context_wrapper.get_approval_status(
+                tool_name,
+                call_id,
+                existing_pending=existing_pending,
+            )
+
         if approval_status is False:
             rejection = rejection_builder(run, call_id)
             if inspect.isawaitable(rejection):
@@ -416,15 +430,6 @@ async def _collect_runs_by_approval(
         if approval_status is True:
             approved_runs.append(run)
             continue
-
-        needs_approval = True
-        if needs_approval_checker:
-            try:
-                needs_approval = await needs_approval_checker(run)
-            except UserError:
-                raise
-            except Exception:
-                needs_approval = True
 
         if not needs_approval:
             approved_runs.append(run)
@@ -517,6 +522,16 @@ async def _select_function_tool_runs_for_resume(
             existing_pending=approval_items_by_call_id.get(call_id),
         )
 
+        requires_approval = True
+        if approval_status is None:
+            requires_approval = await needs_approval_checker(run)
+            approval_status = context_wrapper.get_approval_status(
+                run.function_tool.name,
+                call_id,
+                tool_namespace=get_tool_call_namespace(run.tool_call),
+                existing_pending=approval_items_by_call_id.get(call_id),
+            )
+
         if approval_status is False:
             await record_rejection(call_id, run.tool_call, run.function_tool)
             continue
@@ -524,12 +539,6 @@ async def _select_function_tool_runs_for_resume(
         if approval_status is True:
             selected.append(run)
             continue
-
-        # Only invoke needs_approval_checker when the approval state is unresolved;
-        # for explicit approve/reject decisions the checker's result is unused, and
-        # invoking it eagerly risks user-side effects (or exceptions that swallow
-        # rejections) on calls whose outcome is already determined.
-        requires_approval = await needs_approval_checker(run)
 
         if not requires_approval:
             selected.append(run)

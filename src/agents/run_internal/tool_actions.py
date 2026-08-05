@@ -454,11 +454,23 @@ class ShellAction:
                     dataclasses.asdict(shell_call.action)
                 )
 
-            needs_approval_result = await evaluate_needs_approval_setting(
-                shell_tool.needs_approval, context_wrapper, shell_call.action, shell_call.call_id
+            approval_status = context_wrapper.get_approval_status(
+                shell_tool.name, shell_call.call_id
             )
+            if approval_status is None:
+                needs_approval_result = await evaluate_needs_approval_setting(
+                    shell_tool.needs_approval,
+                    context_wrapper,
+                    shell_call.action,
+                    shell_call.call_id,
+                )
+                approval_status = context_wrapper.get_approval_status(
+                    shell_tool.name, shell_call.call_id
+                )
+            else:
+                needs_approval_result = False
 
-            if needs_approval_result:
+            if approval_status is None and needs_approval_result:
                 approval_status, approval_item = await resolve_approval_status(
                     tool_name=shell_tool.name,
                     call_id=shell_call.call_id,
@@ -468,23 +480,23 @@ class ShellAction:
                     on_approval=shell_tool.on_approval,
                 )
 
-                if approval_status is False:
-                    rejection_message = await resolve_approval_rejection_message(
-                        context_wrapper=context_wrapper,
-                        run_config=config,
-                        tool_type="shell",
-                        tool_name=shell_tool.name,
-                        call_id=shell_call.call_id,
-                    )
-                    return shell_rejection_item(
-                        agent,
-                        shell_call.call_id,
-                        tool_call=call.tool_call,
-                        rejection_message=rejection_message,
-                    )
-
-                if approval_status is not True:
+                if approval_status is None:
                     return approval_item
+
+            if approval_status is False:
+                rejection_message = await resolve_approval_rejection_message(
+                    context_wrapper=context_wrapper,
+                    run_config=config,
+                    tool_type="shell",
+                    tool_name=shell_tool.name,
+                    call_id=shell_call.call_id,
+                )
+                return shell_rejection_item(
+                    agent,
+                    shell_call.call_id,
+                    tool_call=call.tool_call,
+                    rejection_message=rejection_message,
+                )
 
             await asyncio.gather(
                 hooks.on_tool_start(context_wrapper, agent, shell_tool),
@@ -649,11 +661,16 @@ class CustomToolAction:
             if span and config.trace_include_sensitive_data:
                 span.span_data.input = tool_input
 
-            needs_approval_result = await evaluate_needs_approval_setting(
-                custom_tool.runtime_needs_approval(), context_wrapper, tool_input, call_id
-            )
+            approval_status = context_wrapper.get_approval_status(custom_tool.name, call_id)
+            if approval_status is None:
+                needs_approval_result = await evaluate_needs_approval_setting(
+                    custom_tool.runtime_needs_approval(), context_wrapper, tool_input, call_id
+                )
+                approval_status = context_wrapper.get_approval_status(custom_tool.name, call_id)
+            else:
+                needs_approval_result = False
 
-            if needs_approval_result:
+            if approval_status is None and needs_approval_result:
                 approval_status, approval_item = await resolve_approval_status(
                     tool_name=custom_tool.name,
                     call_id=call_id,
@@ -663,27 +680,27 @@ class CustomToolAction:
                     on_approval=custom_tool.runtime_on_approval(),
                 )
 
-                if approval_status is False:
-                    rejection_message = await resolve_approval_rejection_message(
-                        context_wrapper=context_wrapper,
-                        run_config=config,
-                        tool_type="custom",
-                        tool_name=custom_tool.name,
-                        call_id=call_id,
-                    )
-                    return cls._tool_output_item(
-                        agent,
+                if approval_status is None:
+                    return approval_item
+
+            if approval_status is False:
+                rejection_message = await resolve_approval_rejection_message(
+                    context_wrapper=context_wrapper,
+                    run_config=config,
+                    tool_type="custom",
+                    tool_name=custom_tool.name,
+                    call_id=call_id,
+                )
+                return cls._tool_output_item(
+                    agent,
+                    call_id,
+                    rejection_message,
+                    raw_item=cls._raw_tool_output_item(
                         call_id,
                         rejection_message,
-                        raw_item=cls._raw_tool_output_item(
-                            call_id,
-                            rejection_message,
-                            tool_call=call.tool_call,
-                        ),
-                    )
-
-                if approval_status is not True:
-                    return approval_item
+                        tool_call=call.tool_call,
+                    ),
+                )
 
             await asyncio.gather(
                 hooks.on_tool_start(tool_context, agent, custom_tool),
@@ -830,15 +847,20 @@ class ApplyPatchAction:
                     ]
                 )
 
+            approval_status = context_wrapper.get_approval_status(apply_patch_tool.name, call_id)
             needs_approval_result = False
-            for operation in operations:
-                if await evaluate_needs_approval_setting(
-                    apply_patch_tool.needs_approval, context_wrapper, operation, call_id
-                ):
-                    needs_approval_result = True
-                    break
+            if approval_status is None:
+                for operation in operations:
+                    needs_approval_result = await evaluate_needs_approval_setting(
+                        apply_patch_tool.needs_approval, context_wrapper, operation, call_id
+                    )
+                    approval_status = context_wrapper.get_approval_status(
+                        apply_patch_tool.name, call_id
+                    )
+                    if approval_status is not None or needs_approval_result:
+                        break
 
-            if needs_approval_result:
+            if approval_status is None and needs_approval_result:
                 approval_status, approval_item = await resolve_approval_status(
                     tool_name=apply_patch_tool.name,
                     call_id=call_id,
@@ -848,24 +870,24 @@ class ApplyPatchAction:
                     on_approval=apply_patch_tool.on_approval,
                 )
 
-                if approval_status is False:
-                    rejection_message = await resolve_approval_rejection_message(
-                        context_wrapper=context_wrapper,
-                        run_config=config,
-                        tool_type="apply_patch",
-                        tool_name=apply_patch_tool.name,
-                        call_id=call_id,
-                    )
-                    return apply_patch_rejection_item(
-                        agent,
-                        call_id,
-                        tool_call=call.tool_call,
-                        output_type="apply_patch_call_output",
-                        rejection_message=rejection_message,
-                    )
-
-                if approval_status is not True:
+                if approval_status is None:
                     return approval_item
+
+            if approval_status is False:
+                rejection_message = await resolve_approval_rejection_message(
+                    context_wrapper=context_wrapper,
+                    run_config=config,
+                    tool_type="apply_patch",
+                    tool_name=apply_patch_tool.name,
+                    call_id=call_id,
+                )
+                return apply_patch_rejection_item(
+                    agent,
+                    call_id,
+                    tool_call=call.tool_call,
+                    output_type="apply_patch_call_output",
+                    rejection_message=rejection_message,
+                )
 
             await asyncio.gather(
                 hooks.on_tool_start(context_wrapper, agent, apply_patch_tool),

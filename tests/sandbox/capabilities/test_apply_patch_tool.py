@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable
 from pathlib import Path
 from typing import Any, cast
@@ -76,6 +77,73 @@ class TestSandboxApplyPatchTool:
         )
 
         assert isinstance(result, ToolApprovalItem)
+
+    @pytest.mark.parametrize("approved", [True, False], ids=["approved", "rejected"])
+    @pytest.mark.asyncio
+    async def test_multi_operation_checker_stops_when_approval_resolves(
+        self,
+        approved: bool,
+    ) -> None:
+        checker_started = asyncio.Event()
+        release_checker = asyncio.Event()
+        checked_paths: list[str] = []
+
+        async def needs_approval(
+            _ctx: RunContextWrapper[Any], operation: ApplyPatchOperation, _call_id: str
+        ) -> bool:
+            checked_paths.append(operation.path)
+            if len(checked_paths) > 1:
+                raise AssertionError("resolved approval must stop later callbacks")
+            checker_started.set()
+            await release_checker.wait()
+            return False
+
+        session = ApplyPatchSession()
+        tool = SandboxApplyPatchTool(session=session, needs_approval=needs_approval)
+        context_wrapper = make_context_wrapper()
+        raw_input = (
+            "*** Begin Patch\n"
+            "*** Add File: first.txt\n"
+            "+first\n"
+            "*** Add File: second.txt\n"
+            "+second\n"
+            "*** End Patch\n"
+        )
+        approval_item = ToolApprovalItem(
+            agent=Agent(name="patcher"),
+            raw_item={
+                "type": "custom_tool_call",
+                "name": tool.name,
+                "call_id": "call_apply",
+                "input": raw_input,
+            },
+            tool_name=tool.name,
+        )
+        execution_task = asyncio.create_task(
+            _execute_custom_tool_call(
+                tool,
+                context_wrapper=context_wrapper,
+                raw_input=raw_input,
+            )
+        )
+        try:
+            await asyncio.wait_for(checker_started.wait(), timeout=1)
+            if approved:
+                context_wrapper.approve_tool(approval_item)
+            else:
+                context_wrapper.reject_tool(approval_item)
+            release_checker.set()
+            result = await execution_task
+        finally:
+            release_checker.set()
+
+        assert checked_paths == ["first.txt"]
+        assert isinstance(result, ToolCallOutputItem)
+        if approved:
+            assert session.files[Path("/workspace/first.txt")] == b"first"
+            assert session.files[Path("/workspace/second.txt")] == b"second"
+        else:
+            assert session.files == {}
 
     @pytest.mark.asyncio
     async def test_invalid_patch_input_surfaces_tool_error_after_approval_precheck(self) -> None:

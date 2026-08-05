@@ -1220,10 +1220,16 @@ async def resolve_interrupted_turn(
         )
         call_id = extract_apply_patch_call_id(run.tool_call)
         for operation in operations:
-            if await evaluate_needs_approval_setting(
+            needs_approval = await evaluate_needs_approval_setting(
                 run.apply_patch_tool.needs_approval, context_wrapper, operation, call_id
-            ):
-                return True
+            )
+            approval_status = context_wrapper.get_approval_status(
+                run.apply_patch_tool.name,
+                call_id,
+                existing_pending=approval_items_by_call_id.get(call_id),
+            )
+            if approval_status is not None or needs_approval:
+                return needs_approval
         return False
 
     async def _custom_tool_needs_approval(run: ToolRunCustom) -> bool:
@@ -1841,11 +1847,18 @@ async def resolve_interrupted_turn(
                 )
                 rejected_function_call_ids.add(call_id)
 
+    collector_owned_call_ids = {
+        *(_shell_call_id_from_run(run) for run in processed_response.shell_calls),
+        *(_apply_patch_call_id_from_run(run) for run in processed_response.apply_patch_calls),
+        *(_custom_call_id_from_run(run) for run in processed_response.custom_tool_calls),
+    }
     for original_approval in pending_approval_items:
         approval_snapshot = validated_function_approval_items.get(original_approval)
         if approval_snapshot is None:
             approval = original_approval
             approval_call_id = extract_tool_call_id(approval.raw_item)
+            if approval_call_id in collector_owned_call_ids:
+                continue
             if (
                 approval_call_id is None
                 or context_wrapper.get_approval_status(
@@ -2004,8 +2017,8 @@ async def resolve_interrupted_turn(
     for interruption in _collect_tool_interruptions(
         function_results=function_results,
         custom_tool_results=custom_tool_results,
-        shell_results=[],
-        apply_patch_results=[],
+        shell_results=shell_results,
+        apply_patch_results=apply_patch_results,
     ):
         _add_pending_interruption(interruption)
 

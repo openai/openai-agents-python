@@ -3344,6 +3344,186 @@ class TestToolCallExecution:
         assert tool_calls == []
 
     @pytest.mark.asyncio
+    async def test_sticky_rejection_skips_dynamic_approval_checker(self, mock_model):
+        checker_calls: list[str] = []
+        tool_calls: list[str] = []
+
+        async def needs_approval(_ctx: Any, _params: dict[str, Any], call_id: str) -> bool:
+            checker_calls.append(call_id)
+            if call_id != "call-reject-first":
+                raise AssertionError("sticky rejection must bypass needs_approval")
+            return True
+
+        async def invoke_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+            tool_calls.append("called")
+            return "should-not-run"
+
+        tool = FunctionTool(
+            name="send_email",
+            description="Send an email.",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=invoke_tool,
+            needs_approval=needs_approval,
+        )
+        agent = RealtimeAgent(name="agent", tools=[tool])
+        session = RealtimeSession(mock_model, agent, None, run_config={"async_tool_calls": False})
+        first_call = RealtimeModelToolCallEvent(
+            name=tool.name, call_id="call-reject-first", arguments="{}"
+        )
+        second_call = RealtimeModelToolCallEvent(
+            name=tool.name, call_id="call-reject-second", arguments="{}"
+        )
+
+        await session._handle_tool_call(first_call)
+        await session.reject_tool_call(first_call.call_id, always=True)
+        await session._handle_tool_call(second_call)
+
+        assert checker_calls == ["call-reject-first"]
+        assert tool_calls == []
+        assert session._pending_tool_calls == {}
+        assert len(mock_model.sent_tool_outputs) == 2
+
+    @pytest.mark.asyncio
+    async def test_sticky_rejection_wins_while_dynamic_approval_checker_is_pending(
+        self, mock_model
+    ):
+        checker_started = asyncio.Event()
+        checker_release = asyncio.Event()
+        checker_calls: list[str] = []
+        tool_calls: list[str] = []
+
+        async def needs_approval(_ctx: Any, _params: dict[str, Any], call_id: str) -> bool:
+            checker_calls.append(call_id)
+            if call_id == "call-pending-checker":
+                checker_started.set()
+                await checker_release.wait()
+                return False
+            return True
+
+        async def invoke_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+            tool_calls.append("called")
+            return "should-not-run"
+
+        tool = FunctionTool(
+            name="send_email",
+            description="Send an email.",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=invoke_tool,
+            needs_approval=needs_approval,
+        )
+        agent = RealtimeAgent(name="agent", tools=[tool])
+        session = RealtimeSession(mock_model, agent, None)
+        first_call = RealtimeModelToolCallEvent(
+            name=tool.name, call_id="call-reject-first", arguments="{}"
+        )
+        pending_checker_call = RealtimeModelToolCallEvent(
+            name=tool.name, call_id="call-pending-checker", arguments="{}"
+        )
+
+        await session._handle_tool_call(first_call)
+        pending_checker_task = asyncio.create_task(session._handle_tool_call(pending_checker_call))
+        try:
+            await asyncio.wait_for(checker_started.wait(), timeout=1)
+            await session.reject_tool_call(
+                first_call.call_id,
+                always=True,
+                rejection_message="sticky rejection",
+            )
+        finally:
+            checker_release.set()
+        await pending_checker_task
+
+        assert checker_calls == ["call-reject-first", "call-pending-checker"]
+        assert tool_calls == []
+        assert session._pending_tool_calls == {}
+        assert [output for _call, output, _start in mock_model.sent_tool_outputs] == [
+            "sticky rejection",
+            "sticky rejection",
+        ]
+
+    @pytest.mark.parametrize("approved", [True, False], ids=["approved", "rejected"])
+    @pytest.mark.asyncio
+    async def test_sticky_decision_wins_while_rejecting_pre_approval_guardrail_is_pending(
+        self, mock_model, approved: bool
+    ):
+        guardrail_started = asyncio.Event()
+        guardrail_release = asyncio.Event()
+        guardrail_calls: list[str | None] = []
+        tool_calls: list[str] = []
+
+        @tool_input_guardrail
+        async def blocking_guardrail(
+            data: ToolInputGuardrailData,
+        ) -> ToolGuardrailFunctionOutput:
+            call_id = data.context.tool_call_id
+            guardrail_calls.append(call_id)
+            if call_id == "call-pending-guardrail":
+                guardrail_started.set()
+                await guardrail_release.wait()
+                return ToolGuardrailFunctionOutput.reject_content("guardrail rejection")
+            return ToolGuardrailFunctionOutput.allow()
+
+        async def invoke_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+            tool_calls.append("called")
+            return "tool output"
+
+        tool = FunctionTool(
+            name="send_email",
+            description="Send an email.",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=invoke_tool,
+            needs_approval=True,
+            tool_input_guardrails=[blocking_guardrail],
+        )
+        agent = RealtimeAgent(name="agent", tools=[tool])
+        session = RealtimeSession(
+            mock_model,
+            agent,
+            None,
+            run_config={"tool_execution": {"pre_approval_tool_input_guardrails": True}},
+        )
+        first_call = RealtimeModelToolCallEvent(
+            name=tool.name, call_id="call-reject-first", arguments="{}"
+        )
+        pending_guardrail_call = RealtimeModelToolCallEvent(
+            name=tool.name, call_id="call-pending-guardrail", arguments="{}"
+        )
+
+        await session._handle_tool_call(first_call)
+        pending_guardrail_task = asyncio.create_task(
+            session._handle_tool_call(pending_guardrail_call)
+        )
+        try:
+            await asyncio.wait_for(guardrail_started.wait(), timeout=1)
+            approval_item = session._pending_tool_calls[first_call.call_id].approval_item
+            if approved:
+                session._context_wrapper.approve_tool(approval_item, always_approve=True)
+            else:
+                session._context_wrapper.reject_tool(
+                    approval_item,
+                    always_reject=True,
+                    rejection_message="sticky rejection",
+                )
+        finally:
+            guardrail_release.set()
+        await pending_guardrail_task
+
+        assert pending_guardrail_call.call_id not in session._pending_tool_calls
+        outputs = [output for _call, output, _start in mock_model.sent_tool_outputs]
+        if approved:
+            assert guardrail_calls == [
+                "call-reject-first",
+                "call-pending-guardrail",
+                "call-pending-guardrail",
+            ]
+            assert tool_calls == []
+            assert outputs == ["guardrail rejection"]
+        else:
+            assert guardrail_calls == ["call-reject-first", "call-pending-guardrail"]
+            assert tool_calls == []
+            assert outputs == ["sticky rejection"]
+
+    @pytest.mark.asyncio
     async def test_function_tool_exception_handling(
         self, mock_model, mock_agent, mock_function_tool
     ):

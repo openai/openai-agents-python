@@ -1724,14 +1724,6 @@ class _FunctionToolBatchExecutor:
         raw_tool_call: ResponseFunctionToolCall,
         span_fn: Span[Any],
     ) -> Any | None:
-        needs_approval_result = await function_needs_approval(
-            func_tool,
-            self.context_wrapper,
-            tool_call,
-        )
-        if not needs_approval_result:
-            return None
-
         tool_namespace = get_tool_call_namespace(raw_tool_call)
         if tool_namespace is None and is_deferred_top_level_function_tool(func_tool):
             tool_namespace = func_tool.name
@@ -1744,6 +1736,21 @@ class _FunctionToolBatchExecutor:
             tool_namespace=tool_namespace,
             tool_lookup_key=tool_lookup_key,
         )
+        if approval_status is None:
+            needs_approval_result = await function_needs_approval(
+                func_tool,
+                self.context_wrapper,
+                tool_call,
+            )
+            approval_status = self.context_wrapper.get_approval_status(
+                func_tool.name,
+                tool_call.call_id,
+                tool_namespace=tool_namespace,
+                tool_lookup_key=tool_lookup_key,
+            )
+            if approval_status is None and not needs_approval_result:
+                return None
+
         if approval_status is None:
             if self._should_run_pre_approval_tool_input_guardrails():
                 tool_context_namespace = get_tool_call_namespace(raw_tool_call)
@@ -1763,7 +1770,13 @@ class _FunctionToolBatchExecutor:
                     agent=self.public_agent,
                     tool_input_guardrail_results=self.tool_input_guardrail_results,
                 )
-                if rejected_message is not None:
+                approval_status = self.context_wrapper.get_approval_status(
+                    func_tool.name,
+                    tool_call.call_id,
+                    tool_namespace=tool_namespace,
+                    tool_lookup_key=tool_lookup_key,
+                )
+                if approval_status is None and rejected_message is not None:
                     return FunctionToolResult(
                         tool=func_tool,
                         output=rejected_message,
@@ -1776,6 +1789,8 @@ class _FunctionToolBatchExecutor:
                             tool_origin=get_function_tool_origin(func_tool),
                         ),
                     )
+
+        if approval_status is None:
             approval_item = ToolApprovalItem(
                 agent=self.public_agent,
                 raw_item=raw_tool_call,
