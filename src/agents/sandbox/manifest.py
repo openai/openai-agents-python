@@ -1,5 +1,4 @@
 import abc
-import asyncio
 import inspect
 from collections.abc import Iterator, Mapping
 from pathlib import Path, PurePath, PurePosixPath
@@ -16,6 +15,7 @@ from pydantic_core import PydanticSerializationError
 from typing_extensions import assert_never
 
 from .._config_coercion import coerce_pydantic_config
+from ..util._asyncio_tasks import gather_with_cancel
 from .entries import BaseEntry, Dir, Mount, resolve_workspace_path
 from .errors import InvalidManifestPathError
 from .manifest_render import render_manifest_description
@@ -206,7 +206,11 @@ class Environment(BaseModel):
     async def resolve(self) -> dict[str, str]:
         normalized = self.normalized()
         keys = normalized.keys()
-        values = await asyncio.gather(*[normalized[key].value.resolve() for key in keys])
+        # `EnvValue` is an extension point, so these are user-supplied coroutines that
+        # can reach a secret store or the network. A bare gather returns on the first
+        # failure and leaves the rest running, which is how a rejected lookup ends up
+        # with sibling fetches still in flight after the manifest has already failed.
+        values = await gather_with_cancel(*[normalized[key].value.resolve() for key in keys])
         return dict(zip(keys, values, strict=False))
 
 
