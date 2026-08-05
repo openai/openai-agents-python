@@ -28,6 +28,28 @@ class SpanError(TypedDict):
     data: dict[str, Any] | None
 
 
+def _finish_on_generator_exit(span: Span[Any]) -> None:
+    """Finish a span whose ``with`` block is unwinding because of ``GeneratorExit``.
+
+    A generator closed from the task that advanced it resets normally, which is the common
+    case. An abandoned async generator is instead finalized from whichever task happens to
+    run its ``aclose``, so the body resumes in a context that never set the token and
+    ``ContextVar.reset`` raises ``ValueError``. Nothing can be done about that from here:
+    a ``Token`` is only valid in the ``Context`` that created it, so the task doing the
+    finalizing cannot rewrite the caller's context, and the caller keeps seeing this span
+    as current until its own scope ends. Raising would only add a crash on top of that.
+
+    The tolerance is deliberately limited to this path. An explicit ``finish`` from the
+    wrong context is a context-ownership violation rather than an unavoidable one, so it
+    still raises.
+    """
+    try:
+        span.finish(reset_current=True)
+    except ValueError:
+        logger.debug("Skipping span context reset, token belongs to another context")
+        span._prev_span_token = None  # type: ignore[attr-defined]
+
+
 class Span(abc.ABC, Generic[TSpanData]):
     """Base class for representing traceable operations with timing and context.
 
@@ -230,12 +252,10 @@ class NoOpSpan(Span[TSpanData]):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        reset_current = True
         if exc_type is GeneratorExit:
-            logger.debug("GeneratorExit, skipping span reset")
-            reset_current = False
-
-        self.finish(reset_current=reset_current)
+            _finish_on_generator_exit(self)
+        else:
+            self.finish(reset_current=True)
 
     def set_error(self, error: SpanError) -> None:
         pass
@@ -339,12 +359,10 @@ class SpanImpl(Span[TSpanData]):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        reset_current = True
         if exc_type is GeneratorExit:
-            logger.debug("GeneratorExit, skipping span reset")
-            reset_current = False
-
-        self.finish(reset_current=reset_current)
+            _finish_on_generator_exit(self)
+        else:
+            self.finish(reset_current=True)
 
     def set_error(self, error: SpanError) -> None:
         self._error = error
