@@ -8,7 +8,7 @@ Before running any tests, make sure you have `uv` installed (and ideally run `ma
 make tests
 ```
 
-`make tests` runs the shard-safe suite in parallel and then runs tests marked `serial` in a separate serial pass.
+`make tests` runs the shard-safe suite and the tests marked `serial` concurrently in separate pytest processes. Output is buffered per process to avoid interleaving, then each complete pytest log is printed with terminal colors preserved when the parent output is a TTY. The serial process limits collection to test files containing the literal `pytest.mark.serial`, so keep that literal marker in every file containing serial tests.
 
 ## Performance and determinism
 
