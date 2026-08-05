@@ -43,7 +43,11 @@ except ImportError as e:
     )
 
 from ...items import TResponseInputItem
-from ...logger import log_model_and_tool_action_error, logger
+from ...logger import (
+    log_model_and_tool_action_error,
+    log_model_and_tool_action_warning,
+    logger,
+)
 from ...memory.session import SessionABC
 from ...memory.session_settings import (
     SessionSettings,
@@ -419,11 +423,12 @@ class DaprSession(SessionABC):
                     should_retry = await self._handle_concurrency_conflict(error, attempt)
                     if should_retry:
                         continue
-                    logger.warning(
-                        "DaprSession stored the new items for session %s but could not update "
-                        "its metadata: %s",
-                        self.session_id,
+                    log_model_and_tool_action_warning(
+                        logger,
+                        "DaprSession stored the new items but could not update the session "
+                        "metadata",
                         error,
+                        diagnostic_extra=lambda: {"session_id": self.session_id},
                     )
                     break
 

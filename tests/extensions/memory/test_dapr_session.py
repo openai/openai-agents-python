@@ -1434,6 +1434,15 @@ async def test_add_items_survives_metadata_write_giving_up(
 
         items = await session.get_items()
         assert [item["content"] for item in items] == ["kept"]
-        assert any("could not update" in record.getMessage() for record in caplog.records)
+
+        warnings = [
+            record for record in caplog.records if "could not update" in record.getMessage()
+        ]
+        assert warnings
+        # Data logging is off by default, so neither the caller-supplied session id nor the
+        # provider error text may reach the record.
+        for record in warnings:
+            assert "metadata_gives_up" not in record.getMessage()
+            assert "etag mismatch" not in record.getMessage()
     finally:
         await session.close()
