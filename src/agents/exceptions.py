@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
 from .util._pretty_print import pretty_print_run_error_details
 
 _DRAIN_STREAM_EVENTS_ATTR = "_agents_drain_queued_stream_events"
+_DATA_REDACTED_ATTR = "_agents_data_redacted"
 
 
 def _mark_error_to_drain_stream_events(error: Exception) -> None:
@@ -27,6 +29,15 @@ def _mark_error_to_drain_stream_events(error: Exception) -> None:
 
 def _should_drain_stream_events_before_raising(error: Exception) -> bool:
     return bool(getattr(error, _DRAIN_STREAM_EVENTS_ATTR, False))
+
+
+def _mark_error_data_redacted(error: Exception) -> None:
+    setattr(error, _DATA_REDACTED_ATTR, True)
+
+
+def _clear_data_redacted_error_traceback(error: Exception) -> None:
+    if getattr(error, _DATA_REDACTED_ATTR, False) and error.__traceback__ is not None:
+        traceback.clear_frames(error.__traceback__)
 
 
 @dataclass

@@ -18,7 +18,12 @@ from .._tool_identity import (
     get_function_tool_namespace,
 )
 from ..agent import Agent
-from ..exceptions import ToolInputGuardrailTripwireTriggered, UserError
+from ..exceptions import (
+    ModelBehaviorError,
+    ToolInputGuardrailTripwireTriggered,
+    UserError,
+    _clear_data_redacted_error_traceback,
+)
 from ..handoffs import Handoff
 from ..items import ToolApprovalItem
 from ..logger import (
@@ -398,7 +403,18 @@ class RealtimeSession(RealtimeModelListener):
                 handle_kwargs: dict[str, Any] = {"agent_snapshot": agent_snapshot}
                 if dispatch_snapshot is not None:
                     handle_kwargs["dispatch_snapshot"] = dispatch_snapshot
-                await self._handle_tool_call(event, **handle_kwargs)
+                try:
+                    await self._handle_tool_call(event, **handle_kwargs)
+                except ModelBehaviorError as error:
+                    # Remove model-generated arguments from this synchronous boundary before the
+                    # exception escapes to the model listener.
+                    event = RealtimeModelToolCallEvent(
+                        name="<redacted>",
+                        call_id="<redacted>",
+                        arguments="<redacted>",
+                    )
+                    _clear_data_redacted_error_traceback(error)
+                    raise
         elif event.type == "audio":
             if event.response_id not in self._interrupted_response_ids:
                 await self._put_event(
@@ -1625,14 +1641,16 @@ class RealtimeSession(RealtimeModelListener):
     def _on_tool_call_task_done(self, task: asyncio.Task[Any]) -> None:
         self._tool_call_tasks.discard(task)
 
-        if self._closing or self._closed:
-            self._consume_task_result(task)
-            return
-
         if task.cancelled():
             return
 
         exception = task.exception()
+        if isinstance(exception, ModelBehaviorError):
+            _clear_data_redacted_error_traceback(exception)
+
+        if self._closing or self._closed:
+            return
+
         if exception is None:
             return
 

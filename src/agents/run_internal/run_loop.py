@@ -40,6 +40,7 @@ from ..exceptions import (
     OutputGuardrailTripwireTriggered,
     RunErrorDetails,
     UserError,
+    _clear_data_redacted_error_traceback,
 )
 from ..handoffs import Handoff
 from ..items import (
@@ -1387,6 +1388,7 @@ async def start_streaming(
     except AgentsException as exc:
         streamed_result.is_complete = True
         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+        _clear_data_redacted_error_traceback(exc)
         exc.run_data = RunErrorDetails(
             input=streamed_result.input,
             new_items=streamed_result.new_items,

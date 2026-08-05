@@ -17,6 +17,7 @@ from .exceptions import (
     OutputGuardrailTripwireTriggered,
     RunErrorDetails,
     UserError,
+    _clear_data_redacted_error_traceback,
 )
 from .guardrail import (
     InputGuardrailResult,
@@ -1621,6 +1622,7 @@ class AgentRunner:
                     trace_include_sensitive_data=run_config.trace_include_sensitive_data,
                 )
                 if isinstance(exc, AgentsException):
+                    _clear_data_redacted_error_traceback(exc)
                     exc.run_data = RunErrorDetails(
                         input=original_input,
                         new_items=session_items,

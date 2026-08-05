@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, cast, overload
 from pydantic import TypeAdapter
 from typing_extensions import TypeVar
 
-from ..exceptions import ModelBehaviorError, UserError
+from ..exceptions import ModelBehaviorError, UserError, _clear_data_redacted_error_traceback
 from ..handoffs import Handoff
 from ..run_context import RunContextWrapper, TContext
 from ..strict_schema import ensure_strict_json_schema
@@ -159,12 +159,18 @@ def realtime_handoff(
                 )
                 raise ModelBehaviorError("Handoff function expected non-null input, but got None")
 
-            validated_input = _json.validate_json(
-                json_str=input_json,
-                type_adapter=type_adapter,
-                partial=False,
-                strict=True,
-            )
+            try:
+                validated_input = _json.validate_json(
+                    json_str=input_json,
+                    type_adapter=type_adapter,
+                    partial=False,
+                    strict=True,
+                    contains_tool_data=True,
+                )
+            except ModelBehaviorError as error:
+                input_json = "<redacted>"
+                _clear_data_redacted_error_traceback(error)
+                raise
             input_func = cast(OnHandoffWithInput[THandoffInput], on_handoff)
             result = input_func(ctx, validated_input)
             if inspect.isawaitable(result):
