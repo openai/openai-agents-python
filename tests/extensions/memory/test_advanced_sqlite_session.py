@@ -670,6 +670,7 @@ def _create_branch_in_process(
     db_path: str,
     session_id: str,
     branch_name: str | None,
+    turn_number: int,
     ready: Any,
     start: Any,
     attempted: Any,
@@ -682,7 +683,7 @@ def _create_branch_in_process(
 
     class InstrumentedSession(AdvancedSQLiteSession):
         def __init__(self, **kwargs: Any) -> None:
-            self._reported_check = False
+            self._reported_reservation = False
             super().__init__(**kwargs)
 
         @contextlib.contextmanager
@@ -702,14 +703,16 @@ def _create_branch_in_process(
             with super()._locked_connection() as connection:
                 yield BeginObservableConnection(connection)
 
-        def _branch_id_exists(self, cursor: Any, branch_id: str) -> bool:
-            exists = super()._branch_id_exists(cursor, branch_id)
-            if not self._reported_check:
-                self._reported_check = True
+        def _reserve_branch_id(
+            self, cursor: Any, new_branch_id: str | None, from_turn_number: int
+        ) -> str:
+            branch_id = super()._reserve_branch_id(cursor, new_branch_id, from_turn_number)
+            if not self._reported_reservation:
+                self._reported_reservation = True
                 checked.set()
                 if hold_after_check and not release_check.wait(timeout=10):
-                    raise TimeoutError("Timed out waiting to release the branch ID check")
-            return exists
+                    raise TimeoutError("Timed out waiting to release the branch ID reservation")
+            return branch_id
 
     session = InstrumentedSession(session_id=session_id, db_path=db_path)
     try:
@@ -720,7 +723,12 @@ def _create_branch_in_process(
             "agents.extensions.memory.advanced_sqlite_session.time.time",
             return_value=1_700_000_000.0,
         ):
-            branch_id = asyncio.run(session.create_branch_from_turn(3, branch_name))
+            branch_id = asyncio.run(session.create_branch_from_turn(turn_number, branch_name))
+        branch_item: TResponseInputItem = {
+            "role": "user",
+            "content": f"{worker_name} branch item",
+        }
+        asyncio.run(session.add_items([branch_item]))
         results.put((worker_name, "success", branch_id))
     except Exception as exc:
         results.put((worker_name, "error", type(exc).__name__, str(exc)))
@@ -745,7 +753,7 @@ async def test_create_branch_rejects_populated_branch_id(branch_id: str):
 
         branch_items_before = await session.get_items(branch_id=branch_id)
 
-        with pytest.raises(ValueError, match="already exists"):
+        with pytest.raises(ValueError, match="already been used"):
             await session.create_branch_from_turn(2, branch_id)
 
         assert session._current_branch_id == "main"
@@ -779,13 +787,207 @@ async def test_generated_branch_ids_do_not_merge_within_the_same_second(monkeypa
         session.close()
 
 
-@pytest.mark.parametrize("branch_name", [None, "shared_branch"])
-async def test_branch_allocation_is_serialized_across_processes(
-    tmp_path: Path, branch_name: str | None
+async def test_failed_branch_reservation_rolls_back_and_allows_retry(tmp_path: Path):
+    """A failure after reservation must not burn the branch ID or retain a transaction."""
+
+    class FailAfterReservationSession(AdvancedSQLiteSession):
+        fail_after_reservation = True
+
+        def _reserve_branch_id(
+            self, cursor: Any, new_branch_id: str | None, from_turn_number: int
+        ) -> str:
+            branch_id = super()._reserve_branch_id(cursor, new_branch_id, from_turn_number)
+            if self.fail_after_reservation:
+                self.fail_after_reservation = False
+                raise RuntimeError("failed after reservation")
+            return branch_id
+
+    session = FailAfterReservationSession(
+        session_id="failed_branch_reservation",
+        db_path=tmp_path / "failed_branch_reservation.db",
+        create_tables=True,
+    )
+    items = _branch_collision_items()
+
+    try:
+        await session.add_items(items)
+
+        with pytest.raises(RuntimeError, match="failed after reservation"):
+            await session.create_branch_from_turn(3, "retryable_branch")
+
+        with session._locked_connection() as conn:
+            reservation_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM branch_reservations
+                WHERE session_id = ? AND branch_id = ?
+                """,
+                (session.session_id, "retryable_branch"),
+            ).fetchone()[0]
+        assert reservation_count == 0
+        assert await session.get_items(branch_id="retryable_branch") == []
+        with session._connections_lock:
+            assert all(not conn.in_transaction for conn in session._connections)
+
+        assert await session.create_branch_from_turn(3, "retryable_branch") == "retryable_branch"
+        assert await session.get_items(branch_id="retryable_branch") == items[:4]
+    finally:
+        session.close()
+
+
+async def test_branch_ids_remain_reserved_after_delete_and_clear():
+    """Deleted and cleared branch IDs must not be reused by stale session instances."""
+    session = AdvancedSQLiteSession(
+        session_id="branch_reservation_tombstones",
+        create_tables=True,
+    )
+    items = _branch_collision_items()
+
+    try:
+        await session.add_items(items)
+        await session.create_branch_from_turn(3, "used_branch")
+        await session.switch_to_branch("main")
+        await session.delete_branch("used_branch")
+
+        with pytest.raises(ValueError, match="already been used"):
+            await session.create_branch_from_turn(2, "used_branch")
+
+        await session.clear_session()
+        await session.add_items(items)
+        with pytest.raises(ValueError, match="already been used"):
+            await session.create_branch_from_turn(1, "used_branch")
+    finally:
+        session.close()
+
+
+async def test_branch_reservations_migrate_existing_populated_branches(tmp_path: Path):
+    """Existing databases must backfill branch reservations before allocating IDs."""
+    db_path = tmp_path / "branch_reservation_migration.db"
+    session_id = "branch_reservation_migration"
+    items = _branch_collision_items()
+    setup_session = AdvancedSQLiteSession(
+        session_id=session_id,
+        db_path=db_path,
+        create_tables=True,
+    )
+    try:
+        await setup_session.add_items(items)
+        await setup_session.create_branch_from_turn(3, "existing_branch")
+        with setup_session._locked_connection() as conn:
+            conn.execute("DROP TABLE branch_reservations")
+            conn.commit()
+    finally:
+        setup_session.close()
+
+    session = AdvancedSQLiteSession(session_id=session_id, db_path=db_path)
+    try:
+        with pytest.raises(ValueError, match="already been used"):
+            await session.create_branch_from_turn(2, "existing_branch")
+        await session.create_branch_from_turn(1, "empty_branch")
+
+        with session._locked_connection() as conn:
+            reservations = conn.execute(
+                """
+                SELECT branch_id FROM branch_reservations
+                WHERE session_id = ?
+                ORDER BY branch_id
+                """,
+                (session_id,),
+            ).fetchall()
+        assert reservations == [("empty_branch",), ("existing_branch",), ("main",)]
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("operation", ["clear", "delete", "pop"])
+async def test_legacy_branch_ids_are_backfilled_before_destructive_operations(
+    tmp_path: Path, operation: str
 ):
-    """Processes sharing one file must serialize branch ID checks and copies."""
+    """Destructive operations must preserve IDs from databases created before reservations."""
+    db_path = tmp_path / f"legacy_branch_{operation}.db"
+    session_id = f"legacy_branch_{operation}"
+    items = _branch_collision_items()
+    setup_session = AdvancedSQLiteSession(
+        session_id=session_id,
+        db_path=db_path,
+        create_tables=True,
+    )
+    try:
+        await setup_session.add_items(items)
+        await setup_session.create_branch_from_turn(3, "legacy_branch")
+        with setup_session._locked_connection() as conn:
+            conn.execute("DROP TABLE branch_reservations")
+            conn.commit()
+    finally:
+        setup_session.close()
+
+    session = AdvancedSQLiteSession(session_id=session_id, db_path=db_path)
+    try:
+        if operation == "clear":
+            await session.clear_session()
+            await session.add_items(items)
+        elif operation == "delete":
+            await session.delete_branch("legacy_branch")
+        else:
+            await session.switch_to_branch("legacy_branch")
+            while await session.pop_item() is not None:
+                pass
+            await session.switch_to_branch("main")
+
+        with pytest.raises(ValueError, match="already been used"):
+            await session.create_branch_from_turn(2, "legacy_branch")
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("operation", ["missing_delete", "empty_pop"])
+async def test_legacy_destructive_noops_leave_database_unlocked(tmp_path: Path, operation: str):
+    """Lazy migration must not retain a writer transaction after a no-op or error."""
+    db_path = tmp_path / f"legacy_noop_{operation}.db"
+    session_id = f"legacy_noop_{operation}"
+    setup_session = AdvancedSQLiteSession(
+        session_id=session_id,
+        db_path=db_path,
+        create_tables=True,
+    )
+    try:
+        await setup_session.add_items(_branch_collision_items())
+        await setup_session.create_branch_from_turn(3, "legacy_branch")
+        if operation == "empty_pop":
+            await setup_session.switch_to_branch("main")
+            while await setup_session.pop_item() is not None:
+                pass
+        with setup_session._locked_connection() as conn:
+            conn.execute("DROP TABLE branch_reservations")
+            conn.commit()
+    finally:
+        setup_session.close()
+
+    session = AdvancedSQLiteSession(session_id=session_id, db_path=db_path)
+    contender = AdvancedSQLiteSession(session_id=f"{session_id}_contender", db_path=db_path)
+    try:
+        if operation == "missing_delete":
+            with pytest.raises(ValueError, match="does not exist"):
+                await session.delete_branch("missing_branch")
+        else:
+            assert await session.pop_item() is None
+
+        with session._connections_lock:
+            assert all(not conn.in_transaction for conn in session._connections)
+
+        await contender.add_items([{"role": "user", "content": "writer acquired"}])
+    finally:
+        contender.close()
+        session.close()
+
+
+@pytest.mark.parametrize("branch_name", [None, "shared_branch"])
+@pytest.mark.parametrize("turn_number", [1, 3])
+async def test_branch_allocation_is_serialized_across_processes(
+    tmp_path: Path, branch_name: str | None, turn_number: int
+):
+    """Processes must serialize branch reservations, including empty branches."""
     db_path = tmp_path / "branch_allocation.db"
-    session_id = f"branch_allocation_{branch_name}"
+    session_id = f"branch_allocation_{branch_name}_{turn_number}"
     setup_session = AdvancedSQLiteSession(
         session_id=session_id,
         db_path=db_path,
@@ -814,6 +1016,7 @@ async def test_branch_allocation_is_serialized_across_processes(
                     str(db_path),
                     session_id,
                     branch_name,
+                    turn_number,
                     ready,
                     start,
                     attempted,
@@ -836,8 +1039,8 @@ async def test_branch_allocation_is_serialized_across_processes(
         second_start.set()
         assert second_attempted.wait(timeout=10)
 
-        # The second process has entered branch creation, but SQLite's write reservation
-        # must keep it from checking the same ID until the first process commits.
+        # The second process has entered branch creation, but SQLite's write transaction
+        # must keep it from reserving an ID until the first process commits.
         assert not second_checked.wait(timeout=0.2)
         release_check.set()
 
@@ -850,19 +1053,24 @@ async def test_branch_allocation_is_serialized_across_processes(
         if branch_name is None:
             assert all(result[1] == "success" for result in process_results)
             assert sorted(successful_ids) == [
-                "branch_from_turn_3_1700000000",
-                "branch_from_turn_3_1700000000_2",
+                f"branch_from_turn_{turn_number}_1700000000",
+                f"branch_from_turn_{turn_number}_1700000000_2",
             ]
         else:
             assert successful_ids == [branch_name]
             errors = [result for result in process_results if result[1] == "error"]
             assert len(errors) == 1
             assert errors[0][2] == "ValueError"
-            assert "already exists" in errors[0][3]
+            assert "already been used" in errors[0][3]
 
         verification_session = AdvancedSQLiteSession(session_id=session_id, db_path=db_path)
-        for branch_id in successful_ids:
-            assert await verification_session.get_items(branch_id=branch_id) == items[:4]
+        copied_items = items[: 2 * (turn_number - 1)]
+        successful_results = [result for result in process_results if result[1] == "success"]
+        for worker_name, _, branch_id in successful_results:
+            assert await verification_session.get_items(branch_id=branch_id) == [
+                *copied_items,
+                {"role": "user", "content": f"{worker_name} branch item"},
+            ]
         assert await verification_session.get_items(branch_id="main") == items
         verification_session.close()
     finally:
@@ -2559,6 +2767,41 @@ async def test_stale_create_branch_after_clear_does_not_repoint():
         session.close()
 
 
+async def test_clear_before_branch_transaction_prevents_stale_reservation():
+    """A clear that wins before transactional validation must leave no reservation."""
+    session = AdvancedSQLiteSession(
+        session_id="clear_before_branch_transaction_test",
+        create_tables=True,
+    )
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+            ]
+        )
+
+        with _gate_worker("_copy_sync") as (started, real_to_thread, release):
+            task = asyncio.ensure_future(session.create_branch_from_turn(1, "stale_branch"))
+            await real_to_thread(started.wait)
+            await session.clear_session()
+            release.set()
+            with pytest.raises(ValueError, match="does not contain a user message"):
+                await task
+
+        assert session._current_branch_id == "main"
+        assert await session.list_branches() == []
+        with session._locked_connection() as conn:
+            reservations = conn.execute(
+                "SELECT branch_id FROM branch_reservations WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchall()
+        assert reservations == [("main",)]
+    finally:
+        session.close()
+
+
 async def test_stale_store_run_usage_skipped_when_turn_removed_by_pop(usage_data: Usage):
     """A store_run_usage that reads a turn and then races with pop_item removing
     that turn must not reinsert usage for the now-nonexistent turn.
@@ -2688,11 +2931,13 @@ async def test_clear_session_resets_current_branch_to_main():
         await session.create_branch_from_turn(2, "branch_a")
         await session.switch_to_branch("branch_a")
         assert session._current_branch_id == "branch_a"
+        assert _count_rows(session, "branch_reservations") == 2
 
         await session.clear_session()
 
         assert session._current_branch_id == "main"
         assert await session.get_items() == []
+        assert _count_rows(session, "branch_reservations") == 2
     finally:
         session.close()
 
