@@ -29,6 +29,7 @@ from typing import Any, Literal, cast
 import pytest
 from openai import omit
 from openai.types.chat import ChatCompletionMessage, ChatCompletionMessageFunctionToolCall
+from openai.types.chat.chat_completion_message import Annotation, AnnotationURLCitation
 from openai.types.chat.chat_completion_message_custom_tool_call import (
     ChatCompletionMessageCustomToolCall,
     Custom,
@@ -71,6 +72,40 @@ def test_message_to_output_items_with_text_only():
     text_part = cast(ResponseOutputText, message_item.content[0])
     assert text_part.type == "output_text"
     assert text_part.text == "Hello"
+
+
+def test_message_to_output_items_keeps_url_citation_annotations():
+    """
+    URL citations reported on the Chat Completions message should survive as
+    output text annotations, the same way the Responses API reports them.
+    """
+    msg = ChatCompletionMessage(
+        role="assistant",
+        content="It will rain tomorrow.",
+        annotations=[
+            Annotation(
+                type="url_citation",
+                url_citation=AnnotationURLCitation(
+                    start_index=0,
+                    end_index=22,
+                    url="https://example.com/weather",
+                    title="Weather",
+                ),
+            )
+        ],
+    )
+    items = Converter.message_to_output_items(msg)
+    message_item = cast(ResponseOutputMessage, items[0])
+    text_part = cast(ResponseOutputText, message_item.content[0])
+    assert [annotation.model_dump() for annotation in text_part.annotations] == [
+        {
+            "end_index": 22,
+            "start_index": 0,
+            "title": "Weather",
+            "type": "url_citation",
+            "url": "https://example.com/weather",
+        }
+    ]
 
 
 def test_message_to_output_items_with_refusal():
