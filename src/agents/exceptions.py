@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import traceback
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -21,6 +21,7 @@ from .util._pretty_print import pretty_print_run_error_details
 
 _DRAIN_STREAM_EVENTS_ATTR = "_agents_drain_queued_stream_events"
 _DATA_REDACTED_ATTR = "_agents_data_redacted"
+_DATA_REDACTED_ERROR_MESSAGE = "Error details are redacted."
 
 
 def _mark_error_to_drain_stream_events(error: Exception) -> None:
@@ -47,6 +48,11 @@ def _clear_data_redacted_error_traceback(error: Exception) -> None:
 def _detach_data_redacted_error_traceback(error: Exception) -> None:
     if _is_error_data_redacted(error):
         error.__traceback__ = None
+
+
+def _raise_data_redacted_error(error: Exception) -> NoReturn:
+    """Raise a detached redacted error from a frame that owns no payload data."""
+    raise error from None
 
 
 @dataclass

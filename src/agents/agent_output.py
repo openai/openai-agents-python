@@ -1,6 +1,6 @@
 import abc
 from dataclasses import dataclass
-from typing import Any, get_args, get_origin
+from typing import Any, cast, get_args, get_origin
 
 from pydantic import BaseModel, TypeAdapter
 from typing_extensions import TypedDict
@@ -10,6 +10,7 @@ from .exceptions import (
     UserError,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
+    _raise_data_redacted_error,
 )
 from .strict_schema import ensure_strict_json_schema
 from .tracing import SpanError
@@ -142,6 +143,7 @@ class AgentOutputSchema(AgentOutputSchemaBase):
         """Validate a JSON string against the output type. Returns the validated object, or raises
         a `ModelBehaviorError` if the JSON is invalid.
         """
+        redacted_error: ModelBehaviorError | None = None
         try:
             validated = _json.validate_json(
                 json_str,
@@ -150,10 +152,15 @@ class AgentOutputSchema(AgentOutputSchemaBase):
                 strict=True if self._strict_json_schema else None,
             )
         except ModelBehaviorError as error:
-            if _is_error_data_redacted(error):
-                json_str = "<redacted>"
-                _detach_data_redacted_error_traceback(error)
-            raise
+            if not _is_error_data_redacted(error):
+                raise
+            _detach_data_redacted_error_traceback(error)
+            redacted_error = error
+
+        if redacted_error is not None:
+            self = cast(Any, None)
+            json_str = "<redacted>"
+            _raise_data_redacted_error(redacted_error)
         if self._is_wrapped:
             if not isinstance(validated, dict):
                 _error_tracing.attach_error_to_current_span(

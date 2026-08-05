@@ -12,6 +12,7 @@ from ..exceptions import (
     UserError,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
+    _raise_data_redacted_error,
 )
 from ..handoffs import Handoff
 from ..run_context import RunContextWrapper, TContext
@@ -151,7 +152,7 @@ def realtime_handoff(
             if len(sig.parameters) != 1:
                 raise UserError("on_handoff must take one argument: context")
 
-    async def _invoke_handoff(
+    async def _invoke_handoff_impl(
         ctx: RunContextWrapper[Any], input_json: str | None = None
     ) -> RealtimeAgent[TContext]:
         if input_type is not None and type_adapter is not None:
@@ -164,19 +165,13 @@ def realtime_handoff(
                 )
                 raise ModelBehaviorError("Handoff function expected non-null input, but got None")
 
-            try:
-                validated_input = _json.validate_json(
-                    json_str=input_json,
-                    type_adapter=type_adapter,
-                    partial=False,
-                    strict=True,
-                    contains_tool_data=True,
-                )
-            except ModelBehaviorError as error:
-                if _is_error_data_redacted(error):
-                    input_json = "<redacted>"
-                    _detach_data_redacted_error_traceback(error)
-                raise
+            validated_input = _json.validate_json(
+                json_str=input_json,
+                type_adapter=type_adapter,
+                partial=False,
+                strict=True,
+                contains_tool_data=True,
+            )
             input_func = cast(OnHandoffWithInput[THandoffInput], on_handoff)
             result = input_func(ctx, validated_input)
             if inspect.isawaitable(result):
@@ -188,6 +183,23 @@ def realtime_handoff(
                 await result
 
         return agent
+
+    async def _invoke_handoff(
+        ctx: RunContextWrapper[Any], input_json: str | None = None
+    ) -> RealtimeAgent[TContext]:
+        redacted_error: ModelBehaviorError | None = None
+        try:
+            return await _invoke_handoff_impl(ctx, input_json)
+        except ModelBehaviorError as error:
+            if not _is_error_data_redacted(error):
+                raise
+            _detach_data_redacted_error_traceback(error)
+            redacted_error = error
+
+        ctx = cast(Any, None)
+        input_json = "<redacted>"
+        assert redacted_error is not None
+        _raise_data_redacted_error(redacted_error)
 
     tool_name = tool_name_override or Handoff.default_tool_name(agent)
     tool_description = tool_description_override or Handoff.default_tool_description(agent)

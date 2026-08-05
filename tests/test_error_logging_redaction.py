@@ -8,11 +8,13 @@ statements honor ``_debug.DONT_LOG_MODEL_DATA`` / ``_debug.DONT_LOG_TOOL_DATA``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import pickle
 import threading
 import traceback
+import warnings
 from logging.handlers import QueueHandler
 from pathlib import Path
 from queue import SimpleQueue
@@ -38,6 +40,7 @@ from agents import (
     RunContextWrapper,
     RunErrorHandlerInput,
     Runner,
+    UserError,
     function_tool,
     handoff,
     trace,
@@ -1194,7 +1197,6 @@ async def test_run_surfaces_redacted_output_validation_error(
     _assert_secret_absent_from_agents_traceback(
         error,
         _MODEL_OUTPUT_SECRET,
-        require_agents_frames=False,
     )
     assert all(session is not value for frame in frame_locals for value in frame.values())
 
@@ -1223,7 +1225,6 @@ def test_run_sync_surfaces_redacted_output_validation_error_without_runner_data(
     _assert_secret_absent_from_agents_traceback(
         error,
         _MODEL_OUTPUT_SECRET,
-        require_agents_frames=False,
     )
     assert all(session is not value for frame in frame_locals for value in frame.values())
 
@@ -1287,6 +1288,41 @@ async def test_streamed_run_surfaces_redacted_output_validation_error(
     assert error.__cause__ is None
     assert error.__context__ is None
     _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+
+
+@pytest.mark.parametrize("redacted", [False, True])
+@pytest.mark.asyncio
+async def test_streamed_run_loop_exception_follows_model_data_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    redacted: bool,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
+    model = FakeModel(initial_output=[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    agent = Agent(name="A", model=model, output_type=_RequiredOutput)
+    result = Runner.run_streamed(agent, "go")
+
+    assert result.run_loop_task is not None
+    while not result.run_loop_task.done():
+        await asyncio.sleep(0)
+
+    error = result.run_loop_exception
+    assert isinstance(error, ModelBehaviorError)
+    if redacted:
+        assert error.run_data is None
+        assert error.__cause__ is None
+        assert error.__context__ is None
+        _assert_secret_absent_from_agents_traceback(
+            error,
+            _MODEL_OUTPUT_SECRET,
+            require_agents_frames=False,
+        )
+    else:
+        assert _MODEL_OUTPUT_SECRET in str(error)
+        assert isinstance(error.__cause__, ValidationError)
+        assert any(
+            _MODEL_OUTPUT_SECRET in repr(frame_locals)
+            for frame_locals in _agents_traceback_frame_locals(error)
+        )
 
 
 @pytest.mark.asyncio
@@ -1398,6 +1434,123 @@ async def test_invalid_final_output_handler_receives_detached_redacted_error(
     assert error.__cause__ is None
     assert error.__context__ is None
     assert _MODEL_OUTPUT_SECRET not in str(error)
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_invalid_final_output_handler_invalid_fallback_preserves_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+) -> None:
+    fallback_secret = "INVALID_HANDLER_FALLBACK_SECRET"
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    model = FakeModel(initial_output=[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    agent = Agent(name="A", model=model, output_type=_RequiredOutput)
+
+    def invalid_fallback(_data: RunErrorHandlerInput[None]) -> dict[str, str]:
+        return {"answer": fallback_secret}
+
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        if streamed:
+            result = Runner.run_streamed(
+                agent,
+                "go",
+                error_handlers={"invalid_final_output": invalid_fallback},
+            )
+            with pytest.raises(UserError) as exc_info:
+                async for _ in result.stream_events():
+                    pass
+        else:
+            with pytest.raises(UserError) as exc_info:
+                await Runner.run(
+                    agent,
+                    "go",
+                    error_handlers={"invalid_final_output": invalid_fallback},
+                )
+
+    error = exc_info.value
+    assert not caught_warnings
+    assert str(error) == "Error details are redacted."
+    assert error.run_data is None
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+    _assert_secret_absent_from_agents_traceback(error, fallback_secret)
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_invalid_final_output_handler_failure_preserves_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    model = FakeModel(initial_output=[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    agent = Agent(name="A", model=model, output_type=_RequiredOutput)
+
+    def fail(data: RunErrorHandlerInput[None]) -> None:
+        raise RuntimeError(repr(data.run_data.raw_responses))
+
+    if streamed:
+        result = Runner.run_streamed(
+            agent,
+            "go",
+            error_handlers={"invalid_final_output": fail},
+        )
+        with pytest.raises(UserError) as exc_info:
+            async for _ in result.stream_events():
+                pass
+    else:
+        with pytest.raises(UserError) as exc_info:
+            await Runner.run(
+                agent,
+                "go",
+                error_handlers={"invalid_final_output": fail},
+            )
+
+    error = exc_info.value
+    assert str(error) == "Error details are redacted."
+    assert error.run_data is None
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_invalid_final_output_handler_failure_preserves_diagnostic_context(
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
+    model = FakeModel(initial_output=[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    agent = Agent(name="A", model=model, output_type=_RequiredOutput)
+
+    def fail(_data: RunErrorHandlerInput[None]) -> None:
+        raise RuntimeError("handler failed")
+
+    if streamed:
+        result = Runner.run_streamed(
+            agent,
+            "go",
+            error_handlers={"invalid_final_output": fail},
+        )
+        with pytest.raises(RuntimeError, match="handler failed") as exc_info:
+            async for _ in result.stream_events():
+                pass
+    else:
+        with pytest.raises(RuntimeError, match="handler failed") as exc_info:
+            await Runner.run(
+                agent,
+                "go",
+                error_handlers={"invalid_final_output": fail},
+            )
+
+    validation_error = exc_info.value.__context__
+    assert isinstance(validation_error, ModelBehaviorError)
+    assert _MODEL_OUTPUT_SECRET in str(validation_error)
+    assert isinstance(validation_error.__cause__, ValidationError)
 
 
 @pytest.mark.parametrize("streamed", [False, True])

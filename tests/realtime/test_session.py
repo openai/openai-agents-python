@@ -893,7 +893,7 @@ async def test_synchronous_realtime_handoff_clears_redacted_error_traceback(
         for frame in traceback_exception.stack
         if Path(frame.filename).resolve().is_relative_to(agents_source)
     ]
-    assert not sdk_frames
+    assert sdk_frames
     assert payload_secret not in "".join(
         value for frame in sdk_frames for value in (frame.locals or {}).values()
     )
@@ -901,7 +901,12 @@ async def test_synchronous_realtime_handoff_clears_redacted_error_traceback(
         value for frame in sdk_frames for value in (frame.locals or {}).values()
     )
     actual_frame_locals = _realtime_sdk_traceback_frame_locals(error)
-    assert not actual_frame_locals
+    assert actual_frame_locals
+    assert all(
+        value is not session and value is not event
+        for frame in actual_frame_locals
+        for value in frame.values()
+    )
     assert payload_secret not in str(error)
     assert schema_secret not in str(error)
     assert error.__cause__ is None

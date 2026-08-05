@@ -279,6 +279,7 @@ class Runner:
         """
 
         runner = DEFAULT_AGENT_RUNNER
+        redacted_error: AgentsException | None = None
         try:
             return await runner.run(
                 starting_agent,
@@ -293,9 +294,25 @@ class Runner:
                 conversation_id=conversation_id,
                 session=session,
             )
-        except ModelBehaviorError as error:
+        except AgentsException as error:
+            if not _is_error_data_redacted(error):
+                raise
             _detach_data_redacted_error_traceback(error)
-            raise
+            redacted_error = error
+
+        starting_agent = cast(Any, None)
+        input = cast(Any, None)
+        context = cast(Any, None)
+        hooks = cast(Any, None)
+        run_config = cast(Any, None)
+        error_handlers = cast(Any, None)
+        previous_response_id = None
+        auto_previous_response_id = cast(Any, None)
+        conversation_id = None
+        session = cast(Any, None)
+        runner = cast(Any, None)
+        assert redacted_error is not None
+        raise redacted_error from None
 
     @classmethod
     def run_sync(
@@ -365,6 +382,7 @@ class Runner:
         """
 
         runner = DEFAULT_AGENT_RUNNER
+        redacted_error: AgentsException | None = None
         try:
             return runner.run_sync(
                 starting_agent,
@@ -379,9 +397,25 @@ class Runner:
                 session=session,
                 auto_previous_response_id=auto_previous_response_id,
             )
-        except ModelBehaviorError as error:
+        except AgentsException as error:
+            if not _is_error_data_redacted(error):
+                raise
             _detach_data_redacted_error_traceback(error)
-            raise
+            redacted_error = error
+
+        starting_agent = cast(Any, None)
+        input = cast(Any, None)
+        context = cast(Any, None)
+        hooks = cast(Any, None)
+        run_config = cast(Any, None)
+        error_handlers = cast(Any, None)
+        previous_response_id = None
+        auto_previous_response_id = cast(Any, None)
+        conversation_id = None
+        session = cast(Any, None)
+        runner = cast(Any, None)
+        assert redacted_error is not None
+        raise redacted_error from None
 
     @classmethod
     def run_streamed(

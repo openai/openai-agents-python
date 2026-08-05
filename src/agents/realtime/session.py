@@ -25,6 +25,7 @@ from ..exceptions import (
     _clear_data_redacted_error_traceback,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
+    _raise_data_redacted_error,
 )
 from ..handoffs import Handoff
 from ..items import ToolApprovalItem
@@ -414,12 +415,22 @@ class RealtimeSession(RealtimeModelListener):
                 handle_kwargs: dict[str, Any] = {"agent_snapshot": agent_snapshot}
                 if dispatch_snapshot is not None:
                     handle_kwargs["dispatch_snapshot"] = dispatch_snapshot
+                redacted_error: ModelBehaviorError | None = None
                 try:
                     await self._handle_tool_call(event, **handle_kwargs)
                 except ModelBehaviorError as error:
-                    if _is_error_data_redacted(error):
-                        _detach_data_redacted_error_traceback(error)
-                    raise
+                    if not _is_error_data_redacted(error):
+                        raise
+                    _detach_data_redacted_error_traceback(error)
+                    redacted_error = error
+
+                if redacted_error is not None:
+                    self = cast(Any, None)
+                    event = cast(Any, None)
+                    agent_snapshot = cast(Any, None)
+                    dispatch_snapshot = cast(Any, None)
+                    handle_kwargs = {}
+                    _raise_data_redacted_error(redacted_error)
         elif event.type == "audio":
             if event.response_id not in self._interrupted_response_ids:
                 await self._put_event(

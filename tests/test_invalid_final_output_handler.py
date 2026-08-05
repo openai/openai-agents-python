@@ -7,6 +7,7 @@ import pytest
 from openai.types.responses import ResponseOutputMessage
 from pydantic import BaseModel
 
+import agents._debug as _debug
 from agents import (
     Agent,
     AgentHookContext,
@@ -114,7 +115,10 @@ async def test_invalid_final_output_handler_can_skip_fallback_history() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invalid_final_output_handler_rejects_invalid_fallback() -> None:
+async def test_invalid_final_output_handler_rejects_invalid_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
     model = FakeModel(initial_output=[get_text_message("not valid json")])
     agent = Agent(name="test", model=model, output_type=FinalOutput)
 

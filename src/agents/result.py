@@ -731,7 +731,10 @@ class RunResultStreaming(RunResultBase):
         task = self.run_loop_task
         if task is None or not task.done() or task.cancelled():
             return None
-        return task.exception()
+        error = task.exception()
+        if isinstance(error, Exception) and _is_error_data_redacted(error):
+            _detach_data_redacted_error_traceback(error)
+        return error
 
     def cancel(self, mode: Literal["immediate", "after_turn"] = "immediate") -> None:
         """Cancel the streaming run.

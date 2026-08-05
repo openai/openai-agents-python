@@ -159,7 +159,12 @@ def format_final_output_text(agent: Agent[Any], final_output: Any) -> str:
         return str(final_output)
 
 
-def validate_handler_final_output(agent: Agent[Any], final_output: Any) -> Any:
+def validate_handler_final_output(
+    agent: Agent[Any],
+    final_output: Any,
+    *,
+    data_redacted: bool = False,
+) -> Any:
     output_schema = get_output_schema(agent)
     if output_schema is None or output_schema.is_plain_text():
         return final_output
@@ -171,7 +176,10 @@ def validate_handler_final_output(agent: Agent[Any], final_output: Any) -> Any:
             payload_value = {_WRAPPER_DICT_KEY: final_output}
     try:
         if isinstance(output_schema, AgentOutputSchema):
-            payload_bytes = output_schema._type_adapter.dump_json(payload_value)
+            payload_bytes = output_schema._type_adapter.dump_json(
+                payload_value,
+                warnings="none" if data_redacted else "warn",
+            )
             payload = (
                 payload_bytes.decode()
                 if isinstance(payload_bytes, bytes | bytearray)
