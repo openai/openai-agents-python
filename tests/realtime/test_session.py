@@ -4,7 +4,8 @@ import json
 import logging
 import threading
 import traceback
-from typing import Any, cast
+from pathlib import Path
+from typing import Any, Literal, cast
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 import pytest
@@ -831,13 +832,144 @@ async def test_on_tool_call_task_done_clears_redacted_error_traceback(
         assert session._event_queue.empty()
 
 
+def _realtime_sdk_traceback_frame_locals(error: BaseException) -> list[dict[str, Any]]:
+    agents_source = (Path(__file__).parents[2] / "src" / "agents").resolve()
+    frame_locals: list[dict[str, Any]] = []
+    traceback_object = error.__traceback__
+    while traceback_object is not None:
+        if (
+            Path(traceback_object.tb_frame.f_code.co_filename)
+            .resolve()
+            .is_relative_to(agents_source)
+        ):
+            frame_locals.append(traceback_object.tb_frame.f_locals)
+        traceback_object = traceback_object.tb_next
+    return frame_locals
+
+
 @pytest.mark.asyncio
 async def test_synchronous_realtime_handoff_clears_redacted_error_traceback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    secret = "SYNCHRONOUS_REALTIME_HANDOFF_TRACEBACK_SECRET"
+    payload_secret = "SYNCHRONOUS_REALTIME_HANDOFF_TRACEBACK_SECRET"
+    schema_secret = "SYNCHRONOUS_REALTIME_HANDOFF_SCHEMA_SECRET_4207"
+    sensitive_input_type = cast(
+        type[Any],
+        Literal["SYNCHRONOUS_REALTIME_HANDOFF_SCHEMA_SECRET_4207"],
+    )
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+    target = RealtimeAgent(name="target")
+
+    async def on_handoff(_ctx: RunContextWrapper[Any], _input: Any) -> None:
+        pass  # pragma: no cover
+
+    handoff_obj = realtime_handoff(
+        target,
+        on_handoff=on_handoff,
+        input_type=sensitive_input_type,
+    )
+    agent = RealtimeAgent(name="agent", handoffs=[handoff_obj])
+    session = RealtimeSession(
+        _DummyModel(),
+        agent,
+        None,
+        run_config={"async_tool_calls": False},
+    )
+    event = RealtimeModelToolCallEvent(
+        name=handoff_obj.tool_name,
+        call_id="call-1",
+        arguments=f'"{payload_secret}"',
+    )
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await session.on_event(event)
+
+    error = exc_info.value
+    traceback_exception = traceback.TracebackException.from_exception(error, capture_locals=True)
+    agents_source = (Path(__file__).parents[2] / "src" / "agents").resolve()
+    sdk_frames = [
+        frame
+        for frame in traceback_exception.stack
+        if Path(frame.filename).resolve().is_relative_to(agents_source)
+    ]
+    assert not sdk_frames
+    assert payload_secret not in "".join(
+        value for frame in sdk_frames for value in (frame.locals or {}).values()
+    )
+    assert schema_secret not in "".join(
+        value for frame in sdk_frames for value in (frame.locals or {}).values()
+    )
+    actual_frame_locals = _realtime_sdk_traceback_frame_locals(error)
+    assert not actual_frame_locals
+    assert payload_secret not in str(error)
+    assert schema_secret not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_async_realtime_handoff_detaches_session_from_redacted_error_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "ASYNCHRONOUS_REALTIME_HANDOFF_TRACEBACK_SECRET"
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+    target = RealtimeAgent(name="target")
+
+    async def on_handoff(_ctx: RunContextWrapper[Any], _input: int) -> None:
+        pass  # pragma: no cover
+
+    handoff_obj = realtime_handoff(target, on_handoff=on_handoff, input_type=int)
+    agent = RealtimeAgent(name="agent", handoffs=[handoff_obj])
+    session = RealtimeSession(_DummyModel(), agent, None)
+    event = RealtimeModelToolCallEvent(
+        name=handoff_obj.tool_name,
+        call_id="call-1",
+        arguments=f'"{secret}"',
+    )
+    event_iterator = session.__aiter__()
+
+    await session.on_event(event)
+    raw_event = await anext(event_iterator)
+    assert isinstance(raw_event, RealtimeRawModelEvent)
+
+    for _ in range(20):
+        if session._stored_exception is not None:
+            break
+        await asyncio.sleep(0)
+    assert isinstance(session._stored_exception, ModelBehaviorError)
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await anext(event_iterator)
+
+    error = exc_info.value
+    traceback_exception = traceback.TracebackException.from_exception(error, capture_locals=True)
+    agents_source = (Path(__file__).parents[2] / "src" / "agents").resolve()
+    sdk_frames = [
+        frame
+        for frame in traceback_exception.stack
+        if Path(frame.filename).resolve().is_relative_to(agents_source)
+    ]
+    assert sdk_frames
+    assert secret not in "".join(
+        value for frame in sdk_frames for value in (frame.locals or {}).values()
+    )
+    actual_frame_locals = _realtime_sdk_traceback_frame_locals(error)
+    assert actual_frame_locals
+    assert all(session is not value for frame in actual_frame_locals for value in frame.values())
+    assert secret not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_synchronous_realtime_handoff_preserves_diagnostic_traceback_locals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "SYNCHRONOUS_REALTIME_HANDOFF_DIAGNOSTIC_SECRET"
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
     target = RealtimeAgent(name="target")
 
     async def on_handoff(_ctx: RunContextWrapper[Any], _input: int) -> None:
@@ -861,15 +993,11 @@ async def test_synchronous_realtime_handoff_clears_redacted_error_traceback(
         await session.on_event(event)
 
     error = exc_info.value
-    traceback_exception = traceback.TracebackException.from_exception(error, capture_locals=True)
-    sdk_frames = [frame for frame in traceback_exception.stack if "/src/agents/" in frame.filename]
-    assert sdk_frames
-    assert secret not in "".join(
-        value for frame in sdk_frames for value in (frame.locals or {}).values()
+    assert secret in str(error)
+    assert any(
+        frame_locals.get("event") is event
+        for frame_locals in _realtime_sdk_traceback_frame_locals(error)
     )
-    assert secret not in str(error)
-    assert error.__cause__ is None
-    assert error.__context__ is None
 
 
 @pytest.mark.asyncio

@@ -41,6 +41,8 @@ from ..exceptions import (
     RunErrorDetails,
     UserError,
     _clear_data_redacted_error_traceback,
+    _detach_data_redacted_error_traceback,
+    _is_error_data_redacted,
 )
 from ..handoffs import Handoff
 from ..items import (
@@ -1388,18 +1390,21 @@ async def start_streaming(
     except AgentsException as exc:
         streamed_result.is_complete = True
         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-        _clear_data_redacted_error_traceback(exc)
-        exc.run_data = RunErrorDetails(
-            input=streamed_result.input,
-            new_items=streamed_result.new_items,
-            raw_responses=streamed_result.raw_responses,
-            last_agent=current_agent,
-            context_wrapper=context_wrapper,
-            input_guardrail_results=streamed_result.input_guardrail_results,
-            output_guardrail_results=streamed_result.output_guardrail_results,
-            tool_input_guardrail_results=streamed_result.tool_input_guardrail_results,
-            tool_output_guardrail_results=streamed_result.tool_output_guardrail_results,
-        )
+        if _is_error_data_redacted(exc):
+            _detach_data_redacted_error_traceback(exc)
+        else:
+            _clear_data_redacted_error_traceback(exc)
+            exc.run_data = RunErrorDetails(
+                input=streamed_result.input,
+                new_items=streamed_result.new_items,
+                raw_responses=streamed_result.raw_responses,
+                last_agent=current_agent,
+                context_wrapper=context_wrapper,
+                input_guardrail_results=streamed_result.input_guardrail_results,
+                output_guardrail_results=streamed_result.output_guardrail_results,
+                tool_input_guardrail_results=streamed_result.tool_input_guardrail_results,
+                tool_output_guardrail_results=streamed_result.tool_output_guardrail_results,
+            )
         raise
     except Exception as e:
         attach_generic_agent_error(

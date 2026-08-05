@@ -5,7 +5,12 @@ from typing import Any, get_args, get_origin
 from pydantic import BaseModel, TypeAdapter
 from typing_extensions import TypedDict
 
-from .exceptions import ModelBehaviorError, UserError, _clear_data_redacted_error_traceback
+from .exceptions import (
+    ModelBehaviorError,
+    UserError,
+    _detach_data_redacted_error_traceback,
+    _is_error_data_redacted,
+)
 from .strict_schema import ensure_strict_json_schema
 from .tracing import SpanError
 from .util import _error_tracing, _json
@@ -145,8 +150,9 @@ class AgentOutputSchema(AgentOutputSchemaBase):
                 strict=True if self._strict_json_schema else None,
             )
         except ModelBehaviorError as error:
-            json_str = "<redacted>"
-            _clear_data_redacted_error_traceback(error)
+            if _is_error_data_redacted(error):
+                json_str = "<redacted>"
+                _detach_data_redacted_error_traceback(error)
             raise
         if self._is_wrapped:
             if not isinstance(validated, dict):

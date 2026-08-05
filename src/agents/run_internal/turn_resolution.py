@@ -54,7 +54,12 @@ from ..agent_tool_state import (
     peek_agent_tool_run_result,
     record_agent_tool_run_result,
 )
-from ..exceptions import ModelBehaviorError, ModelRefusalError, UserError
+from ..exceptions import (
+    ModelBehaviorError,
+    ModelRefusalError,
+    UserError,
+    _detach_data_redacted_error_traceback,
+)
 from ..handoffs import Handoff, HandoffInputData, HandoffInputFilter, nest_handoff_history
 from ..handoffs.history import (
     _get_nested_history_owned_items,
@@ -421,6 +426,7 @@ async def _resolve_invalid_final_output(
         raw_responses=[new_response],
         last_agent=public_agent,
     )
+    _detach_data_redacted_error_traceback(error)
     handler_result = await resolve_run_error_handler_result(
         error_handlers=error_handlers,
         error_kind="invalid_final_output",

@@ -23,6 +23,8 @@ from ..exceptions import (
     ToolInputGuardrailTripwireTriggered,
     UserError,
     _clear_data_redacted_error_traceback,
+    _detach_data_redacted_error_traceback,
+    _is_error_data_redacted,
 )
 from ..handoffs import Handoff
 from ..items import ToolApprovalItem
@@ -309,7 +311,16 @@ class RealtimeSession(RealtimeModelListener):
             if self._stored_exception is not None:
                 # Clean up resources before raising
                 await self.close()
-                raise self._stored_exception
+                stored_exception = self._stored_exception
+                if isinstance(stored_exception, Exception) and _is_error_data_redacted(
+                    stored_exception
+                ):
+                    _detach_data_redacted_error_traceback(stored_exception)
+                    # Do not retain the session or the previously yielded raw event in the
+                    # traceback frame that exposes a redacted error to the caller.
+                    self = cast(Any, None)
+                    event = cast(Any, None)
+                raise stored_exception
 
             self._event_iterator_waiters += 1
             try:
@@ -406,14 +417,8 @@ class RealtimeSession(RealtimeModelListener):
                 try:
                     await self._handle_tool_call(event, **handle_kwargs)
                 except ModelBehaviorError as error:
-                    # Remove model-generated arguments from this synchronous boundary before the
-                    # exception escapes to the model listener.
-                    event = RealtimeModelToolCallEvent(
-                        name="<redacted>",
-                        call_id="<redacted>",
-                        arguments="<redacted>",
-                    )
-                    _clear_data_redacted_error_traceback(error)
+                    if _is_error_data_redacted(error):
+                        _detach_data_redacted_error_traceback(error)
                     raise
         elif event.type == "audio":
             if event.response_id not in self._interrupted_response_ids:

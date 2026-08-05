@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING, Any, cast, overload
 from pydantic import TypeAdapter
 from typing_extensions import TypeVar
 
-from ..exceptions import ModelBehaviorError, UserError, _clear_data_redacted_error_traceback
+from ..exceptions import (
+    ModelBehaviorError,
+    UserError,
+    _detach_data_redacted_error_traceback,
+    _is_error_data_redacted,
+)
 from ..handoffs import Handoff
 from ..run_context import RunContextWrapper, TContext
 from ..strict_schema import ensure_strict_json_schema
@@ -168,8 +173,9 @@ def realtime_handoff(
                     contains_tool_data=True,
                 )
             except ModelBehaviorError as error:
-                input_json = "<redacted>"
-                _clear_data_redacted_error_traceback(error)
+                if _is_error_data_redacted(error):
+                    input_json = "<redacted>"
+                    _detach_data_redacted_error_traceback(error)
                 raise
             input_func = cast(OnHandoffWithInput[THandoffInput], on_handoff)
             result = input_func(ctx, validated_input)

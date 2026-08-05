@@ -8,6 +8,7 @@ statements honor ``_debug.DONT_LOG_MODEL_DATA`` / ``_debug.DONT_LOG_TOOL_DATA``.
 
 from __future__ import annotations
 
+import json
 import logging
 import pickle
 import threading
@@ -15,7 +16,7 @@ import traceback
 from logging.handlers import QueueHandler
 from pathlib import Path
 from queue import SimpleQueue
-from typing import Any
+from typing import Any, Literal, cast
 from unittest.mock import patch
 
 import httpx
@@ -26,12 +27,16 @@ from pydantic import BaseModel, ValidationError
 import agents._debug as _debug
 from agents import (
     Agent,
+    GuardrailFunctionOutput,
+    InputGuardrail,
     ModelBehaviorError,
     ModelSettings,
     ModelTracing,
     OpenAIResponsesModel,
+    OutputGuardrail,
     RunConfig,
     RunContextWrapper,
+    RunErrorHandlerInput,
     Runner,
     function_tool,
     handoff,
@@ -63,7 +68,8 @@ from agents.tracing.spans import Span
 from agents.tracing.traces import Trace
 
 from .fake_model import FakeModel
-from .test_responses import get_text_message
+from .test_responses import get_function_tool_call, get_text_message
+from .utils.simple_session import SimpleListSession
 
 _SECRET = "super secret prompt content"
 
@@ -869,6 +875,10 @@ async def test_agent_tool_validation_error_preserves_diagnostics_when_tool_data_
 
 
 _MODEL_OUTPUT_SECRET = "SECRET_MODEL_OUTPUT_123"
+_SENSITIVE_SCHEMA_SECRET = "SENSITIVE_HANDOFF_SCHEMA_SECRET_4207"
+_SENSITIVE_OUTPUT_SCHEMA_SECRET = "SENSITIVE_OUTPUT_SCHEMA_SECRET_4207"
+_SensitiveHandoffInput = Literal["SENSITIVE_HANDOFF_SCHEMA_SECRET_4207"]
+_SensitiveOutput = Literal["SENSITIVE_OUTPUT_SCHEMA_SECRET_4207"]
 
 
 class _RequiredOutput(BaseModel):
@@ -876,7 +886,12 @@ class _RequiredOutput(BaseModel):
     count: int
 
 
-def _assert_secret_absent_from_agents_traceback(error: BaseException, secret: str) -> None:
+def _assert_secret_absent_from_agents_traceback(
+    error: BaseException,
+    secret: str,
+    *,
+    require_agents_frames: bool = True,
+) -> None:
     traceback_exception = traceback.TracebackException.from_exception(error, capture_locals=True)
     agents_source = (Path(__file__).parents[1] / "src" / "agents").resolve()
     agents_frames = [
@@ -884,9 +899,25 @@ def _assert_secret_absent_from_agents_traceback(error: BaseException, secret: st
         for frame in traceback_exception.stack
         if Path(frame.filename).resolve().is_relative_to(agents_source)
     ]
-    assert agents_frames
+    if require_agents_frames:
+        assert agents_frames
     for frame in agents_frames:
         assert secret not in "".join((frame.locals or {}).values())
+
+
+def _agents_traceback_frame_locals(error: BaseException) -> list[dict[str, Any]]:
+    agents_source = (Path(__file__).parents[1] / "src" / "agents").resolve()
+    frame_locals: list[dict[str, Any]] = []
+    traceback_object = error.__traceback__
+    while traceback_object is not None:
+        if (
+            Path(traceback_object.tb_frame.f_code.co_filename)
+            .resolve()
+            .is_relative_to(agents_source)
+        ):
+            frame_locals.append(traceback_object.tb_frame.f_locals)
+        traceback_object = traceback_object.tb_next
+    return frame_locals
 
 
 @pytest.mark.parametrize(
@@ -914,10 +945,18 @@ def test_output_schema_validation_error_follows_model_data_policy(
         assert _MODEL_OUTPUT_SECRET not in str(error)
         assert error.__cause__ is None
         assert error.__context__ is None
-        _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+        _assert_secret_absent_from_agents_traceback(
+            error,
+            _MODEL_OUTPUT_SECRET,
+            require_agents_frames=False,
+        )
     else:
         assert _MODEL_OUTPUT_SECRET in str(error)
         assert isinstance(error.__cause__, ValidationError)
+        assert any(
+            frame_locals.get("json_str") == payload
+            for frame_locals in _agents_traceback_frame_locals(error)
+        )
 
 
 def test_output_schema_redaction_survives_trace_attachment_failure(
@@ -937,7 +976,31 @@ def test_output_schema_redaction_survives_trace_attachment_failure(
     assert _MODEL_OUTPUT_SECRET not in str(error)
     assert error.__cause__ is None
     assert error.__context__ is None
-    _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+    _assert_secret_absent_from_agents_traceback(
+        error,
+        _MODEL_OUTPUT_SECRET,
+        require_agents_frames=False,
+    )
+
+
+def test_output_schema_redaction_omits_sensitive_schema_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    output_type = cast(type[Any], _SensitiveOutput)
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        AgentOutputSchema(output_type).validate_json('"invalid"')
+
+    error = exc_info.value
+    assert _SENSITIVE_OUTPUT_SCHEMA_SECRET not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    _assert_secret_absent_from_agents_traceback(
+        error,
+        _SENSITIVE_OUTPUT_SCHEMA_SECRET,
+        require_agents_frames=False,
+    )
 
 
 @pytest.mark.parametrize(
@@ -960,23 +1023,100 @@ async def test_handoff_input_validation_error_follows_mixed_data_policy(
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
     payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
     target = Agent(name="target")
+    handoff_calls = 0
 
     async def on_handoff(_ctx: RunContextWrapper[Any], _input: _RequiredOutput) -> None:
-        pass  # pragma: no cover
+        nonlocal handoff_calls
+        handoff_calls += 1
 
     handoff_obj = handoff(target, input_type=_RequiredOutput, on_handoff=on_handoff)
     with pytest.raises(ModelBehaviorError) as exc_info:
         await handoff_obj.on_invoke_handoff(RunContextWrapper(None), payload)
 
+    assert handoff_calls == 0
     error = exc_info.value
     if expected_redacted:
         assert _MODEL_OUTPUT_SECRET not in str(error)
         assert error.__cause__ is None
         assert error.__context__ is None
-        _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+        _assert_secret_absent_from_agents_traceback(
+            error,
+            _MODEL_OUTPUT_SECRET,
+            require_agents_frames=False,
+        )
     else:
         assert _MODEL_OUTPUT_SECRET in str(error)
         assert isinstance(error.__cause__, ValidationError)
+        assert any(
+            frame_locals.get("input_json") == payload
+            for frame_locals in _agents_traceback_frame_locals(error)
+        )
+
+
+@pytest.mark.asyncio
+async def test_handoff_redaction_omits_sensitive_schema_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+    target = Agent(name="target")
+    handoff_calls = 0
+
+    async def on_handoff(_ctx: RunContextWrapper[Any], _input: Any) -> None:
+        nonlocal handoff_calls
+        handoff_calls += 1
+
+    handoff_obj = handoff(
+        target,
+        input_type=cast(type[Any], _SensitiveHandoffInput),
+        on_handoff=on_handoff,
+    )
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await handoff_obj.on_invoke_handoff(RunContextWrapper(None), '"invalid"')
+
+    error = exc_info.value
+    assert handoff_calls == 0
+    assert _SENSITIVE_SCHEMA_SECRET not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    _assert_secret_absent_from_agents_traceback(
+        error,
+        _SENSITIVE_SCHEMA_SECRET,
+        require_agents_frames=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_realtime_handoff_redaction_omits_sensitive_schema_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+    target = RealtimeAgent(name="target")
+    handoff_calls = 0
+
+    async def on_handoff(_ctx: RunContextWrapper[Any], _input: Any) -> None:
+        nonlocal handoff_calls
+        handoff_calls += 1
+
+    handoff_obj = realtime_handoff(
+        target,
+        input_type=cast(type[Any], _SensitiveHandoffInput),
+        on_handoff=on_handoff,
+    )
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await handoff_obj.on_invoke_handoff(RunContextWrapper(None), '"invalid"')
+
+    error = exc_info.value
+    assert handoff_calls == 0
+    assert _SENSITIVE_SCHEMA_SECRET not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    _assert_secret_absent_from_agents_traceback(
+        error,
+        _SENSITIVE_SCHEMA_SECRET,
+        require_agents_frames=False,
+    )
 
 
 @pytest.mark.parametrize(
@@ -999,23 +1139,34 @@ async def test_realtime_handoff_input_validation_error_follows_mixed_data_policy
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
     payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
     target = RealtimeAgent(name="target")
+    handoff_calls = 0
 
     async def on_handoff(_ctx: RunContextWrapper[Any], _input: _RequiredOutput) -> None:
-        pass  # pragma: no cover
+        nonlocal handoff_calls
+        handoff_calls += 1
 
     handoff_obj = realtime_handoff(target, input_type=_RequiredOutput, on_handoff=on_handoff)
     with pytest.raises(ModelBehaviorError) as exc_info:
         await handoff_obj.on_invoke_handoff(RunContextWrapper(None), payload)
 
+    assert handoff_calls == 0
     error = exc_info.value
     if expected_redacted:
         assert _MODEL_OUTPUT_SECRET not in str(error)
         assert error.__cause__ is None
         assert error.__context__ is None
-        _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+        _assert_secret_absent_from_agents_traceback(
+            error,
+            _MODEL_OUTPUT_SECRET,
+            require_agents_frames=False,
+        )
     else:
         assert _MODEL_OUTPUT_SECRET in str(error)
         assert isinstance(error.__cause__, ValidationError)
+        assert any(
+            frame_locals.get("input_json") == payload
+            for frame_locals in _agents_traceback_frame_locals(error)
+        )
 
 
 @pytest.mark.asyncio
@@ -1027,15 +1178,93 @@ async def test_run_surfaces_redacted_output_validation_error(
     model = FakeModel()
     agent = Agent(name="A", model=model, output_type=_RequiredOutput)
     model.set_next_output([get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    session = SimpleListSession(
+        session_id="redacted-run",
+        history=[{"role": "user", "content": _MODEL_OUTPUT_SECRET}],
+    )
 
     with pytest.raises(ModelBehaviorError) as exc_info:
-        await Runner.run(agent, "go")
+        await Runner.run(agent, _MODEL_OUTPUT_SECRET, session=session)
 
     error = exc_info.value
+    frame_locals = _agents_traceback_frame_locals(error)
     assert _MODEL_OUTPUT_SECRET not in str(error)
     assert error.__cause__ is None
     assert error.__context__ is None
-    _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+    _assert_secret_absent_from_agents_traceback(
+        error,
+        _MODEL_OUTPUT_SECRET,
+        require_agents_frames=False,
+    )
+    assert all(session is not value for frame in frame_locals for value in frame.values())
+
+
+def test_run_sync_surfaces_redacted_output_validation_error_without_runner_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    model = FakeModel()
+    agent = Agent(name="A", model=model, output_type=_RequiredOutput)
+    model.set_next_output([get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    session = SimpleListSession(
+        session_id="redacted-run-sync",
+        history=[{"role": "user", "content": _MODEL_OUTPUT_SECRET}],
+    )
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        Runner.run_sync(agent, _MODEL_OUTPUT_SECRET, session=session)
+
+    error = exc_info.value
+    frame_locals = _agents_traceback_frame_locals(error)
+    assert _MODEL_OUTPUT_SECRET not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    _assert_secret_absent_from_agents_traceback(
+        error,
+        _MODEL_OUTPUT_SECRET,
+        require_agents_frames=False,
+    )
+    assert all(session is not value for frame in frame_locals for value in frame.values())
+
+
+@pytest.mark.asyncio
+async def test_run_preserves_diagnostic_wrapper_traceback_locals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    diagnostic_input = "DIAGNOSTIC_RUNNER_INPUT_SECRET"
+    model = FakeModel(initial_output=[get_text_message('{"answer": "missing count"}')])
+    agent = Agent(name="A", model=model, output_type=_RequiredOutput)
+    session = SimpleListSession(session_id="diagnostic-runner")
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await Runner.run(agent, diagnostic_input, session=session)
+
+    error = exc_info.value
+    frame_locals = _agents_traceback_frame_locals(error)
+    assert any(frame.get("input") == diagnostic_input for frame in frame_locals)
+    assert any(frame.get("session") is session for frame in frame_locals)
+
+
+def test_run_sync_preserves_diagnostic_wrapper_traceback_locals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    diagnostic_input = "DIAGNOSTIC_RUNNER_SYNC_INPUT_SECRET"
+    model = FakeModel(initial_output=[get_text_message('{"answer": "missing count"}')])
+    agent = Agent(name="A", model=model, output_type=_RequiredOutput)
+    session = SimpleListSession(session_id="diagnostic-runner-sync")
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        Runner.run_sync(agent, diagnostic_input, session=session)
+
+    error = exc_info.value
+    frame_locals = _agents_traceback_frame_locals(error)
+    assert any(frame.get("input") == diagnostic_input for frame in frame_locals)
+    assert any(frame.get("session") is session for frame in frame_locals)
 
 
 @pytest.mark.asyncio
@@ -1058,3 +1287,172 @@ async def test_streamed_run_surfaces_redacted_output_validation_error(
     assert error.__cause__ is None
     assert error.__context__ is None
     _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+
+
+@pytest.mark.asyncio
+async def test_streamed_output_guardrail_omits_run_data_from_redacted_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _agent_output: Any,
+    ) -> GuardrailFunctionOutput:
+        AgentOutputSchema(_RequiredOutput).validate_json(payload)
+        raise AssertionError("validation should fail")  # pragma: no cover
+
+    model = FakeModel(initial_output=[get_text_message(_MODEL_OUTPUT_SECRET)])
+    agent = Agent(
+        name="A",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    result = Runner.run_streamed(agent, "go")
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        async for _ in result.stream_events():
+            pass
+
+    error = exc_info.value
+    assert error.run_data is None
+    assert _MODEL_OUTPUT_SECRET not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+
+
+@pytest.mark.asyncio
+async def test_streamed_input_guardrail_omits_run_data_from_redacted_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
+
+    def input_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _input: str | list[Any],
+    ) -> GuardrailFunctionOutput:
+        AgentOutputSchema(_RequiredOutput).validate_json(payload)
+        raise AssertionError("validation should fail")  # pragma: no cover
+
+    model = FakeModel(initial_output=[get_text_message("unused")])
+    agent = Agent(
+        name="A",
+        model=model,
+        input_guardrails=[InputGuardrail(guardrail_function=input_guardrail)],
+    )
+    result = Runner.run_streamed(agent, _MODEL_OUTPUT_SECRET)
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        async for _ in result.stream_events():
+            pass
+
+    error = exc_info.value
+    assert error.run_data is None
+    assert _MODEL_OUTPUT_SECRET not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_invalid_final_output_handler_receives_detached_redacted_error(
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    model = FakeModel(initial_output=[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    agent = Agent(name="A", model=model, output_type=_RequiredOutput)
+    retained_errors: list[ModelBehaviorError] = []
+
+    def recover(data: RunErrorHandlerInput[None]) -> _RequiredOutput:
+        assert isinstance(data.error, ModelBehaviorError)
+        retained_errors.append(data.error)
+        return _RequiredOutput(answer="safe", count=1)
+
+    if streamed:
+        result = Runner.run_streamed(
+            agent,
+            "go",
+            error_handlers={"invalid_final_output": recover},
+        )
+        async for _ in result.stream_events():
+            pass
+    else:
+        await Runner.run(
+            agent,
+            "go",
+            error_handlers={"invalid_final_output": recover},
+        )
+
+    assert len(retained_errors) == 1
+    error = retained_errors[0]
+    assert error.__traceback__ is None
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert _MODEL_OUTPUT_SECRET not in str(error)
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("redacted", [False, True])
+@pytest.mark.asyncio
+async def test_multiturn_output_validation_error_run_data_follows_redaction_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+    redacted: bool,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+
+    @function_tool
+    def record_value(value: str) -> str:
+        return "recorded"
+
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    record_value.name,
+                    json.dumps({"value": _MODEL_OUTPUT_SECRET}),
+                )
+            ],
+            [get_text_message('{"answer": "missing count"}')],
+        ]
+    )
+    agent = Agent(
+        name="A",
+        model=model,
+        tools=[record_value],
+        output_type=_RequiredOutput,
+    )
+
+    if streamed:
+        result = Runner.run_streamed(agent, "go")
+        with pytest.raises(ModelBehaviorError) as exc_info:
+            async for _ in result.stream_events():
+                pass
+    else:
+        with pytest.raises(ModelBehaviorError) as exc_info:
+            await Runner.run(agent, "go")
+
+    error = exc_info.value
+    if redacted:
+        assert error.run_data is None
+        assert _MODEL_OUTPUT_SECRET not in str(error)
+        _assert_secret_absent_from_agents_traceback(
+            error,
+            _MODEL_OUTPUT_SECRET,
+            require_agents_frames=streamed,
+        )
+    else:
+        assert error.run_data is not None
+        assert error.run_data.raw_responses
+        assert error.run_data.new_items

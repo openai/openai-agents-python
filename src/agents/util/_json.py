@@ -47,7 +47,7 @@ def validate_json(
     # Clear the payload before creating the redacted traceback frame. Raising outside the except
     # block also prevents the payload-bearing ValidationError from becoming the cause or context.
     json_str = "<redacted>"
-    error = ModelBehaviorError(f"Invalid JSON when parsing model output for {type_adapter}")
+    error = ModelBehaviorError("Invalid JSON when parsing model output")
     _mark_error_data_redacted(error)
     # Redacted error reporting is best-effort so tracing failures cannot replace the safe error.
     try:

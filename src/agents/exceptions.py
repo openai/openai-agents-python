@@ -35,9 +35,18 @@ def _mark_error_data_redacted(error: Exception) -> None:
     setattr(error, _DATA_REDACTED_ATTR, True)
 
 
+def _is_error_data_redacted(error: Exception) -> bool:
+    return bool(getattr(error, _DATA_REDACTED_ATTR, False))
+
+
 def _clear_data_redacted_error_traceback(error: Exception) -> None:
-    if getattr(error, _DATA_REDACTED_ATTR, False) and error.__traceback__ is not None:
+    if _is_error_data_redacted(error) and error.__traceback__ is not None:
         traceback.clear_frames(error.__traceback__)
+
+
+def _detach_data_redacted_error_traceback(error: Exception) -> None:
+    if _is_error_data_redacted(error):
+        error.__traceback__ = None
 
 
 @dataclass
