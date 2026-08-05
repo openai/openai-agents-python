@@ -678,3 +678,79 @@ class TestOpenAIConversationsSessionSettings:
 
         assert isinstance(session.session_settings, SessionSettings)
         assert session.session_settings.limit == 0
+
+
+class _FakeConversationItem:
+    """Minimal stand-in for a Conversations item returned by the API."""
+
+    def __init__(self, index: int) -> None:
+        self._index = index
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+        return {"id": f"item_{self._index}", "role": "user", "content": f"m{self._index}"}
+
+
+class _FakeConversationItems:
+    """Records the requested page size and rejects values the API does not accept."""
+
+    MAX_PAGE_SIZE = 100
+
+    def __init__(self, total: int) -> None:
+        self._total = total
+        self.requested_limits: list[int | None] = []
+
+    def list(
+        self,
+        *,
+        conversation_id: str,
+        order: str,
+        limit: int | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        self.requested_limits.append(limit)
+
+        async def _iterate() -> Any:
+            if limit is not None and not 1 <= limit <= self.MAX_PAGE_SIZE:
+                raise ValueError(
+                    f"Invalid 'limit': expected a value between 1 and {self.MAX_PAGE_SIZE}, "
+                    f"but got {limit} instead."
+                )
+            # The auto-paginating iterator hides page boundaries from callers, so it
+            # yields every stored item regardless of the per-request page size.
+            indexes = range(self._total)
+            for index in reversed(indexes) if order == "desc" else indexes:
+                yield _FakeConversationItem(index)
+
+        return _iterate()
+
+
+class TestOpenAIConversationsSessionItemPageSize:
+    """The session limit must not be forwarded as the Conversations items page size."""
+
+    @pytest.mark.asyncio
+    async def test_get_items_pages_when_limit_exceeds_api_page_size(self, mock_openai_client):
+        items = _FakeConversationItems(total=200)
+        mock_openai_client.conversations.items = items
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+
+        retrieved = await session.get_items(limit=150)
+
+        assert items.requested_limits == [_FakeConversationItems.MAX_PAGE_SIZE]
+        assert len(retrieved) == 150
+        assert retrieved[0]["content"] == "m50"
+        assert retrieved[-1]["content"] == "m199"
+
+    @pytest.mark.asyncio
+    async def test_get_items_forwards_limits_within_the_api_page_size(self, mock_openai_client):
+        items = _FakeConversationItems(total=200)
+        mock_openai_client.conversations.items = items
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+
+        retrieved = await session.get_items(limit=5)
+
+        assert items.requested_limits == [5]
+        assert [item["content"] for item in retrieved] == ["m195", "m196", "m197", "m198", "m199"]
