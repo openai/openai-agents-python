@@ -6,6 +6,7 @@ import threading
 from collections.abc import Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -990,3 +991,39 @@ async def test_runner_with_session_settings_override(agent: Agent):
     history_items = [item for item in last_input if item.get("content") != "New question"]
     # Should have 2 history items (last two from the 10 we added)
     assert len(history_items) == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_pop_item_hands_each_item_to_one_caller(
+    agent: Agent, tmp_path: Path
+) -> None:
+    """pop_item removes an item, so concurrent callers must never receive the same one.
+
+    pop_item selects the newest id, reads its payload, then deletes it in three separate
+    statements. Concurrent callers can therefore select the same id before either delete
+    lands, and both return that item while the rows they never claimed stay in the store.
+    """
+    item_count = 40
+    session_id = "concurrent_pop"
+    session = SQLAlchemySession.from_url(
+        session_id,
+        url=f"sqlite+aiosqlite:///{(tmp_path / 'concurrent_pop.db').as_posix()}",
+        create_tables=True,
+    )
+
+    await session.add_items(
+        cast(
+            list[TResponseInputItem],
+            [{"role": "user", "content": f"m{index}"} for index in range(item_count)],
+        )
+    )
+
+    popped = await asyncio.gather(*[session.pop_item() for _ in range(item_count)])
+    contents = [item.get("content") for item in popped if item is not None]
+
+    assert len(contents) == item_count
+    # Each item belongs to exactly one caller.
+    assert len(set(contents)) == item_count
+    assert sorted(cast(list[str], contents)) == sorted(f"m{index}" for index in range(item_count))
+    # And nothing is left behind by a pop that returned an item it did not delete.
+    assert await session.get_items() == []

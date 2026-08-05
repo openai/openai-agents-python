@@ -435,7 +435,16 @@ class SQLAlchemySession(SessionABC):
                         select(self._messages.c.message_data).where(self._messages.c.id == row_id)
                     )
                     row = res_data.scalar_one_or_none()
-                    await sess.execute(delete(self._messages).where(self._messages.c.id == row_id))
+                    deleted = await sess.execute(
+                        delete(self._messages).where(self._messages.c.id == row_id)
+                    )
+
+                    # The DELETE is the only atomic claim on this row: the select above can
+                    # return the same id to concurrent poppers, so treat deleting zero rows as
+                    # losing the race and look for the next item instead of handing the same
+                    # item to two callers.
+                    if deleted.rowcount == 0:
+                        continue
 
                     if row is None:
                         continue
