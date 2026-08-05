@@ -1,5 +1,9 @@
+import asyncio
 import logging
+from collections.abc import AsyncGenerator, Callable
 from typing import Any, cast
+
+import pytest
 
 from agents.tracing.processor_interface import TracingProcessor
 from agents.tracing.scope import Scope
@@ -29,6 +33,42 @@ class DummyProcessor(TracingProcessor):
 
     def force_flush(self) -> None:
         return None
+
+
+def _new_no_op_trace() -> Trace:
+    return NoOpTrace()
+
+
+def _new_trace_impl() -> Trace:
+    return TraceImpl(
+        name="generator-exit",
+        trace_id="trace-generator-exit",
+        group_id=None,
+        metadata=None,
+        processor=DummyProcessor(),
+    )
+
+
+@pytest.mark.parametrize("new_trace", [_new_no_op_trace, _new_trace_impl])
+async def test_trace_exit_skips_context_reset_on_generator_exit(
+    new_trace: Callable[[], Trace],
+) -> None:
+    """Abandoned async generators are finalized from a different asyncio task.
+
+    The generator body resumes in the finalizing task's context, so resetting the
+    token saved by ``start`` raises ``ValueError`` because that context never set it.
+    Disabled tracing must behave the same as enabled tracing here.
+    """
+    Scope.set_current_trace(None)
+
+    async def stream() -> AsyncGenerator[int, None]:
+        with new_trace():
+            yield 1
+            yield 2
+
+    generator = stream()
+    assert await generator.asend(None) == 1
+    await asyncio.create_task(generator.aclose())
 
 
 def test_no_op_trace_double_enter_logs_error(caplog) -> None:
