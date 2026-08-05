@@ -1326,6 +1326,13 @@ async def test_stream_handler_places_text_after_existing_refusal_part() -> None:
 
     events = await _collect_handler_events(*chunks)
 
+    refusal_part_added = next(
+        event
+        for event in events
+        if event.type == "response.content_part.added"
+        and isinstance(event.part, ResponseOutputRefusal)
+    )
+    assert refusal_part_added.content_index == 0
     text_part_added = next(
         event
         for event in events
@@ -1337,10 +1344,12 @@ async def test_stream_handler_places_text_after_existing_refusal_part() -> None:
     completed_event = next(event for event in events if event.type == "response.completed")
     assistant_item = completed_event.response.output[0]
     assert isinstance(assistant_item, ResponseOutputMessage)
-    assert isinstance(assistant_item.content[0], ResponseOutputText)
-    assert isinstance(assistant_item.content[1], ResponseOutputRefusal)
-    assert assistant_item.content[0].text == "partial"
-    assert assistant_item.content[1].refusal == "blocked"
+    # The completed content must line up with the content indexes announced above: the
+    # refusal opened first at index 0 and the text followed at index 1.
+    assert isinstance(assistant_item.content[0], ResponseOutputRefusal)
+    assert isinstance(assistant_item.content[1], ResponseOutputText)
+    assert assistant_item.content[0].refusal == "blocked"
+    assert assistant_item.content[1].text == "partial"
 
 
 @pytest.mark.allow_call_model_methods
