@@ -15,6 +15,21 @@ from .processor_interface import TracingProcessor
 from .scope import Scope
 
 
+def _reset_current_trace(token: contextvars.Token[Trace | None]) -> None:
+    """Restore the previously current trace, tolerating a foreign context.
+
+    An abandoned async generator is finalized from whichever task happens to run its
+    ``aclose``, so the generator body resumes in a context that never set this token and
+    ``ContextVar.reset`` raises ``ValueError``. There is nothing to restore in that
+    context, so the failure is expected and ignored. Every other case, including a
+    generator closed from the same task, resets normally.
+    """
+    try:
+        Scope.reset_current_trace(token)
+    except ValueError:
+        logger.debug("Skipping trace context reset, token belongs to another context")
+
+
 class Trace(abc.ABC):
     """A complete end-to-end workflow containing related spans and metadata.
 
@@ -326,7 +341,7 @@ class ReattachedTrace(Trace):
             return
 
         if reset_current and self._prev_context_token is not None:
-            Scope.reset_current_trace(self._prev_context_token)
+            _reset_current_trace(self._prev_context_token)
             self._prev_context_token = None
 
     def __enter__(self) -> Trace:
@@ -339,7 +354,7 @@ class ReattachedTrace(Trace):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.finish(reset_current=exc_type is not GeneratorExit)
+        self.finish(reset_current=True)
 
     def export(self) -> dict[str, Any] | None:
         return {
@@ -399,7 +414,7 @@ class NoOpTrace(Trace):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.finish(reset_current=exc_type is not GeneratorExit)
+        self.finish(reset_current=True)
 
     def start(self, mark_as_current: bool = False):
         if mark_as_current:
@@ -407,7 +422,7 @@ class NoOpTrace(Trace):
 
     def finish(self, reset_current: bool = False):
         if reset_current and self._prev_context_token is not None:
-            Scope.reset_current_trace(self._prev_context_token)
+            _reset_current_trace(self._prev_context_token)
             self._prev_context_token = None
 
     @property
@@ -508,7 +523,7 @@ class TraceImpl(Trace):
         self._processor.on_trace_end(self)
 
         if reset_current and self._prev_context_token is not None:
-            Scope.reset_current_trace(self._prev_context_token)
+            _reset_current_trace(self._prev_context_token)
             self._prev_context_token = None
 
     def __enter__(self) -> Trace:
@@ -521,7 +536,7 @@ class TraceImpl(Trace):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.finish(reset_current=exc_type is not GeneratorExit)
+        self.finish(reset_current=True)
 
     def export(self) -> dict[str, Any] | None:
         return {
