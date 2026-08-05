@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
-import sqlite3
+import multiprocessing
 import tempfile
 import threading
 import time
@@ -665,6 +665,69 @@ def _branch_collision_items() -> list[TResponseInputItem]:
     ]
 
 
+def _create_branch_in_process(
+    worker_name: str,
+    db_path: str,
+    session_id: str,
+    branch_name: str | None,
+    ready: Any,
+    start: Any,
+    attempted: Any,
+    checked: Any,
+    release_check: Any,
+    hold_after_check: bool,
+    results: Any,
+) -> None:
+    """Create a branch in a separate process with a controllable ID check."""
+
+    class InstrumentedSession(AdvancedSQLiteSession):
+        def __init__(self, **kwargs: Any) -> None:
+            self._reported_check = False
+            super().__init__(**kwargs)
+
+        @contextlib.contextmanager
+        def _locked_connection(self) -> Iterator[Any]:
+            class BeginObservableConnection:
+                def __init__(self, connection: Any) -> None:
+                    self._connection = connection
+
+                def execute(self, sql: str, parameters: Any = ()) -> Any:
+                    if sql == "BEGIN IMMEDIATE":
+                        attempted.set()
+                    return self._connection.execute(sql, parameters)
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(self._connection, name)
+
+            with super()._locked_connection() as connection:
+                yield BeginObservableConnection(connection)
+
+        def _branch_id_exists(self, cursor: Any, branch_id: str) -> bool:
+            exists = super()._branch_id_exists(cursor, branch_id)
+            if not self._reported_check:
+                self._reported_check = True
+                checked.set()
+                if hold_after_check and not release_check.wait(timeout=10):
+                    raise TimeoutError("Timed out waiting to release the branch ID check")
+            return exists
+
+    session = InstrumentedSession(session_id=session_id, db_path=db_path)
+    try:
+        ready.set()
+        if not start.wait(timeout=10):
+            raise TimeoutError("Timed out waiting to start branch creation")
+        with patch(
+            "agents.extensions.memory.advanced_sqlite_session.time.time",
+            return_value=1_700_000_000.0,
+        ):
+            branch_id = asyncio.run(session.create_branch_from_turn(3, branch_name))
+        results.put((worker_name, "success", branch_id))
+    except Exception as exc:
+        results.put((worker_name, "error", type(exc).__name__, str(exc)))
+    finally:
+        session.close()
+
+
 @pytest.mark.parametrize("branch_id", ["main", "existing_branch"])
 async def test_create_branch_rejects_populated_branch_id(branch_id: str):
     """Creating a branch must not append history to a populated branch."""
@@ -717,73 +780,100 @@ async def test_generated_branch_ids_do_not_merge_within_the_same_second(monkeypa
 
 
 @pytest.mark.parametrize("branch_name", [None, "shared_branch"])
-async def test_branch_allocation_is_serialized_across_sessions(
-    tmp_path: Path,
-    monkeypatch,
-    branch_name: str | None,
+async def test_branch_allocation_is_serialized_across_processes(
+    tmp_path: Path, branch_name: str | None
 ):
-    """Sessions sharing one file must serialize branch ID checks and copies."""
-
-    class InstrumentedBranchCheckSession(AdvancedSQLiteSession):
-        def __init__(self, **kwargs: Any) -> None:
-            self._lock_state = threading.local()
-            super().__init__(**kwargs)
-
-        @contextlib.contextmanager
-        def _locked_connection(self) -> Iterator[sqlite3.Connection]:
-            with super()._locked_connection() as conn:
-                self._lock_state.active = True
-                try:
-                    yield conn
-                finally:
-                    self._lock_state.active = False
-
-        def _branch_id_exists(self, cursor: Any, branch_id: str) -> bool:
-            assert getattr(self._lock_state, "active", False)
-            return super()._branch_id_exists(cursor, branch_id)
-
-    monkeypatch.setattr(time, "time", lambda: 1_700_000_000.0)
+    """Processes sharing one file must serialize branch ID checks and copies."""
     db_path = tmp_path / "branch_allocation.db"
     session_id = f"branch_allocation_{branch_name}"
-    first_session = InstrumentedBranchCheckSession(
+    setup_session = AdvancedSQLiteSession(
         session_id=session_id,
         db_path=db_path,
         create_tables=True,
     )
-    second_session = InstrumentedBranchCheckSession(
-        session_id=session_id,
-        db_path=db_path,
-    )
     items = _branch_collision_items()
+    await setup_session.add_items(items)
+    setup_session.close()
+
+    context = multiprocessing.get_context("spawn")
+    results = context.Queue()
+    release_check = context.Event()
+    processes = []
 
     try:
-        assert first_session._lock is second_session._lock
-        await first_session.add_items(items)
-        results = await asyncio.gather(
-            first_session.create_branch_from_turn(3, branch_name),
-            second_session.create_branch_from_turn(3, branch_name),
-            return_exceptions=True,
-        )
+        worker_events = []
+        for worker_name, hold_after_check in (("first", True), ("second", False)):
+            ready = context.Event()
+            start = context.Event()
+            attempted = context.Event()
+            checked = context.Event()
+            process = context.Process(
+                target=_create_branch_in_process,
+                args=(
+                    worker_name,
+                    str(db_path),
+                    session_id,
+                    branch_name,
+                    ready,
+                    start,
+                    attempted,
+                    checked,
+                    release_check,
+                    hold_after_check,
+                    results,
+                ),
+            )
+            process.start()
+            processes.append(process)
+            worker_events.append((ready, start, attempted, checked))
 
-        successful_ids = [result for result in results if isinstance(result, str)]
+        first_ready, first_start, _, first_checked = worker_events[0]
+        second_ready, second_start, second_attempted, second_checked = worker_events[1]
+        assert first_ready.wait(timeout=10)
+        first_start.set()
+        assert first_checked.wait(timeout=10)
+        assert second_ready.wait(timeout=10)
+        second_start.set()
+        assert second_attempted.wait(timeout=10)
+
+        # The second process has entered branch creation, but SQLite's write reservation
+        # must keep it from checking the same ID until the first process commits.
+        assert not second_checked.wait(timeout=0.2)
+        release_check.set()
+
+        for process in processes:
+            process.join(timeout=10)
+            assert process.exitcode == 0
+
+        process_results = [results.get(timeout=5), results.get(timeout=5)]
+        successful_ids = [result[2] for result in process_results if result[1] == "success"]
         if branch_name is None:
-            assert not [result for result in results if isinstance(result, BaseException)]
+            assert all(result[1] == "success" for result in process_results)
             assert sorted(successful_ids) == [
                 "branch_from_turn_3_1700000000",
                 "branch_from_turn_3_1700000000_2",
             ]
         else:
             assert successful_ids == [branch_name]
-            errors = [result for result in results if isinstance(result, ValueError)]
+            errors = [result for result in process_results if result[1] == "error"]
             assert len(errors) == 1
-            assert "already exists" in str(errors[0])
+            assert errors[0][2] == "ValueError"
+            assert "already exists" in errors[0][3]
 
+        verification_session = AdvancedSQLiteSession(session_id=session_id, db_path=db_path)
         for branch_id in successful_ids:
-            assert await first_session.get_items(branch_id=branch_id) == items[:4]
-        assert await first_session.get_items(branch_id="main") == items
+            assert await verification_session.get_items(branch_id=branch_id) == items[:4]
+        assert await verification_session.get_items(branch_id="main") == items
+        verification_session.close()
     finally:
-        first_session.close()
-        second_session.close()
+        release_check.set()
+        for _, start, _, _ in worker_events:
+            start.set()
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=5)
+        results.close()
 
 
 async def test_delete_branch_removes_branch_only_messages():

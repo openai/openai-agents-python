@@ -1128,85 +1128,92 @@ class AdvancedSQLiteSession(SQLiteSession):
         def _copy_sync() -> str:
             """Synchronous helper to copy messages to new branch."""
             with self._locked_connection() as conn:
-                with closing(conn.cursor()) as cursor:
-                    if new_branch_id is None:
-                        branch_id = self._generate_branch_id(cursor, from_turn_number)
-                    else:
-                        branch_id = new_branch_id
-                        if self._branch_id_exists(cursor, branch_id):
-                            raise ValueError(
-                                f"Branch '{branch_id}' already exists. Use switch_to_branch() "
-                                "to continue an existing branch."
-                            )
+                try:
+                    # Acquire SQLite's write reservation before checking the branch ID so
+                    # sessions in other processes cannot pass the same check concurrently.
+                    conn.execute("BEGIN IMMEDIATE")
+                    with closing(conn.cursor()) as cursor:
+                        if new_branch_id is None:
+                            branch_id = self._generate_branch_id(cursor, from_turn_number)
+                        else:
+                            branch_id = new_branch_id
+                            if self._branch_id_exists(cursor, branch_id):
+                                raise ValueError(
+                                    f"Branch '{branch_id}' already exists. Use switch_to_branch() "
+                                    "to continue an existing branch."
+                                )
 
-                    # Get all messages before the branch point
-                    cursor.execute(
-                        """
-                        SELECT
-                            ms.message_id,
-                            ms.message_type,
-                            ms.sequence_number,
-                            ms.user_turn_number,
-                            ms.branch_turn_number,
-                            ms.tool_name
-                        FROM message_structure ms
-                        WHERE ms.session_id = ? AND ms.branch_id = ?
-                        AND ms.branch_turn_number < ?
-                        ORDER BY ms.sequence_number
-                    """,
-                        (self.session_id, self._current_branch_id, from_turn_number),
-                    )
-
-                    messages_to_copy = cursor.fetchall()
-
-                    if messages_to_copy:
-                        # Get the max sequence number for the new inserts
+                        # Get all messages before the branch point
                         cursor.execute(
                             """
-                            SELECT COALESCE(MAX(sequence_number), 0)
-                            FROM message_structure
-                            WHERE session_id = ?
+                            SELECT
+                                ms.message_id,
+                                ms.message_type,
+                                ms.sequence_number,
+                                ms.user_turn_number,
+                                ms.branch_turn_number,
+                                ms.tool_name
+                            FROM message_structure ms
+                            WHERE ms.session_id = ? AND ms.branch_id = ?
+                            AND ms.branch_turn_number < ?
+                            ORDER BY ms.sequence_number
                         """,
-                            (self.session_id,),
+                            (self.session_id, self._current_branch_id, from_turn_number),
                         )
 
-                        seq_start = cursor.fetchone()[0]
+                        messages_to_copy = cursor.fetchall()
 
-                        # Insert copied messages with new branch_id
-                        new_structure_data = []
-                        for i, (
-                            msg_id,
-                            msg_type,
-                            _,
-                            user_turn,
-                            branch_turn,
-                            tool_name,
-                        ) in enumerate(messages_to_copy):
-                            new_structure_data.append(
-                                (
-                                    self.session_id,
-                                    msg_id,  # Same message_id (sharing the actual message data)
-                                    branch_id,
-                                    msg_type,
-                                    seq_start + i + 1,  # New sequence number
-                                    user_turn,  # Keep same global turn number
-                                    branch_turn,  # Keep same branch turn number
-                                    tool_name,
-                                )
+                        if messages_to_copy:
+                            # Get the max sequence number for the new inserts
+                            cursor.execute(
+                                """
+                                SELECT COALESCE(MAX(sequence_number), 0)
+                                FROM message_structure
+                                WHERE session_id = ?
+                            """,
+                                (self.session_id,),
                             )
 
-                        cursor.executemany(
-                            """
-                            INSERT INTO message_structure
-                            (session_id, message_id, branch_id, message_type, sequence_number,
-                             user_turn_number, branch_turn_number, tool_name)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                            new_structure_data,
-                        )
+                            seq_start = cursor.fetchone()[0]
+
+                            # Insert copied messages with new branch_id
+                            new_structure_data = []
+                            for i, (
+                                msg_id,
+                                msg_type,
+                                _,
+                                user_turn,
+                                branch_turn,
+                                tool_name,
+                            ) in enumerate(messages_to_copy):
+                                new_structure_data.append(
+                                    (
+                                        self.session_id,
+                                        msg_id,  # Same message_id (sharing the actual message data)
+                                        branch_id,
+                                        msg_type,
+                                        seq_start + i + 1,  # New sequence number
+                                        user_turn,  # Keep same global turn number
+                                        branch_turn,  # Keep same branch turn number
+                                        tool_name,
+                                    )
+                                )
+
+                            cursor.executemany(
+                                """
+                                INSERT INTO message_structure
+                                (session_id, message_id, branch_id, message_type, sequence_number,
+                                 user_turn_number, branch_turn_number, tool_name)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                                new_structure_data,
+                            )
 
                     conn.commit()
                     return branch_id
+                except Exception:
+                    conn.rollback()
+                    raise
 
         return await asyncio.to_thread(_copy_sync)
 
