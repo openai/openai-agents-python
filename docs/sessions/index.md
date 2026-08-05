@@ -684,58 +684,6 @@ result = await Runner.run(
 )
 ```
 
-### Accessing the run context in a custom session
-
-A custom session can opt into the active [`RunContextWrapper`][agents.run_context.RunContextWrapper] by adding an optional keyword-only `wrapper` parameter to all four session methods. Existing session implementations do not need to change: the runner only passes this keyword when the complete session implementation accepts it.
-
-```python
-from typing import Any
-
-from agents import RunContextWrapper
-from agents.items import TResponseInputItem
-from agents.memory.session import SessionABC
-
-
-class TenantSession(SessionABC):
-    async def get_items(
-        self,
-        limit: int | None = None,
-        *,
-        wrapper: RunContextWrapper[Any] | None = None,
-    ) -> list[TResponseInputItem]:
-        tenant = wrapper.context.tenant_id if wrapper is not None else "default"
-        return await self.store.read(tenant=tenant, limit=limit)
-
-    async def add_items(
-        self,
-        items: list[TResponseInputItem],
-        *,
-        wrapper: RunContextWrapper[Any] | None = None,
-    ) -> None:
-        tenant = wrapper.context.tenant_id if wrapper is not None else "default"
-        await self.store.append(tenant=tenant, items=items)
-
-    async def pop_item(
-        self,
-        *,
-        wrapper: RunContextWrapper[Any] | None = None,
-    ) -> TResponseInputItem | None:
-        tenant = wrapper.context.tenant_id if wrapper is not None else "default"
-        return await self.store.pop(tenant=tenant)
-
-    async def clear_session(
-        self,
-        *,
-        wrapper: RunContextWrapper[Any] | None = None,
-    ) -> None:
-        tenant = wrapper.context.tenant_id if wrapper is not None else "default"
-        await self.store.clear(tenant=tenant)
-```
-
-When context selects a storage scope, accept `wrapper` consistently on `get_items`, `add_items`, `pop_item`, and `clear_session`. The opt-in is session-level so history loading, persistence, and retry rollback cannot address different stores. Treat the wrapper as run-local state; persist values from `wrapper.context` only when that is an intentional application-level durability decision.
-
-`EncryptedSession` forwards the wrapper to an underlying session that supports this opt-in. `OpenAIResponsesCompactionSession` does not currently forward it; use the context-aware session directly when compaction state would also need context-specific isolation.
-
 ## Community session implementations
 
 The community has developed additional session implementations:
