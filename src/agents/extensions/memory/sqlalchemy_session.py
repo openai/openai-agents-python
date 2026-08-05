@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import weakref
 from typing import Any, ClassVar
 
 from sqlalchemy import (
@@ -63,6 +64,10 @@ class SQLAlchemySession(SessionABC):
 
     _table_init_locks: ClassVar[dict[tuple[str, str, str], threading.Lock]] = {}
     _table_init_locks_guard: ClassVar[threading.Lock] = threading.Lock()
+    # Keyed on id(engine.sync_engine) so two distinct engines that happen to compare equal
+    # never share a cache entry.  A weakref.finalize callback removes the entry when the sync
+    # engine is garbage collected, preventing stale id() values from being reused by a future
+    # engine that has not been configured yet.
     _sqlite_configured_engines: ClassVar[set[int]] = set()
     _sqlite_configured_engines_guard: ClassVar[threading.Lock] = threading.Lock()
     _SQLITE_BUSY_TIMEOUT_MS: ClassVar[int] = 5000
@@ -109,6 +114,9 @@ class SQLAlchemySession(SessionABC):
                     cursor.close()
 
             cls._sqlite_configured_engines.add(engine_key)
+            # Drop the entry once the sync engine goes away so a later engine allocated at the
+            # same address is still configured instead of being treated as already configured.
+            weakref.finalize(engine.sync_engine, cls._sqlite_configured_engines.discard, engine_key)
 
     @staticmethod
     def _is_sqlite_lock_error(exc: OperationalError) -> bool:

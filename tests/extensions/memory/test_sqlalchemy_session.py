@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import threading
 from collections.abc import Iterable, Sequence
@@ -990,3 +991,44 @@ async def test_runner_with_session_settings_override(agent: Agent):
     history_items = [item for item in last_input if item.get("content") != "New question"]
     # Should have 2 history items (last two from the 10 we added)
     assert len(history_items) == 2
+
+
+async def test_sqlite_configuration_registry_releases_collected_engines(tmp_path):
+    """The SQLite configuration registry must not keep ids of collected engines."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'sqlite_registry_release.db'}"
+    session = SQLAlchemySession.from_url(
+        "sqlite_registry_release",
+        url=db_url,
+        create_tables=True,
+    )
+    engine = session.engine
+    engine_key = id(engine.sync_engine)
+    assert engine_key in SQLAlchemySession._sqlite_configured_engines
+
+    await engine.dispose()
+    del session
+    del engine
+    gc.collect()
+
+    # A later engine can be allocated at the same address, so a stale entry would make the
+    # SQLite PRAGMA setup silently skipped for an engine that was never configured.
+    assert engine_key not in SQLAlchemySession._sqlite_configured_engines
+
+
+async def test_sqlite_configuration_registry_does_not_grow_unbounded(tmp_path):
+    """Short-lived SQLite sessions must not accumulate registry entries."""
+    baseline = len(SQLAlchemySession._sqlite_configured_engines)
+
+    for index in range(25):
+        db_url = f"sqlite+aiosqlite:///{tmp_path / f'sqlite_registry_growth_{index}.db'}"
+        session = SQLAlchemySession.from_url(
+            f"sqlite_registry_growth_{index}",
+            url=db_url,
+            create_tables=True,
+        )
+        await session.add_items([{"role": "user", "content": f"turn {index}"}])
+        await session.engine.dispose()
+        del session
+        gc.collect()
+
+    assert len(SQLAlchemySession._sqlite_configured_engines) == baseline
