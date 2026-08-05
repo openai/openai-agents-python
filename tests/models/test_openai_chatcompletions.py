@@ -172,6 +172,127 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
     assert resp.response_id is None
 
 
+async def _get_response_for_choice(
+    monkeypatch: pytest.MonkeyPatch, choice: Choice
+) -> ModelResponse:
+    chat = ChatCompletion(
+        id="resp-id",
+        created=0,
+        model="fake",
+        object="chat.completion",
+        choices=[choice],
+    )
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return chat
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    return await model.get_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_surfaces_empty_content_filter_as_refusal(monkeypatch) -> None:
+    resp = await _get_response_for_choice(
+        monkeypatch,
+        Choice(
+            index=0,
+            finish_reason="content_filter",
+            message=ChatCompletionMessage(role="assistant", content=None),
+        ),
+    )
+
+    assert len(resp.output) == 1
+    assert isinstance(resp.output[0], ResponseOutputMessage)
+    assert len(resp.output[0].content) == 1
+    assert isinstance(resp.output[0].content[0], ResponseOutputRefusal)
+    assert (
+        resp.output[0].content[0].refusal == "Response withheld by the provider's content filter."
+    )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "expected_output_type", "expected_content_type"),
+    [
+        (
+            ChatCompletionMessage(role="assistant", content="partial"),
+            ResponseOutputMessage,
+            ResponseOutputText,
+        ),
+        (
+            ChatCompletionMessage(role="assistant", content=None, refusal="provider refusal"),
+            ResponseOutputMessage,
+            ResponseOutputRefusal,
+        ),
+        (
+            ChatCompletionMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    ChatCompletionMessageFunctionToolCall(
+                        id="call-1",
+                        type="function",
+                        function=Function(name="do_thing", arguments="{}"),
+                    )
+                ],
+            ),
+            ResponseFunctionToolCall,
+            None,
+        ),
+    ],
+)
+async def test_get_response_preserves_nonempty_content_filter_output(
+    monkeypatch,
+    message: ChatCompletionMessage,
+    expected_output_type: type[object],
+    expected_content_type: type[object] | None,
+) -> None:
+    resp = await _get_response_for_choice(
+        monkeypatch,
+        Choice(index=0, finish_reason="content_filter", message=message),
+    )
+
+    assert len(resp.output) == 1
+    assert isinstance(resp.output[0], expected_output_type)
+    if expected_content_type is not None:
+        assert isinstance(resp.output[0], ResponseOutputMessage)
+        assert len(resp.output[0].content) == 1
+        assert isinstance(resp.output[0].content[0], expected_content_type)
+    if isinstance(resp.output[0], ResponseOutputMessage) and isinstance(
+        resp.output[0].content[0], ResponseOutputRefusal
+    ):
+        assert resp.output[0].content[0].refusal == "provider refusal"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_preserves_empty_nonfiltered_output(monkeypatch) -> None:
+    resp = await _get_response_for_choice(
+        monkeypatch,
+        Choice(
+            index=0,
+            finish_reason="stop",
+            message=ChatCompletionMessage(role="assistant", content=None),
+        ),
+    )
+
+    assert resp.output == []
+
+
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 @pytest.mark.parametrize(

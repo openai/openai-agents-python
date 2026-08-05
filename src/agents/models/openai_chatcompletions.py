@@ -306,6 +306,19 @@ class OpenAIChatCompletionsModel(Model):
                 "output_tokens_details": usage.output_tokens_details.model_dump(),
             }
 
+            # Some providers signal a filtered non-streaming completion only through
+            # finish_reason="content_filter" and an otherwise empty message. Preserve
+            # that terminal signal as a refusal instead of returning an empty output.
+            if (
+                message is not None
+                and first_choice is not None
+                and first_choice.finish_reason == "content_filter"
+                and not message.content
+                and not message.refusal
+                and not message.tool_calls
+            ):
+                message.refusal = "Response withheld by the provider's content filter."
+
             # Build provider_data for provider_specific_fields
             provider_data = {"model": self.model}
             if message is not None and hasattr(response, "id"):
