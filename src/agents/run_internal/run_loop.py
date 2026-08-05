@@ -1410,6 +1410,8 @@ async def start_streaming(
             context_wrapper=context_wrapper,
             input_guardrail_results=streamed_result.input_guardrail_results,
             output_guardrail_results=streamed_result.output_guardrail_results,
+            tool_input_guardrail_results=streamed_result.tool_input_guardrail_results,
+            tool_output_guardrail_results=streamed_result.tool_output_guardrail_results,
         )
         raise
     except Exception as e:

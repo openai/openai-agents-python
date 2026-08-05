@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -11,7 +11,9 @@ if TYPE_CHECKING:
     from .tool_guardrails import (
         ToolGuardrailFunctionOutput,
         ToolInputGuardrail,
+        ToolInputGuardrailResult,
         ToolOutputGuardrail,
+        ToolOutputGuardrailResult,
     )
 
 from .util._pretty_print import pretty_print_run_error_details
@@ -38,6 +40,11 @@ class RunErrorDetails:
     context_wrapper: RunContextWrapper[Any]
     input_guardrail_results: list[InputGuardrailResult]
     output_guardrail_results: list[OutputGuardrailResult]
+    tool_input_guardrail_results: list[ToolInputGuardrailResult] = field(default_factory=list)
+    """Tool input guardrail results accumulated from completed turns before the run failed."""
+
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult] = field(default_factory=list)
+    """Tool output guardrail results accumulated from completed turns before the run failed."""
 
     def __str__(self) -> str:
         return pretty_print_run_error_details(self)

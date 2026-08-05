@@ -7,6 +7,8 @@ import pytest
 
 from agents import (
     Agent,
+    MaxTurnsExceeded,
+    Runner,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrail,
     ToolInputGuardrailData,
@@ -15,9 +17,13 @@ from agents import (
     ToolOutputGuardrailData,
     ToolOutputGuardrailTripwireTriggered,
     UserError,
+    function_tool,
 )
 from agents.tool_context import ToolContext
 from agents.tool_guardrails import tool_input_guardrail, tool_output_guardrail
+
+from .fake_model import FakeModel
+from .test_responses import get_function_tool_call
 
 
 def get_mock_tool_context(tool_arguments: str = '{"param": "value"}') -> ToolContext:
@@ -518,6 +524,119 @@ async def test_mixed_behavior_output_guardrail():
     result = await mixed_guardrail.run(data_clean)
     assert result.behavior["type"] == "allow"
     assert result.output_info["status"] == "clean"
+
+
+def _agent_with_repeated_guarded_tool_calls(
+    *,
+    input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
+    output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
+) -> Agent[Any]:
+    @function_tool
+    def guarded(query: str) -> str:
+        return "tool output"
+
+    guarded.tool_input_guardrails = input_guardrails or []
+    guarded.tool_output_guardrails = output_guardrails or []
+
+    model = FakeModel()
+    tool_call = [get_function_tool_call("guarded", '{"query": "secret"}')]
+    model.add_multiple_turn_outputs([tool_call, tool_call])
+    return Agent(name="guarded_tool_agent", model=model, tools=[guarded])
+
+
+async def _run_until_max_turns(agent: Agent[Any], *, streaming: bool) -> MaxTurnsExceeded:
+    with pytest.raises(MaxTurnsExceeded) as exc_info:
+        if streaming:
+            result = Runner.run_streamed(agent, "go", max_turns=2)
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go", max_turns=2)
+    return exc_info.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_tool_input_guardrail_results_reported_on_max_turns(streaming: bool):
+    async def reject(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.reject_content(
+            message="blocked by policy", output_info="input_rejected"
+        )
+
+    guardrail: ToolInputGuardrail[Any] = ToolInputGuardrail(
+        guardrail_function=reject,
+        name="input_rejects",
+    )
+    exc = await _run_until_max_turns(
+        _agent_with_repeated_guarded_tool_calls(input_guardrails=[guardrail]),
+        streaming=streaming,
+    )
+
+    assert exc.run_data is not None
+    assert [
+        result.guardrail.get_name() for result in exc.run_data.tool_input_guardrail_results
+    ] == ["input_rejects", "input_rejects"]
+    assert exc.run_data.tool_output_guardrail_results == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_tool_output_guardrail_results_reported_on_max_turns(streaming: bool):
+    async def reject(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.reject_content(
+            message="blocked by policy", output_info="output_rejected"
+        )
+
+    guardrail: ToolOutputGuardrail[Any] = ToolOutputGuardrail(
+        guardrail_function=reject,
+        name="output_rejects",
+    )
+    exc = await _run_until_max_turns(
+        _agent_with_repeated_guarded_tool_calls(output_guardrails=[guardrail]),
+        streaming=streaming,
+    )
+
+    assert exc.run_data is not None
+    assert [
+        result.guardrail.get_name() for result in exc.run_data.tool_output_guardrail_results
+    ] == ["output_rejects", "output_rejects"]
+    assert exc.run_data.tool_input_guardrail_results == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_tool_tripwire_preserves_completed_turn_results(streaming: bool):
+    guardrail_runs = 0
+
+    async def allow_then_raise(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        nonlocal guardrail_runs
+        guardrail_runs += 1
+        if guardrail_runs == 2:
+            return ToolGuardrailFunctionOutput.raise_exception(output_info="second_turn")
+        return ToolGuardrailFunctionOutput.allow(output_info="first_turn")
+
+    guardrail: ToolInputGuardrail[Any] = ToolInputGuardrail(
+        guardrail_function=allow_then_raise,
+        name="allow_then_raise",
+    )
+    agent = _agent_with_repeated_guarded_tool_calls(input_guardrails=[guardrail])
+
+    with pytest.raises(ToolInputGuardrailTripwireTriggered) as exc_info:
+        if streaming:
+            result = Runner.run_streamed(agent, "go")
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go")
+
+    exc = exc_info.value
+    assert exc.guardrail is guardrail
+    assert exc.output.output_info == "second_turn"
+    assert exc.run_data is not None
+    assert [result.output.output_info for result in exc.run_data.tool_input_guardrail_results] == [
+        "first_turn"
+    ]
+    assert exc.run_data.tool_output_guardrail_results == []
 
 
 if __name__ == "__main__":

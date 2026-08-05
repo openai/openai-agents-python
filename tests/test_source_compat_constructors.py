@@ -16,6 +16,7 @@ from agents import (
     MultiProvider,
     RunConfig,
     RunContextWrapper,
+    RunErrorDetails,
     RunResult,
     RunResultStreaming,
     SessionSettings,
@@ -38,6 +39,33 @@ def test_run_config_positional_arguments_remain_backward_compatible() -> None:
 
     assert config.handoff_input_filter is keep_handoff_input
     assert config.session_settings is None
+
+
+def test_run_error_details_positional_prefix_and_defaults_are_preserved() -> None:
+    first = RunErrorDetails(
+        "input",
+        [],
+        [],
+        Agent(name="agent"),
+        RunContextWrapper(context=None),
+        [],
+        [],
+    )
+    second = RunErrorDetails(
+        "input",
+        [],
+        [],
+        Agent(name="agent"),
+        RunContextWrapper(context=None),
+        [],
+        [],
+    )
+
+    first.tool_input_guardrail_results.append(cast(Any, object()))
+    first.tool_output_guardrail_results.append(cast(Any, object()))
+
+    assert second.tool_input_guardrail_results == []
+    assert second.tool_output_guardrail_results == []
 
 
 def test_run_config_session_settings_positional_binding_is_preserved() -> None:
