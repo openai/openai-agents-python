@@ -14,6 +14,7 @@ from agents.tracing import (
     custom_span,
     function_span,
     generation_span,
+    get_current_span,
     handoff_span,
     set_trace_processors,
     trace,
@@ -405,6 +406,19 @@ async def test_multiple_span_start_finish_doesnt_crash():
             span.start()
 
         span.finish()
+
+
+async def test_finishing_a_span_twice_still_releases_the_span_scope():
+    with trace(workflow_name="test", trace_id="123", group_id="456"):
+        with custom_span(name="span_1") as span:
+            # Ending a span early, for example to keep cleanup work out of its
+            # timing, must not stop the context manager from releasing the scope.
+            span.finish()
+
+        assert get_current_span() is None
+
+        with custom_span(name="span_2") as sibling:
+            assert sibling.parent_id is None
 
 
 async def test_noop_parent_is_noop_child():

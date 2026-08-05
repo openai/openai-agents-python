@@ -326,10 +326,12 @@ class SpanImpl(Span[TSpanData]):
     def finish(self, reset_current: bool = False) -> None:
         if self.ended_at is not None:
             logger.warning("Span already finished")
-            return
+        else:
+            self._ended_at = util.time_iso()
+            self._processor.on_span_end(self)
 
-        self._ended_at = util.time_iso()
-        self._processor.on_span_end(self)
+        # The span scope is released even for a repeated finish, otherwise an ended
+        # span stays current and later spans are nested under it.
         if reset_current and self._prev_span_token is not None:
             Scope.reset_current_span(self._prev_span_token)
             self._prev_span_token = None
