@@ -1,6 +1,7 @@
+import asyncio
 import json
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 
 import pytest
 from pydantic import model_serializer
@@ -447,3 +448,80 @@ def test_duplicate_env_value_type_registration_raises() -> None:
 
             async def resolve(self) -> str:
                 return "unused"
+
+
+class _BlockingEnvValue(EnvValue):
+    """Stands in for a user resolver that reaches a secret store or the network."""
+
+    type: Literal["test.blocking"] = "test.blocking"
+
+    _started: ClassVar[asyncio.Event]
+    _cancelled: ClassVar[bool]
+    _finished: ClassVar[bool]
+
+    async def resolve(self) -> str:
+        type(self)._started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            type(self)._cancelled = True
+            raise
+        finally:
+            type(self)._finished = True
+        return "unreachable"
+
+
+class _FailingEnvValue(EnvValue):
+    type: Literal["test.failing"] = "test.failing"
+
+    async def resolve(self) -> str:
+        # Fail only once the sibling is genuinely in flight, so the test pins the
+        # interleaving instead of racing the two resolvers.
+        await _BlockingEnvValue._started.wait()
+        raise RuntimeError("secret backend rejected the request")
+
+
+@pytest.mark.asyncio
+async def test_environment_resolve_cancels_siblings_when_one_resolver_fails() -> None:
+    """A failed env lookup must not leave the other resolvers running.
+
+    `EnvValue` is an extension point, so `Environment.resolve()` fans out
+    user-supplied coroutines that can reach a secret store. A bare `asyncio.gather`
+    returns on the first failure and leaves the siblings pending, so a rejected
+    lookup left other secret fetches in flight after the manifest had already
+    failed.
+    """
+    _BlockingEnvValue._started = asyncio.Event()
+    _BlockingEnvValue._cancelled = False
+    _BlockingEnvValue._finished = False
+
+    environment = Environment(
+        value={"BLOCKING": _BlockingEnvValue(), "FAILING": _FailingEnvValue()}
+    )
+
+    with pytest.raises(RuntimeError, match="secret backend rejected the request"):
+        await environment.resolve()
+
+    assert _BlockingEnvValue._cancelled, "sibling resolver was not cancelled"
+    assert _BlockingEnvValue._finished, "sibling resolver did not finish unwinding"
+    assert not [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+
+
+@pytest.mark.asyncio
+async def test_environment_resolve_still_returns_every_value() -> None:
+    """The cancel path must not change the success path's mapping."""
+    environment = Environment(
+        value={
+            "PLAIN": "literal",
+            "REF": _SecretReferenceEnvValue(key="alpha"),
+            "ENTRY": EnvEntry(value=_SecretReferenceEnvValue(key="beta")),
+        }
+    )
+
+    resolved = await environment.resolve()
+
+    assert resolved == {
+        "PLAIN": "literal",
+        "REF": "resolved-secret-for-alpha",
+        "ENTRY": "resolved-secret-for-beta",
+    }
