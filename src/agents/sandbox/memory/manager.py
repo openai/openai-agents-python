@@ -131,11 +131,15 @@ class SandboxMemoryGenerationManager:
                 self._ensure_worker()
                 for rollout_file in rollout_files:
                     self._queue.put_nowait(rollout_file)
-                await self._queue.join()
                 if self._worker_task is not None:
                     self._queue.put_nowait(_STOP)
-                    await self._worker_task
-                    self._worker_task = None
+                    worker_task = self._worker_task
+                    try:
+                        # The stop marker follows every rollout, so worker completion implies
+                        # that all preceding rollout files were processed.
+                        await worker_task
+                    finally:
+                        self._worker_task = None
                 await self._run_phase_two()
             finally:
                 _unregister_memory_generation_manager(session=self._session, manager=self)

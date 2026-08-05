@@ -3046,3 +3046,158 @@ def test_replaced_agent_as_tool_preserves_agent_markers_for_build_agent_map() ->
     agent_map = _build_agent_map(parent_agent)
 
     assert agent_map["nested_agent"] is nested_agent
+
+
+class _FatalAgentToolStreamHandlerError(BaseException):
+    pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "handler_error",
+    [_FatalAgentToolStreamHandlerError("fatal"), asyncio.CancelledError()],
+    ids=["base_exception", "cancelled_error"],
+)
+async def test_agent_as_tool_streaming_propagates_base_exception_without_hanging(
+    monkeypatch: pytest.MonkeyPatch,
+    handler_error: BaseException,
+) -> None:
+    agent = Agent(name="streamer")
+    source_cancelled = asyncio.Event()
+    stream_event = RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = "streamed"
+            self.current_agent = agent
+
+        async def stream_events(self):
+            yield stream_event
+            try:
+                await asyncio.Event().wait()
+            finally:
+                source_cancelled.set()
+
+    monkeypatch.setattr(
+        Runner,
+        "run_streamed",
+        classmethod(lambda *args, **kwargs: DummyStreamingResult()),
+    )
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        del payload
+        raise handler_error
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_fatal",
+        arguments='{"input": "go"}',
+        call_id="call-fatal",
+        name="stream_tool",
+        type="function_call",
+    )
+    tool = agent.as_tool(
+        tool_name="stream_tool",
+        tool_description="Streams events",
+        on_stream=on_stream,
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+
+    with pytest.raises(type(handler_error)):
+        await asyncio.wait_for(
+            tool.on_invoke_tool(tool_context, '{"input": "go"}'),
+            timeout=1.0,
+        )
+
+    assert source_cancelled.is_set()
+
+
+class _NestedAgentStreamError(Exception):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_streaming_drains_emitted_events_before_stream_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="streamer")
+    stream_event = RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
+    handler_started = asyncio.Event()
+    producer_failed = asyncio.Event()
+    allow_handler_to_finish = asyncio.Event()
+    handler_cancelled = asyncio.Event()
+    handled_events: list[RawResponsesStreamEvent] = []
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = "streamed"
+            self.current_agent = agent
+
+        async def stream_events(self):
+            yield stream_event
+            await handler_started.wait()
+            producer_failed.set()
+            raise _NestedAgentStreamError("nested stream failed")
+
+    monkeypatch.setattr(
+        Runner,
+        "run_streamed",
+        classmethod(lambda *args, **kwargs: DummyStreamingResult()),
+    )
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        handler_started.set()
+        try:
+            await allow_handler_to_finish.wait()
+        except asyncio.CancelledError:
+            handler_cancelled.set()
+            raise
+        handled_events.append(cast(RawResponsesStreamEvent, payload["event"]))
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_stream_error",
+        arguments='{"input": "go"}',
+        call_id="call-stream-error",
+        name="stream_tool",
+        type="function_call",
+    )
+    tool = agent.as_tool(
+        tool_name="stream_tool",
+        tool_description="Streams events",
+        on_stream=on_stream,
+        failure_error_function=None,
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+
+    async def invoke() -> Any:
+        return await tool.on_invoke_tool(tool_context, '{"input": "go"}')
+
+    invoke_task = asyncio.create_task(invoke())
+
+    try:
+        await asyncio.wait_for(producer_failed.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+
+        assert not invoke_task.done()
+        assert not handler_cancelled.is_set()
+
+        allow_handler_to_finish.set()
+        with pytest.raises(_NestedAgentStreamError, match="nested stream failed"):
+            await asyncio.wait_for(invoke_task, timeout=1.0)
+    finally:
+        if not invoke_task.done():
+            invoke_task.cancel()
+        await asyncio.gather(invoke_task, return_exceptions=True)
+
+    assert handled_events == [stream_event]

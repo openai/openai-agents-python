@@ -2108,3 +2108,191 @@ async def test_codex_tool_argument_errors_respect_tool_data_redaction(
     else:
         assert _CODEX_TOOL_ARGUMENT_SECRET in str(error)
         assert isinstance(error.__cause__, cause_type)
+
+
+class _FatalCodexStreamHandlerError(BaseException):
+    pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "handler_error",
+    [_FatalCodexStreamHandlerError("fatal"), asyncio.CancelledError()],
+    ids=["base_exception", "cancelled_error"],
+)
+async def test_codex_tool_streaming_propagates_base_exception_and_finishes_spans(
+    monkeypatch: pytest.MonkeyPatch,
+    handler_error: BaseException,
+) -> None:
+    class RecordingSpan:
+        def __init__(self) -> None:
+            self.started = False
+            self.finished = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def finish(self) -> None:
+            self.finished = True
+
+    span = RecordingSpan()
+    monkeypatch.setattr(codex_tool_module, "custom_span", lambda **_kwargs: span)
+    source_cancelled = asyncio.Event()
+
+    async def event_stream():
+        yield {
+            "type": "item.started",
+            "item": {
+                "id": "cmd-1",
+                "type": "command_execution",
+                "command": "pwd",
+                "status": "in_progress",
+            },
+        }
+        try:
+            await asyncio.Event().wait()
+        finally:
+            source_cancelled.set()
+
+    def on_stream(payload: CodexToolStreamEvent) -> None:
+        del payload
+        raise handler_error
+
+    context = ToolContext(
+        context=None,
+        tool_name="codex",
+        tool_call_id="call-1",
+        tool_arguments="{}",
+    )
+
+    with pytest.raises(type(handler_error)):
+        await asyncio.wait_for(
+            codex_tool_module._consume_events(
+                event_stream(),
+                {"inputs": [{"type": "text", "text": "hello"}]},
+                context,
+                SimpleNamespace(id="thread-1"),
+                on_stream,
+                64,
+            ),
+            timeout=1.0,
+        )
+
+    assert span.started
+    assert span.finished
+    assert source_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_streaming_parent_cancellation_stops_dispatcher() -> None:
+    handler_started = asyncio.Event()
+    handler_cancelled = asyncio.Event()
+    source_cancelled = asyncio.Event()
+
+    async def event_stream():
+        yield {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        }
+        try:
+            await asyncio.Event().wait()
+        finally:
+            source_cancelled.set()
+
+    async def on_stream(payload: CodexToolStreamEvent) -> None:
+        del payload
+        handler_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            handler_cancelled.set()
+
+    context = ToolContext(
+        context=None,
+        tool_name="codex",
+        tool_call_id="call-1",
+        tool_arguments="{}",
+    )
+    invoke_task = asyncio.create_task(
+        codex_tool_module._consume_events(
+            event_stream(),
+            {"inputs": [{"type": "text", "text": "hello"}]},
+            context,
+            SimpleNamespace(id="thread-1"),
+            on_stream,
+            64,
+        )
+    )
+
+    await asyncio.wait_for(handler_started.wait(), timeout=1.0)
+    invoke_task.cancel()
+
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(invoke_task, timeout=1.0)
+    finally:
+        if not invoke_task.done():
+            invoke_task.cancel()
+        await asyncio.gather(invoke_task, return_exceptions=True)
+
+    assert source_cancelled.is_set()
+    assert handler_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_streaming_drains_events_before_stream_error() -> None:
+    handler_started = asyncio.Event()
+    terminal_event_emitted = asyncio.Event()
+    allow_handler_to_finish = asyncio.Event()
+    handler_cancelled = asyncio.Event()
+    handled_event_types: list[str] = []
+
+    async def event_stream():
+        yield {"type": "turn.started"}
+        await handler_started.wait()
+        terminal_event_emitted.set()
+        yield {"type": "turn.failed", "error": {"message": "boom"}}
+
+    async def on_stream(payload: CodexToolStreamEvent) -> None:
+        if not handled_event_types:
+            handler_started.set()
+            try:
+                await allow_handler_to_finish.wait()
+            except asyncio.CancelledError:
+                handler_cancelled.set()
+                raise
+        handled_event_types.append(payload.event.type)
+
+    context = ToolContext(
+        context=None,
+        tool_name="codex",
+        tool_call_id="call-1",
+        tool_arguments="{}",
+    )
+    invoke_task = asyncio.create_task(
+        codex_tool_module._consume_events(
+            event_stream(),
+            {"inputs": [{"type": "text", "text": "hello"}]},
+            context,
+            SimpleNamespace(id="thread-1"),
+            on_stream,
+            64,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(terminal_event_emitted.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+
+        assert not invoke_task.done()
+        assert not handler_cancelled.is_set()
+
+        allow_handler_to_finish.set()
+        with pytest.raises(UserError, match="Codex turn failed: boom"):
+            await asyncio.wait_for(invoke_task, timeout=1.0)
+    finally:
+        if not invoke_task.done():
+            invoke_task.cancel()
+        await asyncio.gather(invoke_task, return_exceptions=True)
+
+    assert handled_event_types == ["turn.started", "turn.failed"]

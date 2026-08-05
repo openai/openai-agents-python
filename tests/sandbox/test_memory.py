@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -1493,6 +1494,112 @@ async def test_sandbox_memory_unregisters_manager_on_session_close() -> None:
         await session.aclose()
 
         assert memory_manager_module._MEMORY_GENERATION_MANAGERS.get(session) is None
+    finally:
+        await client.delete(session)
+
+
+class _FatalMemoryWorkerError(BaseException):
+    pass
+
+
+@pytest.mark.parametrize(
+    "worker_error",
+    [_FatalMemoryWorkerError("fatal"), asyncio.CancelledError()],
+    ids=["base_exception", "cancelled_error"],
+)
+@pytest.mark.asyncio
+async def test_sandbox_memory_flush_propagates_worker_base_exception_without_hanging(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_error: BaseException,
+) -> None:
+    client = UnixLocalSandboxClient()
+    session = await client.create(manifest=Manifest())
+    memory = _memory_config()
+    manager = get_or_create_memory_generation_manager(session=session, memory=memory)
+
+    async def fail_processing(_rollout_file_name: str) -> None:
+        raise worker_error
+
+    monkeypatch.setattr(manager, "_process_rollout_file", fail_processing)
+
+    try:
+        await manager.enqueue_rollout_payload(
+            {
+                "updated_at": "2026-08-05T00:00:00+00:00",
+                "input": [],
+                "generated_items": [],
+                "terminal_metadata": {
+                    "terminal_state": "completed",
+                    "has_final_output": False,
+                },
+            },
+            rollout_id="fatal-worker",
+        )
+
+        with pytest.raises(type(worker_error)):
+            await asyncio.wait_for(manager.flush(), timeout=1.0)
+
+        assert manager._worker_task is None
+        assert memory_manager_module._MEMORY_GENERATION_MANAGERS.get(session) is None
+    finally:
+        await client.delete(session)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_memory_flush_parent_cancellation_stops_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = UnixLocalSandboxClient()
+    session = await client.create(manifest=Manifest())
+    memory = _memory_config()
+    manager = get_or_create_memory_generation_manager(session=session, memory=memory)
+    worker_started = asyncio.Event()
+    worker_cancelled = asyncio.Event()
+    phase_two_called = False
+
+    async def block_processing(_rollout_file_name: str) -> None:
+        worker_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            worker_cancelled.set()
+
+    async def record_phase_two() -> None:
+        nonlocal phase_two_called
+        phase_two_called = True
+
+    monkeypatch.setattr(manager, "_process_rollout_file", block_processing)
+    monkeypatch.setattr(manager, "_run_phase_two", record_phase_two)
+
+    try:
+        await manager.enqueue_rollout_payload(
+            {
+                "updated_at": "2026-08-05T00:00:00+00:00",
+                "input": [],
+                "generated_items": [],
+                "terminal_metadata": {
+                    "terminal_state": "completed",
+                    "has_final_output": False,
+                },
+            },
+            rollout_id="cancelled-flush",
+        )
+        flush_task = asyncio.create_task(manager.flush())
+        await asyncio.wait_for(worker_started.wait(), timeout=1.0)
+        flush_task.cancel()
+
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(flush_task, timeout=1.0)
+        finally:
+            if not flush_task.done():
+                flush_task.cancel()
+            await asyncio.gather(flush_task, return_exceptions=True)
+
+        assert worker_cancelled.is_set()
+        assert manager._worker_task is None
+        assert memory_manager_module._MEMORY_GENERATION_MANAGERS.get(session) is None
+        assert not phase_two_called
     finally:
         await client.delete(session)
 

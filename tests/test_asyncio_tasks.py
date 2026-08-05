@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from agents.util._asyncio_tasks import gather_with_cancel
+from agents.util._asyncio_tasks import gather_with_cancel, run_producer_consumer
 
 
 @pytest.mark.asyncio
@@ -75,3 +75,57 @@ async def test_gather_with_cancel_does_not_report_parent_cancellation_as_child_f
 
     assert not child_failure_reported.is_set()
     assert loop_errors == []
+
+
+@pytest.mark.asyncio
+async def test_run_producer_consumer_drains_consumer_before_producer_failure() -> None:
+    class ProducerError(Exception):
+        pass
+
+    item_ready = asyncio.Event()
+    allow_consumer_to_finish = asyncio.Event()
+    consumer_finished = asyncio.Event()
+
+    async def producer() -> None:
+        item_ready.set()
+        raise ProducerError("producer failed")
+
+    async def consumer() -> None:
+        await item_ready.wait()
+        await allow_consumer_to_finish.wait()
+        consumer_finished.set()
+
+    task = asyncio.create_task(run_producer_consumer(producer(), consumer()))
+    await item_ready.wait()
+    await asyncio.sleep(0)
+
+    assert not task.done()
+    allow_consumer_to_finish.set()
+
+    with pytest.raises(ProducerError, match="producer failed"):
+        await task
+    assert consumer_finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_run_producer_consumer_cancels_producer_after_consumer_failure() -> None:
+    class ConsumerError(BaseException):
+        pass
+
+    producer_started = asyncio.Event()
+    producer_cancelled = asyncio.Event()
+
+    async def producer() -> None:
+        producer_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            producer_cancelled.set()
+
+    async def consumer() -> None:
+        await producer_started.wait()
+        raise ConsumerError("consumer failed")
+
+    with pytest.raises(ConsumerError, match="consumer failed"):
+        await run_producer_consumer(producer(), consumer())
+    assert producer_cancelled.is_set()

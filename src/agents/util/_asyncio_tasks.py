@@ -11,6 +11,8 @@ T3 = TypeVar("T3")
 T4 = TypeVar("T4")
 T5 = TypeVar("T5")
 T6 = TypeVar("T6")
+TProducer = TypeVar("TProducer")
+TConsumer = TypeVar("TConsumer")
 
 
 def _consume_future_exception(future: asyncio.Future[Any]) -> None:
@@ -104,6 +106,44 @@ async def gather_with_cancel(
             if on_child_failure is not None:
                 on_child_failure()
             raise
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
+async def run_producer_consumer(
+    producer: Awaitable[TProducer],
+    consumer: Awaitable[TConsumer],
+    /,
+) -> tuple[TProducer, TConsumer]:
+    """Run a producer and consumer with asymmetric failure handling.
+
+    The producer must signal completion to the consumer in a ``finally`` block. A producer
+    failure waits for the consumer to drain before propagating, while a consumer failure or
+    parent cancellation cancels and drains the sibling task.
+    """
+    producer_task = asyncio.ensure_future(producer)
+    consumer_task = asyncio.ensure_future(consumer)
+    tasks = (producer_task, consumer_task)
+
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        if consumer_task in done:
+            consumer_result = consumer_task.result()
+            producer_result = await producer_task
+            return producer_result, consumer_result
+
+        try:
+            producer_result = producer_task.result()
+        except BaseException:
+            await consumer_task
+            raise
+
+        consumer_result = await consumer_task
+        return producer_result, consumer_result
     except BaseException:
         for task in tasks:
             if not task.done():
