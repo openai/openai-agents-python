@@ -49,24 +49,48 @@ def _new_trace_impl() -> Trace:
     )
 
 
-@pytest.mark.parametrize("new_trace", [_new_no_op_trace, _new_trace_impl])
-async def test_trace_exit_skips_context_reset_on_generator_exit(
-    new_trace: Callable[[], Trace],
-) -> None:
-    """Abandoned async generators are finalized from a different asyncio task.
-
-    The generator body resumes in the finalizing task's context, so resetting the
-    token saved by ``start`` raises ``ValueError`` because that context never set it.
-    Disabled tracing must behave the same as enabled tracing here.
-    """
-    Scope.set_current_trace(None)
-
+def _traced_stream(new_trace: Callable[[], Trace]) -> AsyncGenerator[int, None]:
     async def stream() -> AsyncGenerator[int, None]:
         with new_trace():
             yield 1
             yield 2
 
-    generator = stream()
+    return stream()
+
+
+@pytest.mark.parametrize("new_trace", [_new_no_op_trace, _new_trace_impl])
+async def test_generator_close_in_the_same_task_releases_the_trace_scope(
+    new_trace: Callable[[], Trace],
+) -> None:
+    """Closing a generator from the task that advanced it must restore the caller's trace.
+
+    ``GeneratorExit`` unwinds the ``with`` block, but the token saved by ``start`` is still
+    valid here because the body resumes in the caller's own context. Skipping the reset
+    would leave the closed trace current and nest every later trace under it.
+    """
+    Scope.set_current_trace(None)
+
+    generator = _traced_stream(new_trace)
+    assert await generator.asend(None) == 1
+    await generator.aclose()
+
+    assert Scope.get_current_trace() is None
+
+
+@pytest.mark.parametrize("new_trace", [_new_no_op_trace, _new_trace_impl])
+async def test_generator_close_from_another_task_does_not_raise(
+    new_trace: Callable[[], Trace],
+) -> None:
+    """Abandoned async generators are finalized from whichever task runs ``aclose``.
+
+    The body then resumes in a context that never set the token, so ``ContextVar.reset``
+    raises ``ValueError``. That reset cannot succeed from there, and the caller keeps
+    seeing the trace as current, so closing must at least not raise on top of it.
+    Disabled tracing must behave the same as enabled tracing here.
+    """
+    Scope.set_current_trace(None)
+
+    generator = _traced_stream(new_trace)
     assert await generator.asend(None) == 1
     await asyncio.create_task(generator.aclose())
 
