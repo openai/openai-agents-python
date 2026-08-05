@@ -22,7 +22,7 @@ async def _await_mutation(awaitable: Awaitable[_T]) -> _T:
     cancellation: asyncio.CancelledError | None = None
     while True:
         try:
-            return await asyncio.shield(task)
+            result = await asyncio.shield(task)
         except asyncio.CancelledError as exc:
             if cancellation is None:
                 cancellation = exc
@@ -32,12 +32,18 @@ async def _await_mutation(awaitable: Awaitable[_T]) -> _T:
             if cancellation is not None:
                 raise cancellation from None
             raise
+        else:
+            if cancellation is not None:
+                raise cancellation from None
+            return result
 
         try:
-            return task.result()
+            result = task.result()
         except BaseException:
             assert cancellation is not None
             raise cancellation from None
+        assert cancellation is not None
+        raise cancellation from None
 
 
 class SQLiteSession(SessionABC):

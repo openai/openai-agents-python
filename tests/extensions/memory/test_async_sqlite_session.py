@@ -554,12 +554,12 @@ async def test_cancelled_close_finishes_cleanup_and_propagates_cancellation(
 
 
 @pytest.mark.parametrize("operation", ["add", "pop", "clear"])
-async def test_post_commit_cancellation_returns_known_mutation_outcome(
+async def test_post_commit_cancellation_propagates_after_known_mutation_outcome(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
 ):
-    """Cancellation after async commit must not invite a duplicate mutation retry."""
+    """Cancellation after async commit must propagate without inviting a retry."""
     db_path = tmp_path / f"async_post_commit_{operation}.db"
     session = AsyncSQLiteSession(f"async_post_commit_{operation}", db_path)
     item: TResponseInputItem = {"role": "user", "content": "once"}
@@ -596,7 +596,8 @@ async def test_post_commit_cancellation_returns_known_mutation_outcome(
             mutation.cancel()
             await asyncio.sleep(0)
             allow_return.set()
-            result = await mutation
+            with pytest.raises(asyncio.CancelledError):
+                await mutation
         finally:
             allow_return.set()
             if not mutation.done():
@@ -604,14 +605,12 @@ async def test_post_commit_cancellation_returns_known_mutation_outcome(
                 await asyncio.gather(mutation, return_exceptions=True)
 
         if operation == "add":
-            assert result is None
             assert await session.get_items() == [item]
         elif operation == "pop":
-            assert result == item
             assert await session.get_items() == []
         else:
-            assert result is None
             assert await session.get_items() == []
+        assert mutation.cancelled()
     finally:
         await session.close()
 

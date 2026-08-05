@@ -1113,12 +1113,12 @@ async def test_sqlite_session_close_retries_quarantined_connection(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["add", "pop", "clear"])
-async def test_sqlite_session_post_commit_cancellation_returns_known_outcome(
+async def test_sqlite_session_post_commit_cancellation_propagates_after_known_outcome(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
 ):
-    """Cancellation after a worker commit must not invite a duplicate mutation retry."""
+    """Cancellation after a worker commit must propagate without inviting a retry."""
 
     class PausingCommitConnection(sqlite3.Connection):
         pause_commit = False
@@ -1162,7 +1162,8 @@ async def test_sqlite_session_post_commit_cancellation_returns_known_outcome(
         mutation.cancel()
         await asyncio.sleep(0)
         conn.allow_return.set()
-        result = await mutation
+        with pytest.raises(asyncio.CancelledError):
+            await mutation
     finally:
         conn.allow_return.set()
         if not mutation.done():
@@ -1170,12 +1171,10 @@ async def test_sqlite_session_post_commit_cancellation_returns_known_outcome(
             await asyncio.gather(mutation, return_exceptions=True)
 
     if operation == "add":
-        assert result is None
         assert await session.get_items() == [item]
     elif operation == "pop":
-        assert result == item
         assert await session.get_items() == []
     else:
-        assert result is None
         assert await session.get_items() == []
+    assert mutation.cancelled()
     session.close()
