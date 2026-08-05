@@ -38,7 +38,11 @@ from agents.handoffs import (
     reset_conversation_history_wrappers,
     set_conversation_history_wrappers,
 )
-from agents.handoffs.history import _get_nested_history_owned_items
+from agents.handoffs.history import (
+    _extract_nested_history_transcript,
+    _get_nested_history_owned_items,
+    get_conversation_history_wrappers,
+)
 from agents.items import (
     HandoffCallItem,
     HandoffOutputItem,
@@ -2298,3 +2302,111 @@ async def test_first_nested_handoff_after_restore_uses_explicit_occurrence_linea
     expected_occurrences = 2 if legacy_snapshot else 1
     assert replay_types.count("tool_search_call") == expected_occurrences
     assert replay_types.count("tool_search_output") == expected_occurrences
+
+
+@pytest.mark.parametrize(
+    "empty_item",
+    [
+        {"role": "user", "content": ""},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": None},
+        {"role": "user", "name": "bob", "content": ""},
+    ],
+    ids=["user_empty", "assistant_empty", "user_none", "named_empty"],
+)
+def test_nested_history_keeps_turns_with_no_content(empty_item: dict[str, Any]) -> None:
+    """A turn with no content must survive being summarized and flattened again.
+
+    An empty turn was rendered as a bare role with no separator, and the parser that
+    flattens the summary on the next handoff requires one, so the turn was dropped. The
+    next agent then saw a transcript with a turn missing, which also breaks the
+    user/assistant alternation.
+    """
+    history = (
+        {"role": "user", "content": "first question"},
+        empty_item,
+        {"role": "user", "content": "second question"},
+    )
+    data = HandoffInputData(
+        input_history=cast(Any, history),
+        pre_handoff_items=(),
+        new_items=(),
+        run_context=None,
+    )
+
+    nested = nest_handoff_history(data)
+    transcript = _extract_nested_history_transcript(cast(Any, nested.input_history)[0])
+
+    assert transcript is not None
+    assert len(transcript) == len(history)
+    assert [item.get("role") for item in transcript] == ["user", empty_item["role"], "user"]
+
+
+def test_nested_history_survives_repeated_handoffs() -> None:
+    """Flattening and re-nesting must not shed the empty turn on each hop."""
+    history = (
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": "second question"},
+    )
+    data = HandoffInputData(
+        input_history=cast(Any, history),
+        pre_handoff_items=(),
+        new_items=(),
+        run_context=None,
+    )
+
+    nested = nest_handoff_history(data)
+    for _ in range(3):
+        nested = nest_handoff_history(nested)
+        transcript = _extract_nested_history_transcript(cast(Any, nested.input_history)[0])
+        assert transcript is not None
+        assert len(transcript) == len(history)
+
+
+def test_bare_role_record_from_an_older_summary_is_recovered() -> None:
+    """Summaries written before the separator was always emitted must still flatten."""
+    start_marker, end_marker = get_conversation_history_wrappers()
+    legacy = {
+        "role": "assistant",
+        "content": "\n".join(
+            [
+                "For context, here is the conversation so far between the user and the "
+                "previous agent:",
+                start_marker,
+                "1. user: first question",
+                "2. assistant",
+                "3. user: second question",
+                end_marker,
+            ]
+        ),
+    }
+
+    transcript = _extract_nested_history_transcript(cast(Any, legacy))
+
+    assert transcript is not None
+    assert [item.get("role") for item in transcript] == ["user", "assistant", "user"]
+
+
+def test_prose_inside_the_summary_block_is_still_rejected() -> None:
+    """The bare-role recovery must not turn arbitrary text into a fabricated turn."""
+    start_marker, end_marker = get_conversation_history_wrappers()
+    with_prose = {
+        "role": "assistant",
+        "content": "\n".join(
+            [
+                "For context, here is the conversation so far between the user and the "
+                "previous agent:",
+                start_marker,
+                "1. user: first question",
+                "some stray prose with no separator",
+                "3. user: second question",
+                end_marker,
+            ]
+        ),
+    }
+
+    transcript = _extract_nested_history_transcript(cast(Any, with_prose))
+
+    assert transcript is not None
+    assert [item.get("role") for item in transcript] == ["user", "user"]
