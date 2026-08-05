@@ -2128,6 +2128,32 @@ async def test_input_guardrail_exception_reports_completed_results():
     assert _result_names(collected) == ["passes"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run_in_parallel", [False, True])
+async def test_input_guardrail_exception_reports_completed_results_streamed(
+    run_in_parallel: bool,
+):
+    """A streamed guardrail raising a non-tripwire error still reports earlier results."""
+    model = FakeModel()
+    model.set_next_output([get_text_message("hello")])
+    agent = Agent(
+        name="guardrail_results_agent",
+        model=model,
+        input_guardrails=_ordered_input_guardrails(
+            second_triggers=False,
+            second_raises=True,
+            run_in_parallel=run_in_parallel,
+        ),
+    )
+
+    result = Runner.run_streamed(agent, "test input")
+    with pytest.raises(RuntimeError, match="guardrail exploded"):
+        async for _ in result.stream_events():
+            pass
+
+    assert _result_names(result.input_guardrail_results) == ["passes"]
+
+
 def _ordered_output_guardrails(
     *, second_triggers: bool, second_raises: bool = False
 ) -> list[OutputGuardrail[Any]]:
@@ -2239,3 +2265,22 @@ async def test_output_guardrail_exception_reports_completed_results():
         )
 
     assert _result_names(collected) == ["passes"]
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_exception_reports_completed_results_streamed():
+    """A streamed output guardrail raising a non-tripwire error still reports earlier results."""
+    model = FakeModel()
+    model.set_next_output([get_text_message("hello")])
+    agent = Agent(
+        name="output_guardrail_results_agent",
+        model=model,
+        output_guardrails=_ordered_output_guardrails(second_triggers=False, second_raises=True),
+    )
+
+    result = Runner.run_streamed(agent, "test input")
+    with pytest.raises(RuntimeError, match="guardrail exploded"):
+        async for _ in result.stream_events():
+            pass
+
+    assert _result_names(result.output_guardrail_results) == ["passes"]

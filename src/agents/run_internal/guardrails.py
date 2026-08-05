@@ -67,16 +67,16 @@ async def run_input_guardrails_with_queue(
         asyncio.create_task(run_single_input_guardrail(agent, guardrail, input, context))
         for guardrail in guardrails
     ]
-    guardrail_results = []
     try:
         for done in asyncio.as_completed(guardrail_tasks):
             result = await done
-            guardrail_results.append(result)
+            # Publish into the runner-owned accumulator as each guardrail completes, so no exit
+            # path can omit results that already finished. This mirrors how the non-streamed
+            # `run_input_guardrails` records into its caller-owned sink.
+            streamed_result.input_guardrail_results = streamed_result.input_guardrail_results + [
+                result
+            ]
             if result.output.tripwire_triggered:
-                streamed_result.input_guardrail_results = (
-                    streamed_result.input_guardrail_results + guardrail_results
-                )
-                guardrail_results = []
                 streamed_result._triggered_input_guardrail_result = result
                 queue.put_nowait(result)
                 for t in guardrail_tasks:
@@ -110,10 +110,6 @@ async def run_input_guardrails_with_queue(
                 streamed_result.run_loop_task.cancel()
             streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
         raise
-
-    streamed_result.input_guardrail_results = (
-        streamed_result.input_guardrail_results + guardrail_results
-    )
 
 
 async def run_input_guardrails(

@@ -431,15 +431,17 @@ async def _run_output_guardrails_for_stream(
 
     try:
         return cast(list[Any], await streamed_result._output_guardrails_task)
-    except OutputGuardrailTripwireTriggered:
-        streamed_result.output_guardrail_results = (
-            streamed_result.output_guardrail_results + completed_results
-        )
-        raise
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        log_model_action_error(logger, "Unexpected error in output guardrails", exc)
+        # Publish at a single boundary so no failure path can omit results that already
+        # finished. A guardrail raising a non-tripwire error reports the same completed
+        # results a tripwire does.
+        streamed_result.output_guardrail_results = (
+            streamed_result.output_guardrail_results + completed_results
+        )
+        if not isinstance(exc, OutputGuardrailTripwireTriggered):
+            log_model_action_error(logger, "Unexpected error in output guardrails", exc)
         raise
 
 
