@@ -1113,6 +1113,19 @@ def test_any_llm_provider_passes_api_override() -> None:
     assert model.api == "chat_completions"
 
 
+def test_any_llm_provider_reads_default_model_at_call_time(monkeypatch: Any) -> None:
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
+    from agents.extensions.models.any_llm_provider import AnyLLMProvider
+
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-4.1")
+    provider = AnyLLMProvider()
+
+    assert cast(Any, provider.get_model(None)).model == "openai/gpt-4.1"
+
+
 def test_any_llm_reasoning_objects_prefer_content_attributes_over_iterable_pairs() -> None:
     pytest.importorskip(
         "any_llm",
