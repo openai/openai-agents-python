@@ -97,6 +97,7 @@ from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData, TaskSpanData
 from ..usage import Usage, _response_usage_to_usage
 from ..util import _coro, _error_tracing
+from ..util._asyncio_tasks import gather_with_cancel
 from .agent_bindings import AgentBindings, bind_public_agent
 from .agent_runner_helpers import (
     apply_resumed_conversation_settings,
@@ -1544,7 +1545,7 @@ async def run_single_turn_streamed(
             _approvals=context_wrapper._approvals,
             turn_input=turn_input,
         )
-        await asyncio.gather(
+        await gather_with_cancel(
             hooks.on_agent_start(agent_hook_context, public_agent),
             (
                 public_agent.hooks.on_start(agent_hook_context, public_agent)
@@ -1558,7 +1559,7 @@ async def run_single_turn_streamed(
     streamed_result.current_agent = public_agent
     streamed_result._current_agent_output_schema = get_output_schema(public_agent)
 
-    system_prompt, prompt_config = await asyncio.gather(
+    system_prompt, prompt_config = await gather_with_cancel(
         execution_agent.get_system_prompt(context_wrapper),
         execution_agent.get_prompt(context_wrapper),
     )
@@ -1642,7 +1643,7 @@ async def run_single_turn_streamed(
         # explicitly rewind this state before replaying a failed request.
         server_conversation_tracker.mark_input_as_sent(filtered.input)
 
-    await asyncio.gather(
+    await gather_with_cancel(
         hooks.on_llm_start(context_wrapper, public_agent, filtered.instructions, filtered.input),
         (
             public_agent.hooks.on_llm_start(
@@ -1879,7 +1880,7 @@ async def run_single_turn_streamed(
 
     if final_response is not None:
         context_wrapper.usage.add(final_response.usage)
-        await asyncio.gather(
+        await gather_with_cancel(
             (
                 public_agent.hooks.on_llm_end(context_wrapper, public_agent, final_response)
                 if public_agent.hooks
@@ -1993,7 +1994,7 @@ async def run_single_turn(
             _approvals=context_wrapper._approvals,
             turn_input=turn_input,
         )
-        await asyncio.gather(
+        await gather_with_cancel(
             hooks.on_agent_start(agent_hook_context, public_agent),
             (
                 public_agent.hooks.on_start(agent_hook_context, public_agent)
@@ -2002,7 +2003,7 @@ async def run_single_turn(
             ),
         )
 
-    system_prompt, prompt_config = await asyncio.gather(
+    system_prompt, prompt_config = await gather_with_cancel(
         execution_agent.get_system_prompt(context_wrapper),
         execution_agent.get_prompt(context_wrapper),
     )
@@ -2100,7 +2101,7 @@ async def get_new_response(
     if server_conversation_tracker is not None:
         server_conversation_tracker.mark_input_as_sent(filtered.input)
 
-    await asyncio.gather(
+    await gather_with_cancel(
         hooks.on_llm_start(context_wrapper, public_agent, filtered.instructions, filtered.input),
         (
             public_agent.hooks.on_llm_start(
@@ -2180,7 +2181,7 @@ async def get_new_response(
 
     context_wrapper.usage.add(new_response.usage)
 
-    await asyncio.gather(
+    await gather_with_cancel(
         (
             public_agent.hooks.on_llm_end(context_wrapper, public_agent, new_response)
             if public_agent.hooks

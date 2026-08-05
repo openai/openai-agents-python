@@ -25,6 +25,7 @@ from ..items import (
 from ..run_context import RunContextWrapper
 from ..tool import FunctionTool, MCPToolApprovalRequest, get_function_tool_origin
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
+from ..util._asyncio_tasks import gather_with_cancel
 from .agent_bindings import AgentBindings
 from .run_steps import (
     ToolRunApplyPatchCall,
@@ -136,7 +137,7 @@ async def execute_mcp_approval_requests(
         )
 
     tasks = [run_single_approval(approval_request) for approval_request in approval_requests]
-    return await asyncio.gather(*tasks)
+    return list(await gather_with_cancel(*tasks))
 
 
 def _build_tool_output_index(items: Sequence[RunItem]) -> set[tuple[str, str]]:
@@ -582,6 +583,7 @@ async def _execute_tool_plan(
         )
     )
     if parallel:
+        sibling_category_failure = asyncio.Event()
         (
             (function_results, tool_input_guardrail_results, tool_output_guardrail_results),
             computer_results,
@@ -589,7 +591,7 @@ async def _execute_tool_plan(
             shell_results,
             apply_patch_results,
             local_shell_results,
-        ) = await asyncio.gather(
+        ) = await gather_with_cancel(
             execute_function_tool_calls(
                 bindings=bindings,
                 tool_runs=plan.function_runs,
@@ -597,6 +599,7 @@ async def _execute_tool_plan(
                 context_wrapper=context_wrapper,
                 config=run_config,
                 isolate_parallel_failures=isolate_function_tool_failures,
+                sibling_category_failure=sibling_category_failure,
             ),
             execute_computer_actions(
                 public_agent=public_agent,
@@ -633,6 +636,7 @@ async def _execute_tool_plan(
                 context_wrapper=context_wrapper,
                 config=run_config,
             ),
+            on_child_failure=sibling_category_failure.set,
         )
     else:
         (

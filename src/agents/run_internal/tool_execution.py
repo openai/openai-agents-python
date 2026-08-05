@@ -602,7 +602,7 @@ async def initialize_computer_tools(
         tool for tool in computer_tools if _computer_tool_uses_run_scoped_initializer(tool)
     }
 
-    resolved_computers = await asyncio.gather(
+    resolved_computers = await gather_with_cancel(
         *(resolve_computer(tool=tool, run_context=context_wrapper) for tool in computer_tools)
     )
     resolved_by_tool = dict(zip(computer_tools, resolved_computers, strict=True))
@@ -1456,6 +1456,7 @@ class _FunctionToolBatchExecutor:
         context_wrapper: RunContextWrapper[Any],
         config: RunConfig,
         isolate_parallel_failures: bool | None,
+        sibling_category_failure: asyncio.Event | None,
     ) -> None:
         self.execution_agent = bindings.execution_agent
         self.public_agent = bindings.public_agent
@@ -1466,6 +1467,7 @@ class _FunctionToolBatchExecutor:
         self.isolate_parallel_failures = (
             len(tool_runs) > 1 if isolate_parallel_failures is None else isolate_parallel_failures
         )
+        self.sibling_category_failure = sibling_category_failure
         self.tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
         self.tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
         self.tool_state_scope_id = get_agent_tool_state_scope(context_wrapper)
@@ -1516,7 +1518,10 @@ class _FunctionToolBatchExecutor:
         except asyncio.CancelledError as exc:
             if self.propagating_failure is exc:
                 raise
-            self._cancel_pending_tasks_for_parent_cancellation()
+            if self.sibling_category_failure is not None and self.sibling_category_failure.is_set():
+                await self._drain_pending_tasks_for_sibling_category_failure()
+            else:
+                self._cancel_pending_tasks_for_parent_cancellation()
             raise
 
         return (
@@ -1634,6 +1639,30 @@ class _FunctionToolBatchExecutor:
             failure_sources_by_task=post_invoke_failure_sources,
             timeout_seconds=_FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS,
         )
+
+    async def _drain_pending_tasks_for_sibling_category_failure(self) -> None:
+        """Settle nested function tasks after another tool category fails."""
+        cancellable_tasks, post_invoke_tasks = self._partition_pending_tasks()
+        self.teardown_cancelled_tasks.update(cancellable_tasks)
+        _cancel_function_tool_tasks(cancellable_tasks)
+
+        try:
+            _, remaining_cancelled_tasks = await self._drain_cancelled_tasks(cancellable_tasks)
+            _, remaining_post_invoke_tasks = await self._wait_post_invoke_tasks(post_invoke_tasks)
+        except BaseException:
+            self._cancel_pending_tasks_for_parent_cancellation()
+            self.pending_tasks = set()
+            raise
+
+        _attach_function_tool_task_result_callbacks(
+            remaining_cancelled_tasks,
+            message_for_exception=_background_cleanup_task_exception_message,
+        )
+        _attach_function_tool_task_result_callbacks(
+            remaining_post_invoke_tasks,
+            message_for_exception=_background_post_invoke_task_exception_message,
+        )
+        self.pending_tasks = set()
 
     def _cancel_pending_tasks_for_parent_cancellation(self) -> None:
         self.teardown_cancelled_tasks.update(self.pending_tasks)
@@ -1862,7 +1891,7 @@ class _FunctionToolBatchExecutor:
             self.schema_bypassed_tool_runs.add(id(task_state.tool_run))
             return rejected_message
 
-        await asyncio.gather(
+        await gather_with_cancel(
             self.hooks.on_tool_start(tool_context, self.public_agent, func_tool),
             (
                 agent_hooks.on_tool_start(tool_context, self.public_agent, func_tool)
@@ -1978,7 +2007,7 @@ class _FunctionToolBatchExecutor:
         if custom_data:
             self.custom_data_by_tool_run[id(task_state.tool_run)] = custom_data
 
-        await asyncio.gather(
+        await gather_with_cancel(
             self.hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result),
             (
                 agent_hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result)
@@ -2134,6 +2163,7 @@ async def execute_function_tool_calls(
     context_wrapper: RunContextWrapper[Any],
     config: RunConfig,
     isolate_parallel_failures: bool | None = None,
+    sibling_category_failure: asyncio.Event | None = None,
 ) -> tuple[
     list[FunctionToolResult], list[ToolInputGuardrailResult], list[ToolOutputGuardrailResult]
 ]:
@@ -2145,6 +2175,7 @@ async def execute_function_tool_calls(
         context_wrapper=context_wrapper,
         config=config,
         isolate_parallel_failures=isolate_parallel_failures,
+        sibling_category_failure=sibling_category_failure,
     ).execute()
 
 
