@@ -1628,9 +1628,39 @@ def test_sse_event_is_not_split_when_crlf_straddles_a_chunk_boundary() -> None:
         assert _events(_decode_in_chunks(stream, size)) == whole, f"chunk size {size}"
 
 
-def test_sse_line_decoder_flush_does_not_emit_a_phantom_line_for_a_trailing_cr() -> None:
-    """A stream ending on a lone CR closes its line without adding a blank one."""
+def test_sse_line_decoder_delivers_a_cr_terminated_line_immediately() -> None:
+    """A CR is a complete line ending, so the line must not wait for the next chunk.
+
+    Holding it back to learn whether a LF follows would delay every CR-terminated line
+    until more bytes arrive or the stream ends.
+    """
     decoder = _SSELineDecoder()
 
-    assert decoder.decode("data: a\r") == []
-    assert decoder.flush() == ["data: a"]
+    assert decoder.decode("data: a\r") == ["data: a"]
+    # The LF is the second half of that CRLF, not a blank line, so it yields nothing.
+    assert decoder.decode("\n") == []
+    assert decoder.flush() == []
+
+
+def test_sse_line_decoder_dispatches_a_cr_only_blank_line_without_more_input() -> None:
+    """A CR-only blank line must dispatch its event without another chunk or EOF."""
+    decoder = _SSELineDecoder()
+    sse = _SSEDecoder()
+
+    lines = decoder.decode("data: a\r\r")
+
+    assert lines == ["data: a", ""]
+    events = [event for event in (sse.decode(line) for line in lines) if event is not None]
+    assert [(event.event, event.data) for event in events] == [("message", "a")]
+
+
+def test_sse_line_decoder_flush_emits_only_an_unterminated_line() -> None:
+    """A stream ending on a lone CR already delivered its line, so flush adds nothing."""
+    decoder = _SSELineDecoder()
+
+    assert decoder.decode("data: a\r") == ["data: a"]
+    assert decoder.flush() == []
+
+    partial = _SSELineDecoder()
+    assert partial.decode("data: b") == []
+    assert partial.flush() == ["data: b"]

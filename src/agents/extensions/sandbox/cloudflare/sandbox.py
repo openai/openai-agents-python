@@ -207,12 +207,22 @@ class _ServerSentEvent:
 
 class _SSELineDecoder:
     _buf: bytes
+    _skip_leading_lf: bool
 
     def __init__(self) -> None:
         self._buf = b""
+        self._skip_leading_lf = False
 
     def decode(self, text: str) -> list[str]:
-        raw = self._buf + text.encode("utf-8")
+        data = text.encode("utf-8")
+        if self._skip_leading_lf and data:
+            # The previous chunk ended on a CR, which already terminated its line. A LF
+            # opening this chunk is the second half of that CRLF, so consume it instead of
+            # reading it as a blank line, which SSE treats as an event dispatch.
+            self._skip_leading_lf = False
+            if data.startswith(b"\n"):
+                data = data[1:]
+        raw = self._buf + data
         self._buf = b""
 
         lines: list[str] = []
@@ -231,13 +241,13 @@ class _SSELineDecoder:
                 if cr + 1 < length and raw[cr + 1 : cr + 2] == b"\n":
                     i = cr + 2
                 elif cr + 1 == length:
-                    # The CR is the last byte available, so it is either a lone CR
-                    # terminator or the first half of a CRLF split across chunks. Keep the
-                    # unterminated line and decide once the next chunk arrives. Emitting it
-                    # now would leave the following LF to be read as an empty line, and an
-                    # empty line dispatches the event, splitting one multi-line SSE event
-                    # into several.
-                    self._buf = raw[i:]
+                    # A CR is a complete line ending on its own, so deliver the line now
+                    # rather than waiting to learn whether a LF follows. Only remember that
+                    # a LF opening the next chunk belongs to this CRLF; without that, the
+                    # LF reads as a blank line and dispatches the event early, splitting one
+                    # multi-line event into several.
+                    self._skip_leading_lf = True
+                    lines.append(line.decode("utf-8"))
                     break
                 else:
                     i = cr + 1
@@ -252,12 +262,10 @@ class _SSELineDecoder:
     def flush(self) -> list[str]:
         buf = self._buf
         self._buf = b""
+        # A trailing CR already delivered its line, so there is nothing pending for it here.
+        self._skip_leading_lf = False
         if not buf:
             return []
-        if buf.endswith(b"\r"):
-            # A CR held back by decode() turned out to end the stream, so it is a lone CR
-            # terminator and the line it closes is the last one.
-            return [buf[:-1].decode("utf-8")]
         return [buf.decode("utf-8")]
 
 
