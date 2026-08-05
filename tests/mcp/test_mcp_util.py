@@ -1890,11 +1890,18 @@ class StructuredContentTestServer(FakeMCPServer):
         self.use_structured_content = use_structured_content
         self._test_content: list[Any] = []
         self._test_structured_content: dict[str, Any] | None = None
+        self._test_is_error: bool | None = None
 
-    def set_test_result(self, content: list[Any], structured_content: dict[str, Any] | None = None):
+    def set_test_result(
+        self,
+        content: list[Any],
+        structured_content: dict[str, Any] | None = None,
+        is_error: bool | None = None,
+    ):
         """Set the content and structured content that will be returned by call_tool."""
         self._test_content = content
         self._test_structured_content = structured_content
+        self._test_is_error = is_error
 
     async def call_tool(
         self,
@@ -1905,8 +1912,13 @@ class StructuredContentTestServer(FakeMCPServer):
         """Return test result with specified content and structured content."""
         self.tool_calls.append(tool_name)
 
+        extra: dict[str, Any] = {}
+        if self._test_is_error is not None:
+            extra["isError"] = self._test_is_error
         return CallToolResult(
-            content=self._test_content, structuredContent=self._test_structured_content
+            content=self._test_content,
+            structuredContent=self._test_structured_content,
+            **extra,
         )
 
 
@@ -1999,6 +2011,46 @@ async def test_structured_content_handling(
 
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
     assert result == expected_output
+
+
+@pytest.mark.asyncio
+async def test_structured_content_skipped_for_error_results():
+    """A result flagged as an error keeps the content that carries the error text."""
+
+    server = StructuredContentTestServer(use_structured_content=True)
+    server.add_tool("failing_tool", {})
+    server.set_test_result(
+        [TextContent(text="database connection refused", type="text")],
+        {"answer": 42},
+        is_error=True,
+    )
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="failing_tool", inputSchema={})
+
+    result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+    assert result == {"type": "text", "text": "database connection refused"}
+
+
+@pytest.mark.asyncio
+async def test_structured_content_used_for_non_error_results():
+    """An explicit isError=False result still prefers structured content."""
+
+    server = StructuredContentTestServer(use_structured_content=True)
+    server.add_tool("ok_tool", {})
+    server.set_test_result(
+        [TextContent(text="ignored", type="text")],
+        {"answer": 42},
+        is_error=False,
+    )
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="ok_tool", inputSchema={})
+
+    result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+    assert result == '{"answer": 42}'
 
 
 @pytest.mark.asyncio
