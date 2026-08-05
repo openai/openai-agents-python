@@ -30,7 +30,12 @@ def get_sentence_based_splitter(
         if len(sentences) >= 1:
             combined_sentences = " ".join(sentences[:-1])
             if len(combined_sentences) >= min_sentence_length:
-                remaining_text_buffer = sentences[-1]
+                # Carry any trailing whitespace over to the remainder. It separates the text
+                # held back from the next streamed delta, and stripping it concatenates the
+                # next word onto the last one, so "He " followed by "arrived" is spoken as
+                # "Hearrived".
+                trailing_whitespace = text_buffer[len(text_buffer.rstrip()) :]
+                remaining_text_buffer = sentences[-1] + trailing_whitespace
                 return combined_sentences, remaining_text_buffer
         return "", text_buffer
 
