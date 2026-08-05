@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypeVar
 
+from .. import _debug
 from ..exceptions import ModelBehaviorError
 from ..tracing import SpanError
 from ._error_tracing import attach_error_to_current_span
@@ -32,9 +33,16 @@ def validate_json(
                 data={},
             )
         )
-        raise ModelBehaviorError(
-            f"Invalid JSON when parsing {json_str} for {type_adapter}; {e}"
-        ) from e
+        if not _debug.DONT_LOG_MODEL_DATA:
+            raise ModelBehaviorError(
+                f"Invalid JSON when parsing {json_str} for {type_adapter}; {e}"
+            ) from e
+
+    # Only reachable when the model-data policy suppressed the detailed error above. This is
+    # raised outside the except block on purpose: chaining it would keep the ValidationError
+    # reachable through __cause__ and __context__, and that error embeds the offending model
+    # output in its own message.
+    raise ModelBehaviorError(f"Invalid JSON when parsing model output for {type_adapter}")
 
 
 def _to_dump_compatible(obj: Any) -> Any:

@@ -20,7 +20,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 from openai import AsyncOpenAI
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 import agents._debug as _debug
 from agents import (
@@ -31,9 +31,11 @@ from agents import (
     OpenAIResponsesModel,
     RunConfig,
     RunContextWrapper,
+    Runner,
     function_tool,
     trace,
 )
+from agents.agent_output import AgentOutputSchema
 from agents.logger import (
     log_model_action_debug,
     log_model_action_error,
@@ -56,6 +58,10 @@ from agents.tracing.processor_interface import TracingProcessor
 from agents.tracing.provider import SynchronousMultiTracingProcessor
 from agents.tracing.spans import Span
 from agents.tracing.traces import Trace
+from agents.util._json import validate_json
+
+from .fake_model import FakeModel
+from .test_responses import get_text_message
 
 _SECRET = "super secret prompt content"
 
@@ -858,3 +864,85 @@ async def test_agent_tool_validation_error_preserves_diagnostics_when_tool_data_
     error = exc_info.value
     assert _TOOL_ARGUMENT_SECRET in str(error)
     assert isinstance(error.__cause__, ValidationError)
+
+
+_MODEL_OUTPUT_SECRET = "SECRET_MODEL_OUTPUT_123"
+
+
+class _RequiredOutput(BaseModel):
+    answer: str
+    count: int
+
+
+def _output_schema() -> AgentOutputSchema:
+    return AgentOutputSchema(_RequiredOutput)
+
+
+def test_output_schema_validation_error_redacts_payload_when_model_data_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The model output must not reach the error when model-data logging is disabled.
+
+    The message embedded the raw JSON, and the chained ValidationError carries the same
+    payload again in its own ``input_value``, so both have to go.
+    """
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        _output_schema().validate_json(payload)
+
+    error = exc_info.value
+    assert _MODEL_OUTPUT_SECRET not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+def test_output_schema_validation_error_preserves_diagnostics_when_model_data_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
+    payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        _output_schema().validate_json(payload)
+
+    error = exc_info.value
+    assert _MODEL_OUTPUT_SECRET in str(error)
+    assert isinstance(error.__cause__, ValidationError)
+
+
+def test_handoff_input_validation_error_redacts_payload_when_model_data_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Handoff arguments are model output too, so they follow the same policy."""
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        validate_json(payload, TypeAdapter(_RequiredOutput), partial=False)
+
+    error = exc_info.value
+    assert _MODEL_OUTPUT_SECRET not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_run_surfaces_redacted_output_validation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end: a run whose model output fails validation must not leak it."""
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+
+    model = FakeModel()
+    agent = Agent(name="A", model=model, output_type=_RequiredOutput)
+    model.set_next_output([get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await Runner.run(agent, "go")
+
+    error = exc_info.value
+    assert _MODEL_OUTPUT_SECRET not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
