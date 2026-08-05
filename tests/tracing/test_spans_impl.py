@@ -1,6 +1,6 @@
 import asyncio
 from collections.abc import AsyncGenerator, Callable
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -123,5 +123,40 @@ async def test_explicit_finish_from_another_context_still_raises(
             span.finish(reset_current=True)
 
     await asyncio.create_task(finish_elsewhere())
+
+    Scope.set_current_span(None)
+
+
+async def test_generator_close_surfaces_processor_failure() -> None:
+    """A processor failing during close must not be mistaken for a foreign token.
+
+    ``finish`` calls ``on_span_end`` before resetting the scope, so catching every
+    ``ValueError`` around the whole call would swallow a processor failure, drop the saved
+    token, and leave the finished span current for everything that ran afterwards.
+    """
+    Scope.set_current_span(None)
+
+    class FailingProcessor(DummyProcessor):
+        def on_span_end(self, span: Span[Any]) -> None:
+            raise ValueError("processor exploded")
+
+    span = SpanImpl(
+        trace_id="trace-processor-failure",
+        span_id="span-processor-failure",
+        parent_id=None,
+        processor=cast(Any, FailingProcessor()),
+        span_data=AgentSpanData(name="processor-failure"),
+        tracing_api_key=None,
+    )
+
+    async def stream() -> AsyncGenerator[int, None]:
+        with span:
+            yield 1
+
+    generator = stream()
+    assert await generator.asend(None) == 1
+
+    with pytest.raises(ValueError, match="processor exploded"):
+        await generator.aclose()
 
     Scope.set_current_span(None)
