@@ -131,7 +131,7 @@ def _populate_state_from_result(
         snapshot_refs,
     )
     state._nested_history_owned_session_item_refs = live_refs
-    state._model_responses = result.raw_responses
+    state._model_responses = list(result.raw_responses)
     state._input_guardrail_results = result.input_guardrail_results
     state._output_guardrail_results = result.output_guardrail_results
     state._tool_input_guardrail_results = result.tool_input_guardrail_results
