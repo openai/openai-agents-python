@@ -184,6 +184,25 @@ class DaprSession(SessionABC):
             metadata["ttlInSeconds"] = str(self._ttl)
         return metadata
 
+    async def _read_created_at(self) -> str | None:
+        """Return the stored creation timestamp, or None when it is missing or unreadable."""
+        response = await self._dapr_client.get_state(
+            store_name=self._state_store_name,
+            key=self._metadata_key,
+            state_metadata=self._get_read_metadata(),
+        )
+        data = response.data
+        if not data:
+            return None
+        try:
+            stored = json.loads(data.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(stored, dict):
+            return None
+        created_at = stored.get("created_at")
+        return created_at if isinstance(created_at, str) and created_at else None
+
     async def _serialize_item(self, item: TResponseInputItem) -> str:
         """Serialize an item to JSON string. Can be overridden by subclasses."""
         return json.dumps(item, separators=(",", ":"))
@@ -362,11 +381,12 @@ class DaprSession(SessionABC):
                         continue
                     raise
 
-            # Update metadata
+            # Update metadata, preserving created_at across subsequent writes.
+            now = str(int(time.time()))
             metadata = {
                 "session_id": self.session_id,
-                "created_at": str(int(time.time())),
-                "updated_at": str(int(time.time())),
+                "created_at": await self._read_created_at() or now,
+                "updated_at": now,
             }
             await self._dapr_client.save_state(
                 store_name=self._state_store_name,

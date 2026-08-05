@@ -1327,3 +1327,27 @@ async def test_dapr_session_operation_waiting_behind_close_raises():
                 task.cancel()
                 with suppress(asyncio.CancelledError, RuntimeError):
                     await task
+
+
+async def test_add_items_preserves_created_at_metadata(
+    fake_dapr_client: FakeDaprClient, monkeypatch: pytest.MonkeyPatch
+):
+    """`created_at` must be set once and not overwritten by subsequent add_items calls."""
+    import agents.extensions.memory.dapr_session as dapr_session_module
+
+    session = await _create_test_session(fake_dapr_client)
+
+    try:
+        monkeypatch.setattr(dapr_session_module.time, "time", lambda: 1000.0)
+        await session.add_items([{"role": "user", "content": "first"}])
+        first = json.loads(fake_dapr_client._state[session._metadata_key].decode("utf-8"))
+        assert first["created_at"] == "1000"
+        assert first["updated_at"] == "1000"
+
+        monkeypatch.setattr(dapr_session_module.time, "time", lambda: 2000.0)
+        await session.add_items([{"role": "user", "content": "second"}])
+        second = json.loads(fake_dapr_client._state[session._metadata_key].decode("utf-8"))
+        assert second["created_at"] == "1000"
+        assert second["updated_at"] == "2000"
+    finally:
+        await session.close()
