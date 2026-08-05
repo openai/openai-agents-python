@@ -156,21 +156,18 @@ def _session_method_accepts_wrapper(method: Any) -> bool:
     """Return whether a session method opts into receiving ``wrapper``.
 
     The public ``Session`` protocol keeps its released signatures so existing structural
-    implementations remain type-compatible. Custom sessions can opt in by adding a keyword
-    parameter named ``wrapper`` or by accepting arbitrary keyword arguments.
+    implementations remain type-compatible. Custom sessions can opt in by adding a ``wrapper``
+    parameter that can be passed by keyword.
     """
     try:
         parameters = inspect.signature(method).parameters.values()
-    except (TypeError, ValueError):
+    except Exception:
         return False
 
     return any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        or (
-            parameter.name == "wrapper"
-            and parameter.kind
-            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-        )
+        parameter.name == "wrapper"
+        and parameter.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
         for parameter in parameters
     )
 

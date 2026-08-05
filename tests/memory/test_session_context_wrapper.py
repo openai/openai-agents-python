@@ -94,6 +94,44 @@ class LegacySession:
         self.items.clear()
 
 
+class LegacyKwargsSession:
+    def __init__(self) -> None:
+        self.session_id = "legacy-kwargs"
+        self.session_settings: SessionSettings | None = None
+        self.items: list[TResponseInputItem] = []
+        self.kwargs_calls: list[dict[str, Any]] = []
+
+    async def get_items(self, limit: int | None = None, **kwargs: Any) -> list[TResponseInputItem]:
+        self.kwargs_calls.append(kwargs)
+        if limit is None:
+            return list(self.items)
+        return list(self.items[-limit:])
+
+    async def add_items(self, items: list[TResponseInputItem], **kwargs: Any) -> None:
+        self.kwargs_calls.append(kwargs)
+        self.items.extend(items)
+
+    async def pop_item(self, **kwargs: Any) -> TResponseInputItem | None:
+        self.kwargs_calls.append(kwargs)
+        return self.items.pop() if self.items else None
+
+    async def clear_session(self, **kwargs: Any) -> None:
+        self.kwargs_calls.append(kwargs)
+        self.items.clear()
+
+
+class UninspectableAsyncMethod:
+    def __init__(self, method: Any) -> None:
+        self.method = method
+
+    @property
+    def __signature__(self) -> Any:
+        raise RuntimeError("signature unavailable")
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.method(*args, **kwargs)
+
+
 @pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.asyncio
 async def test_runner_passes_same_wrapper_to_context_aware_session(streamed: bool) -> None:
@@ -131,6 +169,41 @@ async def test_runner_preserves_legacy_session_call_shapes() -> None:
         "hello",
         context=TenantContext(tenant_id="tenant-a"),
         session=cast(Any, session),
+    )
+
+    assert result.final_output == "ok"
+    assert session.get_calls == 1
+    assert len(session.items) == 2
+
+
+@pytest.mark.asyncio
+async def test_runner_does_not_treat_legacy_kwargs_as_wrapper_opt_in() -> None:
+    session = LegacyKwargsSession()
+    model = FakeModel(initial_output=[get_text_message("ok")])
+
+    result = await Runner.run(
+        Agent(name="test", model=model),
+        "hello",
+        context=TenantContext(tenant_id="tenant-a"),
+        session=session,
+    )
+
+    assert result.final_output == "ok"
+    assert session.kwargs_calls == [{}, {}, {}]
+    assert len(session.items) == 2
+
+
+@pytest.mark.asyncio
+async def test_runner_preserves_legacy_calls_when_signature_inspection_fails() -> None:
+    session = cast(Any, LegacySession())
+    session.get_items = UninspectableAsyncMethod(session.get_items)
+    model = FakeModel(initial_output=[get_text_message("ok")])
+
+    result = await Runner.run(
+        Agent(name="test", model=model),
+        "hello",
+        context=TenantContext(tenant_id="tenant-a"),
+        session=session,
     )
 
     assert result.final_output == "ok"
@@ -356,7 +429,7 @@ async def test_compaction_session_keeps_context_aware_underlying_on_legacy_scope
     assert all(wrapper is None for _, wrapper in underlying.calls)
 
 
-def test_session_wrapper_method_requires_named_keyword_or_kwargs() -> None:
+def test_session_wrapper_method_requires_named_wrapper_parameter() -> None:
     class Methods:
         async def legacy(self) -> None:
             pass
@@ -375,7 +448,7 @@ def test_session_wrapper_method_requires_named_keyword_or_kwargs() -> None:
     assert not _session_method_accepts_wrapper(methods.legacy)
     assert not _session_method_accepts_wrapper(methods.positional_only)
     assert _session_method_accepts_wrapper(methods.keyword)
-    assert _session_method_accepts_wrapper(methods.kwargs)
+    assert not _session_method_accepts_wrapper(methods.kwargs)
 
 
 def test_session_wrapper_opt_in_requires_all_history_operations() -> None:
