@@ -1062,11 +1062,17 @@ async def test_add_items_is_invisible_until_single_document_commit(
     ]
     add_task = asyncio.create_task(session.add_items(batch))
 
-    await insert_started.wait()
-    assert await session.get_items() == [seed]
-    allow_failure.set()
-    with pytest.raises(RuntimeError, match="insert failed"):
-        await add_task
+    try:
+        await asyncio.wait_for(insert_started.wait(), timeout=1)
+        assert await session.get_items() == [seed]
+        allow_failure.set()
+        with pytest.raises(RuntimeError, match="insert failed"):
+            await asyncio.wait_for(add_task, timeout=1)
+    finally:
+        allow_failure.set()
+        if not add_task.done():
+            add_task.cancel()
+        await asyncio.gather(add_task, return_exceptions=True)
 
     assert await session.get_items() == [seed]
 
@@ -1075,7 +1081,9 @@ async def test_add_items_is_invisible_until_single_document_commit(
     assert await session.get_items() == [seed, *batch]
 
 
-async def test_concurrent_pop_item_claims_distinct_items_from_batch() -> None:
+async def test_concurrent_pop_item_claims_distinct_items_from_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Atomic array pops must return each item in a logical batch at most once."""
     MongoDBSession._init_state.clear()
     client = FakeAsyncMongoClient()
@@ -1091,7 +1099,33 @@ async def test_concurrent_pop_item_claims_distinct_items_from_batch() -> None:
     ]
     await session.add_items(items)
 
-    popped = await asyncio.gather(*(session.pop_item() for _ in items))
+    real_to_list = FakeCursor.to_list
+    initial_reads = 0
+    all_initial_reads_ready = asyncio.Event()
+
+    async def pause_initial_candidate_reads(cursor: FakeCursor) -> list[dict[str, Any]]:
+        nonlocal initial_reads
+        docs = [
+            {**doc, "message_data": copy.deepcopy(doc.get("message_data"))}
+            for doc in await real_to_list(cursor)
+        ]
+        if initial_reads < len(items):
+            initial_reads += 1
+            if initial_reads == len(items):
+                all_initial_reads_ready.set()
+            await all_initial_reads_ready.wait()
+        return docs
+
+    monkeypatch.setattr(FakeCursor, "to_list", pause_initial_candidate_reads)
+    tasks = [asyncio.create_task(session.pop_item()) for _ in items]
+    try:
+        popped = await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+    finally:
+        all_initial_reads_ready.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     contents = {cast(dict[str, Any], item).get("content") for item in popped if item is not None}
     assert contents == {

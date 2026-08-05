@@ -265,8 +265,12 @@ async def test_concurrent_pop_item_returns_each_row_once(monkeypatch: pytest.Mon
             return None
 
     class FakeSession:
-        selected_row_id: int | None = None
-        selected_row: str | None = None
+        def __init__(self) -> None:
+            # Model a repeatable-read transaction: selects keep reading this snapshot even
+            # after another transaction deletes from the durable rows mapping.
+            self.snapshot = dict(rows)
+            self.selected_row_id: int | None = None
+            self.selected_row: str | None = None
 
         async def __aenter__(self) -> FakeSession:
             return self
@@ -282,7 +286,7 @@ async def test_concurrent_pop_item_returns_each_row_once(monkeypatch: pytest.Mon
             if isinstance(statement, Select):
                 selected_columns = list(statement.selected_columns.keys())
                 if selected_columns == ["id"]:
-                    self.selected_row_id = max(rows, default=None)
+                    self.selected_row_id = max(self.snapshot, default=None)
                     if first_reads < 2:
                         first_reads += 1
                         if first_reads == 2:
@@ -291,7 +295,7 @@ async def test_concurrent_pop_item_returns_each_row_once(monkeypatch: pytest.Mon
                     return FakeResult(self.selected_row_id)
                 assert selected_columns == ["message_data"]
                 assert self.selected_row_id is not None
-                self.selected_row = rows.get(self.selected_row_id)
+                self.selected_row = self.snapshot.get(self.selected_row_id)
                 if first_payload_reads < 2:
                     first_payload_reads += 1
                     if first_payload_reads == 2:
@@ -312,14 +316,89 @@ async def test_concurrent_pop_item_returns_each_row_once(monkeypatch: pytest.Mon
     async def tables_ready() -> None:
         return None
 
+    session_factory = FakeSessionFactory()
     monkeypatch.setattr(session, "_ensure_tables", tables_ready)
-    monkeypatch.setattr(session, "_session_factory", FakeSessionFactory())
+    monkeypatch.setattr(session, "_session_factory", session_factory)
 
-    popped = await asyncio.gather(session.pop_item(), session.pop_item())
+    tasks = [asyncio.create_task(session.pop_item()) for _ in range(2)]
+    try:
+        popped = await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+    finally:
+        both_read_newest.set()
+        both_read_newest_payload.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await session.engine.dispose()
 
     contents = {cast(dict[str, Any], item)["content"] for item in popped if item is not None}
     assert contents == {"first", "second"}
     assert rows == {}
+
+
+async def test_pop_item_rejects_unknown_delete_rowcount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown DELETE row count cannot authorize a destructive read."""
+    session = SQLAlchemySession.from_url("unknown_rowcount", url=DB_URL, create_tables=False)
+    transaction_exit_errors: list[type[BaseException] | None] = []
+
+    class FakeResult:
+        def __init__(self, scalar: Any = None, rowcount: int = -1) -> None:
+            self._scalar = scalar
+            self.rowcount = rowcount
+
+        def scalar_one_or_none(self) -> Any:
+            return self._scalar
+
+    class FakeTransaction:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            traceback: Any,
+        ) -> None:
+            transaction_exit_errors.append(exc_type)
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        def begin(self) -> FakeTransaction:
+            return FakeTransaction()
+
+        async def execute(self, statement: Any) -> FakeResult:
+            if isinstance(statement, Select):
+                selected_columns = list(statement.selected_columns.keys())
+                if selected_columns == ["id"]:
+                    return FakeResult(1)
+                return FakeResult(json.dumps({"role": "user", "content": "unclaimed"}))
+            return FakeResult(rowcount=-1)
+
+    class FakeSessionFactory:
+        def __call__(self) -> FakeSession:
+            return FakeSession()
+
+    async def tables_ready() -> None:
+        return None
+
+    monkeypatch.setattr(session, "_ensure_tables", tables_ready)
+    monkeypatch.setattr(session, "_session_factory", FakeSessionFactory())
+
+    try:
+        with pytest.raises(RuntimeError, match="confirm that exactly one item was deleted"):
+            await session.pop_item()
+    finally:
+        await session.engine.dispose()
+
+    assert transaction_exit_errors == [RuntimeError]
 
 
 async def test_pop_item_skips_corrupt_most_recent():

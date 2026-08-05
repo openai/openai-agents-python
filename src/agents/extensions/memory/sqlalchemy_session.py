@@ -450,6 +450,14 @@ class SQLAlchemySession(SessionABC):
                         # A concurrent caller claimed this row. Start a new transaction so
                         # dialects with repeatable-read snapshots can observe the next row.
                         continue
+                    if delete_result.rowcount != 1:
+                        # Unknown or unexpected row counts cannot prove that this caller owns
+                        # the destructive read. Raising inside the transaction rolls the DELETE
+                        # back instead of risking the same payload being returned twice.
+                        raise RuntimeError(
+                            "SQLAlchemySession.pop_item() could not confirm that exactly one "
+                            "item was deleted"
+                        )
 
                     if row is None:
                         continue
