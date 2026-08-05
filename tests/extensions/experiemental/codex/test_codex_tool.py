@@ -2108,3 +2108,69 @@ async def test_codex_tool_argument_errors_respect_tool_data_redaction(
     else:
         assert _CODEX_TOOL_ARGUMENT_SECRET in str(error)
         assert isinstance(error.__cause__, cause_type)
+
+
+class _FatalCodexHandlerError(BaseException):
+    """A BaseException, so `_run_handler`'s `except Exception` does not catch it."""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raised",
+    [_FatalCodexHandlerError("fatal"), asyncio.CancelledError()],
+    ids=["base_exception", "cancelled_error"],
+)
+async def test_codex_tool_consume_events_does_not_hang_on_base_exception(
+    raised: BaseException,
+) -> None:
+    """A handler raising a BaseException must not strand `_consume_events`.
+
+    The dispatcher only catches `Exception`, so a BaseException such as `CancelledError`
+    terminates it. Waiting on `event_queue.join()` then waited for `task_done()` calls that
+    could never arrive, deadlocking the tool and leaving the active tracing spans unfinished.
+    """
+    events = [
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "done"},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    async def event_stream():
+        for event in events:
+            yield event
+
+    def on_stream(payload: CodexToolStreamEvent) -> None:
+        del payload
+        raise raised
+
+    context = ToolContext(
+        context=None,
+        tool_name="codex",
+        tool_call_id="call-1",
+        tool_arguments="{}",
+    )
+
+    async def invoke():
+        with trace("codex-test"):
+            return await codex_tool_module._consume_events(
+                event_stream(),
+                {"inputs": [{"type": "text", "text": "hello"}]},
+                context,
+                SimpleNamespace(id="thread-1"),
+                on_stream,
+                64,
+            )
+
+    try:
+        await asyncio.wait_for(invoke(), timeout=5)
+    except asyncio.TimeoutError:
+        pytest.fail("_consume_events deadlocked after the on_stream handler raised")
+    except _FatalCodexHandlerError:
+        pass
+    except asyncio.CancelledError:
+        pass

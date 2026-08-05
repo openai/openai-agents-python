@@ -1115,8 +1115,13 @@ async def _consume_events(
     finally:
         if event_queue is not None:
             await event_queue.put(None)
-            await event_queue.join()
         if dispatch_task is not None:
+            # Wait on the dispatcher itself rather than on the queue draining. The sentinel is
+            # the last item queued and the dispatcher only returns after consuming it, so
+            # awaiting the task already implies every event was handled. Waiting on `join()`
+            # instead would hang forever when a handler raised a BaseException such as
+            # CancelledError, because the dispatcher is then gone and the outstanding
+            # `task_done()` calls can never arrive -- stranding the open spans below too.
             await dispatch_task
 
         # Ensure any open spans are closed even on failure.

@@ -3047,3 +3047,140 @@ def test_replaced_agent_as_tool_preserves_agent_markers_for_build_agent_map() ->
     agent_map = _build_agent_map(parent_agent)
 
     assert agent_map["nested_agent"] is nested_agent
+
+
+class _FatalHandlerError(BaseException):
+    """A BaseException, so it is not caught by the on_stream handler's `except Exception`."""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raised",
+    [_FatalHandlerError("fatal"), asyncio.CancelledError()],
+    ids=["base_exception", "cancelled_error"],
+)
+async def test_agent_as_tool_streaming_does_not_hang_when_handler_raises_base_exception(
+    raised: BaseException,
+) -> None:
+    """A handler raising a BaseException must not strand the run.
+
+    The dispatcher only catches `Exception`, so a BaseException such as `CancelledError`
+    terminates it. Waiting on `event_queue.join()` then waited for `task_done()` calls that
+    could never arrive, deadlocking the tool invocation with no error and no timeout.
+    """
+    agent = Agent(
+        name="streamer",
+        model=FakeModel(
+            initial_output=[
+                ResponseOutputMessage(
+                    id="msg-fatal",
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                    content=[
+                        ResponseOutputText(
+                            annotations=[],
+                            text="streamed",
+                            type="output_text",
+                            logprobs=[],
+                        )
+                    ],
+                )
+            ]
+        ),
+    )
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        del payload
+        raise raised
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_fatal",
+        arguments='{"input": "go"}',
+        call_id="call-fatal",
+        name="stream_tool",
+        type="function_call",
+    )
+    tool = agent.as_tool(
+        tool_name="stream_tool",
+        tool_description="Streams events",
+        on_stream=on_stream,
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+
+    # The call must settle rather than hang; whether it returns or propagates is secondary.
+    try:
+        await asyncio.wait_for(
+            tool.on_invoke_tool(tool_context, '{"input": "go"}'),
+            timeout=5,
+        )
+    except asyncio.TimeoutError:
+        pytest.fail("on_invoke_tool deadlocked after the on_stream handler raised")
+    except _FatalHandlerError:
+        pass
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_streaming_reports_every_event_before_returning() -> None:
+    """Dropping `join()` must not let the tool return before handlers have run."""
+    agent = Agent(
+        name="streamer",
+        model=FakeModel(
+            initial_output=[
+                ResponseOutputMessage(
+                    id="msg-ordered",
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                    content=[
+                        ResponseOutputText(
+                            annotations=[],
+                            text="ordered",
+                            type="output_text",
+                            logprobs=[],
+                        )
+                    ],
+                )
+            ]
+        ),
+    )
+
+    handled: list[str] = []
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        # Yield control so a missing wait would let the tool return first.
+        await asyncio.sleep(0)
+        handled.append(payload["event"].type)
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_ordered",
+        arguments='{"input": "go"}',
+        call_id="call-ordered",
+        name="stream_tool",
+        type="function_call",
+    )
+    tool = agent.as_tool(
+        tool_name="stream_tool",
+        tool_description="Streams events",
+        on_stream=on_stream,
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input": "go"}')
+
+    assert output == "ordered"
+    assert handled, "every streamed event must reach the handler before the tool returns"

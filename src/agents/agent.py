@@ -942,7 +942,13 @@ class Agent(AgentBase, Generic[TContext]):
                                 pass
                         else:
                             await event_queue.put(None)
-                            await event_queue.join()
+                            # Wait on the dispatcher itself rather than on the queue draining.
+                            # The sentinel is the last item queued and the dispatcher only
+                            # returns after consuming it, so awaiting the task already implies
+                            # every event was handled. Waiting on `join()` instead would hang
+                            # forever when a handler raised a BaseException such as
+                            # CancelledError, because the dispatcher is then gone and the
+                            # outstanding `task_done()` calls can never arrive.
                             await dispatch_task
                     run_result = run_result_streaming
                 else:

@@ -131,8 +131,12 @@ class SandboxMemoryGenerationManager:
                 self._ensure_worker()
                 for rollout_file in rollout_files:
                     self._queue.put_nowait(rollout_file)
-                await self._queue.join()
                 if self._worker_task is not None:
+                    # Wait on the worker rather than on the queue draining. The worker consumes
+                    # FIFO and only returns on _STOP, which is queued behind every rollout, so
+                    # awaiting it already implies each one was processed. Waiting on `join()`
+                    # instead would hang forever if the worker died on a BaseException, because
+                    # the outstanding `task_done()` calls can never arrive.
                     self._queue.put_nowait(_STOP)
                     await self._worker_task
                     self._worker_task = None
