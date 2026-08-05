@@ -763,8 +763,10 @@ class MCPUtil:
             logger.debug("MCP tool %s returned %s", tool_name_for_display, result)
 
         # If structured content is requested and available, use it exclusively. Results the
-        # server flagged as errors keep their content, because that is where the error text
-        # lives and structured content is not a valid output payload for a failed call.
+        # server flagged as errors keep their content instead, because that is where the
+        # actionable failure text lives. MCP permits `structuredContent` alongside
+        # `isError`, so this is an error-content precedence policy in this SDK rather than
+        # the structured payload being invalid for a failed call.
         tool_output: ToolOutput
         structured_content = result_structured_content(result)
         if server.use_structured_content and structured_content and not result_is_error(result):
