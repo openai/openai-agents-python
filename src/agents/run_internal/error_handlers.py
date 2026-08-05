@@ -8,7 +8,14 @@ from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
 from ..agent import Agent
 from ..agent_output import _WRAPPER_DICT_KEY, AgentOutputSchema
-from ..exceptions import MaxTurnsExceeded, ModelBehaviorError, ModelRefusalError, UserError
+from ..exceptions import (
+    InputGuardrailTripwireTriggered,
+    MaxTurnsExceeded,
+    ModelBehaviorError,
+    ModelRefusalError,
+    OutputGuardrailTripwireTriggered,
+    UserError,
+)
 from ..items import (
     ItemHelpers,
     MessageOutputItem,
@@ -16,6 +23,7 @@ from ..items import (
     RunItem,
     TResponseInputItem,
 )
+from ..logger import logger
 from ..models.fake_id import FAKE_RESPONSES_ID
 from ..run_context import RunContextWrapper, TContext
 from ..run_error_handlers import (
@@ -24,10 +32,82 @@ from ..run_error_handlers import (
     RunErrorHandlerResult,
     RunErrorHandlers,
 )
+from ..tracing import Span, SpanError
+from ..util import _error_tracing
+from ..util._error_tracing import REDACTED_TRACE_ERROR_MESSAGE
 from .items import ReasoningItemIdPolicy, run_item_to_input_item
 from .turn_preparation import get_output_schema
 
 RunErrorHandlerKind = Literal["max_turns", "model_refusal", "invalid_final_output"]
+
+GENERIC_AGENT_ERROR_MESSAGE = "Error in agent run"
+UNFORMATTABLE_TRACE_ERROR_MESSAGE = "Error details are unavailable."
+
+
+def _is_generic_agent_error(exc: BaseException) -> bool:
+    """Return whether a failed run still needs the generic agent-span error.
+
+    Only ``Exception`` is eligible: the non-streaming handler also catches ``BaseException``, but
+    cancellation is not an agent failure and the streamed path never marks it. Failures that
+    already write their own agent-span error, or that a dedicated child span reports, are excluded
+    so the span keeps the more specific diagnosis.
+    """
+    if not isinstance(exc, Exception):
+        return False
+    return not isinstance(
+        exc,
+        ModelBehaviorError | InputGuardrailTripwireTriggered | OutputGuardrailTripwireTriggered,
+    )
+
+
+def _format_agent_error_detail(exc: BaseException) -> str:
+    """Stringify an exception for tracing without ever raising.
+
+    A custom exception whose ``__str__`` raises must not replace the exception the run is
+    propagating, so the formatting failure is swallowed and reported as a placeholder.
+    """
+    try:
+        return str(exc)
+    except BaseException:
+        return UNFORMATTABLE_TRACE_ERROR_MESSAGE
+
+
+def attach_generic_agent_error(
+    span: Span[Any] | None,
+    exc: BaseException,
+    *,
+    trace_include_sensitive_data: bool,
+) -> None:
+    """Mark the agent span of a failed run with the generic ``Error in agent run`` error.
+
+    This owns the whole policy shared by the streaming and non-streaming paths: eligibility,
+    preserving a more specific error already on the span, redaction, the span error payload, and
+    the attachment itself. Tracing never changes what the run raises: the exception is stringified
+    only when sensitive data is traced, and a formatting failure cannot propagate.
+    """
+    if span is None or not _is_generic_agent_error(exc):
+        return
+
+    try:
+        if span.error is not None:
+            return
+        detail = (
+            _format_agent_error_detail(exc)
+            if trace_include_sensitive_data
+            else REDACTED_TRACE_ERROR_MESSAGE
+        )
+        _error_tracing.attach_error_to_span(
+            span,
+            SpanError(message=GENERIC_AGENT_ERROR_MESSAGE, data={"error": detail}),
+        )
+    except BaseException as tracing_error:
+        try:
+            logger.warning(
+                "Failed to record a generic agent error on the span (%s)",
+                type(tracing_error).__name__,
+            )
+        except BaseException:
+            pass
 
 
 def build_run_error_data(

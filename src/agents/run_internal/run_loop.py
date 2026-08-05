@@ -108,6 +108,7 @@ from .agent_runner_helpers import (
 )
 from .approvals import approvals_from_step
 from .error_handlers import (
+    attach_generic_agent_error,
     build_run_error_data,
     create_message_output_item,
     format_final_output_text,
@@ -285,13 +286,6 @@ async def cleanup_models_after_run(tool_use_tracker: AgentToolUseTracker) -> Non
 
 def _agent_diagnostic_extra(agent: Agent[Any]) -> dict[str, object]:
     return {"agent_name": agent.name}
-
-
-def _should_attach_generic_agent_error(exc: Exception) -> bool:
-    return not isinstance(
-        exc,
-        ModelBehaviorError | InputGuardrailTripwireTriggered | OutputGuardrailTripwireTriggered,
-    )
 
 
 async def _should_persist_stream_items(
@@ -1384,21 +1378,11 @@ async def start_streaming(
                     if await _wait_for_streamed_turn_events_and_stop_if_cancelled(streamed_result):
                         break
             except Exception as e:
-                if current_span and _should_attach_generic_agent_error(e):
-                    _error_tracing.attach_error_to_span(
-                        current_span,
-                        SpanError(
-                            message="Error in agent run",
-                            data={
-                                "error": _error_tracing.get_trace_error(
-                                    trace_include_sensitive_data=(
-                                        run_config.trace_include_sensitive_data
-                                    ),
-                                    error_message=str(e),
-                                )
-                            },
-                        ),
-                    )
+                attach_generic_agent_error(
+                    current_span,
+                    e,
+                    trace_include_sensitive_data=run_config.trace_include_sensitive_data,
+                )
                 raise
     except AgentsException as exc:
         streamed_result.is_complete = True
@@ -1416,19 +1400,11 @@ async def start_streaming(
         )
         raise
     except Exception as e:
-        if current_span and _should_attach_generic_agent_error(e):
-            _error_tracing.attach_error_to_span(
-                current_span,
-                SpanError(
-                    message="Error in agent run",
-                    data={
-                        "error": _error_tracing.get_trace_error(
-                            trace_include_sensitive_data=run_config.trace_include_sensitive_data,
-                            error_message=str(e),
-                        )
-                    },
-                ),
-            )
+        attach_generic_agent_error(
+            current_span,
+            e,
+            trace_include_sensitive_data=run_config.trace_include_sensitive_data,
+        )
         streamed_result.is_complete = True
         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
         raise

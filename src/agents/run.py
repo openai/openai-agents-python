@@ -72,6 +72,7 @@ from .run_internal.agent_runner_helpers import (
 )
 from .run_internal.approvals import approvals_from_step
 from .run_internal.error_handlers import (
+    attach_generic_agent_error,
     build_run_error_data,
     create_message_output_item,
     format_final_output_text,
@@ -1614,6 +1615,11 @@ class AgentRunner:
                         turn_result.new_step_items.clear()
             except BaseException as exc:
                 run_exception = exc
+                attach_generic_agent_error(
+                    current_span,
+                    exc,
+                    trace_include_sensitive_data=run_config.trace_include_sensitive_data,
+                )
                 if isinstance(exc, AgentsException):
                     exc.run_data = RunErrorDetails(
                         input=original_input,
