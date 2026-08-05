@@ -491,11 +491,15 @@ async def test_blocking_guardrail_prevents_agent_execution_streaming():
 async def test_parallel_guardrail_may_not_prevent_tool_execution():
     tool_was_executed = False
     guardrail_executed = False
+    loop = asyncio.get_running_loop()
+    tool_executed = asyncio.Event()
 
     @function_tool
     def fast_tool() -> str:
         nonlocal tool_was_executed
         tool_was_executed = True
+        # Sync tools run in a worker thread, so signal the loop-owned event safely.
+        loop.call_soon_threadsafe(tool_executed.set)
         return "tool_executed"
 
     @input_guardrail(run_in_parallel=True)
@@ -503,7 +507,9 @@ async def test_parallel_guardrail_may_not_prevent_tool_execution():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         nonlocal guardrail_executed
-        await asyncio.sleep(LONG_DELAY)
+        # Trip only after the tool ran. If parallel guardrails gated the turn, this
+        # would deadlock instead of silently losing a wall-clock race.
+        await asyncio.wait_for(tool_executed.wait(), timeout=5)
         guardrail_executed = True
         return GuardrailFunctionOutput(
             output_info="slow_parallel_triggered",
@@ -646,7 +652,8 @@ async def test_model_error_cancels_parallel_input_guardrail_task():
     ) -> GuardrailFunctionOutput:
         guardrail_started.set()
         try:
-            await asyncio.sleep(LONG_DELAY)
+            # Never finishes on its own, so only cancellation can end this guardrail.
+            await asyncio.Event().wait()
             guardrail_finished.set()
             return GuardrailFunctionOutput(
                 output_info="parallel_ok",
@@ -671,7 +678,7 @@ async def test_model_error_cancels_parallel_input_guardrail_task():
 
     with patch.object(model, "get_response", side_effect=boom_get_response):
         with pytest.raises(RuntimeError, match="model boom"):
-            await Runner.run(agent, "trigger guardrail")
+            await asyncio.wait_for(Runner.run(agent, "trigger guardrail"), timeout=5)
 
     # By the time Runner.run returns, the guardrail task must already be
     # cancelled rather than left running to completion in the background.
@@ -703,7 +710,8 @@ async def test_parallel_guardrail_non_tripwire_error_not_swallowed():
     async def slow_get_response(*args, **kwargs):
         model_started.set()
         try:
-            await asyncio.sleep(LONG_DELAY)
+            # Never finishes on its own, so only cancellation can end the model call.
+            await asyncio.Event().wait()
             return await original_get_response(*args, **kwargs)
         except asyncio.CancelledError:
             model_cancelled.set()
@@ -720,7 +728,7 @@ async def test_parallel_guardrail_non_tripwire_error_not_swallowed():
 
     with patch.object(model, "get_response", side_effect=slow_get_response):
         with pytest.raises(ValueError, match="guardrail boom"):
-            await Runner.run(agent, "trigger guardrail")
+            await asyncio.wait_for(Runner.run(agent, "trigger guardrail"), timeout=5)
 
     await asyncio.wait_for(model_finished.wait(), timeout=1)
     assert model_started.is_set() is True
@@ -842,11 +850,15 @@ async def test_model_error_before_guardrail_error_preserves_stream_finalization(
 async def test_parallel_guardrail_may_not_prevent_tool_execution_streaming():
     tool_was_executed = False
     guardrail_executed = False
+    loop = asyncio.get_running_loop()
+    tool_executed = asyncio.Event()
 
     @function_tool
     def fast_tool() -> str:
         nonlocal tool_was_executed
         tool_was_executed = True
+        # Sync tools run in a worker thread, so signal the loop-owned event safely.
+        loop.call_soon_threadsafe(tool_executed.set)
         return "tool_executed"
 
     @input_guardrail(run_in_parallel=True)
@@ -854,7 +866,9 @@ async def test_parallel_guardrail_may_not_prevent_tool_execution_streaming():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         nonlocal guardrail_executed
-        await asyncio.sleep(LONG_DELAY)
+        # Trip only after the tool ran. If parallel guardrails gated the turn, this
+        # would deadlock instead of silently losing a wall-clock race.
+        await asyncio.wait_for(tool_executed.wait(), timeout=5)
         guardrail_executed = True
         return GuardrailFunctionOutput(
             output_info="slow_parallel_triggered_streaming",
@@ -1713,17 +1727,16 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger():
     fast_guardrail_executed = False
     slow_guardrail_executed = False
     slow_guardrail_cancelled = False
-    timestamps = {}
+    slow_guardrail_started = asyncio.Event()
 
     @input_guardrail(run_in_parallel=False)
     async def fast_guardrail_that_triggers(
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         nonlocal fast_guardrail_executed
-        timestamps["fast_start"] = time.time()
-        await asyncio.sleep(SHORT_DELAY)
+        # Trip only once the sibling is provably in flight and therefore cancellable.
+        await asyncio.wait_for(slow_guardrail_started.wait(), timeout=5)
         fast_guardrail_executed = True
-        timestamps["fast_end"] = time.time()
         return GuardrailFunctionOutput(
             output_info="fast_triggered",
             tripwire_triggered=True,
@@ -1734,18 +1747,17 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         nonlocal slow_guardrail_executed, slow_guardrail_cancelled
-        timestamps["slow_start"] = time.time()
+        slow_guardrail_started.set()
         try:
-            await asyncio.sleep(MEDIUM_DELAY)
+            # Never finishes on its own, so only cancellation can end this guardrail.
+            await asyncio.Event().wait()
             slow_guardrail_executed = True
-            timestamps["slow_end"] = time.time()
             return GuardrailFunctionOutput(
                 output_info="slow_completed",
                 tripwire_triggered=False,
             )
         except asyncio.CancelledError:
             slow_guardrail_cancelled = True
-            timestamps["slow_cancelled"] = time.time()
             raise
 
     model = FakeModel()
@@ -1758,7 +1770,7 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger():
     model.set_next_output([get_text_message("hello")])
 
     with pytest.raises(InputGuardrailTripwireTriggered):
-        await Runner.run(agent, "test input")
+        await asyncio.wait_for(Runner.run(agent, "test input"), timeout=5)
 
     # Verify the fast guardrail executed
     assert fast_guardrail_executed is True, "Fast guardrail should have executed"
@@ -1766,19 +1778,6 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger():
     # Verify the slow guardrail was cancelled, not completed
     assert slow_guardrail_cancelled is True, "Slow guardrail should have been cancelled"
     assert slow_guardrail_executed is False, "Slow guardrail should NOT have completed execution"
-
-    # Verify timing: cancellation happened shortly after fast guardrail triggered
-    assert "fast_end" in timestamps
-    assert "slow_cancelled" in timestamps
-    cancellation_delay = timestamps["slow_cancelled"] - timestamps["fast_end"]
-    assert cancellation_delay >= 0, (
-        f"Slow guardrail should be cancelled after fast one completes, "
-        f"but was {cancellation_delay:.2f}s"
-    )
-    assert cancellation_delay < 0.2, (
-        f"Cancellation should happen before the slow guardrail completes, "
-        f"but took {cancellation_delay:.2f}s"
-    )
 
     # Verify agent never started
     assert model.first_turn_args is None, (
@@ -1795,17 +1794,16 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger_streaming():
     fast_guardrail_executed = False
     slow_guardrail_executed = False
     slow_guardrail_cancelled = False
-    timestamps = {}
+    slow_guardrail_started = asyncio.Event()
 
     @input_guardrail(run_in_parallel=False)
     async def fast_guardrail_that_triggers(
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         nonlocal fast_guardrail_executed
-        timestamps["fast_start"] = time.time()
-        await asyncio.sleep(SHORT_DELAY)
+        # Trip only once the sibling is provably in flight and therefore cancellable.
+        await asyncio.wait_for(slow_guardrail_started.wait(), timeout=5)
         fast_guardrail_executed = True
-        timestamps["fast_end"] = time.time()
         return GuardrailFunctionOutput(
             output_info="fast_triggered",
             tripwire_triggered=True,
@@ -1816,18 +1814,17 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger_streaming():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         nonlocal slow_guardrail_executed, slow_guardrail_cancelled
-        timestamps["slow_start"] = time.time()
+        slow_guardrail_started.set()
         try:
-            await asyncio.sleep(MEDIUM_DELAY)
+            # Never finishes on its own, so only cancellation can end this guardrail.
+            await asyncio.Event().wait()
             slow_guardrail_executed = True
-            timestamps["slow_end"] = time.time()
             return GuardrailFunctionOutput(
                 output_info="slow_completed",
                 tripwire_triggered=False,
             )
         except asyncio.CancelledError:
             slow_guardrail_cancelled = True
-            timestamps["slow_cancelled"] = time.time()
             raise
 
     model = FakeModel()
@@ -1841,9 +1838,12 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger_streaming():
 
     result = Runner.run_streamed(agent, "test input")
 
-    with pytest.raises(InputGuardrailTripwireTriggered):
+    async def consume_stream() -> None:
         async for _event in result.stream_events():
             pass
+
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        await asyncio.wait_for(consume_stream(), timeout=5)
 
     # Verify the fast guardrail executed
     assert fast_guardrail_executed is True, "Fast guardrail should have executed"
@@ -1851,19 +1851,6 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger_streaming():
     # Verify the slow guardrail was cancelled, not completed
     assert slow_guardrail_cancelled is True, "Slow guardrail should have been cancelled"
     assert slow_guardrail_executed is False, "Slow guardrail should NOT have completed execution"
-
-    # Verify timing: cancellation happened shortly after fast guardrail triggered
-    assert "fast_end" in timestamps
-    assert "slow_cancelled" in timestamps
-    cancellation_delay = timestamps["slow_cancelled"] - timestamps["fast_end"]
-    assert cancellation_delay >= 0, (
-        f"Slow guardrail should be cancelled after fast one completes, "
-        f"but was {cancellation_delay:.2f}s"
-    )
-    assert cancellation_delay < 0.2, (
-        f"Cancellation should happen before the slow guardrail completes, "
-        f"but took {cancellation_delay:.2f}s"
-    )
 
     # Verify agent never started
     assert model.first_turn_args is None, (
