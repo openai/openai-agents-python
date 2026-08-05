@@ -1398,3 +1398,42 @@ async def test_concurrent_first_add_items_does_not_regress_created_at(
     finally:
         await winner.close()
         await loser.close()
+
+
+async def test_add_items_survives_metadata_write_giving_up(
+    fake_dapr_client: FakeDaprClient, monkeypatch: pytest.MonkeyPatch, caplog: Any
+):
+    """A metadata write that exhausts its retries must not fail an append that already landed.
+
+    The messages key is saved before the metadata key, so raising here would report failure for
+    items that are already in the session, and the natural retry of `add_items` would store the
+    same batch a second time.
+    """
+    import logging
+
+    session = await _create_test_session(fake_dapr_client, "metadata_gives_up")
+
+    try:
+        real_save = fake_dapr_client.save_state
+
+        async def fail_only_metadata_saves(
+            store_name: str,
+            key: str,
+            value: str | bytes,
+            **kwargs: Any,
+        ) -> None:
+            if key == session._metadata_key:
+                raise RuntimeError("etag mismatch")
+            await real_save(store_name, key, value, **kwargs)
+
+        monkeypatch.setattr(fake_dapr_client, "save_state", fail_only_metadata_saves)
+        monkeypatch.setattr(session, "_calculate_retry_delay", lambda attempt: 0.0)
+
+        with caplog.at_level(logging.WARNING):
+            await session.add_items([{"role": "user", "content": "kept"}])
+
+        items = await session.get_items()
+        assert [item["content"] for item in items] == ["kept"]
+        assert any("could not update" in record.getMessage() for record in caplog.records)
+    finally:
+        await session.close()

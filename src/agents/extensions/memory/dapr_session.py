@@ -390,17 +390,22 @@ class DaprSession(SessionABC):
             # etag-guarded loop used for the messages key above. A plain write would let two
             # processes appending to the same new session each read no metadata, pick their own
             # now, and have the later save overwrite created_at with the later timestamp.
+            #
+            # The messages key is already committed once we reach here, so raising would tell
+            # the caller the append failed while their items are in the session, and the
+            # natural response of retrying add_items() would store the batch twice. Metadata
+            # is derived bookkeeping, so give up on it with a warning instead.
             attempt = 0
             while True:
                 attempt += 1
-                stored_created_at, metadata_etag = await self._read_created_at()
-                now = str(int(time.time()))
-                metadata = {
-                    "session_id": self.session_id,
-                    "created_at": stored_created_at or now,
-                    "updated_at": now,
-                }
                 try:
+                    stored_created_at, metadata_etag = await self._read_created_at()
+                    now = str(int(time.time()))
+                    metadata = {
+                        "session_id": self.session_id,
+                        "created_at": stored_created_at or now,
+                        "updated_at": now,
+                    }
                     await self._dapr_client.save_state(
                         store_name=self._state_store_name,
                         key=self._metadata_key,
@@ -414,7 +419,13 @@ class DaprSession(SessionABC):
                     should_retry = await self._handle_concurrency_conflict(error, attempt)
                     if should_retry:
                         continue
-                    raise
+                    logger.warning(
+                        "DaprSession stored the new items for session %s but could not update "
+                        "its metadata: %s",
+                        self.session_id,
+                        error,
+                    )
+                    break
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
