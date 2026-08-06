@@ -67,7 +67,10 @@ from agents.items import (
     TResponseStreamEvent,
 )
 from agents.run_context import RunContextWrapper
-from agents.run_internal.agent_runner_helpers import resolve_trace_settings
+from agents.run_internal.agent_runner_helpers import (
+    resolve_resumed_context,
+    resolve_trace_settings,
+)
 from agents.run_internal.items import (
     NestedHistoryOwnedItemRef,
     digest_input_item,
@@ -7197,13 +7200,49 @@ async def test_resume_rejected_function_approval_emits_output() -> None:
     assert calls == []
 
 
-@pytest.mark.asyncio
-async def test_resume_approved_function_approval_via_json_with_context_override() -> None:
-    """JSON resume + context= keeps approvals/tool_input and applies the new app context."""
-    calls: list[str] = []
-    seen_contexts: list[dict[str, str]] = []
-    seen_tool_inputs: list[object] = []
+def test_resolve_resumed_context_keeps_restored_wrapper_and_replaces_app_context() -> None:
+    """Override must mutate the restored wrapper in place, not allocate a replacement."""
+    from agents.run_context import _ApprovalRecord
 
+    agent = Agent(name="unit-agent")
+    original_context = {"user": "original"}
+    restored_wrapper = RunContextWrapper(context=original_context)
+    restored_wrapper.tool_input = {"scoped": True}
+    restored_wrapper.turn_input = [{"role": "user", "content": "hi"}]
+    restored_usage = restored_wrapper.usage
+    restored_approvals = restored_wrapper._approvals
+    restored_approvals["needs_ok"] = _ApprovalRecord(approved=["1"])
+
+    state = make_state(agent, context=restored_wrapper, original_input="hi")
+    override = {"user": "reviewer"}
+
+    resolved = resolve_resumed_context(run_state=state, context=override)
+
+    assert resolved is restored_wrapper
+    assert resolved is state._context
+    assert resolved.context is override
+    assert resolved.context is not original_context
+    assert resolved.usage is restored_usage
+    assert resolved._approvals is restored_approvals
+    assert resolved._approvals["needs_ok"].approved == ["1"]
+    assert resolved.turn_input == [{"role": "user", "content": "hi"}]
+    assert resolved.tool_input == {"scoped": True}
+
+    # Passing a wrapper only donates its application value; run-owned state stays.
+    donor = RunContextWrapper(context={"user": "from-wrapper"})
+    donor.tool_input = {"should": "not-win"}
+    resolved_again = resolve_resumed_context(run_state=state, context=donor)
+    assert resolved_again is restored_wrapper
+    assert resolved_again.context == {"user": "from-wrapper"}
+    assert resolved_again.tool_input == {"scoped": True}
+
+
+async def _interrupted_approval_state_with_tool_input(
+    *,
+    calls: list[str],
+    seen_contexts: list[dict[str, str]],
+    seen_tool_inputs: list[object],
+) -> tuple[Any, Any, RunState[Any, Agent[Any]]]:
     @function_tool(needs_approval=True)
     async def needs_ok(ctx: RunContextWrapper[dict[str, str]], text: str) -> str:
         seen_contexts.append(dict(ctx.context))
@@ -7225,9 +7264,26 @@ async def test_resume_approved_function_approval_via_json_with_context_override(
     assert state._context is not None
     state._context.tool_input = {"scoped": True}
     state.approve(first.interruptions[0])
-
     restored = await RunState.from_json(agent, state.to_json())
+    assert restored._context is not None
+    assert restored._context.tool_input == {"scoped": True}
+    assert restored._context._approvals
+    return model, agent, restored
+
+
+@pytest.mark.asyncio
+async def test_resume_approved_function_approval_via_json_with_context_override() -> None:
+    """JSON resume + context= keeps approvals/tool_input and applies the new app context."""
+    calls: list[str] = []
+    seen_contexts: list[dict[str, str]] = []
+    seen_tool_inputs: list[object] = []
+    _model, agent, restored = await _interrupted_approval_state_with_tool_input(
+        calls=calls, seen_contexts=seen_contexts, seen_tool_inputs=seen_tool_inputs
+    )
+    restored_wrapper = restored._context
+    assert restored_wrapper is not None
     override = {"user": "reviewer"}
+
     resumed = await Runner.run(agent, input=restored, context=override)
 
     assert resumed.final_output == "done"
@@ -7235,9 +7291,10 @@ async def test_resume_approved_function_approval_via_json_with_context_override(
     assert calls == ["one"]
     assert seen_contexts == [override]
     assert seen_tool_inputs == [{"scoped": True}]
-    assert resumed.context_wrapper is restored._context
+    assert resumed.context_wrapper is restored_wrapper
     assert resumed.context_wrapper.context == override
     assert resumed.context_wrapper.tool_input == {"scoped": True}
+    assert resumed.context_wrapper._approvals is restored_wrapper._approvals
 
 
 @pytest.mark.asyncio
@@ -7246,31 +7303,13 @@ async def test_resume_approved_function_approval_streamed_with_context_override(
     calls: list[str] = []
     seen_contexts: list[dict[str, str]] = []
     seen_tool_inputs: list[object] = []
-
-    @function_tool(needs_approval=True)
-    async def needs_ok(ctx: RunContextWrapper[dict[str, str]], text: str) -> str:
-        seen_contexts.append(dict(ctx.context))
-        seen_tool_inputs.append(ctx.tool_input)
-        calls.append(text)
-        return text
-
-    model, agent = make_model_and_agent(tools=[needs_ok], name="agent")
-    model.add_multiple_turn_outputs(
-        [
-            [get_function_tool_call("needs_ok", json.dumps({"text": "one"}), call_id="1")],
-            [get_final_output_message("done")],
-        ]
+    _model, agent, restored = await _interrupted_approval_state_with_tool_input(
+        calls=calls, seen_contexts=seen_contexts, seen_tool_inputs=seen_tool_inputs
     )
-
-    first = await Runner.run(agent, input="hi", context={"user": "original"})
-    assert first.interruptions
-    state = first.to_state()
-    assert state._context is not None
-    state._context.tool_input = {"scoped": True}
-    state.approve(first.interruptions[0])
-
-    restored = await RunState.from_json(agent, state.to_json())
+    restored_wrapper = restored._context
+    assert restored_wrapper is not None
     override = {"user": "reviewer"}
+
     resumed = Runner.run_streamed(agent, restored, context=override)
     async for _ in resumed.stream_events():
         pass
@@ -7280,6 +7319,7 @@ async def test_resume_approved_function_approval_streamed_with_context_override(
     assert calls == ["one"]
     assert seen_contexts == [override]
     assert seen_tool_inputs == [{"scoped": True}]
-    assert resumed.context_wrapper is restored._context
+    assert resumed.context_wrapper is restored_wrapper
     assert resumed.context_wrapper.context == override
     assert resumed.context_wrapper.tool_input == {"scoped": True}
+    assert resumed.context_wrapper._approvals is restored_wrapper._approvals
