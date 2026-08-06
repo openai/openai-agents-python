@@ -7195,3 +7195,33 @@ async def test_resume_rejected_function_approval_emits_output() -> None:
         for item in resumed.new_items
     )
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_resume_approved_function_approval_runs_with_context_override() -> None:
+    """Approval decisions must survive resuming with a context= override (issue #4244)."""
+    calls: list[str] = []
+
+    @function_tool(needs_approval=True)
+    async def needs_ok(text: str) -> str:
+        calls.append(text)
+        return text
+
+    model, agent = make_model_and_agent(tools=[needs_ok], name="agent")
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("needs_ok", json.dumps({"text": "one"}), call_id="1")],
+            [get_final_output_message("done")],
+        ]
+    )
+
+    first = await Runner.run(agent, input="hi")
+    assert first.interruptions
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    resumed = await Runner.run(agent, input=state, context={"user": "reviewer"})
+
+    assert resumed.final_output == "done"
+    assert resumed.interruptions == []
+    assert calls == ["one"]

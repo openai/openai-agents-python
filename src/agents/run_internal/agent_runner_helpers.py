@@ -283,9 +283,19 @@ def resolve_resumed_context(
     run_state: RunState[TContext],
     context: RunContextWrapper[TContext] | TContext | None,
 ) -> RunContextWrapper[TContext]:
-    """Return the context wrapper for a resumed run, overriding when provided."""
+    """Return the context wrapper for a resumed run, overriding when provided.
+
+    Overriding only replaces the user-supplied context value. Run bookkeeping restored
+    from the state (approvals, usage, turn input) belongs to the run, not to the context
+    object, so it carries over even when a new context is supplied.
+    """
     if context is not None:
         context_wrapper = ensure_context_wrapper(context)
+        existing_context = run_state._context
+        if existing_context is not None and existing_context is not context_wrapper:
+            context_wrapper._approvals = existing_context._approvals
+            context_wrapper.usage = existing_context.usage
+            context_wrapper.turn_input = existing_context.turn_input
         set_agent_tool_state_scope(context_wrapper, run_state._agent_tool_state_scope_id)
         run_state._context = context_wrapper
         return context_wrapper
