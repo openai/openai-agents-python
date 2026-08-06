@@ -187,58 +187,70 @@ def peek_agent_tool_run_result(
     return _agent_tool_run_results_by_obj.get(candidate_id)
 
 
-def iter_agent_tool_run_results(
-    *,
-    scope_id: str | None = None,
-) -> list[RunResult | RunResultStreaming]:
-    """Return pending nested agent-tool results for a cache scope (no consume)."""
-    results: list[RunResult | RunResultStreaming] = []
-    seen: set[int] = set()
-    for obj_id, run_result in _agent_tool_run_results_by_obj.items():
-        if obj_id in seen:
-            continue
-        if not _tool_call_obj_matches_scope(obj_id, scope_id=scope_id):
-            continue
-        seen.add(obj_id)
-        results.append(run_result)
-    return results
+def _pending_nested_state_from_run_result(
+    run_result: RunResult | RunResultStreaming | Any,
+) -> Any | None:
+    """Return the nested RunState for a cached agent-tool result, if available.
+
+    Prefer the stable ``_state`` on serialized pending results. Only call
+    ``to_state()`` when there is no live ``context_wrapper`` (serialized stubs),
+    since live results rebuild a fresh state from the wrapper on each call.
+    """
+    nested_state = getattr(run_result, "_state", None)
+    if nested_state is not None:
+        return nested_state
+    if getattr(run_result, "context_wrapper", None) is not None:
+        return None
+    to_state = getattr(run_result, "to_state", None)
+    if not callable(to_state):
+        return None
+    try:
+        return to_state()
+    except Exception:
+        return None
 
 
 def apply_application_context_to_agent_tool_states(
+    run_state: Any,
     *,
-    scope_id: str | None,
     application_context: Any,
-    _seen_scopes: set[str | None] | None = None,
+    _seen_states: set[int] | None = None,
 ) -> None:
-    """Propagate an application-context override into cached nested agent-tool runs.
+    """Propagate an application-context override into this run's nested agent-tool states.
 
     Nested ``Agent.as_tool()`` resumes read their own restored ``RunState`` (often with
     ``context=None``), so replacing only the parent wrapper would leave nested tools on
-    the pre-override application context. Update nested wrappers in place and preserve
-    nested run-owned fields such as approvals and ``tool_input``.
+    the pre-override application context. Walk only this ``RunState``'s pending function
+    tool calls (via cache peek) so unscoped live runs cannot overwrite unrelated
+    concurrent interruptions. Preserve nested run-owned fields such as approvals and
+    ``tool_input``.
     """
-    seen = _seen_scopes if _seen_scopes is not None else set()
-    if scope_id in seen:
+    seen = _seen_states if _seen_states is not None else set()
+    state_id = id(run_state)
+    if state_id in seen:
         return
-    seen.add(scope_id)
+    seen.add(state_id)
 
-    for run_result in iter_agent_tool_run_results(scope_id=scope_id):
+    processed = getattr(run_state, "_last_processed_response", None)
+    function_runs = getattr(processed, "functions", None) if processed is not None else None
+    if not function_runs:
+        return
+
+    scope_id = getattr(run_state, "_agent_tool_state_scope_id", None)
+    for function_run in function_runs:
+        tool_call = getattr(function_run, "tool_call", None)
+        if tool_call is None:
+            continue
+
+        run_result = peek_agent_tool_run_result(tool_call, scope_id=scope_id)
+        if run_result is None:
+            continue
+
         wrapper = getattr(run_result, "context_wrapper", None)
         if wrapper is not None and hasattr(wrapper, "context"):
             wrapper.context = application_context
 
-        nested_state = getattr(run_result, "_state", None)
-        # Serialized pending results expose a stable state via to_state() and do not
-        # carry context_wrapper. Avoid calling to_state() on live RunResult objects,
-        # which rebuild a fresh state from context_wrapper on each call.
-        if nested_state is None and wrapper is None:
-            to_state = getattr(run_result, "to_state", None)
-            if callable(to_state):
-                try:
-                    nested_state = to_state()
-                except Exception:
-                    nested_state = None
-
+        nested_state = _pending_nested_state_from_run_result(run_result)
         nested_wrapper = (
             getattr(nested_state, "_context", None) if nested_state is not None else None
         )
@@ -249,12 +261,11 @@ def apply_application_context_to_agent_tool_states(
         ):
             nested_wrapper.context = application_context
 
-        nested_scope = getattr(nested_state, "_agent_tool_state_scope_id", None)
-        if nested_state is not None and nested_scope not in seen:
+        if nested_state is not None and id(nested_state) not in seen:
             apply_application_context_to_agent_tool_states(
-                scope_id=nested_scope,
+                nested_state,
                 application_context=application_context,
-                _seen_scopes=seen,
+                _seen_states=seen,
             )
 
 

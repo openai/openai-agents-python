@@ -293,9 +293,9 @@ def resolve_resumed_context(
     run-owned wrapper state (approvals, usage, turn input, tool input, …)
     survives the override instead of being dropped by a fresh wrapper.
 
-    The same application value is also propagated into cached nested
-    ``Agent.as_tool()`` run states for this resume scope, so nested tools see
-    the override when they resume with ``context=None``.
+    The same application value is also propagated into nested ``Agent.as_tool()``
+    run states pending on this ``RunState``, so nested tools see the override
+    when they resume with ``context=None``.
     """
     if context is not None:
         existing_context = run_state._context
@@ -308,7 +308,7 @@ def resolve_resumed_context(
             if existing_context is not context:
                 existing_context.context = application_context
             apply_application_context_to_agent_tool_states(
-                scope_id=run_state._agent_tool_state_scope_id,
+                run_state,
                 application_context=application_context,
             )
             set_agent_tool_state_scope(
