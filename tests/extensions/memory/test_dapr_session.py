@@ -40,7 +40,8 @@ class FakeDaprClient:
         """Get state from in-memory store."""
         response = Mock()
         response.data = self._state.get(key, b"")
-        response.etag = self._etags.get(key)
+        # The Dapr SDK reports a missing etag as an empty string rather than None.
+        response.etag = self._etags.get(key, "")
         return response
 
     async def save_state(
@@ -1347,6 +1348,54 @@ async def test_add_items_preserves_created_at_metadata(
         second = json.loads(fake_dapr_client._state[session._metadata_key].decode("utf-8"))
         assert second["created_at"] == "1000"
         assert second["updated_at"] == "2000"
+    finally:
+        await session.close()
+
+
+async def test_metadata_creation_does_not_request_first_write(
+    fake_dapr_client: FakeDaprClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Creating the metadata key must not ask for first-write concurrency.
+
+    Dapr treats a write with no etag as last-write-wins even when first-write is requested,
+    so asking for it on the create would imply a guarantee the store does not provide. The
+    SDK reports a missing etag as an empty string, so this also pins that the empty value is
+    not mistaken for a real one.
+    """
+    session = await _create_test_session(fake_dapr_client, "metadata_create_concurrency")
+
+    try:
+        real_save = fake_dapr_client.save_state
+        seen: list[tuple[str | None, Any]] = []
+
+        async def record_metadata_saves(
+            store_name: str,
+            key: str,
+            value: str | bytes,
+            **kwargs: Any,
+        ) -> None:
+            if key == session._metadata_key:
+                seen.append(
+                    (kwargs.get("etag"), getattr(kwargs.get("options"), "concurrency", None))
+                )
+            await real_save(store_name, key, value, **kwargs)
+
+        monkeypatch.setattr(fake_dapr_client, "save_state", record_metadata_saves)
+
+        await session.add_items([{"role": "user", "content": "first"}])
+        assert len(seen) == 1
+        create_etag, create_concurrency = seen[0]
+        # No real etag existed, so no etag is sent and concurrency is left unspecified
+        # rather than first-write, which Dapr would ignore here anyway.
+        assert create_etag is None
+        assert getattr(create_concurrency, "name", None) == "unspecified"
+
+        await session.add_items([{"role": "user", "content": "second"}])
+        assert len(seen) == 2
+        update_etag, update_concurrency = seen[1]
+        # Metadata now exists, so the update is guarded by the etag that backed it.
+        assert update_etag is not None
+        assert getattr(update_concurrency, "name", None) == "first_write"
     finally:
         await session.close()
 

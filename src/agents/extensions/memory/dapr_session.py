@@ -192,14 +192,16 @@ class DaprSession(SessionABC):
         """Return the stored creation timestamp and the metadata etag backing it.
 
         The timestamp is None when it is missing or unreadable. The etag is returned so the
-        caller can write the metadata conditionally against the same revision it read.
+        caller can write the metadata conditionally against the same revision it read. The
+        Dapr SDK reports a missing etag as an empty string, so it is normalized to None and
+        callers can test for a real etag rather than for a particular empty representation.
         """
         response = await self._dapr_client.get_state(
             store_name=self._state_store_name,
             key=self._metadata_key,
             state_metadata=self._get_read_metadata(),
         )
-        etag = response.etag
+        etag = response.etag or None
         data = response.data
         if not data:
             return None, etag
@@ -394,13 +396,10 @@ class DaprSession(SessionABC):
             # would let a later append overwrite created_at with its own now, so the save is
             # guarded by the etag that backed the value that was read.
             #
-            # The guard only applies once metadata exists. Dapr documents a write without an
-            # etag as last-write-wins even when first-write concurrency is requested, so
+            # The guard only applies once a real etag was read. Dapr documents a write without
+            # an etag as last-write-wins even when first-write concurrency is requested, so
             # asking for it on the create is not a race guarantee and is left off rather than
-            # implying one. Two writers creating the key concurrently can therefore both
-            # succeed, and the loser's created_at wins by a fraction of a second. Every write
-            # after that is etag guarded, which is the case that actually matters, since it is
-            # what stops a later append from resetting an established created_at.
+            # implying one. Concurrent etag-less creation is therefore last-write-wins.
             #
             # The messages key is already committed once we reach here, so raising would tell
             # the caller the append failed while their items are in the session, and the
