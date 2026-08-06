@@ -7237,6 +7237,65 @@ def test_resolve_resumed_context_keeps_restored_wrapper_and_replaces_app_context
     assert resolved_again.tool_input == {"scoped": True}
 
 
+def test_resolve_resumed_context_propagates_override_into_nested_agent_tool_state() -> None:
+    """Parent context= override must reach cached nested Agent.as_tool() run states."""
+    from agents.agent_tool_state import (
+        drop_agent_tool_run_result,
+        peek_agent_tool_run_result,
+        record_agent_tool_run_result,
+        set_agent_tool_state_scope,
+    )
+    from agents.run_context import _ApprovalRecord
+
+    scope_id = "scope-override-nested"
+    outer_wrapper = RunContextWrapper(context={"user": "original"})
+    set_agent_tool_state_scope(outer_wrapper, scope_id)
+    agent = Agent(name="OuterAgent")
+    nested_tool = function_tool(lambda: "nested", name_override="nested_agent_tool")
+    agent.tools = [nested_tool]
+    nested_call = make_tool_call(call_id="nested-call", name="nested_agent_tool")
+
+    nested_wrapper = RunContextWrapper(context={"user": "original"})
+    nested_wrapper.tool_input = {"scoped": True}
+    nested_approvals = nested_wrapper._approvals
+    nested_approvals["inner"] = _ApprovalRecord(approved=["1"])
+    nested_state = make_state_with_interruptions(
+        agent,
+        [make_tool_approval_item(agent, call_id="inner-1", name="inner")],
+        original_input="nested",
+    )
+    nested_state._context = nested_wrapper
+    nested_state._agent_tool_state_scope_id = "nested-scope"
+
+    parent_state = make_state(agent, context=outer_wrapper)
+    parent_state._agent_tool_state_scope_id = scope_id
+    parent_state._last_processed_response = make_processed_response(
+        functions=[ToolRunFunction(tool_call=nested_call, function_tool=nested_tool)]
+    )
+
+    pending = SimpleNamespace(
+        interruptions=nested_state.get_interruptions(),
+        to_state=lambda: nested_state,
+    )
+    try:
+        record_agent_tool_run_result(nested_call, cast(Any, pending), scope_id=scope_id)
+        override = {"user": "reviewer"}
+        resolved = resolve_resumed_context(run_state=parent_state, context=override)
+
+        assert resolved is outer_wrapper
+        assert resolved.context is override
+        assert nested_wrapper.context is override
+        assert nested_wrapper.tool_input == {"scoped": True}
+        assert nested_wrapper._approvals is nested_approvals
+        assert nested_wrapper._approvals["inner"].approved == ["1"]
+
+        cached = peek_agent_tool_run_result(nested_call, scope_id=scope_id)
+        assert cached is not None
+        assert cached.to_state()._context.context is override
+    finally:
+        drop_agent_tool_run_result(nested_call, scope_id=scope_id)
+
+
 async def _interrupted_approval_state_with_tool_input(
     *,
     calls: list[str],
