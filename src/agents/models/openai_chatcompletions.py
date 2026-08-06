@@ -348,7 +348,33 @@ class OpenAIChatCompletionsModel(Model):
                 output=items,
                 usage=usage,
                 response_id=None,
+                # The OpenAI SDK records the `x-request-id` header on every parsed response,
+                # so callers can inspect the same debugging handle as on the Responses path.
+                request_id=getattr(response, "_request_id", None),
             )
+
+    @staticmethod
+    def _attach_stream_request_id(response: Response, stream: Any) -> None:
+        """Copy the OpenAI request ID onto the synthesized streamed response.
+
+        The streamed Chat Completions response is built locally rather than returned by the
+        API, so the `x-request-id` header has to be carried over from the underlying HTTP
+        response. The terminal response is a `model_copy()` of this object, and that copy
+        preserves the private attribute, so `Runner` can read it back. Custom clients and
+        test doubles may yield a bare async iterator with no HTTP response attached.
+        """
+        headers = getattr(getattr(stream, "response", None), "headers", None)
+        if headers is None:
+            return
+        request_id = headers.get("x-request-id")
+        if request_id is None:
+            return
+        try:
+            response._request_id = request_id
+        except Exception:
+            # Matches the Responses adapter: a custom response object that rejects the
+            # attribute must not break the stream for a debugging field.
+            return
 
     def _attach_logprobs_to_output(
         self, output_items: list[ResponseOutputItem], logprobs: list[Logprob]
@@ -408,6 +434,8 @@ class OpenAIChatCompletionsModel(Model):
                 stream=True,
                 prompt=None,
             )
+
+            self._attach_stream_request_id(response, stream)
 
             final_response: Response | None = None
             stream_for_handler: AsyncIterator[ChatCompletionChunk]
