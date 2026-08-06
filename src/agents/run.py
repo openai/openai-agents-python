@@ -1015,6 +1015,12 @@ class AgentRunner:
                                 append_model_response_if_new(
                                     model_responses, turn_result.model_response
                                 )
+                                tool_input_guardrail_results.extend(
+                                    turn_result.tool_input_guardrail_results
+                                )
+                                tool_output_guardrail_results.extend(
+                                    turn_result.tool_output_guardrail_results
+                                )
                                 processed_response_for_state = resolve_processed_response(
                                     run_state=run_state,
                                     processed_response=turn_result.processed_response,
@@ -1035,12 +1041,8 @@ class AgentRunner:
                                     model_responses=model_responses,
                                     current_agent=current_agent,
                                     input_guardrail_results=input_guardrail_results,
-                                    tool_input_guardrail_results=(
-                                        turn_result.tool_input_guardrail_results
-                                    ),
-                                    tool_output_guardrail_results=(
-                                        turn_result.tool_output_guardrail_results
-                                    ),
+                                    tool_input_guardrail_results=tool_input_guardrail_results,
+                                    tool_output_guardrail_results=tool_output_guardrail_results,
                                     context_wrapper=context_wrapper,
                                     interruptions=approvals_from_step(turn_result.next_step),
                                     processed_response=processed_response_for_state,
