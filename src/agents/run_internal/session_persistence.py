@@ -772,6 +772,8 @@ _OPENAI_CONVERSATION_ITEM_TYPES_WITH_REQUIRED_ID: frozenset[str] = frozenset(
         "mcp_approval_request",
         "mcp_call",
         "item_reference",
+        "program",
+        "program_output",
     }
 )
 

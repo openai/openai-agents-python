@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from openai.types.responses.response_output_item import Program, ProgramOutput
 
-from agents import Agent, Runner, TResponseInputItem
+from agents import (
+    Agent,
+    ProgrammaticToolCallingTool,
+    Runner,
+    TResponseInputItem,
+    function_tool,
+)
 from agents.memory.openai_conversations_session import (
     OpenAIConversationsSession,
     start_openai_conversations_session,
@@ -455,6 +462,66 @@ class TestOpenAIConversationsSessionRunnerIntegration:
                 # Check that previous conversation is included
                 input_contents = [str(item.get("content", "")) for item in last_input]
                 assert any("Golden Gate Bridge" in content for content in input_contents)
+
+    @pytest.mark.asyncio
+    async def test_runner_persists_program_item_ids(self, mock_openai_client):
+        """Program items keep the id the Conversations create-item schema requires."""
+        model = FakeModel()
+        model.add_multiple_turn_outputs(
+            [
+                [
+                    Program(
+                        id="program_item",
+                        call_id="call_program",
+                        code='lookup_inventory(sku="A-1")',
+                        fingerprint="fingerprint",
+                        type="program",
+                    ),
+                ],
+                [
+                    ProgramOutput(
+                        id="program_output_item",
+                        call_id="call_program",
+                        result='{"sku":"A-1","available_units":42}',
+                        status="completed",
+                        type="program_output",
+                    ),
+                    get_text_message("done"),
+                ],
+            ]
+        )
+
+        @function_tool(allowed_callers=["programmatic"])
+        def lookup_inventory(sku: str) -> str:
+            return sku
+
+        program_agent = Agent(
+            name="inventory",
+            model=model,
+            tools=[ProgrammaticToolCallingTool(), lookup_inventory],
+        )
+        session = OpenAIConversationsSession(openai_client=mock_openai_client)
+
+        saved: list[TResponseInputItem] = []
+
+        async def record(items: list[TResponseInputItem]) -> None:
+            saved.extend(items)
+
+        with patch.object(session, "get_items", return_value=[]):
+            with patch.object(session, "add_items", side_effect=record):
+                result = await Runner.run(program_agent, "Check inventory", session=session)
+
+        assert result.final_output == "done"
+
+        saved_items = {
+            item["type"]: item
+            for item in cast(list[dict[str, Any]], saved)
+            if isinstance(item, dict) and "type" in item
+        }
+        assert saved_items["program"]["id"] == "program_item"
+        assert saved_items["program_output"]["id"] == "program_output_item"
+        # Item types whose id the Conversations schema leaves optional stay stripped.
+        assert "id" not in saved_items["message"]
 
 
 class TestOpenAIConversationsSessionErrorHandling:

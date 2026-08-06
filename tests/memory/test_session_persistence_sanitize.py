@@ -26,6 +26,8 @@ def _sanitize(item: dict[str, Any]) -> dict[str, Any]:
         "mcp_approval_request",
         "mcp_call",
         "item_reference",
+        "program",
+        "program_output",
     ],
 )
 def test_sanitize_preserves_ids_required_by_openai_conversation_items(item_type: str) -> None:
@@ -53,6 +55,40 @@ def test_sanitize_preserves_file_search_call_payload_id() -> None:
     assert sanitized["status"] == "completed"
 
 
+def test_sanitize_preserves_program_payload_id() -> None:
+    item = {
+        "type": "program",
+        "id": "program_abc",
+        "call_id": "call_program",
+        "code": 'lookup_inventory(sku="A-1")',
+        "fingerprint": "fingerprint",
+    }
+
+    sanitized = _sanitize(item)
+
+    assert sanitized["id"] == "program_abc"
+    assert sanitized["call_id"] == "call_program"
+    assert sanitized["code"] == 'lookup_inventory(sku="A-1")'
+    assert sanitized["fingerprint"] == "fingerprint"
+
+
+def test_sanitize_preserves_program_output_payload_id() -> None:
+    item = {
+        "type": "program_output",
+        "id": "program_output_abc",
+        "call_id": "call_program",
+        "result": '{"available_units":42}',
+        "status": "completed",
+    }
+
+    sanitized = _sanitize(item)
+
+    assert sanitized["id"] == "program_output_abc"
+    assert sanitized["call_id"] == "call_program"
+    assert sanitized["result"] == '{"available_units":42}'
+    assert sanitized["status"] == "completed"
+
+
 @pytest.mark.parametrize(
     "item",
     [
@@ -73,6 +109,14 @@ def test_sanitize_preserves_file_search_call_payload_id() -> None:
         {"type": "computer_call_output", "id": "ccout_abc", "call_id": "call_abc", "output": {}},
         {"type": "tool_search_call", "id": "ts_abc", "status": "completed"},
         {"type": "shell_call", "id": "sh_abc", "call_id": "call_abc", "action": {}},
+        {
+            "type": "function_call",
+            "id": "fc_prog",
+            "call_id": "call_abc",
+            "name": "get_weather",
+            "arguments": "{}",
+            "caller": {"type": "program", "caller_id": "call_program"},
+        },
     ],
 )
 def test_sanitize_strips_optional_or_policy_controlled_ids(item: dict[str, Any]) -> None:
