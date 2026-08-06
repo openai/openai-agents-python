@@ -690,9 +690,11 @@ class AgentRunner:
                     run_state._nested_history_owned_session_item_refs,
                 )
                 run_state._original_input = copy_input_items(original_input)
-                generated_items = run_state._generated_items
+                # Copy every list adopted from the state: the run appends to these, and
+                # the caller still owns the state as a resumable snapshot.
+                generated_items = list(run_state._generated_items)
                 session_items = list(run_state._session_items)
-                model_responses = run_state._model_responses
+                model_responses = list(run_state._model_responses)
                 # Cast to the correct type since we know this is TContext
                 context_wrapper = cast(RunContextWrapper[TContext], run_state._context)
             else:
@@ -2004,8 +2006,10 @@ class AgentRunner:
         streamed_result = RunResultStreaming(
             input=copy_input_items(streamed_input),
             # When resuming from RunState, use session_items from state.
-            # primeFromState will mark items as sent so prepareInput skips them
-            new_items=run_state._session_items if run_state else [],
+            # primeFromState will mark items as sent so prepareInput skips them.
+            # Copy it: the streamed loop appends to new_items, and the caller still
+            # owns the state as a resumable snapshot.
+            new_items=list(run_state._session_items) if run_state else [],
             current_agent=schema_agent,
             raw_responses=run_state._model_responses if run_state else [],
             final_output=None,
