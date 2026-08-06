@@ -20,30 +20,22 @@ async def _await_mutation(awaitable: Awaitable[_T]) -> _T:
     """Wait for a mutation outcome despite repeated caller cancellation."""
     task = asyncio.ensure_future(awaitable)
     cancellation: asyncio.CancelledError | None = None
-    while True:
+    while not task.done():
         try:
-            result = await asyncio.shield(task)
+            await asyncio.wait({task})
         except asyncio.CancelledError as exc:
             if cancellation is None:
                 cancellation = exc
-            if not task.done():
-                continue
-        except BaseException:
-            if cancellation is not None:
-                raise cancellation from None
-            raise
-        else:
-            if cancellation is not None:
-                raise cancellation from None
-            return result
 
-        try:
-            result = task.result()
-        except BaseException:
-            assert cancellation is not None
+    try:
+        result = task.result()
+    except BaseException:
+        if cancellation is not None:
             raise cancellation from None
-        assert cancellation is not None
+        raise
+    if cancellation is not None:
         raise cancellation from None
+    return result
 
 
 class SQLiteSession(SessionABC):

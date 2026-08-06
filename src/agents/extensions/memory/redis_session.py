@@ -31,8 +31,10 @@ from ._optional_imports import raise_optional_dependency_error
 
 try:
     import redis.asyncio as redis
+    import redis.asyncio.connection as redis_connection
     from redis.asyncio import BlockingConnectionPool, Redis
-    from redis.exceptions import ResponseError, WatchError
+    from redis.event import AsyncAfterConnectionReleasedEvent
+    from redis.exceptions import ConnectionError as RedisConnectionError, ResponseError, WatchError
 except ImportError as e:
     raise_optional_dependency_error(
         "RedisSession",
@@ -50,10 +52,13 @@ from ...memory.session_settings import (
 )
 from ...memory.sqlite_session import _await_mutation
 
+_redis_connection_api: Any = redis_connection
+
 
 @dataclass
 class _PipelineAttemptOutcome:
     committed: bool
+    retryable_watch_conflict: bool
     operation_error: BaseException | None
     cleanup_error: BaseException | None
     settled: bool
@@ -64,34 +69,214 @@ class _PipelineConnectionPool:
 
     def __init__(self, pool: Any):
         self._pool = pool
+        self.connection: Any | None = None
         self.release_started = False
         self.release_completed = False
+        self._checkout_recorded_used = False
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._pool, name)
+
+    async def get_connection(self, *args: Any, **kwargs: Any) -> Any:
+        """Retain an acquired identity before validating it for pipeline use."""
+        del args, kwargs
+
+        async def acquire() -> Any:
+            if isinstance(self._pool, BlockingConnectionPool):
+                start_time_acquired = time.monotonic()
+                has_timing_observability = all(
+                    hasattr(_redis_connection_api, name)
+                    for name in (
+                        "get_pool_name",
+                        "record_connection_create_time",
+                        "record_connection_wait_time",
+                    )
+                )
+                try:
+                    async with self._pool._condition:
+                        await asyncio.wait_for(
+                            self._pool._condition.wait_for(self._pool.can_get_connection),
+                            timeout=self._pool.timeout,
+                        )
+                        maybe_pool_lock = getattr(self._pool, "_maybe_pool_lock", None)
+                        if has_timing_observability:
+                            connections_before = len(self._pool._available_connections) + len(
+                                self._pool._in_use_connections
+                            )
+                            start_time_created = time.monotonic()
+                        if maybe_pool_lock is None:
+                            connection = self._pool.get_available_connection()
+                            self.connection = connection
+                        else:
+                            async with maybe_pool_lock():
+                                connection = self._pool.get_available_connection()
+                                self.connection = connection
+                        if has_timing_observability:
+                            connections_after = len(self._pool._available_connections) + len(
+                                self._pool._in_use_connections
+                            )
+                            is_created = connections_after > connections_before
+                except asyncio.TimeoutError as exc:
+                    raise RedisConnectionError("No connection available.") from exc
+                await self._pool.ensure_connection(connection)
+                if has_timing_observability:
+                    if is_created:
+                        await _redis_connection_api.record_connection_create_time(
+                            connection_pool=self._pool,
+                            duration_seconds=time.monotonic() - start_time_created,
+                        )
+                    await _redis_connection_api.record_connection_wait_time(
+                        pool_name=_redis_connection_api.get_pool_name(self._pool),
+                        duration_seconds=time.monotonic() - start_time_acquired,
+                    )
+                return connection
+
+            has_observability = hasattr(_redis_connection_api, "record_connection_count")
+            async with self._pool._lock:
+                if has_observability:
+                    connections_before = len(self._pool._available_connections) + len(
+                        self._pool._in_use_connections
+                    )
+                    start_time_created = time.monotonic()
+                connection = self._pool.get_available_connection()
+                self.connection = connection
+                if has_observability:
+                    connections_after = len(self._pool._available_connections) + len(
+                        self._pool._in_use_connections
+                    )
+                    is_created = connections_after > connections_before
+                else:
+                    await self._pool.ensure_connection(connection)
+                    return connection
+
+            pool_name = _redis_connection_api.get_pool_name(self._pool)
+            if is_created:
+                await _redis_connection_api.record_connection_count(
+                    pool_name=pool_name,
+                    connection_state=_redis_connection_api.ConnectionState.USED,
+                    counter=1,
+                )
+            else:
+                await _redis_connection_api.record_connection_count(
+                    pool_name=pool_name,
+                    connection_state=_redis_connection_api.ConnectionState.IDLE,
+                    counter=-1,
+                )
+                await _redis_connection_api.record_connection_count(
+                    pool_name=pool_name,
+                    connection_state=_redis_connection_api.ConnectionState.USED,
+                    counter=1,
+                )
+            self._checkout_recorded_used = True
+            await self._pool.ensure_connection(connection)
+            if is_created:
+                await _redis_connection_api.record_connection_create_time(
+                    connection_pool=self._pool,
+                    duration_seconds=time.monotonic() - start_time_created,
+                )
+            return connection
+
+        acquisition = asyncio.create_task(acquire())
+        cancellation: asyncio.CancelledError | None = None
+        while not acquisition.done():
+            try:
+                await asyncio.wait({acquisition})
+            except asyncio.CancelledError as exc:
+                if cancellation is None:
+                    cancellation = exc
+                if self.connection is None:
+                    acquisition.cancel()
+
+        try:
+            connection = acquisition.result()
+        except BaseException:
+            if cancellation is not None:
+                raise cancellation from None
+            raise
+        if cancellation is not None:
+            raise cancellation from None
+        return connection
+
+    async def record_discard(self) -> None:
+        """Balance supported pool observability when a checked-out connection is removed."""
+        if not self._checkout_recorded_used:
+            return
+        await _redis_connection_api.record_connection_count(
+            pool_name=_redis_connection_api.get_pool_name(self._pool),
+            connection_state=_redis_connection_api.ConnectionState.USED,
+            counter=-1,
+        )
+        self._checkout_recorded_used = False
 
     async def notify_capacity_available(self) -> None:
         if isinstance(self._pool, BlockingConnectionPool):
             async with self._pool._condition:
                 self._pool._condition.notify()
 
+    def _install_release_transfer_listener(self, connection: Any) -> Any:
+        """Mark the exact point where redis-py exposes an identity for reuse."""
+        owner = self
+
+        class ReleaseTransferListener:
+            async def listen(self, event: Any) -> None:
+                if event.connection is connection:
+                    owner.release_completed = True
+                    owner._checkout_recorded_used = False
+
+        listener = ReleaseTransferListener()
+        dispatcher = self._pool._event_dispatcher
+        with dispatcher._lock:
+            listeners = dispatcher._event_listeners_mapping.get(
+                AsyncAfterConnectionReleasedEvent, []
+            )
+            dispatcher._event_listeners_mapping[AsyncAfterConnectionReleasedEvent] = [
+                listener,
+                *listeners,
+            ]
+        return listener
+
+    def _remove_release_transfer_listener(self, listener: Any) -> None:
+        dispatcher = self._pool._event_dispatcher
+        with dispatcher._lock:
+            listeners = dispatcher._event_listeners_mapping.get(
+                AsyncAfterConnectionReleasedEvent, []
+            )
+            dispatcher._event_listeners_mapping[AsyncAfterConnectionReleasedEvent] = [
+                current for current in listeners if current is not listener
+            ]
+
     async def release(self, connection: Any) -> None:
+        self.connection = connection
         self.release_started = True
         was_in_use = connection in self._pool._in_use_connections
+        if was_in_use:
+            try:
+                if connection.should_reconnect():
+                    # Let Pipeline.reset() finish clearing its local state, then
+                    # let _finish_pipeline() detach this retained identity without
+                    # exposing it to shared-pool release listeners.
+                    return
+            except BaseException:
+                pass
+        transfer_listener = self._install_release_transfer_listener(connection)
         try:
             await self._pool.release(connection)
         except BaseException:
-            if was_in_use and connection in self._pool._available_connections:
-                self.release_completed = True
+            if self.release_completed and connection in self._pool._available_connections:
                 await self.notify_capacity_available()
             raise
         else:
             self.release_completed = True
+            self._checkout_recorded_used = False
+        finally:
+            self._remove_release_transfer_listener(transfer_listener)
 
 
 async def _finish_pipeline(
     pipe: Any,
     connection_pool: _PipelineConnectionPool,
+    *,
+    discard_connection: bool = False,
 ) -> tuple[BaseException | None, bool, Any | None]:
     """Reset a pipeline and prove whether its connection left pipeline ownership."""
     if connection_pool.release_completed:
@@ -99,7 +284,7 @@ async def _finish_pipeline(
         return None, True, None
 
     reset_error: BaseException | None = None
-    if not connection_pool.release_started:
+    if not connection_pool.release_started and not discard_connection:
         try:
             await pipe.reset()
         except BaseException as exc:
@@ -109,56 +294,36 @@ async def _finish_pipeline(
         pipe.connection = None
         return reset_error, True, None
 
-    connection = getattr(pipe, "connection", None)
+    connection = connection_pool.connection or getattr(pipe, "connection", None)
     if connection is None:
         return reset_error, True, None
 
-    if connection_pool.release_started:
-        # The first release may have transferred and reborrowed the connection
-        # before failing. Its ownership is ambiguous, so never release it again.
-        connection_pool._pool._in_use_connections.discard(connection)
-        while connection in connection_pool._pool._available_connections:
-            connection_pool._pool._available_connections.remove(connection)
-        try:
-            connection._close()
-        except BaseException as close_error:
-            pipe.connection = None
-            connection_pool.release_completed = True
-            await connection_pool.notify_capacity_available()
-            return close_error, True, connection
-        await connection_pool.notify_capacity_available()
+    # Any retained identity at this point has no proven pool transfer. Detach it
+    # directly instead of starting or repeating a shared-pool release whose
+    # listeners could reborrow the identity before reporting a failure.
+    connection_pool._pool._in_use_connections.discard(connection)
+    while connection in connection_pool._pool._available_connections:
+        connection_pool._pool._available_connections.remove(connection)
+    metrics_error: BaseException | None = None
+    try:
+        await connection_pool.record_discard()
+    except BaseException as exc:
+        metrics_error = exc
+    try:
+        connection._close()
+    except BaseException as close_error:
         pipe.connection = None
         connection_pool.release_completed = True
-        return reset_error, True, None
-
-    try:
-        connection.mark_for_reconnect()
-    except BaseException as reconnect_error:
-        return reconnect_error, False, None
-
-    try:
-        await connection_pool.release(connection)
-    except BaseException as release_error:
-        if not connection_pool.release_completed:
-            # A custom release implementation may transfer and reborrow the
-            # connection before failing. Remove ambiguous pool membership and
-            # quarantine the connection instead of leaving it checked out.
-            connection_pool._pool._in_use_connections.discard(connection)
-            while connection in connection_pool._pool._available_connections:
-                connection_pool._pool._available_connections.remove(connection)
-            try:
-                connection._close()
-            except BaseException as close_error:
-                pipe.connection = None
-                connection_pool.release_completed = True
-                await connection_pool.notify_capacity_available()
-                return close_error, True, connection
-            await connection_pool.notify_capacity_available()
-            connection_pool.release_completed = True
+        await connection_pool.notify_capacity_available()
+        return close_error, True, connection
+    if metrics_error is not None:
         pipe.connection = None
-        return release_error, connection_pool.release_completed, None
-
+        connection_pool.release_completed = True
+        await connection_pool.notify_capacity_available()
+        return metrics_error, True, None
+    await connection_pool.notify_capacity_available()
     pipe.connection = None
+    connection_pool.release_completed = True
     return reset_error, True, None
 
 
@@ -170,21 +335,23 @@ async def _await_pipeline_attempt(
     cancellation: asyncio.CancelledError | None = None
     attempt_cancelled = False
 
-    while True:
+    while not attempt.done():
         try:
-            outcome = await asyncio.shield(attempt)
+            await asyncio.wait({attempt})
         except asyncio.CancelledError as exc:
-            if attempt.done() and attempt.cancelled():
-                if cancellation is not None:
-                    raise cancellation from None
-                raise
             if cancellation is None:
                 cancellation = exc
             if not completion_owned.is_set() and not attempt_cancelled:
                 attempt.cancel()
                 attempt_cancelled = True
-        else:
-            return outcome, cancellation
+
+    try:
+        outcome = attempt.result()
+    except BaseException:
+        if cancellation is not None:
+            raise cancellation from None
+        raise
+    return outcome, cancellation
 
 
 class RedisSession(SessionABC):
@@ -309,9 +476,12 @@ class RedisSession(SessionABC):
     ) -> _PipelineAttemptOutcome:
         """Run one watched write attempt and finish its pipeline before returning."""
         committed = False
+        retryable_watch_conflict = False
         operation_error: BaseException | None = None
+        discard_connection = False
         batch_response_index: int | None = None
         raise_first_error = pipe.raise_first_error
+        parse_response = pipe.parse_response
         raw_connection_pool = pipe.connection_pool
         connection_pool = _PipelineConnectionPool(raw_connection_pool)
         pipe.connection_pool = connection_pool
@@ -329,6 +499,18 @@ class RedisSession(SessionABC):
             result = raise_first_error(*args, **kwargs)
             committed = True
             return result
+
+        parsed_transaction_responses = 0
+        exec_response_position = 0
+
+        async def parse_response_and_classify(*args: Any, **kwargs: Any) -> Any:
+            nonlocal parsed_transaction_responses, retryable_watch_conflict
+            response_position = parsed_transaction_responses
+            parsed_transaction_responses += 1
+            response = await parse_response(*args, **kwargs)
+            if response_position == exec_response_position and response is None:
+                retryable_watch_conflict = True
+            return response
 
         try:
             try:
@@ -367,6 +549,8 @@ class RedisSession(SessionABC):
                         pipe.pexpireat(key, expiration_time_ms)
 
                 pipe.raise_first_error = raise_first_error_and_mark
+                exec_response_position = len(pipe.command_stack) + 1
+                pipe.parse_response = parse_response_and_classify
                 completion_owned.set()
                 await pipe.execute()
                 committed = True
@@ -374,11 +558,19 @@ class RedisSession(SessionABC):
                 operation_error = exc
             except BaseException as exc:
                 operation_error = exc
+                if isinstance(exc, asyncio.CancelledError) and not completion_owned.is_set():
+                    # An immediate WATCH command may have been sent without its
+                    # response being consumed. Never return that connection to
+                    # shared pool reuse or invoke release listeners with it.
+                    discard_connection = True
         finally:
             completion_owned.set()
             pipe.raise_first_error = raise_first_error
+            pipe.parse_response = parse_response
             cleanup_error, settled, detached_connection = await _finish_pipeline(
-                pipe, connection_pool
+                pipe,
+                connection_pool,
+                discard_connection=discard_connection,
             )
             if detached_connection is not None:
                 self._detached_connections.add(detached_connection)
@@ -386,6 +578,7 @@ class RedisSession(SessionABC):
 
         return _PipelineAttemptOutcome(
             committed=committed,
+            retryable_watch_conflict=retryable_watch_conflict,
             operation_error=operation_error,
             cleanup_error=cleanup_error,
             settled=settled,
@@ -417,7 +610,7 @@ class RedisSession(SessionABC):
                 raise cancellation
             if outcome.cleanup_error is not None:
                 raise outcome.cleanup_error
-            if isinstance(outcome.operation_error, WatchError):
+            if outcome.retryable_watch_conflict:
                 continue
             if outcome.operation_error is not None:
                 raise outcome.operation_error

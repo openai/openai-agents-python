@@ -226,9 +226,6 @@ class AdvancedSQLiteSession(SQLiteSession):
         """
         session_limit = resolve_session_limit(limit, self.session_settings)
 
-        if branch_id is None:
-            branch_id = self._current_branch_id
-
         def _decode_rows(rows: list[Any]) -> list[TResponseInputItem]:
             items: list[TResponseInputItem] = []
             for (message_data,) in rows:
@@ -242,6 +239,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         def _get_items_sync():
             """Synchronous helper to get items for a specific branch."""
             with self._locked_connection() as conn:
+                resolved_branch_id = self._resolve_read_branch(conn, branch_id)
                 with closing(conn.cursor()) as cursor:
                     # Get message IDs in correct order for this branch
                     if session_limit is None:
@@ -253,7 +251,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                             WHERE m.session_id = ? AND s.branch_id = ?
                             ORDER BY s.sequence_number ASC
                         """,
-                            (self.session_id, branch_id),
+                            (self.session_id, resolved_branch_id),
                         )
                         return _decode_rows(cursor.fetchall())
 
@@ -272,7 +270,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                                 ORDER BY s.sequence_number DESC
                                 LIMIT ?
                             """,
-                                (self.session_id, branch_id, window),
+                                (self.session_id, resolved_branch_id, window),
                             )
                             rows = cursor.fetchall()
                             items = _decode_rows(list(reversed(rows)))
@@ -293,7 +291,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                         ORDER BY s.sequence_number DESC
                         LIMIT ?
                     """,
-                        (self.session_id, branch_id, session_limit),
+                        (self.session_id, resolved_branch_id, session_limit),
                     )
                     return _decode_rows(list(reversed(cursor.fetchall())))
 
@@ -506,8 +504,8 @@ class AdvancedSQLiteSession(SQLiteSession):
         yields a different anchor.
         """
         with self._locked_connection() as conn:
+            branch_id = self._resolve_read_branch(conn, None)
             with closing(conn.cursor()) as cursor:
-                branch_id = self._current_branch_id
                 cursor.execute(
                     """
                     SELECT COALESCE(MAX(user_turn_number), 0)
@@ -580,6 +578,7 @@ class AdvancedSQLiteSession(SQLiteSession):
             The current turn number for the active branch.
         """
         with self._locked_connection() as conn:
+            branch_id = self._resolve_read_branch(conn, None)
             with closing(conn.cursor()) as cursor:
                 cursor.execute(
                     """
@@ -587,7 +586,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                     FROM message_structure
                     WHERE session_id = ? AND branch_id = ?
                     """,
-                    (self.session_id, self._current_branch_id),
+                    (self.session_id, branch_id),
                 )
                 result = cursor.fetchone()
                 return result[0] if result else 0
@@ -1071,6 +1070,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         def _list_branches_sync():
             """Synchronous helper to list all branches."""
             with self._locked_connection() as conn:
+                current_branch_id = self._resolve_read_branch(conn, None)
                 with closing(conn.cursor()) as cursor:
                     cursor.execute(
                         """
@@ -1095,7 +1095,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                                 "branch_id": branch_id,
                                 "message_count": msg_count,
                                 "user_turns": user_turns,
-                                "is_current": branch_id == self._current_branch_id,
+                                "is_current": branch_id == current_branch_id,
                                 "created_at": created_at,
                             }
                         )
@@ -1153,19 +1153,47 @@ class AdvancedSQLiteSession(SQLiteSession):
             (self.session_id,),
         )
 
-    def _refresh_branch_after_external_clear(self, conn: sqlite3.Connection) -> None:
+    def _refresh_branch_after_external_clear(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        initialize: bool = True,
+    ) -> None:
         """Reset a stale branch pointer after another session instance clears history."""
-        self._ensure_session_clear_generations_table(conn)
-        generation = conn.execute(
+        if initialize:
+            self._ensure_session_clear_generations_table(conn)
+        else:
+            table_exists = conn.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'session_clear_generations'
+                """
+            ).fetchone()
+            if table_exists is None:
+                return
+
+        row = conn.execute(
             """
             SELECT generation FROM session_clear_generations
             WHERE session_id = ?
             """,
             (self.session_id,),
-        ).fetchone()[0]
+        ).fetchone()
+        generation = row[0] if row is not None else 0
         if generation != self._generation:
             self._generation = generation
             self._current_branch_id = "main"
+
+    def _resolve_read_branch(
+        self,
+        conn: sqlite3.Connection,
+        branch_id: str | None,
+    ) -> str:
+        """Resolve an implicit branch after synchronizing an external clear."""
+        if branch_id is not None:
+            return branch_id
+        self._refresh_branch_after_external_clear(conn, initialize=False)
+        return self._current_branch_id
 
     def _reserve_branch_id(
         self, cursor: sqlite3.Cursor, new_branch_id: str | None, from_turn_number: int
@@ -1337,12 +1365,11 @@ class AdvancedSQLiteSession(SQLiteSession):
                 - 'timestamp': When the turn was created
                 - 'can_branch': Always True (all user messages can branch)
         """
-        if branch_id is None:
-            branch_id = self._current_branch_id
 
         def _get_turns_sync():
             """Synchronous helper to get conversation turns."""
             with self._locked_connection() as conn:
+                resolved_branch_id = self._resolve_read_branch(conn, branch_id)
                 with closing(conn.cursor()) as cursor:
                     cursor.execute(
                         f"""
@@ -1356,7 +1383,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                         AND ms.message_type = 'user'
                         ORDER BY ms.branch_turn_number
                     """,
-                        (self.session_id, branch_id),
+                        (self.session_id, resolved_branch_id),
                     )
 
                     turns = []
@@ -1392,12 +1419,11 @@ class AdvancedSQLiteSession(SQLiteSession):
         Returns:
             List of matching turns with same format as get_conversation_turns().
         """
-        if branch_id is None:
-            branch_id = self._current_branch_id
 
         def _search_sync():
             """Synchronous helper to search turns by content."""
             with self._locked_connection() as conn:
+                resolved_branch_id = self._resolve_read_branch(conn, branch_id)
                 with closing(conn.cursor()) as cursor:
                     cursor.execute(
                         f"""
@@ -1412,7 +1438,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                         AND am.message_data LIKE ?
                         ORDER BY ms.branch_turn_number
                     """,
-                        (self.session_id, branch_id, f"%{search_term}%"),
+                        (self.session_id, resolved_branch_id, f"%{search_term}%"),
                     )
 
                     matches = []
@@ -1447,12 +1473,11 @@ class AdvancedSQLiteSession(SQLiteSession):
         Returns:
             Dictionary mapping turn numbers to lists of message metadata.
         """
-        if branch_id is None:
-            branch_id = self._current_branch_id
 
         def _get_conversation_sync():
             """Synchronous helper to get conversation by turns."""
             with self._locked_connection() as conn:
+                resolved_branch_id = self._resolve_read_branch(conn, branch_id)
                 with closing(conn.cursor()) as cursor:
                     cursor.execute(
                         """
@@ -1461,7 +1486,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                         WHERE session_id = ? AND branch_id = ?
                         ORDER BY sequence_number
                     """,
-                        (self.session_id, branch_id),
+                        (self.session_id, resolved_branch_id),
                     )
 
                     turns: dict[int, list[dict[str, str | None]]] = {}
@@ -1483,12 +1508,11 @@ class AdvancedSQLiteSession(SQLiteSession):
         Returns:
             List of tuples containing (tool_name, usage_count, turn_number).
         """
-        if branch_id is None:
-            branch_id = self._current_branch_id
 
         def _get_tool_usage_sync():
             """Synchronous helper to get tool usage statistics."""
             with self._locked_connection() as conn:
+                resolved_branch_id = self._resolve_read_branch(conn, branch_id)
                 with closing(conn.cursor()) as cursor:
                     cursor.execute(
                         """
@@ -1523,9 +1547,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                     """,
                         (
                             self.session_id,
-                            branch_id,
+                            resolved_branch_id,
                             self.session_id,
-                            branch_id,
+                            resolved_branch_id,
                         ),
                     )
                     return cursor.fetchall()
@@ -1605,12 +1629,10 @@ class AdvancedSQLiteSession(SQLiteSession):
             Dictionary with usage data for specific turn, or list of dictionaries for all turns.
         """
 
-        if branch_id is None:
-            branch_id = self._current_branch_id
-
         def _get_turn_usage_sync():
             """Synchronous helper to get turn usage statistics."""
             with self._locked_connection() as conn:
+                resolved_branch_id = self._resolve_read_branch(conn, branch_id)
                 if user_turn_number is not None:
                     query = """
                         SELECT requests, input_tokens, output_tokens, total_tokens,
@@ -1620,7 +1642,10 @@ class AdvancedSQLiteSession(SQLiteSession):
                     """
 
                     with closing(conn.cursor()) as cursor:
-                        cursor.execute(query, (self.session_id, branch_id, user_turn_number))
+                        cursor.execute(
+                            query,
+                            (self.session_id, resolved_branch_id, user_turn_number),
+                        )
                         row = cursor.fetchone()
 
                         if row:
@@ -1659,7 +1684,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 """
 
                 with closing(conn.cursor()) as cursor:
-                    cursor.execute(query, (self.session_id, branch_id))
+                    cursor.execute(query, (self.session_id, resolved_branch_id))
                     results = []
                     for row in cursor.fetchall():
                         # Parse JSON details if present

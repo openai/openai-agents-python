@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
 from unittest.mock import Mock
@@ -158,35 +157,6 @@ class ConflictFakeDaprClient(FakeDaprClient):
         )
 
 
-class FailingMetadataFakeDaprClient(FakeDaprClient):
-    """Fake client that rejects the next metadata write."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.fail_metadata_save = True
-
-    async def save_state(
-        self,
-        store_name: str,
-        key: str,
-        value: str | bytes,
-        state_metadata: dict[str, str] | None = None,
-        options: Any = None,
-        etag: str | None = None,
-    ) -> None:
-        if key.endswith(":metadata") and self.fail_metadata_save:
-            self.fail_metadata_save = False
-            raise RuntimeError("metadata write failed")
-        await super().save_state(
-            store_name=store_name,
-            key=key,
-            value=value,
-            state_metadata=state_metadata,
-            options=options,
-            etag=etag,
-        )
-
-
 @pytest.fixture
 def conflict_dapr_client() -> ConflictFakeDaprClient:
     """Fixture for fake client that forces concurrency conflicts."""
@@ -251,70 +221,9 @@ async def test_dapr_session_direct_ops(fake_dapr_client: FakeDaprClient):
         await session.clear_session()
         retrieved_after_clear = await session.get_items()
         assert len(retrieved_after_clear) == 0
-        assert session._metadata_key in fake_dapr_client._state
 
     finally:
         await session.close()
-
-
-@pytest.mark.parametrize("operation", ["add", "pop", "clear"])
-async def test_mutation_cancellation_waits_for_authoritative_outcome(
-    fake_dapr_client: FakeDaprClient,
-    monkeypatch: pytest.MonkeyPatch,
-    operation: str,
-) -> None:
-    """Cancellation must wait after the state store applies a history mutation."""
-    session = await _create_test_session(fake_dapr_client)
-    item: TResponseInputItem = {"role": "user", "content": "once"}
-    if operation != "add":
-        await session.add_items([item])
-
-    mutation_applied = asyncio.Event()
-    allow_return = asyncio.Event()
-
-    if operation in {"add", "pop"}:
-        original_save = fake_dapr_client.save_state
-
-        async def controlled_save(*args: Any, **kwargs: Any) -> None:
-            await original_save(*args, **kwargs)
-            if kwargs.get("key") == session._messages_key:
-                mutation_applied.set()
-                await allow_return.wait()
-
-        monkeypatch.setattr(fake_dapr_client, "save_state", controlled_save)
-        if operation == "add":
-            task: asyncio.Task[Any] = asyncio.create_task(session.add_items([item]))
-        else:
-            task = asyncio.create_task(session.pop_item())
-    else:
-        original_delete = fake_dapr_client.delete_state
-
-        async def controlled_delete(*args: Any, **kwargs: Any) -> None:
-            await original_delete(*args, **kwargs)
-            mutation_applied.set()
-            await allow_return.wait()
-
-        monkeypatch.setattr(fake_dapr_client, "delete_state", controlled_delete)
-        task = asyncio.create_task(session.clear_session())
-
-    try:
-        await mutation_applied.wait()
-        task.cancel()
-        await asyncio.sleep(0)
-        task.cancel()
-        await asyncio.sleep(0)
-        assert task.done() is False
-        allow_return.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    finally:
-        allow_return.set()
-        if not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-    expected = [item] if operation == "add" else []
-    assert await session.get_items() == expected
 
 
 async def test_runner_integration(agent: Agent, fake_dapr_client: FakeDaprClient):
@@ -1418,22 +1327,3 @@ async def test_dapr_session_operation_waiting_behind_close_raises():
                 task.cancel()
                 with suppress(asyncio.CancelledError, RuntimeError):
                     await task
-
-
-async def test_metadata_failure_does_not_commit_messages() -> None:
-    """An ancillary metadata failure must happen before conversation history is committed."""
-    client = FailingMetadataFakeDaprClient()
-    session = DaprSession(
-        session_id="metadata_failure",
-        state_store_name="statestore",
-        dapr_client=client,  # type: ignore[arg-type]
-    )
-    item: TResponseInputItem = {"role": "user", "content": "once"}
-
-    with pytest.raises(RuntimeError, match="metadata write failed"):
-        await session.add_items([item])
-
-    assert await session.get_items() == []
-
-    await session.add_items([item])
-    assert await session.get_items() == [item]

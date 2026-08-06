@@ -3437,6 +3437,113 @@ async def test_external_clear_resets_stale_branch_before_pop(tmp_path: Path):
         clearer.close()
 
 
+@pytest.mark.parametrize(
+    "read_path",
+    ["items", "turns", "search", "conversation", "tools", "usage", "branches"],
+)
+async def test_external_clear_resets_stale_branch_before_default_reads(
+    tmp_path: Path,
+    usage_data: Usage,
+    read_path: str,
+):
+    """Default reads must recover from a stale branch pointer after an external clear."""
+    db_path = tmp_path / f"external_clear_read_generation_{read_path}.db"
+    session_id = f"external_clear_read_generation_{read_path}"
+    stale = AdvancedSQLiteSession(
+        session_id=session_id,
+        db_path=db_path,
+        create_tables=True,
+    )
+    clearer = AdvancedSQLiteSession(session_id=session_id, db_path=db_path)
+
+    try:
+        await stale.add_items(
+            [
+                {"role": "user", "content": "old question"},
+                {"role": "assistant", "content": "old answer"},
+                {"role": "user", "content": "old follow-up"},
+            ]
+        )
+        await stale.create_branch_from_turn(2, "stale")
+        assert stale._current_branch_id == "stale"
+
+        await clearer.clear_session()
+        new_items: list[TResponseInputItem] = [
+            {"role": "user", "content": "new main question"},
+            {
+                "type": "function_call",
+                "name": "lookup",
+                "arguments": '{"query": "new"}',
+                "call_id": "lookup-new-main",
+            },
+            {"role": "assistant", "content": "new main answer"},
+        ]
+        await clearer.add_items(new_items)
+        await clearer.store_run_usage(create_mock_run_result(usage_data))
+
+        if read_path == "items":
+            assert await stale.get_items() == new_items
+        elif read_path == "turns":
+            assert [turn["full_content"] for turn in await stale.get_conversation_turns()] == [
+                "new main question"
+            ]
+        elif read_path == "search":
+            assert [turn["full_content"] for turn in await stale.find_turns_by_content("new")] == [
+                "new main question"
+            ]
+        elif read_path == "conversation":
+            assert set(await stale.get_conversation_by_turns()) == {1}
+        elif read_path == "tools":
+            assert await stale.get_tool_usage() == [("lookup", 1, 1)]
+        elif read_path == "usage":
+            assert await stale.get_turn_usage(1) == {
+                "requests": 1,
+                "input_tokens": 50,
+                "output_tokens": 30,
+                "total_tokens": 80,
+                "input_tokens_details": {"cache_write_tokens": 0, "cached_tokens": 10},
+                "output_tokens_details": {"reasoning_tokens": 5},
+            }
+        else:
+            assert [
+                (branch["branch_id"], branch["is_current"])
+                for branch in await stale.list_branches()
+            ] == [("main", True)]
+
+        assert stale._current_branch_id == "main"
+    finally:
+        stale.close()
+        clearer.close()
+
+
+async def test_default_read_does_not_initialize_clear_generation_table(tmp_path: Path):
+    """Reading a legacy database must not create the clear-generation table."""
+    session = AdvancedSQLiteSession(
+        session_id="legacy_generation_read",
+        db_path=tmp_path / "legacy_generation_read.db",
+        create_tables=True,
+    )
+
+    try:
+        await session.add_items([{"role": "user", "content": "legacy history"}])
+        with session._locked_connection() as conn:
+            conn.execute("DROP TABLE session_clear_generations")
+            conn.commit()
+
+        assert await session.get_items() == [{"role": "user", "content": "legacy history"}]
+
+        with session._locked_connection() as conn:
+            table_exists = conn.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'session_clear_generations'
+                """
+            ).fetchone()
+        assert table_exists is None
+    finally:
+        session.close()
+
+
 async def test_switch_validation_cancellation_waits_for_generation_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

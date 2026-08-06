@@ -95,6 +95,9 @@ class FakeAsyncCollection:
     async def create_index(self, keys: Any, **kwargs: Any) -> str:
         return "fake_index"
 
+    def with_options(self, **kwargs: Any) -> FakeAsyncCollection:
+        return self
+
     def find(self, query: dict[str, Any] | None = None) -> FakeCursor:
         query = query or {}
         results = [doc for doc in self._docs.values() if self._matches(doc, query)]
@@ -200,9 +203,19 @@ class FakeAsyncCollection:
     @staticmethod
     def _matches(doc: dict[str, Any], query: dict[str, Any]) -> bool:
         for key, expected in query.items():
+            if key == "$or":
+                if not any(FakeAsyncCollection._matches(doc, branch) for branch in expected):
+                    return False
+                continue
             actual = doc.get(key)
             if isinstance(expected, dict):
                 if "$ne" in expected and actual == expected["$ne"]:
+                    return False
+                if "$in" in expected and actual not in expected["$in"]:
+                    return False
+                if "$lt" in expected and (actual is None or actual >= expected["$lt"]):
+                    return False
+                if "$exists" in expected and (key in doc) != expected["$exists"]:
                     return False
                 continue
             if actual != expected:
@@ -240,6 +253,12 @@ class FakeDriverInfo:
         self.version = version
 
 
+class FakeReadPreference:
+    """Minimal stand-in for pymongo read preference constants."""
+
+    PRIMARY = object()
+
+
 class FakeAsyncMongoClient:
     """In-memory substitute for pymongo AsyncMongoClient."""
 
@@ -275,16 +294,19 @@ def _make_fake_pymongo_modules() -> None:
     collection_mod = types.ModuleType("pymongo.asynchronous.collection")
     client_mod = types.ModuleType("pymongo.asynchronous.mongo_client")
     driver_info_mod = types.ModuleType("pymongo.driver_info")
+    read_preferences_mod = types.ModuleType("pymongo.read_preferences")
 
     collection_mod.AsyncCollection = FakeAsyncCollection  # type: ignore[attr-defined]
     client_mod.AsyncMongoClient = FakeAsyncMongoClient  # type: ignore[attr-defined]
     driver_info_mod.DriverInfo = FakeDriverInfo  # type: ignore[attr-defined]
+    read_preferences_mod.ReadPreference = FakeReadPreference  # type: ignore[attr-defined]
 
     sys.modules["pymongo"] = pymongo_mod
     sys.modules["pymongo.asynchronous"] = async_pkg
     sys.modules["pymongo.asynchronous.collection"] = collection_mod
     sys.modules["pymongo.asynchronous.mongo_client"] = client_mod
     sys.modules["pymongo.driver_info"] = driver_info_mod
+    sys.modules["pymongo.read_preferences"] = read_preferences_mod
 
 
 _make_fake_pymongo_modules()
@@ -380,11 +402,142 @@ async def test_clear_session(session: MongoDBSession) -> None:
     await session.clear_session()
 
     assert await session.get_items() == []
-    assert next(iter(session._sessions._docs.values()))["_seq"] == sequence_before_clear
+    metadata = next(iter(session._sessions._docs.values()))
+    assert metadata["_seq"] == sequence_before_clear
+    assert metadata["_generation"] == 1
 
     await session.add_items([{"role": "user", "content": "after clear"}])
     batch = next(iter(session._messages._docs.values()))
     assert batch["seq"] == sequence_before_clear
+    assert batch["generation"] == 1
+
+
+async def test_clear_session_partial_cleanup_failure_is_logically_atomic(
+    session: MongoDBSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed physical sweep must not expose a partially cleared generation."""
+    await session.add_items([{"role": "user", "content": "first"}])
+    await session.add_items([{"role": "assistant", "content": "second"}])
+    messages = cast(FakeAsyncCollection, session._messages)
+
+    async def delete_one_then_fail(query: dict[str, Any]) -> None:
+        matching = [
+            key for key, doc in messages._docs.items() if FakeAsyncCollection._matches(doc, query)
+        ]
+        assert len(matching) == 2
+        del messages._docs[matching[0]]
+        raise RuntimeError("partial cleanup failed")
+
+    monkeypatch.setattr(session._messages, "delete_many", delete_one_then_fail)
+
+    await session.clear_session()
+
+    assert len(messages._docs) == 1
+    assert await session.get_items() == []
+
+
+async def test_generation_reads_use_primary_after_failed_clear_cleanup(
+    session: MongoDBSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lagging secondary metadata must not expose cleared history to reads or pops."""
+    await session.add_items([{"role": "user", "content": "old"}])
+    sessions = cast(FakeAsyncCollection, session._sessions)
+    messages = cast(FakeAsyncCollection, session._messages)
+    primary_find = sessions.find
+
+    async def fail_cleanup(query: dict[str, Any]) -> None:
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(messages, "delete_many", fail_cleanup)
+    await session.clear_session()
+    assert len(messages._docs) == 1
+
+    metadata = copy.deepcopy(next(iter(sessions._docs.values())))
+    stale_metadata = {**metadata, "_generation": 0}
+
+    def stale_secondary_find(query: dict[str, Any] | None = None) -> FakeCursor:
+        query = query or {}
+        docs = [stale_metadata] if FakeAsyncCollection._matches(stale_metadata, query) else []
+        return FakeCursor(docs)
+
+    class PrimaryCollectionView:
+        def find(self, query: dict[str, Any] | None = None) -> FakeCursor:
+            return primary_find(query)
+
+    def with_options(**kwargs: Any) -> PrimaryCollectionView:
+        assert kwargs == {"read_preference": FakeReadPreference.PRIMARY}
+        return PrimaryCollectionView()
+
+    monkeypatch.setattr(sessions, "find", stale_secondary_find)
+    monkeypatch.setattr(sessions, "with_options", with_options)
+
+    assert await session.get_items() == []
+    assert await session.pop_item() is None
+    assert len(messages._docs) == 1
+
+
+async def test_clear_session_hides_add_reserved_before_generation_advance(
+    session: MongoDBSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A batch reserved before clear must remain in the cleared generation."""
+    insert_started = asyncio.Event()
+    allow_insert = asyncio.Event()
+    original_insert = session._messages.insert_one
+
+    async def controlled_insert(document: dict[str, Any]) -> Any:
+        insert_started.set()
+        await allow_insert.wait()
+        return await original_insert(document)
+
+    monkeypatch.setattr(session._messages, "insert_one", controlled_insert)
+    add_task = asyncio.create_task(session.add_items([{"role": "user", "content": "old"}]))
+    try:
+        await insert_started.wait()
+        await session.clear_session()
+        allow_insert.set()
+        await add_task
+    finally:
+        allow_insert.set()
+        if not add_task.done():
+            add_task.cancel()
+            await asyncio.gather(add_task, return_exceptions=True)
+
+    assert await session.get_items() == []
+
+
+async def test_pop_rechecks_generation_after_concurrent_clear(
+    session: MongoDBSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claim from a cleared generation must not be returned to the caller."""
+    await session.add_items([{"role": "user", "content": "old"}])
+    claim_finished = asyncio.Event()
+    allow_claim_return = asyncio.Event()
+    original_claim = session._messages.find_one_and_update
+
+    async def controlled_claim(*args: Any, **kwargs: Any) -> Any:
+        result = await original_claim(*args, **kwargs)
+        claim_finished.set()
+        await allow_claim_return.wait()
+        return result
+
+    monkeypatch.setattr(session._messages, "find_one_and_update", controlled_claim)
+    pop_task = asyncio.create_task(session.pop_item())
+    try:
+        await claim_finished.wait()
+        await session.clear_session()
+        allow_claim_return.set()
+        assert await pop_task is None
+    finally:
+        allow_claim_return.set()
+        if not pop_task.done():
+            pop_task.cancel()
+            await asyncio.gather(pop_task, return_exceptions=True)
+
+    assert await session.get_items() == []
 
 
 async def test_multiple_add_calls_accumulate(session: MongoDBSession) -> None:

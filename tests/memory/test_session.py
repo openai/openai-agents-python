@@ -10,8 +10,42 @@ from typing import Any, cast
 import pytest
 
 from agents import Agent, RunConfig, Runner, SessionSettings, SQLiteSession, TResponseInputItem
+from agents.memory.sqlite_session import _await_mutation
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
+
+
+@pytest.mark.asyncio
+async def test_await_mutation_cancellation_hides_later_failure_without_loop_error() -> None:
+    """A failed mutation must not leak a false loop error after caller cancellation."""
+    mutation_started = asyncio.Event()
+    allow_failure = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    previous_exception_handler = loop.get_exception_handler()
+    loop_errors: list[dict[str, Any]] = []
+
+    async def mutation() -> None:
+        mutation_started.set()
+        await allow_failure.wait()
+        raise RuntimeError("mutation failed")
+
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    task = asyncio.create_task(_await_mutation(mutation()))
+    try:
+        await mutation_started.wait()
+        task.cancel("caller-cancelled")
+        allow_failure.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0)
+        assert loop_errors == []
+    finally:
+        loop.set_exception_handler(previous_exception_handler)
+        allow_failure.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 # Helper functions for parametrized testing of different Runner methods
