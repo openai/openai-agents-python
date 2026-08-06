@@ -102,6 +102,50 @@ async def _collect_buffered_tool_call_chunks(
     ]
 
 
+def _url_citation(
+    url: str = "https://example.com/weather",
+    title: str = "Weather",
+    start_index: int = 0,
+    end_index: int = 22,
+) -> dict[str, Any]:
+    return {
+        "type": "url_citation",
+        "url_citation": {
+            "start_index": start_index,
+            "end_index": end_index,
+            "url": url,
+            "title": title,
+        },
+    }
+
+
+def _annotated_chunk(
+    delta_payload: dict[str, Any], finish_reason: str | None = None
+) -> ChatCompletionChunk:
+    # `annotations` is not a declared field on ChoiceDelta, so it is built through
+    # model_validate to reach the object the same way a provider payload does.
+    return ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[
+            Choice(
+                index=0,
+                delta=ChoiceDelta.model_validate(delta_payload),
+                finish_reason=cast(Any, finish_reason),
+            )
+        ],
+    )
+
+
+def _streamed_annotations(events: list[Any]) -> list[dict[str, Any]]:
+    completed = cast(ResponseCompletedEvent, events[-1])
+    message = cast(ResponseOutputMessage, completed.response.output[0])
+    text_part = cast(ResponseOutputText, message.content[0])
+    return [annotation.model_dump() for annotation in text_part.annotations]
+
+
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 @pytest.mark.parametrize("use_dictionary", [False, True], ids=["model-settings", "dictionary"])
@@ -3665,3 +3709,133 @@ async def test_stream_response_without_http_response_has_no_request_id(monkeypat
 
     assert completed is not None
     assert getattr(completed.response, "_request_id", None) is None
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_keeps_url_citations_on_the_text_delta() -> None:
+    """Citations reported alongside the text reach the output text, as when not streaming."""
+    events = await _collect_handler_events(
+        _annotated_chunk(
+            {
+                "role": "assistant",
+                "content": "It will rain tomorrow.",
+                "annotations": [_url_citation()],
+            },
+            finish_reason="stop",
+        )
+    )
+
+    assert _streamed_annotations(events) == [
+        {
+            "type": "url_citation",
+            "start_index": 0,
+            "end_index": 22,
+            "url": "https://example.com/weather",
+            "title": "Weather",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_keeps_url_citations_reported_after_the_text() -> None:
+    """A provider may cite on a later delta, once the text the citation indexes is sent."""
+    events = await _collect_handler_events(
+        _annotated_chunk({"role": "assistant", "content": "It will rain tomorrow."}),
+        _annotated_chunk({"annotations": [_url_citation()]}, finish_reason="stop"),
+    )
+
+    assert [annotation["url"] for annotation in _streamed_annotations(events)] == [
+        "https://example.com/weather"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_accumulates_url_citations_across_deltas() -> None:
+    """Citations accumulate rather than replace, as LiteLLM does in `stream_chunk_builder`.
+
+    `delta.annotations` is undocumented, so a provider may spread citations over several
+    deltas or report them only on the last one, and accumulating keeps both cases whole.
+    A provider repeating its full list on every delta would report duplicates, which is
+    the same tradeoff LiteLLM makes.
+    """
+    events = await _collect_handler_events(
+        _annotated_chunk(
+            {
+                "role": "assistant",
+                "content": "It will rain tomorrow.",
+                "annotations": [_url_citation()],
+            }
+        ),
+        _annotated_chunk(
+            {"annotations": [_url_citation(url="https://example.com/forecast", title="Forecast")]},
+            finish_reason="stop",
+        ),
+    )
+
+    assert [annotation["url"] for annotation in _streamed_annotations(events)] == [
+        "https://example.com/weather",
+        "https://example.com/forecast",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_buffering_keeps_a_citation_only_delta() -> None:
+    """Tool call buffering must forward a delta whose only output is a citation."""
+    chunks = await _collect_buffered_tool_call_chunks(
+        _annotated_chunk({"role": "assistant", "content": "It will rain tomorrow."}),
+        _annotated_chunk({"annotations": [_url_citation()]}, finish_reason="stop"),
+    )
+    events = await _collect_handler_events(*chunks)
+
+    assert [annotation["url"] for annotation in _streamed_annotations(events)] == [
+        "https://example.com/weather"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_skips_unsupported_annotation_shapes() -> None:
+    """An unsupported or incomplete citation is dropped instead of failing the turn."""
+    other_type = {"type": "file_citation", "file_citation": {"file_id": "file-1", "index": 0}}
+    incomplete = {"type": "url_citation", "url_citation": {"url": "https://example.com/partial"}}
+    events = await _collect_handler_events(
+        _annotated_chunk(
+            {
+                "role": "assistant",
+                "content": "It will rain tomorrow.",
+                "annotations": [other_type, incomplete, _url_citation()],
+            },
+            finish_reason="stop",
+        )
+    )
+
+    assert [annotation["url"] for annotation in _streamed_annotations(events)] == [
+        "https://example.com/weather"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_ignores_annotations_that_are_not_a_sequence() -> None:
+    """The streamed field is untyped, so an unexpected shape must not fail the turn."""
+    events = await _collect_handler_events(
+        _annotated_chunk(
+            {"role": "assistant", "content": "It will rain tomorrow.", "annotations": 5},
+            finish_reason="stop",
+        )
+    )
+
+    assert _streamed_annotations(events) == []
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_drops_citations_reported_before_any_text() -> None:
+    """Citations index into text, so one reported before any text part opens is dropped."""
+    events = await _collect_handler_events(
+        _annotated_chunk({"role": "assistant", "annotations": [_url_citation()]}),
+        _annotated_chunk({"content": "It will rain tomorrow."}, finish_reason="stop"),
+    )
+
+    assert _streamed_annotations(events) == []
+    completed = cast(ResponseCompletedEvent, events[-1])
+    message = cast(ResponseOutputMessage, completed.response.output[0])
+    assert len(message.content) == 1
+    assert cast(ResponseOutputText, message.content[0]).text == "It will rain tomorrow."

@@ -290,6 +290,9 @@ class ChatCmplStreamHandler:
         if hasattr(delta, "thinking_blocks") and delta.thinking_blocks:
             return True
 
+        if getattr(delta, "annotations", None):
+            return True
+
         return False
 
     @staticmethod
@@ -870,6 +873,13 @@ class ChatCmplStreamHandler:
                         # Extend in place to avoid rebuilding the full accumulated list on
                         # every content delta, which would be O(n^2) over a long stream.
                         existing_logprobs.extend(output_logprobs)
+
+            # Handle url citations. These can arrive on the delta carrying the cited text
+            # or on a later one, so this sits outside the content branch above.
+            if state.text_content_index_and_output:
+                state.text_content_index_and_output[1].annotations.extend(
+                    ChatCmplHelpers.convert_url_citations(getattr(delta, "annotations", None))
+                )
 
             # Handle refusals (model declines to answer)
             # This is always set by the OpenAI API, but not by others e.g. LiteLLM

@@ -1,18 +1,35 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextvars import ContextVar
+from typing import Any
 
 from openai import AsyncOpenAI
 from openai.types.chat.chat_completion_token_logprob import ChatCompletionTokenLogprob
-from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
+from openai.types.responses.response_output_text import (
+    Annotation as ResponseOutputTextAnnotation,
+    AnnotationURLCitation,
+    Logprob,
+    LogprobTopLogprob,
+)
 from openai.types.responses.response_text_delta_event import (
     Logprob as DeltaLogprob,
     LogprobTopLogprob as DeltaTopLogprob,
 )
+from pydantic import ValidationError
 
+from ..logger import log_model_action_debug, logger
 from ..model_settings import ModelSettings
 from ..version import __version__
 from .openai_client_utils import is_official_openai_client
+
+
+def _mapping_or_attr(source: Any, name: str) -> Any:
+    """Read a field from a value that is either a typed object or a plain mapping."""
+    if isinstance(source, Mapping):
+        return source.get(name)
+    return getattr(source, name, None)
+
 
 _USER_AGENT = f"Agents/Python {__version__}"
 HEADERS = {"User-Agent": _USER_AGENT}
@@ -99,6 +116,36 @@ class ChatCmplHelpers:
                 )
             )
         return converted
+
+    @classmethod
+    def convert_url_citations(cls, raw_annotations: Any) -> list[ResponseOutputTextAnnotation]:
+        """Convert Chat Completions url citations into output text annotations."""
+        # Providers report annotations as typed objects or as raw payloads, so validate
+        # rather than assume the declared shape.
+        if not isinstance(raw_annotations, list | tuple):
+            return []
+
+        annotations: list[ResponseOutputTextAnnotation] = []
+        for annotation in raw_annotations:
+            url_citation = _mapping_or_attr(annotation, "url_citation")
+            if _mapping_or_attr(annotation, "type") != "url_citation" or url_citation is None:
+                continue
+            try:
+                annotations.append(
+                    AnnotationURLCitation.model_validate(
+                        {
+                            "type": "url_citation",
+                            "start_index": _mapping_or_attr(url_citation, "start_index"),
+                            "end_index": _mapping_or_attr(url_citation, "end_index"),
+                            "url": _mapping_or_attr(url_citation, "url"),
+                            "title": _mapping_or_attr(url_citation, "title"),
+                        }
+                    )
+                )
+            except ValidationError as exc:
+                # A provider that reports an incomplete citation should not fail the turn.
+                log_model_action_debug(logger, "Skipping malformed url citation", exc)
+        return annotations
 
     @classmethod
     def clean_gemini_tool_call_id(cls, tool_call_id: str, model: str | None = None) -> str:

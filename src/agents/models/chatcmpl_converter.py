@@ -44,7 +44,6 @@ from openai.types.responses import (
 from openai.types.responses.response_input_param import FunctionCallOutput, ItemReference, Message
 from openai.types.responses.response_output_text import (
     Annotation as ResponseOutputTextAnnotation,
-    AnnotationURLCitation,
 )
 from openai.types.responses.response_reasoning_item import Content, Summary
 
@@ -60,6 +59,7 @@ from ..tool import (
     ensure_function_tool_supports_responses_only_features,
     ensure_tool_choice_supports_backend,
 )
+from .chatcmpl_helpers import ChatCmplHelpers
 from .fake_id import FAKE_RESPONSES_ID
 from .reasoning_content_replay import (
     ReasoningContentReplayContext,
@@ -264,21 +264,7 @@ class Converter:
         cls, message: ChatCompletionMessage
     ) -> list[ResponseOutputTextAnnotation]:
         """Convert Chat Completions url citations into output text annotations."""
-        annotations: list[ResponseOutputTextAnnotation] = []
-        for annotation in message.annotations or []:
-            url_citation = getattr(annotation, "url_citation", None)
-            if getattr(annotation, "type", None) != "url_citation" or url_citation is None:
-                continue
-            annotations.append(
-                AnnotationURLCitation(
-                    type="url_citation",
-                    start_index=url_citation.start_index,
-                    end_index=url_citation.end_index,
-                    url=url_citation.url,
-                    title=url_citation.title,
-                )
-            )
-        return annotations
+        return ChatCmplHelpers.convert_url_citations(message.annotations)
 
     @classmethod
     def maybe_easy_input_message(cls, item: Any) -> EasyInputMessageParam | None:
