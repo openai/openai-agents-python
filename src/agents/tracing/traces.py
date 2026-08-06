@@ -30,17 +30,22 @@ def _finish_on_generator_exit(trace: Trace) -> None:
     An explicit ``finish`` from the wrong context is a context-ownership violation rather
     than an unavoidable one, so it still raises, and a processor that fails during
     ``finish`` still surfaces rather than being mistaken for a foreign token.
-    """
-    trace.finish(reset_current=False)
 
-    token: contextvars.Token[Trace | None] | None = trace._prev_context_token  # type: ignore[attr-defined]
-    if token is None:
-        return
-    trace._prev_context_token = None  # type: ignore[attr-defined]
+    The reset runs in a ``finally`` so that a failing ``finish`` still releases the scope
+    instead of leaving the finished trace current, and the token is cleared only once the
+    reset has either succeeded or hit the foreign-context ``ValueError`` it expects. An
+    unexpected reset failure therefore leaves the handle in place rather than losing it.
+    """
     try:
-        Scope.reset_current_trace(token)
-    except ValueError:
-        logger.debug("Skipping trace context reset, token belongs to another context")
+        trace.finish(reset_current=False)
+    finally:
+        token: contextvars.Token[Trace | None] | None = trace._prev_context_token  # type: ignore[attr-defined]
+        if token is not None:
+            try:
+                Scope.reset_current_trace(token)
+            except ValueError:
+                logger.debug("Skipping trace context reset, token belongs to another context")
+            trace._prev_context_token = None  # type: ignore[attr-defined]
 
 
 class Trace(abc.ABC):

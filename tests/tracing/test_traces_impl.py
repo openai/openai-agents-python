@@ -270,7 +270,9 @@ async def test_generator_close_surfaces_processor_failure() -> None:
     with pytest.raises(ValueError, match="processor exploded"):
         await generator.aclose()
 
-    # The reset never ran, so the token must still be there rather than silently dropped.
-    assert trace._prev_context_token is not None
+    # The processor failure is the one that propagates, and the scope is still released:
+    # running the reset in a finally keeps a failing finish from leaving the trace current.
+    assert Scope.get_current_trace() is None
+    assert trace._prev_context_token is None
 
     Scope.set_current_trace(None)
