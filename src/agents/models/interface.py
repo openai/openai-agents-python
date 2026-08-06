@@ -35,7 +35,14 @@ class ModelTracing(enum.Enum):
 
 
 class Model(abc.ABC):
-    """The base interface for calling an LLM."""
+    """The base interface for calling an LLM.
+
+    Model implementations must assign a non-empty call ID to each tool invocation. A call ID must
+    identify one canonical invocation for the lifetime of the run and its serialized resume
+    lineage; it must not be reused for changed tool identity or payload. An exact completed replay
+    may be omitted by the runtime without re-executing the invocation. Tool outputs must retain the
+    call ID for correlation.
+    """
 
     async def _cleanup_on_run_end(self, owner: object) -> None:
         """Release run-scoped resources after the runner finishes using this model."""

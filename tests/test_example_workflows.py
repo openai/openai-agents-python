@@ -1075,7 +1075,11 @@ async def test_agents_as_tools_conditional_enabling_matches_preference() -> None
         orchestrator_model = FakeModel()
         # Build tool calls only for expected tools to avoid missing-tool errors.
         tool_calls = [
-            get_function_tool_call(tool_name, json.dumps({"input": "Hi"}))
+            get_function_tool_call(
+                tool_name,
+                json.dumps({"input": "Hi"}),
+                call_id=f"call_{tool_name}",
+            )
             for tool_name in sorted(expected_tools)
         ]
         orchestrator_model.add_multiple_turn_outputs([tool_calls, [get_text_message("Done")]])
@@ -1139,8 +1143,20 @@ async def test_agents_as_tools_orchestrator_runs_multiple_translations() -> None
     orchestrator_model = FakeModel()
     orchestrator_model.add_multiple_turn_outputs(
         [
-            [get_function_tool_call("translate_to_spanish", json.dumps({"input": "Hi"}))],
-            [get_function_tool_call("translate_to_french", json.dumps({"input": "Hi"}))],
+            [
+                get_function_tool_call(
+                    "translate_to_spanish",
+                    json.dumps({"input": "Hi"}),
+                    call_id="translate_spanish",
+                )
+            ],
+            [
+                get_function_tool_call(
+                    "translate_to_french",
+                    json.dumps({"input": "Hi"}),
+                    call_id="translate_french",
+                )
+            ],
             [get_text_message("Summary complete")],
         ]
     )

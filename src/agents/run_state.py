@@ -50,8 +50,14 @@ from ._tool_identity import (
     get_function_tool_qualified_name,
     serialize_function_tool_lookup_key,
 )
+from ._tool_invocation import (
+    tool_invocation_call_id,
+    tool_invocation_identity,
+    tool_invocation_identity_and_scope,
+    tool_output_identity,
+)
 from .agent import Agent
-from .exceptions import UserError
+from .exceptions import ModelBehaviorError, UserError
 from .guardrail import (
     GuardrailFunctionOutput,
     InputGuardrail,
@@ -150,7 +156,7 @@ ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.14"
+CURRENT_SCHEMA_VERSION = "1.15"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
@@ -176,6 +182,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "flows."
     ),
     "1.14": "Scopes hosted MCP approvals and restored requests by server label.",
+    "1.15": "Persists canonical tool invocation identity and lifecycle across resume flows.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -365,10 +372,175 @@ class RunState(Generic[TContext, TAgent]):
             return []
         return self._current_step.interruptions
 
+    @staticmethod
+    def _approval_items_match(
+        candidate: ToolApprovalItem,
+        approval_item: ToolApprovalItem,
+    ) -> bool:
+        """Return whether two approval items identify the same nested invocation."""
+        if candidate is approval_item:
+            return True
+        candidate_agent = candidate.agent
+        approval_agent = approval_item.agent
+        if (
+            candidate_agent is not None
+            and approval_agent is not None
+            and candidate_agent is not approval_agent
+        ):
+            return False
+        candidate_identity = tool_invocation_identity(
+            candidate.raw_item,
+            tool_lookup_key=candidate.tool_lookup_key,
+            tool_name=candidate.tool_name,
+        )
+        approval_identity = tool_invocation_identity(
+            approval_item.raw_item,
+            tool_lookup_key=approval_item.tool_lookup_key,
+            tool_name=approval_item.tool_name,
+        )
+        return candidate_identity is not None and candidate_identity == approval_identity
+
+    def _find_nested_approval_state(
+        self,
+        approval_item: ToolApprovalItem,
+    ) -> tuple[RunState[Any, Agent[Any]], ToolApprovalItem] | None:
+        """Find the nested agent-tool state that owns an approval interruption."""
+        if self._last_processed_response is None:
+            return None
+
+        from .agent_tool_state import peek_agent_tool_run_result
+
+        approval_identity = tool_invocation_identity_and_scope(
+            approval_item.raw_item,
+            tool_lookup_key=approval_item.tool_lookup_key,
+            tool_name=approval_item.tool_name,
+        )
+        current_state_owns_approval = False
+        if approval_identity is not None and self._context is not None:
+            invocation_type, call_id, approval_scope, fingerprint = approval_identity
+            current_record = self._context._tool_invocations.get(call_id)
+            current_state_owns_approval = current_record is not None and (
+                not current_record.completed
+                and current_record.invocation_type == invocation_type
+                and current_record.approval_scope == approval_scope
+                and current_record.fingerprint == fingerprint
+            )
+            current_response_identities = [
+                *(
+                    tool_invocation_identity_and_scope(
+                        run.tool_call,
+                        tool_lookup_key=get_function_tool_lookup_key_for_tool(run.function_tool),
+                    )
+                    for run in self._last_processed_response.functions
+                ),
+                *(
+                    tool_invocation_identity_and_scope(
+                        run.tool_call,
+                        invocation_role="handoff",
+                    )
+                    for run in self._last_processed_response.handoffs
+                ),
+                *(
+                    tool_invocation_identity_and_scope(
+                        run.tool_call,
+                        tool_name=run.computer_tool.name,
+                    )
+                    for run in self._last_processed_response.computer_actions
+                ),
+                *(
+                    tool_invocation_identity_and_scope(
+                        run.tool_call,
+                        tool_name=run.custom_tool.name,
+                    )
+                    for run in self._last_processed_response.custom_tool_calls
+                ),
+                *(
+                    tool_invocation_identity_and_scope(
+                        run.tool_call,
+                        tool_name=run.local_shell_tool.name,
+                    )
+                    for run in self._last_processed_response.local_shell_calls
+                ),
+                *(
+                    tool_invocation_identity_and_scope(
+                        run.tool_call,
+                        tool_name=run.shell_tool.name,
+                    )
+                    for run in self._last_processed_response.shell_calls
+                ),
+                *(
+                    tool_invocation_identity_and_scope(
+                        run.tool_call,
+                        tool_name=run.apply_patch_tool.name,
+                    )
+                    for run in self._last_processed_response.apply_patch_calls
+                ),
+                *(
+                    tool_invocation_identity_and_scope(
+                        run.tool_call,
+                        tool_name=run.tool_name,
+                    )
+                    for run in self._last_processed_response.function_tools_not_found
+                ),
+                *(
+                    tool_invocation_identity_and_scope(run.request_item)
+                    for run in self._last_processed_response.mcp_approval_requests
+                ),
+            ]
+            current_state_owns_approval = (
+                current_state_owns_approval and approval_identity in current_response_identities
+            )
+
+        exact_match: tuple[RunState[Any, Agent[Any]], ToolApprovalItem] | None = None
+        canonical_matches: list[tuple[RunState[Any, Agent[Any]], ToolApprovalItem]] = []
+        for function_run in self._last_processed_response.functions:
+            pending_result = peek_agent_tool_run_result(
+                function_run.tool_call,
+                scope_id=self._agent_tool_state_scope_id,
+            )
+            interruptions = getattr(pending_result, "interruptions", None)
+            to_state = getattr(pending_result, "to_state", None)
+            if not isinstance(interruptions, list) or not callable(to_state):
+                continue
+            nested_state = to_state()
+            if not isinstance(nested_state, RunState) or nested_state is self:
+                continue
+            for candidate in interruptions:
+                if not isinstance(candidate, ToolApprovalItem):
+                    continue
+                if candidate is approval_item:
+                    exact_match = (nested_state, candidate)
+                    break
+                if self._approval_items_match(candidate, approval_item):
+                    canonical_matches.append((nested_state, candidate))
+            if exact_match is not None:
+                break
+
+        if current_state_owns_approval and (exact_match is not None or canonical_matches):
+            raise UserError(
+                "Cannot apply approval because the same tool invocation identity belongs to both "
+                "the current run and a nested agent-tool run. Use distinct call IDs."
+            )
+        if exact_match is not None:
+            return exact_match
+        if len(canonical_matches) == 1:
+            return canonical_matches[0]
+        if len(canonical_matches) > 1:
+            raise UserError(
+                "Cannot apply approval because multiple nested agent-tool runs contain the same "
+                "tool invocation identity. Use unique call IDs within nested runs."
+            )
+        return None
+
     def approve(self, approval_item: ToolApprovalItem, always_approve: bool = False) -> None:
         """Approve a tool call and rerun with this state to continue."""
         if self._context is None:
             raise UserError("Cannot approve tool: RunState has no context")
+        nested_approval = self._find_nested_approval_state(approval_item)
+        if nested_approval is not None:
+            nested_state, nested_item = nested_approval
+            nested_state.approve(nested_item, always_approve=always_approve)
+            return
         self._context.approve_tool(approval_item, always_approve=always_approve)
 
     def reject(
@@ -386,6 +558,15 @@ class RunState(Generic[TContext, TAgent]):
         """
         if self._context is None:
             raise UserError("Cannot reject tool: RunState has no context")
+        nested_approval = self._find_nested_approval_state(approval_item)
+        if nested_approval is not None:
+            nested_state, nested_item = nested_approval
+            nested_state.reject(
+                nested_item,
+                always_reject=always_reject,
+                rejection_message=rejection_message,
+            )
+            return
         self._context.reject_tool(
             approval_item,
             always_reject=always_reject,
@@ -414,7 +595,24 @@ class RunState(Generic[TContext, TAgent]):
                 approvals_dict[tool_name]["sticky_rejection_message"] = (
                     record.sticky_rejection_message
                 )
+            if record.sticky_scope is not None:
+                approvals_dict[tool_name]["sticky_scope"] = record.sticky_scope
         return approvals_dict
+
+    def _serialize_tool_invocations(self) -> dict[str, dict[str, Any]]:
+        """Serialize the run-owned canonical tool invocation ledger."""
+        if self._context is None:
+            return {}
+        return {
+            call_id: {
+                "type": invocation.invocation_type,
+                "approval_scope": invocation.approval_scope,
+                "fingerprint": invocation.fingerprint,
+                "executed": invocation.executed,
+                "completed": invocation.completed,
+            }
+            for call_id, invocation in self._context._tool_invocations.items()
+        }
 
     def _serialize_hosted_mcp_approvals(self) -> list[dict[str, Any]]:
         """Serialize hosted MCP approvals with explicit typed identities."""
@@ -456,6 +654,8 @@ class RunState(Generic[TContext, TAgent]):
                 decision["rejection_messages"] = dict(record.rejection_messages)
             if record.sticky_rejection_message is not None:
                 decision["sticky_rejection_message"] = record.sticky_rejection_message
+            if record.sticky_scope is not None:
+                decision["sticky_scope"] = record.sticky_scope
             serialized.append({"identity": identity_data, "decision": decision})
         return serialized
 
@@ -802,6 +1002,7 @@ class RunState(Generic[TContext, TAgent]):
             raise UserError("Cannot serialize RunState: No context")
 
         approvals_dict = self._serialize_approvals()
+        tool_invocations = self._serialize_tool_invocations()
         hosted_mcp_approvals = self._serialize_hosted_mcp_approvals()
         model_responses = self._serialize_model_responses()
         original_input_serialized = self._serialize_original_input()
@@ -813,6 +1014,7 @@ class RunState(Generic[TContext, TAgent]):
         context_entry: dict[str, Any] = {
             "usage": serialize_usage(self._context.usage),
             "approvals": approvals_dict,
+            "tool_invocations": tool_invocations,
             "context": context_payload,
             # Preserve metadata so deserialization can warn when context types were erased.
             "context_meta": context_meta,
@@ -2837,12 +3039,20 @@ async def _build_run_state_from_json(
     else:
         raise UserError("Serialized run state context must be a mapping. Please provide one.")
     context.usage = usage
+    context._restored_unbound_approval_call_ids = set()
+    context._allow_legacy_approval_binding_reconstruction = (schema_major, schema_minor) < (1, 15)
     context._rebuild_approvals(context_data.get("approvals", {}))
+    if (schema_major, schema_minor) >= (1, 15):
+        context._rebuild_tool_invocations(context_data.get("tool_invocations", {}))
+    else:
+        context._tool_invocations = {}
     hosted_mcp_major, hosted_mcp_minor = (
         int(part) for part in _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
     )
     if (schema_major, schema_minor) >= (hosted_mcp_major, hosted_mcp_minor):
         context._rebuild_hosted_mcp_approvals(context_data.get("hosted_mcp_approvals", []))
+    if (schema_major, schema_minor) >= (1, 15):
+        context._mark_restored_unbound_approval_call_ids()
     serialized_tool_input = context_data.get("tool_input")
     if (
         context_override is None
@@ -3061,6 +3271,8 @@ async def _build_run_state_from_json(
         state._current_step = NextStepInterruption(
             interruptions=[item for item in interruptions if isinstance(item, ToolApprovalItem)]
         )
+        for approval_item in state._current_step.interruptions:
+            context._mark_restored_unbound_pending_approval(approval_item)
 
     state._current_turn_persisted_item_count = state_json.get(
         "current_turn_persisted_item_count", 0
@@ -3083,7 +3295,286 @@ async def _build_run_state_from_json(
     sandbox_data = state_json.get("sandbox")
     state._sandbox = dict(sandbox_data) if isinstance(sandbox_data, Mapping) else None
 
+    _validate_completed_tool_invocations(
+        state,
+        reconstruct_legacy=(schema_major, schema_minor) < (1, 15),
+    )
+
     return state
+
+
+def _validate_completed_tool_invocations(
+    state: RunState[Any, Agent[Any]],
+    *,
+    reconstruct_legacy: bool = False,
+) -> None:
+    """Reconcile invocation bindings with restored calls and outputs."""
+    if state._context is None:
+        return
+    from .run_internal.tool_execution import (
+        is_apply_patch_name,
+        normalize_apply_patch_fallback_call,
+    )
+
+    completed_records = {
+        call_id: record
+        for call_id, record in state._context._tool_invocations.items()
+        if record.completed
+    }
+    starting_agent = state._starting_agent
+    assert starting_agent is not None
+    apply_patch_tools = [
+        tool
+        for agent in _iter_agent_graph(starting_agent)
+        for tool in agent.tools
+        if isinstance(tool, ApplyPatchTool)
+    ]
+    legacy_native_tool_names: dict[str, set[str]] = {}
+    if reconstruct_legacy:
+        native_tool_types = (
+            (ComputerTool, "computer_call"),
+            (CustomTool, "custom_tool_call"),
+            (LocalShellTool, "local_shell_call"),
+            (ShellTool, "shell_call"),
+            (ApplyPatchTool, "apply_patch_call"),
+        )
+        for agent in _iter_agent_graph(starting_agent):
+            for tool in agent.tools:
+                for tool_type, invocation_type in native_tool_types:
+                    if isinstance(tool, tool_type):
+                        legacy_native_tool_names.setdefault(invocation_type, set()).add(tool.name)
+                        break
+    resolved_tool_names_by_call_id: dict[str, str] = {}
+
+    def collect_resolved_tool_name(raw_item: Any, tool_name: Any) -> None:
+        call_identity = tool_invocation_call_id(raw_item)
+        if isinstance(tool_name, str) and tool_name and call_identity is not None:
+            _, call_id = call_identity
+            if call_id is not None:
+                resolved_tool_names_by_call_id.setdefault(call_id, tool_name)
+
+    for run_item in state._generated_items:
+        collect_resolved_tool_name(run_item.raw_item, getattr(run_item, "tool_name", None))
+    for run_item in state._session_items:
+        collect_resolved_tool_name(run_item.raw_item, getattr(run_item, "tool_name", None))
+    if state._last_processed_response is not None:
+        for run_item in state._last_processed_response.new_items:
+            collect_resolved_tool_name(run_item.raw_item, getattr(run_item, "tool_name", None))
+        for computer_run in state._last_processed_response.computer_actions:
+            collect_resolved_tool_name(computer_run.tool_call, computer_run.computer_tool.name)
+        for custom_run in state._last_processed_response.custom_tool_calls:
+            collect_resolved_tool_name(custom_run.tool_call, custom_run.custom_tool.name)
+        for local_shell_run in state._last_processed_response.local_shell_calls:
+            collect_resolved_tool_name(
+                local_shell_run.tool_call,
+                local_shell_run.local_shell_tool.name,
+            )
+        for shell_run in state._last_processed_response.shell_calls:
+            collect_resolved_tool_name(shell_run.tool_call, shell_run.shell_tool.name)
+        for apply_patch_run in state._last_processed_response.apply_patch_calls:
+            collect_resolved_tool_name(
+                apply_patch_run.tool_call,
+                apply_patch_run.apply_patch_tool.name,
+            )
+        for missing_run in state._last_processed_response.function_tools_not_found:
+            collect_resolved_tool_name(missing_run.tool_call, missing_run.tool_name)
+
+    restored_call_occurrences: list[
+        dict[
+            tuple[str, str, str],
+            tuple[Any, FunctionToolLookupKey | None, str | None, str | None],
+        ]
+    ] = []
+    restored_outputs: dict[tuple[str, str], Any] = {}
+    uncanonical_call_ids: set[str] = set()
+
+    def record_raw_item(
+        raw_item: Any,
+        *,
+        tool_lookup_key: FunctionToolLookupKey | None = None,
+        tool_name: str | None = None,
+        invocation_role: str | None = None,
+        allow_handoff_alternative: bool = False,
+    ) -> None:
+        output_identity = tool_output_identity(raw_item)
+        if output_identity is not None:
+            restored_outputs.setdefault(output_identity, raw_item)
+
+        occurrence: dict[
+            tuple[str, str, str],
+            tuple[Any, FunctionToolLookupKey | None, str | None, str | None],
+        ] = {}
+
+        call_identity = tool_invocation_call_id(raw_item)
+        if tool_name is None:
+            if call_identity is not None and call_identity[1] is not None:
+                tool_name = resolved_tool_names_by_call_id.get(call_identity[1])
+                if tool_name is None:
+                    candidate_names = legacy_native_tool_names.get(call_identity[0], set())
+                    if len(candidate_names) == 1:
+                        tool_name = next(iter(candidate_names))
+
+        def add_identity(role: str | None) -> None:
+            identity = tool_invocation_identity(
+                raw_item,
+                tool_lookup_key=tool_lookup_key,
+                tool_name=tool_name,
+                invocation_role=role,
+            )
+            if identity is not None:
+                occurrence.setdefault(identity, (raw_item, tool_lookup_key, tool_name, role))
+
+        add_identity(invocation_role)
+        if allow_handoff_alternative and invocation_role is None:
+            add_identity("handoff")
+        raw_name = getattr(raw_item, "name", None)
+        if isinstance(raw_item, Mapping):
+            raw_name = raw_item.get("name")
+        if any(is_apply_patch_name(raw_name, tool) for tool in apply_patch_tools):
+            try:
+                fallback_call = normalize_apply_patch_fallback_call(raw_item)
+            except ModelBehaviorError:
+                fallback_call = None
+            if fallback_call is not None:
+                fallback_identity = tool_invocation_identity(
+                    fallback_call,
+                    tool_name=tool_name,
+                )
+                if fallback_identity is not None:
+                    occurrence.setdefault(
+                        fallback_identity,
+                        (fallback_call, None, tool_name, None),
+                    )
+        if occurrence:
+            restored_call_occurrences.append(occurrence)
+        elif call_identity is not None and call_identity[1] is not None:
+            uncanonical_call_ids.add(call_identity[1])
+
+    def record_run_item(run_item: RunItem) -> None:
+        record_raw_item(
+            run_item.raw_item,
+            tool_lookup_key=getattr(run_item, "tool_lookup_key", None),
+            tool_name=getattr(run_item, "tool_name", None),
+            invocation_role="handoff" if isinstance(run_item, HandoffCallItem) else None,
+        )
+
+    for run_item in state._generated_items:
+        record_run_item(run_item)
+    for run_item in state._session_items:
+        record_run_item(run_item)
+    if state._last_processed_response is not None:
+        for run_item in state._last_processed_response.new_items:
+            record_run_item(run_item)
+    for response in state._model_responses:
+        for raw_item in response.output:
+            record_raw_item(raw_item, allow_handoff_alternative=True)
+    if isinstance(state._original_input, list):
+        for raw_item in state._original_input:
+            record_raw_item(raw_item, allow_handoff_alternative=True)
+
+    occurrences_by_call_id: dict[
+        str,
+        list[
+            dict[
+                tuple[str, str, str],
+                tuple[Any, FunctionToolLookupKey | None, str | None, str | None],
+            ]
+        ],
+    ] = {}
+    for occurrence in restored_call_occurrences:
+        call_ids = {call_id for _, call_id, _ in occurrence}
+        if len(call_ids) == 1:
+            occurrences_by_call_id.setdefault(next(iter(call_ids)), []).append(occurrence)
+
+    if reconstruct_legacy:
+        for call_id, occurrences in occurrences_by_call_id.items():
+            if call_id in state._context._tool_invocations or call_id in uncanonical_call_ids:
+                continue
+            output_types = {
+                invocation_type
+                for invocation_type, output_call_id in restored_outputs
+                if output_call_id == call_id
+            }
+            if not output_types:
+                continue
+            common_identities = set(occurrences[0])
+            for occurrence in occurrences[1:]:
+                common_identities.intersection_update(occurrence)
+            completed_identities = [
+                identity for identity in common_identities if identity[0] in output_types
+            ]
+            if completed_identities:
+                identity = next(
+                    (
+                        candidate
+                        for candidate in completed_identities
+                        if occurrences[0][candidate][3] is None
+                    ),
+                    completed_identities[0],
+                )
+                details = next(
+                    occurrence[identity] for occurrence in occurrences if identity in occurrence
+                )
+            else:
+                identity, details = next(
+                    candidate for occurrence in occurrences for candidate in occurrence.items()
+                )
+            raw_item, tool_lookup_key, tool_name, invocation_role = details
+            invocation_type, _, _ = identity
+            status = state._context._tool_invocation_status(
+                raw_item,
+                tool_lookup_key=tool_lookup_key,
+                tool_name=tool_name,
+                invocation_role=invocation_role,
+            )
+            if status is not None:
+                if completed_identities:
+                    state._context._mark_tool_call_completed(
+                        restored_outputs[(invocation_type, call_id)]
+                    )
+                else:
+                    state._context._mark_tool_invocation_executed(
+                        raw_item,
+                        tool_lookup_key=tool_lookup_key,
+                        tool_name=tool_name,
+                        invocation_role=invocation_role,
+                    )
+
+        interruptions = getattr(state._current_step, "interruptions", ())
+        for approval_item in interruptions:
+            if isinstance(approval_item, ToolApprovalItem):
+                try:
+                    state._context._restore_pending_approval_binding(approval_item)
+                except ModelBehaviorError:
+                    pending_call_id = state._context._resolve_call_id(approval_item)
+                    if pending_call_id is not None:
+                        state._context._restored_unbound_approval_call_ids.add(pending_call_id)
+
+        state._context._mark_restored_unbound_approval_call_ids()
+
+    state._context._restored_unbound_approval_call_ids.update(
+        {
+            call_id
+            for call_id in occurrences_by_call_id
+            if call_id not in state._context._tool_invocations
+        }
+        | uncanonical_call_ids
+    )
+
+    for call_id, record in completed_records.items():
+        expected_call = (record.invocation_type, call_id, record.fingerprint)
+        expected_output = (record.invocation_type, call_id)
+        occurrences = occurrences_by_call_id.get(call_id, [])
+        if (
+            not occurrences
+            or call_id in uncanonical_call_ids
+            or any(expected_call not in occurrence for occurrence in occurrences)
+            or expected_output not in restored_outputs
+        ):
+            raise UserError(
+                f"RunState completed tool invocation {call_id!r} does not match a restored "
+                "tool call and output."
+            )
 
 
 def _iter_agent_graph(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
@@ -3731,6 +4222,11 @@ def _deserialize_items(
                         description=description,
                         title=title,
                         tool_origin=tool_origin,
+                        _resolved_tool_name=(
+                            item_data.get("tool_name")
+                            if isinstance(item_data.get("tool_name"), str)
+                            else None
+                        ),
                     )
                 )
 

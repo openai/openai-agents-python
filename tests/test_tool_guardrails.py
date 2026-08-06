@@ -539,8 +539,12 @@ def _agent_with_repeated_guarded_tool_calls(
     guarded.tool_output_guardrails = output_guardrails or []
 
     model = FakeModel()
-    tool_call = [get_function_tool_call("guarded", '{"query": "secret"}')]
-    model.add_multiple_turn_outputs([tool_call, tool_call])
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("guarded", '{"query": "secret"}', call_id="guarded_1")],
+            [get_function_tool_call("guarded", '{"query": "secret"}', call_id="guarded_2")],
+        ]
+    )
     return Agent(name="guarded_tool_agent", model=model, tools=[guarded])
 
 

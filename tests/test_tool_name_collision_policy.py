@@ -24,6 +24,7 @@ from agents import (
     tool_namespace,
 )
 from agents.items import ToolCallOutputItem
+from agents.lifecycle import RunHooks
 from agents.tool import Tool, function_tool
 
 from .fake_model import FakeModel
@@ -98,7 +99,7 @@ async def test_resume_error_mode_rejects_current_collision_before_side_effects()
 
 @pytest.mark.parametrize("deserialize", [False, True])
 @pytest.mark.asyncio
-async def test_resume_reclassifies_function_call_to_current_handoff(
+async def test_resume_rejects_function_approval_reclassified_as_handoff(
     deserialize: bool,
 ) -> None:
     calls: list[str] = []
@@ -144,15 +145,61 @@ async def test_resume_reclassifies_function_call_to_current_handoff(
     state._model_responses[-1] = replace(state._model_responses[-1], output=[])
     state.approve(state.get_interruptions()[0])
 
-    resumed_result = await Runner.run(agent, state)
+    with pytest.raises(ModelBehaviorError, match="unique call ID"):
+        await Runner.run(agent, state)
 
-    assert resumed_result.final_output == "target done"
-    assert calls == ["handoff"]
-    assert filter_calls == ["filter"]
+    assert calls == []
+    assert filter_calls == []
 
 
 @pytest.mark.asyncio
-async def test_resume_reclassifies_queued_handoff_to_current_function() -> None:
+async def test_reclassified_handoff_is_rejected_before_run_hook() -> None:
+    calls: list[str] = []
+
+    route_tool = function_tool(
+        lambda: "function",
+        name_override="route",
+        needs_approval=True,
+    )
+    target = Agent(
+        name="target",
+        model=FakeModel(initial_output=[get_text_message("target done")]),
+    )
+    route_handoff = handoff(
+        target,
+        tool_name_override="route",
+        on_handoff=lambda _: calls.append("handoff"),
+    )
+    model = FakeModel(initial_output=[get_function_tool_call("route", "{}", call_id="route")])
+    agent = Agent(name="agent", model=model, tools=[route_tool])
+
+    first = await Runner.run(agent, "Route this request")
+    state = first.to_state()
+    state.approve(state.get_interruptions()[0])
+    state._model_responses[-1] = replace(state._model_responses[-1], output=[])
+    agent.tools = []
+    agent.handoffs = [route_handoff]
+
+    hook_calls: list[str] = []
+
+    class RecordingHandoffHooks(RunHooks[Any]):
+        async def on_handoff(
+            self,
+            context: RunContextWrapper[Any],
+            from_agent: Agent[Any],
+            to_agent: Agent[Any],
+        ) -> None:
+            hook_calls.append("handoff")
+
+    with pytest.raises(ModelBehaviorError, match="unique call ID"):
+        await Runner.run(agent, state, hooks=RecordingHandoffHooks())
+
+    assert calls == []
+    assert hook_calls == []
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_queued_handoff_reclassified_as_function() -> None:
     calls: list[str] = []
 
     def approved_function() -> str:
@@ -192,10 +239,10 @@ async def test_resume_reclassifies_queued_handoff_to_current_function() -> None:
     agent.handoffs = []
     state._model_responses[-1] = replace(state._model_responses[-1], output=[])
 
-    resumed_result = await Runner.run(agent, state)
+    with pytest.raises(ModelBehaviorError, match="unique call ID"):
+        await Runner.run(agent, state)
 
-    assert resumed_result.final_output == "done"
-    assert calls == ["approved", "route"]
+    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -441,7 +488,9 @@ async def test_replacing_interrupted_agent_tool_fails_before_side_effects() -> N
     )
     inner_agent = Agent(
         name="inner",
-        model=FakeModel(initial_output=[get_function_tool_call("sensitive", "{}")]),
+        model=FakeModel(
+            initial_output=[get_function_tool_call("sensitive", "{}", call_id="call_sensitive")]
+        ),
         tools=[sensitive_tool],
     )
     nested_tool = inner_agent.as_tool(
@@ -450,7 +499,15 @@ async def test_replacing_interrupted_agent_tool_fails_before_side_effects() -> N
     )
     outer_agent = Agent(
         name="outer",
-        model=FakeModel(initial_output=[get_function_tool_call("lookup", '{"input":"hi"}')]),
+        model=FakeModel(
+            initial_output=[
+                get_function_tool_call(
+                    "lookup",
+                    '{"input":"hi"}',
+                    call_id="call_lookup",
+                )
+            ]
+        ),
         tools=[nested_tool],
     )
 
@@ -533,7 +590,7 @@ async def test_resume_preserves_model_order_for_function_outcomes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resume_preserves_duplicate_agent_tool_calls() -> None:
+async def test_resume_preserves_multiple_agent_tool_calls() -> None:
     inner_calls: list[str] = []
 
     @function_tool(needs_approval=True)
@@ -561,12 +618,12 @@ async def test_resume_preserves_duplicate_agent_tool_calls() -> None:
             get_function_tool_call(
                 agent_tool.name,
                 '{"input":"a"}',
-                call_id="outer-dup",
+                call_id="outer-a",
             ),
             get_function_tool_call(
                 agent_tool.name,
                 '{"input":"b"}',
-                call_id="outer-dup",
+                call_id="outer-b",
             ),
         ]
     )
@@ -587,7 +644,7 @@ async def test_resume_preserves_duplicate_agent_tool_calls() -> None:
         if isinstance(item, ToolCallOutputItem)
         and isinstance(item.raw_item, dict)
         and item.raw_item.get("type") == "function_call_output"
-        and item.raw_item.get("call_id") == "outer-dup"
+        and item.raw_item.get("call_id") in {"outer-a", "outer-b"}
     ]
     assert len(outer_outputs) == 2
 
@@ -1201,7 +1258,7 @@ async def test_nested_rebind_is_not_committed_before_later_strict_missing_error(
 
 
 @pytest.mark.asyncio
-async def test_resume_preserves_cross_kind_duplicate_call_id_baseline() -> None:
+async def test_cross_kind_duplicate_call_id_fails_before_execution() -> None:
     calls: list[str] = []
     missing_tool = function_tool(
         lambda: _record(calls, "missing"),
@@ -1212,10 +1269,6 @@ async def test_resume_preserves_cross_kind_duplicate_call_id_baseline() -> None:
         lambda: _record(calls, "original"),
         name_override="lookup",
         needs_approval=True,
-    )
-    replacement_tool = function_tool(
-        lambda: _record(calls, "replacement"),
-        name_override="lookup",
     )
     shell_tool = ShellTool(
         executor=lambda _request: _record(calls, "shell"),
@@ -1241,36 +1294,16 @@ async def test_resume_preserves_cross_kind_duplicate_call_id_baseline() -> None:
             shell_call,
         ]
     )
-    model.set_next_output([get_text_message("done")])
     agent = Agent(
         name="agent",
         model=model,
         tools=[missing_tool, original_tool, shell_tool],
     )
 
-    initial_result = await Runner.run(agent, "Look this up")
-    assert calls == ["shell"]
-    state = initial_result.to_state()
-    for interruption in state.get_interruptions():
-        state.approve(interruption)
-    agent.tools = [replacement_tool, shell_tool]
+    with pytest.raises(ModelBehaviorError, match="unique call ID"):
+        await Runner.run(agent, "Look this up")
 
-    resumed_result = await Runner.run(
-        agent,
-        state,
-        run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
-    )
-
-    assert resumed_result.final_output == "done"
-    assert calls == ["shell", "original"]
-    output_ids = [
-        cast(dict[str, Any], item.raw_item)["call_id"]
-        for item in resumed_result.new_items
-        if isinstance(item, ToolCallOutputItem)
-        and isinstance(item.raw_item, dict)
-        and item.raw_item.get("type") == "function_call_output"
-    ]
-    assert output_ids == ["missing_call", "shared_call"]
+    assert calls == []
 
 
 @pytest.mark.parametrize(
@@ -1363,7 +1396,10 @@ async def test_resume_rejects_cross_kind_approval_identity_before_sibling_effect
 
 
 @pytest.mark.asyncio
-async def test_missing_formatter_cancellation_precedes_sibling_side_effects() -> None:
+@pytest.mark.parametrize("streamed", [False, True], ids=["non-streamed", "streamed"])
+async def test_missing_formatter_cancellation_precedes_sibling_side_effects(
+    streamed: bool,
+) -> None:
     calls: list[str] = []
     formatter_started = asyncio.Event()
     keep_formatter_waiting = asyncio.Event()
@@ -1397,14 +1433,20 @@ async def test_missing_formatter_cancellation_precedes_sibling_side_effects() ->
         await keep_formatter_waiting.wait()
         return "missing"
 
+    async def resume(run_config: RunConfig) -> Any:
+        if not streamed:
+            return await Runner.run(agent, state, run_config=run_config)
+        result = Runner.run_streamed(agent, state, run_config=run_config)
+        async for _event in result.stream_events():
+            pass
+        return result
+
     resume_task = asyncio.create_task(
-        Runner.run(
-            agent,
-            state,
-            run_config=RunConfig(
+        resume(
+            RunConfig(
                 tool_not_found_behavior="return_error_to_model",
                 tool_error_formatter=blocking_formatter,
-            ),
+            )
         )
     )
     await formatter_started.wait()
@@ -1414,11 +1456,7 @@ async def test_missing_formatter_cancellation_precedes_sibling_side_effects() ->
 
     assert calls == []
 
-    resumed_result = await Runner.run(
-        agent,
-        state,
-        run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
-    )
+    with pytest.raises(ModelBehaviorError, match="already executed"):
+        await resume(RunConfig(tool_not_found_behavior="return_error_to_model"))
 
-    assert resumed_result.final_output == "done"
-    assert calls == ["available"]
+    assert calls == []

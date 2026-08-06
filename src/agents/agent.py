@@ -14,11 +14,7 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 from typing_extensions import NotRequired, TypedDict
 
 from . import _debug
-from ._tool_identity import (
-    get_function_tool_approval_keys,
-    get_hosted_mcp_approval_request_identity,
-    get_tool_approval_item_call_id,
-)
+from ._tool_identity import get_tool_approval_item_call_id
 from .agent_output import AgentOutputSchemaBase
 from .agent_tool_input import (
     AgentAsToolInput,
@@ -27,9 +23,10 @@ from .agent_tool_input import (
     resolve_agent_tool_input,
 )
 from .agent_tool_state import (
-    consume_agent_tool_run_result,
+    get_agent_tool_resume_state,
     get_agent_tool_state_scope,
     peek_agent_tool_run_result,
+    record_agent_tool_resume_state,
     record_agent_tool_run_result,
     set_agent_tool_state_scope,
 )
@@ -68,7 +65,6 @@ from .util._types import MaybeAwaitable
 if TYPE_CHECKING:
     from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 
-    from .items import ToolApprovalItem
     from .lifecycle import AgentHooks, RunHooks
     from .mcp import MCPServer
     from .memory.session import Session
@@ -747,8 +743,10 @@ class Agent(AgentBase, Generic[TContext]):
             should_record_run_result = True
 
             def _nested_approvals_status(
-                interruptions: list[ToolApprovalItem],
+                pending_run_result: RunResult | RunResultStreaming,
             ) -> Literal["approved", "pending", "rejected"]:
+                interruptions = pending_run_result.interruptions
+                nested_decision_context = pending_run_result.to_state()._context
                 has_pending = False
                 has_decision = False
                 for interruption in interruptions:
@@ -757,12 +755,72 @@ class Agent(AgentBase, Generic[TContext]):
                         has_pending = True
                         continue
                     tool_namespace = RunContextWrapper._resolve_tool_namespace(interruption)
-                    status = context.get_approval_status(
-                        interruption.tool_name or "",
-                        call_id,
-                        tool_namespace=tool_namespace,
-                        existing_pending=interruption,
+                    status = (
+                        nested_decision_context.get_approval_status(
+                            interruption.tool_name or "",
+                            call_id,
+                            tool_namespace=tool_namespace,
+                            existing_pending=interruption,
+                        )
+                        if nested_decision_context is not None
+                        else None
                     )
+                    if (
+                        status is None
+                        and nested_decision_context is not None
+                        and context._allow_legacy_approval_binding_reconstruction
+                    ):
+                        status = context.get_approval_status(
+                            interruption.tool_name or "",
+                            call_id,
+                            tool_namespace=tool_namespace,
+                            existing_pending=interruption,
+                        )
+                        if status is not None:
+                            legacy_namespace = RunContextWrapper._resolve_tool_namespace(
+                                interruption
+                            )
+                            legacy_tool_name = RunContextWrapper._resolve_tool_name(interruption)
+                            legacy_qualified_key = (
+                                f"{legacy_namespace}.{legacy_tool_name}"
+                                if legacy_namespace is not None
+                                else legacy_tool_name
+                            )
+                            approval_keys = (
+                                RunContextWrapper._resolve_approval_key(interruption),
+                                *RunContextWrapper._resolve_approval_keys(interruption),
+                                legacy_qualified_key,
+                            )
+                            approval_record = next(
+                                (
+                                    context._approvals[key]
+                                    for key in approval_keys
+                                    if key in context._approvals
+                                ),
+                                None,
+                            )
+                            if status:
+                                RunContextWrapper.approve_tool(
+                                    nested_decision_context,
+                                    interruption,
+                                    always_approve=bool(
+                                        approval_record and approval_record.approved is True
+                                    ),
+                                )
+                            else:
+                                RunContextWrapper.reject_tool(
+                                    nested_decision_context,
+                                    interruption,
+                                    always_reject=bool(
+                                        approval_record and approval_record.rejected is True
+                                    ),
+                                    rejection_message=context.get_rejection_message(
+                                        interruption.tool_name or "",
+                                        call_id,
+                                        tool_namespace=tool_namespace,
+                                        existing_pending=interruption,
+                                    ),
+                                )
                     if status is False:
                         return "rejected"
                     if status is True:
@@ -775,126 +833,36 @@ class Agent(AgentBase, Generic[TContext]):
                     return "pending"
                 return "approved"
 
-            def _apply_nested_approvals(
-                nested_context: RunContextWrapper[Any],
-                parent_context: RunContextWrapper[Any],
-                interruptions: list[ToolApprovalItem],
-            ) -> None:
-                def _find_mirrored_approval_record(
-                    interruption: ToolApprovalItem,
-                    *,
-                    approved: bool,
-                ) -> Any | None:
-                    hosted_request = get_hosted_mcp_approval_request_identity(interruption)
-                    if hosted_request is not None and hosted_request.request_id is not None:
-                        hosted_key = hosted_request.approval_identity or (
-                            "hosted_mcp_call",
-                            hosted_request.request_id,
-                        )
-                        hosted_record = parent_context._approvals.get(hosted_key)
-                        if hosted_record is not None:
-                            return hosted_record
-                    candidate_keys = list(RunContextWrapper._resolve_approval_keys(interruption))
-                    for candidate_key in get_function_tool_approval_keys(
-                        tool_name=RunContextWrapper._resolve_tool_name(interruption),
-                        tool_namespace=RunContextWrapper._resolve_tool_namespace(interruption),
-                        tool_lookup_key=RunContextWrapper._resolve_tool_lookup_key(interruption),
-                        include_legacy_deferred_key=True,
-                    ):
-                        if candidate_key not in candidate_keys:
-                            candidate_keys.append(candidate_key)
-                    fallback: Any | None = None
-                    for candidate_key in candidate_keys:
-                        candidate = parent_context._approvals.get(candidate_key)
-                        if candidate is None:
-                            continue
-                        if approved and candidate.approved is True:
-                            return candidate
-                        if not approved and candidate.rejected is True:
-                            return candidate
-                        if fallback is None:
-                            fallback = candidate
-                    return fallback
-
-                for interruption in interruptions:
-                    call_id = get_tool_approval_item_call_id(interruption)
-                    if not call_id:
-                        continue
-                    tool_name = RunContextWrapper._resolve_tool_name(interruption)
-                    tool_namespace = RunContextWrapper._resolve_tool_namespace(interruption)
-                    approval_key = RunContextWrapper._resolve_approval_key(interruption)
-                    status = parent_context.get_approval_status(
-                        tool_name,
-                        call_id,
-                        tool_namespace=tool_namespace,
-                        existing_pending=interruption,
-                    )
-                    if status is None:
-                        continue
-                    hosted_request = get_hosted_mcp_approval_request_identity(interruption)
-                    if hosted_request is not None:
-                        approval_record = _find_mirrored_approval_record(
-                            interruption,
-                            approved=status,
-                        )
-                    else:
-                        approval_record = parent_context._approvals.get(approval_key)
-                        if approval_record is None:
-                            approval_record = _find_mirrored_approval_record(
-                                interruption,
-                                approved=status,
-                            )
-                    if status is True:
-                        always_approve = bool(approval_record and approval_record.approved is True)
-                        nested_context.approve_tool(
-                            interruption,
-                            always_approve=always_approve,
-                        )
-                    else:
-                        always_reject = bool(approval_record and approval_record.rejected is True)
-                        rejection_message = (
-                            parent_context.get_rejection_message(
-                                tool_name,
-                                call_id,
-                                tool_namespace=tool_namespace,
-                                existing_pending=interruption,
-                            )
-                            if hosted_request is not None
-                            else None
-                        )
-                        nested_context.reject_tool(
-                            interruption,
-                            always_reject=always_reject,
-                            rejection_message=rejection_message,
-                        )
-
             if isinstance(context, ToolContext) and context.tool_call is not None:
                 pending_run_result = peek_agent_tool_run_result(
                     context.tool_call,
                     scope_id=tool_state_scope_id,
                 )
-                if pending_run_result and getattr(pending_run_result, "interruptions", None):
-                    status = _nested_approvals_status(pending_run_result.interruptions)
+                pending_resume_state = get_agent_tool_resume_state(pending_run_result)
+                if pending_resume_state is not None:
+                    resume_state = pending_resume_state
+                elif pending_run_result and getattr(pending_run_result, "interruptions", None):
+                    resolved_pending_result = cast(
+                        "RunResult | RunResultStreaming",
+                        pending_run_result,
+                    )
+                    status = _nested_approvals_status(resolved_pending_result)
                     if status == "pending":
-                        run_result = pending_run_result
+                        run_result = resolved_pending_result
                         should_record_run_result = False
                     elif status in ("approved", "rejected"):
-                        resume_state = pending_run_result.to_state()
+                        resume_state = resolved_pending_result.to_state()
                         if resume_state._context is not None:
-                            # Apply only explicit parent approvals to the nested resumed run.
-                            _apply_nested_approvals(
-                                resume_state._context,
-                                context,
-                                pending_run_result.interruptions,
-                            )
                             # Keep accumulating nested post-resume usage on the parent
                             # ToolContext accumulator. resolve_resumed_context only
                             # replaces application .context and would otherwise leave
                             # the restored nested wrapper on a detached Usage object.
                             resume_state._context.usage = context.usage
-                        consume_agent_tool_run_result(
+                        record_agent_tool_resume_state(
                             context.tool_call,
+                            resume_state,
                             scope_id=tool_state_scope_id,
+                            approval_items=resolved_pending_result.interruptions,
                         )
 
             if run_result is None:
@@ -999,6 +967,7 @@ class Agent(AgentBase, Generic[TContext]):
                         run_result,
                         scope_id=tool_state_scope_id,
                     )
+                return run_result.final_output
 
             if custom_output_extractor is not None:
                 return await custom_output_extractor(run_result)

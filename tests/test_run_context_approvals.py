@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from openai.types.responses.response_output_item import McpApprovalRequest
 
-from agents import Agent, RunContextWrapper, ToolApprovalItem, UserError
+from agents import Agent, ModelBehaviorError, RunContextWrapper, ToolApprovalItem, UserError
 
 from .utils.factories import make_tool_approval_item
 
@@ -184,7 +184,7 @@ def test_hosted_mcp_exact_query_does_not_inherit_function_rejection_reason(
     context_wrapper = RunContextWrapper(context=None)
     function_item = make_tool_approval_item(
         agent,
-        call_id="shared-call",
+        call_id="function-call",
         name="lookup_account",
     )
     hosted_item = _make_hosted_mcp_approval_item(
@@ -321,6 +321,7 @@ def test_hosted_mcp_legacy_exact_call_decisions_remain_usable() -> None:
             }
         }
     )
+    context_wrapper._allow_legacy_approval_binding_reconstruction = True  # noqa: SLF001
 
     assert (
         context_wrapper.get_approval_status(
@@ -352,7 +353,7 @@ def test_hosted_mcp_legacy_exact_call_decisions_remain_usable() -> None:
             "request-rejected",
             existing_pending=rejected_without_raw_name,
         )
-        is False
+        is None
     )
 
 
@@ -417,35 +418,10 @@ def test_incomplete_hosted_mcp_uses_only_exact_call_decisions() -> None:
         is None
     )
 
-    context_wrapper.approve_tool(malformed)
-    assert context_wrapper.is_tool_approved("lookup_account", "request-a-1") is True
-    assert (
-        context_wrapper.get_approval_status(
-            "lookup_account",
-            "request-a-1",
-            existing_pending=malformed,
-        )
-        is True
-    )
-
-    context_wrapper.reject_tool(malformed, rejection_message="exact denial")
-    assert context_wrapper.is_tool_approved("lookup_account", "request-a-1") is False
-    assert (
-        context_wrapper.get_approval_status(
-            "lookup_account",
-            "request-a-1",
-            existing_pending=malformed,
-        )
-        is False
-    )
-    assert (
-        context_wrapper.get_rejection_message(
-            "lookup_account",
-            "request-a-1",
-            existing_pending=malformed,
-        )
-        == "exact denial"
-    )
+    with pytest.raises(ModelBehaviorError, match="canonical invocation identity"):
+        context_wrapper.approve_tool(malformed)
+    with pytest.raises(ModelBehaviorError, match="canonical invocation identity"):
+        context_wrapper.reject_tool(malformed, rejection_message="exact denial")
 
 
 def test_hosted_mcp_decision_requires_request_id() -> None:
@@ -681,6 +657,7 @@ def test_deferred_top_level_legacy_permanent_approval_key_still_restores() -> No
     context_wrapper._rebuild_approvals(  # noqa: SLF001
         {"get_weather.get_weather": {"approved": True, "rejected": []}}
     )
+    context_wrapper._allow_legacy_approval_binding_reconstruction = True  # noqa: SLF001
 
     assert (
         context_wrapper.get_approval_status(

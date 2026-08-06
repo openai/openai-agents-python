@@ -16,6 +16,7 @@ from uuid import uuid4
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel
 
+from .._tool_identity import get_hosted_mcp_approval_request_identity
 from ..agent_tool_state import drop_agent_tool_run_result
 from ..items import ItemHelpers, RunItem, ToolCallOutputItem, TResponseInputItem
 from ..models.fake_id import FAKE_RESPONSES_ID
@@ -668,6 +669,12 @@ def _dedupe_key(item: TResponseInputItem) -> str | None:
     item_type = payload.get("type") or role
     if role is not None or item_type == "message":
         return None
+    call_id = payload.get("call_id")
+    if isinstance(call_id, str) and item_type in {
+        *_TOOL_CALL_TO_OUTPUT_TYPE,
+        *_TOOL_CALL_TO_OUTPUT_TYPE.values(),
+    }:
+        return f"call_id:{item_type}:{call_id}"
     item_id = payload.get("id")
     if item_id == FAKE_RESPONSES_ID:
         # Ignore placeholder IDs so call_id-based dedupe remains possible.
@@ -675,7 +682,6 @@ def _dedupe_key(item: TResponseInputItem) -> str | None:
     if isinstance(item_id, str):
         return f"id:{item_type}:{item_id}"
 
-    call_id = payload.get("call_id")
     if isinstance(call_id, str):
         return f"call_id:{item_type}:{call_id}"
 
@@ -876,6 +882,12 @@ def apply_patch_rejection_item(
 
 def extract_mcp_request_id(raw_item: Any) -> str | None:
     """Pull the request id from hosted MCP approval payloads."""
+    try:
+        hosted_request = get_hosted_mcp_approval_request_identity(raw_item)
+    except Exception:
+        hosted_request = None
+    if hosted_request is not None:
+        return hosted_request.request_id
     if isinstance(raw_item, dict):
         provider_data = raw_item.get("provider_data")
         if isinstance(provider_data, dict):
@@ -902,6 +914,12 @@ def extract_mcp_request_id(raw_item: Any) -> str | None:
 def extract_mcp_request_id_from_run(mcp_run: Any) -> str | None:
     """Extract the hosted MCP request id from a streaming run item."""
     request_item = getattr(mcp_run, "request_item", None) or getattr(mcp_run, "requestItem", None)
+    try:
+        hosted_request = get_hosted_mcp_approval_request_identity(request_item)
+    except Exception:
+        hosted_request = None
+    if hosted_request is not None:
+        return hosted_request.request_id
     if isinstance(request_item, dict):
         provider_data = request_item.get("provider_data")
         if isinstance(provider_data, dict):

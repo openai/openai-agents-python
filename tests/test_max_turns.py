@@ -41,11 +41,11 @@ async def test_non_streamed_max_turns():
 
     model.add_multiple_turn_outputs(
         [
-            [get_text_message("1"), get_function_tool_call("some_function", func_output)],
-            [get_text_message("2"), get_function_tool_call("some_function", func_output)],
-            [get_text_message("3"), get_function_tool_call("some_function", func_output)],
-            [get_text_message("4"), get_function_tool_call("some_function", func_output)],
-            [get_text_message("5"), get_function_tool_call("some_function", func_output)],
+            [get_text_message("1"), get_function_tool_call("some_function", func_output, "1")],
+            [get_text_message("2"), get_function_tool_call("some_function", func_output, "2")],
+            [get_text_message("3"), get_function_tool_call("some_function", func_output, "3")],
+            [get_text_message("4"), get_function_tool_call("some_function", func_output, "4")],
+            [get_text_message("5"), get_function_tool_call("some_function", func_output, "5")],
         ]
     )
     with pytest.raises(MaxTurnsExceeded):
@@ -65,10 +65,10 @@ async def test_non_streamed_max_turns_none_disables_limit():
 
     model.add_multiple_turn_outputs(
         [
-            [get_text_message("1"), get_function_tool_call("some_function", func_output)],
-            [get_text_message("2"), get_function_tool_call("some_function", func_output)],
-            [get_text_message("3"), get_function_tool_call("some_function", func_output)],
-            [get_text_message("4"), get_function_tool_call("some_function", func_output)],
+            [get_text_message("1"), get_function_tool_call("some_function", func_output, "1")],
+            [get_text_message("2"), get_function_tool_call("some_function", func_output, "2")],
+            [get_text_message("3"), get_function_tool_call("some_function", func_output, "3")],
+            [get_text_message("4"), get_function_tool_call("some_function", func_output, "4")],
             [get_text_message("done")],
         ]
     )
@@ -93,23 +93,23 @@ async def test_streamed_max_turns():
         [
             [
                 get_text_message("1"),
-                get_function_tool_call("some_function", func_output),
+                get_function_tool_call("some_function", func_output, "1"),
             ],
             [
                 get_text_message("2"),
-                get_function_tool_call("some_function", func_output),
+                get_function_tool_call("some_function", func_output, "2"),
             ],
             [
                 get_text_message("3"),
-                get_function_tool_call("some_function", func_output),
+                get_function_tool_call("some_function", func_output, "3"),
             ],
             [
                 get_text_message("4"),
-                get_function_tool_call("some_function", func_output),
+                get_function_tool_call("some_function", func_output, "4"),
             ],
             [
                 get_text_message("5"),
-                get_function_tool_call("some_function", func_output),
+                get_function_tool_call("some_function", func_output, "5"),
             ],
         ]
     )
@@ -131,10 +131,10 @@ async def test_streamed_max_turns_none_disables_limit():
 
     model.add_multiple_turn_outputs(
         [
-            [get_text_message("1"), get_function_tool_call("some_function", func_output)],
-            [get_text_message("2"), get_function_tool_call("some_function", func_output)],
-            [get_text_message("3"), get_function_tool_call("some_function", func_output)],
-            [get_text_message("4"), get_function_tool_call("some_function", func_output)],
+            [get_text_message("1"), get_function_tool_call("some_function", func_output, "1")],
+            [get_text_message("2"), get_function_tool_call("some_function", func_output, "2")],
+            [get_text_message("3"), get_function_tool_call("some_function", func_output, "3")],
+            [get_text_message("4"), get_function_tool_call("some_function", func_output, "4")],
             [get_text_message("done")],
         ]
     )

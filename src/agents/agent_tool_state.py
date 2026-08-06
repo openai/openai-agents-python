@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import weakref
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+from ._tool_invocation import tool_invocation_identity_and_scope
 
 if TYPE_CHECKING:
     from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
@@ -11,11 +14,28 @@ if TYPE_CHECKING:
 ToolCallSignature = tuple[str, str, str, str, str | None, str | None]
 ScopedToolCallSignature = tuple[str | None, ToolCallSignature]
 
+
+@dataclass
+class _AgentToolResumeCheckpoint:
+    state: Any
+    approval_identities: frozenset[tuple[str, str, str, str]]
+
+    @property
+    def interruptions(self) -> list[Any]:
+        interruptions = self.state.get_interruptions()
+        return interruptions if isinstance(interruptions, list) else []
+
+    def to_state(self) -> Any:
+        return self.state
+
+
 _AGENT_TOOL_STATE_SCOPE_ATTR = "_agent_tool_state_scope_id"
 
 # Ephemeral maps linking tool call objects to nested agent results within the same run.
 # Store by object identity, and index by a stable signature to avoid call ID collisions.
-_agent_tool_run_results_by_obj: dict[int, RunResult | RunResultStreaming] = {}
+_agent_tool_run_results_by_obj: dict[
+    int, RunResult | RunResultStreaming | _AgentToolResumeCheckpoint
+] = {}
 _agent_tool_run_results_by_signature: dict[
     ScopedToolCallSignature,
     set[int],
@@ -118,7 +138,7 @@ def _register_tool_call_ref(tool_call: ResponseFunctionToolCall, tool_call_obj_i
 
 def record_agent_tool_run_result(
     tool_call: ResponseFunctionToolCall,
-    run_result: RunResult | RunResultStreaming,
+    run_result: RunResult | RunResultStreaming | _AgentToolResumeCheckpoint,
     *,
     scope_id: str | None = None,
 ) -> None:
@@ -127,6 +147,55 @@ def record_agent_tool_run_result(
     _agent_tool_run_results_by_obj[tool_call_obj_id] = run_result
     _index_agent_tool_run_result(tool_call, tool_call_obj_id, scope_id=scope_id)
     _register_tool_call_ref(tool_call, tool_call_obj_id)
+
+
+def record_agent_tool_resume_state(
+    tool_call: ResponseFunctionToolCall,
+    state: Any,
+    *,
+    scope_id: str | None = None,
+    approval_items: list[Any] | None = None,
+) -> None:
+    """Keep a live nested RunState checkpoint while an approved resume is in flight."""
+    resolved_approval_items = approval_items
+    if resolved_approval_items is None:
+        get_interruptions = getattr(state, "get_interruptions", None)
+        interruptions = get_interruptions() if callable(get_interruptions) else []
+        resolved_approval_items = interruptions if isinstance(interruptions, list) else []
+    approval_identities = frozenset(
+        identity
+        for item in resolved_approval_items
+        if (
+            identity := tool_invocation_identity_and_scope(
+                item.raw_item,
+                tool_lookup_key=getattr(item, "tool_lookup_key", None),
+                tool_name=getattr(item, "tool_name", None),
+            )
+        )
+        is not None
+    )
+    record_agent_tool_run_result(
+        tool_call,
+        _AgentToolResumeCheckpoint(state, approval_identities),
+        scope_id=scope_id,
+    )
+
+
+def get_agent_tool_resume_state(run_result: Any) -> Any | None:
+    """Return the live nested RunState stored in an in-flight resume checkpoint."""
+    return run_result.state if isinstance(run_result, _AgentToolResumeCheckpoint) else None
+
+
+def agent_tool_resume_checkpoint_owns_approval(run_result: Any, approval_item: Any) -> bool:
+    """Return whether an in-flight nested resume accepted the approval item."""
+    if not isinstance(run_result, _AgentToolResumeCheckpoint):
+        return False
+    identity = tool_invocation_identity_and_scope(
+        approval_item.raw_item,
+        tool_lookup_key=getattr(approval_item, "tool_lookup_key", None),
+        tool_name=getattr(approval_item, "tool_name", None),
+    )
+    return identity is not None and identity in run_result.approval_identities
 
 
 def _tool_call_obj_matches_scope(tool_call_obj_id: int, *, scope_id: str | None) -> bool:
@@ -141,7 +210,7 @@ def consume_agent_tool_run_result(
     tool_call: ResponseFunctionToolCall,
     *,
     scope_id: str | None = None,
-) -> RunResult | RunResultStreaming | None:
+) -> RunResult | RunResultStreaming | _AgentToolResumeCheckpoint | None:
     """Return and drop the stored nested agent run result for the given tool call."""
     obj_id = id(tool_call)
     if _tool_call_obj_matches_scope(obj_id, scope_id=scope_id):
@@ -168,7 +237,7 @@ def peek_agent_tool_run_result(
     tool_call: ResponseFunctionToolCall,
     *,
     scope_id: str | None = None,
-) -> RunResult | RunResultStreaming | None:
+) -> RunResult | RunResultStreaming | _AgentToolResumeCheckpoint | None:
     """Return the stored nested agent run result without removing it."""
     obj_id = id(tool_call)
     if _tool_call_obj_matches_scope(obj_id, scope_id=scope_id):

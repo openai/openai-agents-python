@@ -9,6 +9,7 @@ import copy
 import dataclasses
 import inspect
 import json
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from openai.types.responses import ResponseComputerToolCall
@@ -20,7 +21,7 @@ from openai.types.responses.response_input_param import ComputerCallOutput
 from .._tool_identity import get_mapping_or_attr, get_tool_trace_name_for_tool
 from ..agent import Agent
 from ..exceptions import ModelBehaviorError
-from ..items import ItemHelpers, RunItem, ToolCallOutputItem
+from ..items import ItemHelpers, RunItem, ToolApprovalItem, ToolCallOutputItem
 from ..logger import logger
 from ..run_config import RunConfig
 from ..run_context import RunContextWrapper
@@ -112,6 +113,7 @@ class ComputerAction:
         context_wrapper: RunContextWrapper[Any],
         config: RunConfig,
         acknowledged_safety_checks: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None,
+        tool_output_committer: Callable[[RunItem], None] | None = None,
     ) -> RunItem:
         """Run a computer action, capturing a screenshot and notifying hooks."""
         trace_tool_name = get_tool_trace_name_for_tool(action.computer_tool) or cls.TRACE_TOOL_NAME
@@ -166,6 +168,13 @@ class ComputerAction:
                 type="computer_call_output",
                 acknowledged_safety_checks=acknowledged_safety_checks,
             )
+            output_item = ToolCallOutputItem(
+                agent=agent,
+                output=image_url,
+                raw_item=raw_item,
+            )
+            if tool_output_committer is not None:
+                tool_output_committer(output_item)
             custom_data = await maybe_extract_custom_data(
                 action.computer_tool.custom_data_extractor,
                 ComputerToolCustomDataContext(
@@ -176,6 +185,7 @@ class ComputerAction:
                     raw_item=copy.deepcopy(raw_item),
                 ),
             )
+            output_item.custom_data = custom_data
 
             await gather_with_cancel(
                 hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),
@@ -189,12 +199,7 @@ class ComputerAction:
             if span and config.trace_include_sensitive_data:
                 span.span_data.output = image_url
 
-            return ToolCallOutputItem(
-                agent=agent,
-                output=image_url,
-                raw_item=raw_item,
-                custom_data=custom_data,
-            )
+            return output_item
 
         return await with_tool_function_span(
             config=config,
@@ -390,9 +395,14 @@ class LocalShellAction:
         hooks: RunHooks[Any],
         context_wrapper: RunContextWrapper[Any],
         config: RunConfig,
+        tool_output_committer: Callable[[RunItem], None] | None = None,
     ) -> RunItem:
         """Run a local shell tool call and wrap the result as a ToolCallOutputItem."""
         agent_hooks = agent.hooks
+        context_wrapper._mark_tool_invocation_executed(
+            call.tool_call,
+            tool_name=call.local_shell_tool.name,
+        )
         await gather_with_cancel(
             hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool),
             (
@@ -409,6 +419,19 @@ class LocalShellAction:
         output = call.local_shell_tool.executor(request)
         result = await output if inspect.isawaitable(output) else output
 
+        raw_payload: dict[str, Any] = {
+            "type": "local_shell_call_output",
+            "call_id": call.tool_call.call_id,
+            "output": result,
+        }
+        output_item = ToolCallOutputItem(
+            agent=agent,
+            output=result,
+            raw_item=raw_payload,
+        )
+        if tool_output_committer is not None:
+            tool_output_committer(output_item)
+
         await gather_with_cancel(
             hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result),
             (
@@ -417,17 +440,7 @@ class LocalShellAction:
                 else _coro.noop_coroutine()
             ),
         )
-
-        raw_payload: dict[str, Any] = {
-            "type": "local_shell_call_output",
-            "call_id": call.tool_call.call_id,
-            "output": result,
-        }
-        return ToolCallOutputItem(
-            agent=agent,
-            output=result,
-            raw_item=raw_payload,
-        )
+        return output_item
 
 
 class ShellAction:
@@ -442,11 +455,17 @@ class ShellAction:
         hooks: RunHooks[Any],
         context_wrapper: RunContextWrapper[Any],
         config: RunConfig,
+        tool_output_committer: Callable[[RunItem], None] | None = None,
     ) -> RunItem:
         """Run a shell tool call and return a normalized ToolCallOutputItem."""
         shell_call = coerce_shell_call(call.tool_call)
         shell_tool = call.shell_tool
         agent_hooks = agent.hooks
+        current_item = ToolApprovalItem(
+            agent=agent,
+            raw_item=call.tool_call,
+            tool_name=shell_tool.name,
+        )
 
         async def _run_call(span: Any | None) -> RunItem:
             if span and config.trace_include_sensitive_data:
@@ -455,7 +474,9 @@ class ShellAction:
                 )
 
             approval_status = context_wrapper.get_approval_status(
-                shell_tool.name, shell_call.call_id
+                shell_tool.name,
+                shell_call.call_id,
+                current_invocation=current_item,
             )
             if approval_status is None:
                 needs_approval_result = await evaluate_needs_approval_setting(
@@ -465,7 +486,9 @@ class ShellAction:
                     shell_call.call_id,
                 )
                 approval_status = context_wrapper.get_approval_status(
-                    shell_tool.name, shell_call.call_id
+                    shell_tool.name,
+                    shell_call.call_id,
+                    current_invocation=current_item,
                 )
             else:
                 needs_approval_result = False
@@ -487,6 +510,7 @@ class ShellAction:
                 rejection_message = await resolve_approval_rejection_message(
                     context_wrapper=context_wrapper,
                     run_config=config,
+                    tool_call=call.tool_call,
                     tool_type="shell",
                     tool_name=shell_tool.name,
                     call_id=shell_call.call_id,
@@ -498,6 +522,10 @@ class ShellAction:
                     rejection_message=rejection_message,
                 )
 
+            context_wrapper._mark_tool_invocation_executed(
+                call.tool_call,
+                tool_name=shell_tool.name,
+            )
             await gather_with_cancel(
                 hooks.on_tool_start(context_wrapper, agent, shell_tool),
                 (
@@ -572,15 +600,6 @@ class ShellAction:
                     output_text = output_text[:max_output_length]
                 log_tool_action_error("Shell executor failed", exc)
 
-            await gather_with_cancel(
-                hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text),
-                (
-                    agent_hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text)
-                    if agent_hooks
-                    else _coro.noop_coroutine()
-                ),
-            )
-
             raw_entries: list[dict[str, Any]] | None = None
             if shell_output_payload:
                 raw_entries = shell_output_payload
@@ -610,14 +629,27 @@ class ShellAction:
             if provider_meta:
                 raw_item["provider_data"] = provider_meta
 
-            if span and config.trace_include_sensitive_data:
-                span.span_data.output = output_text
-
-            return ToolCallOutputItem(
+            output_item = ToolCallOutputItem(
                 agent=agent,
                 output=output_text,
                 raw_item=raw_item,
             )
+            if tool_output_committer is not None:
+                tool_output_committer(output_item)
+
+            await gather_with_cancel(
+                hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text),
+                (
+                    agent_hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text)
+                    if agent_hooks
+                    else _coro.noop_coroutine()
+                ),
+            )
+
+            if span and config.trace_include_sensitive_data:
+                span.span_data.output = output_text
+
+            return output_item
 
         return await with_tool_function_span(
             config=config,
@@ -638,13 +670,14 @@ class CustomToolAction:
         hooks: RunHooks[Any],
         context_wrapper: RunContextWrapper[Any],
         config: RunConfig,
+        tool_output_committer: Callable[[RunItem], None] | None = None,
     ) -> RunItem:
         custom_tool: CustomTool = call.custom_tool
         agent_hooks = agent.hooks
         call_id = get_mapping_or_attr(call.tool_call, "call_id")
         tool_input = get_mapping_or_attr(call.tool_call, "input")
-        if not isinstance(call_id, str):
-            raise ModelBehaviorError("Custom tool call is missing call_id.")
+        if not isinstance(call_id, str) or not call_id:
+            raise ModelBehaviorError("Custom tool call is missing a non-empty call_id.")
         if not isinstance(tool_input, str):
             raise ModelBehaviorError("Custom tool call is missing input.")
 
@@ -656,17 +689,30 @@ class CustomToolAction:
             agent=agent,
             run_config=config,
         )
+        current_item = ToolApprovalItem(
+            agent=agent,
+            raw_item=call.tool_call,
+            tool_name=custom_tool.name,
+        )
 
         async def _run_call(span: Any | None) -> RunItem:
             if span and config.trace_include_sensitive_data:
                 span.span_data.input = tool_input
 
-            approval_status = context_wrapper.get_approval_status(custom_tool.name, call_id)
+            approval_status = context_wrapper.get_approval_status(
+                custom_tool.name,
+                call_id,
+                current_invocation=current_item,
+            )
             if approval_status is None:
                 needs_approval_result = await evaluate_needs_approval_setting(
                     custom_tool.runtime_needs_approval(), context_wrapper, tool_input, call_id
                 )
-                approval_status = context_wrapper.get_approval_status(custom_tool.name, call_id)
+                approval_status = context_wrapper.get_approval_status(
+                    custom_tool.name,
+                    call_id,
+                    current_invocation=current_item,
+                )
             else:
                 needs_approval_result = False
 
@@ -687,6 +733,7 @@ class CustomToolAction:
                 rejection_message = await resolve_approval_rejection_message(
                     context_wrapper=context_wrapper,
                     run_config=config,
+                    tool_call=call.tool_call,
                     tool_type="custom",
                     tool_name=custom_tool.name,
                     call_id=call_id,
@@ -702,6 +749,10 @@ class CustomToolAction:
                     ),
                 )
 
+            context_wrapper._mark_tool_invocation_executed(
+                call.tool_call,
+                tool_name=custom_tool.name,
+            )
             await gather_with_cancel(
                 hooks.on_tool_start(tool_context, agent, custom_tool),
                 (
@@ -738,6 +789,14 @@ class CustomToolAction:
                 output_text,
                 tool_call=call.tool_call,
             )
+            output_item = cls._tool_output_item(
+                agent,
+                call_id,
+                output_text,
+                raw_item=raw_item,
+            )
+            if tool_output_committer is not None:
+                tool_output_committer(output_item)
             custom_data = await maybe_extract_custom_data(
                 custom_tool.custom_data_extractor,
                 CustomToolCustomDataContext(
@@ -748,6 +807,7 @@ class CustomToolAction:
                     raw_item=copy.deepcopy(raw_item),
                 ),
             )
+            output_item.custom_data = custom_data
 
             await gather_with_cancel(
                 hooks.on_tool_end(tool_context, agent, custom_tool, output_text),
@@ -760,13 +820,7 @@ class CustomToolAction:
 
             if span and config.trace_include_sensitive_data:
                 span.span_data.output = output_text
-            return cls._tool_output_item(
-                agent,
-                call_id,
-                output_text,
-                raw_item=raw_item,
-                custom_data=custom_data,
-            )
+            return output_item
 
         return await with_tool_function_span(
             config=config,
@@ -824,6 +878,7 @@ class ApplyPatchAction:
         hooks: RunHooks[Any],
         context_wrapper: RunContextWrapper[Any],
         config: RunConfig,
+        tool_output_committer: Callable[[RunItem], None] | None = None,
     ) -> RunItem:
         """Run an apply_patch call and serialize the editor result for the model."""
         apply_patch_tool: ApplyPatchTool = call.apply_patch_tool
@@ -833,6 +888,11 @@ class ApplyPatchAction:
             context_wrapper=context_wrapper,
         )
         call_id = extract_apply_patch_call_id(call.tool_call)
+        current_item = ToolApprovalItem(
+            agent=agent,
+            raw_item=call.tool_call,
+            tool_name=apply_patch_tool.name,
+        )
 
         async def _run_call(span: Any | None) -> RunItem:
             if span and config.trace_include_sensitive_data:
@@ -847,7 +907,11 @@ class ApplyPatchAction:
                     ]
                 )
 
-            approval_status = context_wrapper.get_approval_status(apply_patch_tool.name, call_id)
+            approval_status = context_wrapper.get_approval_status(
+                apply_patch_tool.name,
+                call_id,
+                current_invocation=current_item,
+            )
             needs_approval_result = False
             if approval_status is None:
                 for operation in operations:
@@ -855,7 +919,9 @@ class ApplyPatchAction:
                         apply_patch_tool.needs_approval, context_wrapper, operation, call_id
                     )
                     approval_status = context_wrapper.get_approval_status(
-                        apply_patch_tool.name, call_id
+                        apply_patch_tool.name,
+                        call_id,
+                        current_invocation=current_item,
                     )
                     if approval_status is not None or needs_approval_result:
                         break
@@ -877,6 +943,7 @@ class ApplyPatchAction:
                 rejection_message = await resolve_approval_rejection_message(
                     context_wrapper=context_wrapper,
                     run_config=config,
+                    tool_call=call.tool_call,
                     tool_type="apply_patch",
                     tool_name=apply_patch_tool.name,
                     call_id=call_id,
@@ -889,6 +956,10 @@ class ApplyPatchAction:
                     rejection_message=rejection_message,
                 )
 
+            context_wrapper._mark_tool_invocation_executed(
+                call.tool_call,
+                tool_name=apply_patch_tool.name,
+            )
             await gather_with_cancel(
                 hooks.on_tool_start(context_wrapper, agent, apply_patch_tool),
                 (
@@ -954,6 +1025,14 @@ class ApplyPatchAction:
             if output_text:
                 raw_item["output"] = output_text
 
+            output_item = ToolCallOutputItem(
+                agent=agent,
+                output=output_text,
+                raw_item=raw_item,
+            )
+            if tool_output_committer is not None:
+                tool_output_committer(output_item)
+
             custom_data = await maybe_extract_custom_data(
                 apply_patch_tool.custom_data_extractor,
                 ApplyPatchToolCustomDataContext(
@@ -965,6 +1044,7 @@ class ApplyPatchAction:
                     raw_item=copy.deepcopy(raw_item),
                 ),
             )
+            output_item.custom_data = custom_data
 
             await gather_with_cancel(
                 hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text),
@@ -978,12 +1058,7 @@ class ApplyPatchAction:
             if span and config.trace_include_sensitive_data:
                 span.span_data.output = output_text
 
-            return ToolCallOutputItem(
-                agent=agent,
-                output=output_text,
-                raw_item=raw_item,
-                custom_data=custom_data,
-            )
+            return output_item
 
         return await with_tool_function_span(
             config=config,

@@ -65,6 +65,13 @@ class DummyApplyPatchCall:
     call_id: str
     operation: dict[str, Any]
 
+    def model_dump(self, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "type": self.type,
+            "call_id": self.call_id,
+            "operation": self.operation,
+        }
+
 
 class RecordingEditor:
     def __init__(self) -> None:

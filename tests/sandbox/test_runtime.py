@@ -2811,7 +2811,7 @@ async def test_runner_serializes_unique_sandbox_resume_keys_for_duplicate_agent_
                     call_id="call_write",
                 )
             ],
-            [get_handoff_tool_call(second)],
+            [get_handoff_tool_call(second, call_id="handoff_to_second")],
             [
                 get_function_tool_call(
                     "read_file",
@@ -2825,7 +2825,7 @@ async def test_runner_serializes_unique_sandbox_resume_keys_for_duplicate_agent_
     second_model.add_multiple_turn_outputs(
         [
             [get_function_tool_call("approval_tool", json.dumps({}), call_id="call_approval")],
-            [get_handoff_tool_call(first)],
+            [get_handoff_tool_call(first, call_id="handoff_to_first")],
         ]
     )
 
@@ -4027,7 +4027,7 @@ async def test_runner_restores_duplicate_name_sandbox_sessions_after_json_roundt
                     call_id="call_write",
                 )
             ],
-            [get_handoff_tool_call(second)],
+            [get_handoff_tool_call(second, call_id="handoff_to_second")],
         ]
     )
     second_model.add_multiple_turn_outputs(
@@ -4059,7 +4059,9 @@ async def test_runner_restores_duplicate_name_sandbox_sessions_after_json_roundt
     )
     resumed_first.handoffs = [resumed_second]
     resumed_second.handoffs = [resumed_first]
-    resumed_second_model.add_multiple_turn_outputs([[get_handoff_tool_call(resumed_first)]])
+    resumed_second_model.add_multiple_turn_outputs(
+        [[get_handoff_tool_call(resumed_first, call_id="handoff_to_first")]]
+    )
     resumed_first_model.add_multiple_turn_outputs(
         [
             [

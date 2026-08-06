@@ -21,6 +21,7 @@ from openai.types.responses.response_output_item import LocalShellCall, McpAppro
 
 from agents import (
     Agent,
+    AgentBase,
     ApplyPatchTool,
     ComputerTool,
     CustomTool,
@@ -32,6 +33,7 @@ from agents import (
     ToolApprovalItem,
     ToolExecutionConfig,
     function_tool,
+    handoff,
     tool_namespace,
 )
 from agents._public_agent import set_public_agent
@@ -47,6 +49,7 @@ from agents.items import (
 )
 from agents.lifecycle import RunHooks
 from agents.run import RunConfig
+from agents.run_context import RunContextWrapper
 from agents.run_internal import run_loop
 from agents.run_internal.agent_bindings import bind_execution_agent, bind_public_agent
 from agents.run_internal.run_loop import (
@@ -56,6 +59,7 @@ from agents.run_internal.run_loop import (
     ToolRunApplyPatchCall,
     ToolRunComputerAction,
     ToolRunFunction,
+    ToolRunHandoff,
     ToolRunMCPApprovalRequest,
     ToolRunShellCall,
     extract_tool_call_id,
@@ -66,13 +70,16 @@ from agents.run_internal.tool_execution import execute_function_tool_calls
 from agents.run_internal.tool_planning import (
     _collect_runs_by_approval,
     _select_function_tool_runs_for_resume,
+    execute_mcp_approval_requests,
 )
 from agents.run_state import RunState as RunStateClass
 from agents.tool import FunctionTool, HostedMCPTool
 from agents.tool_guardrails import (
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
+    ToolOutputGuardrailData,
     tool_input_guardrail,
+    tool_output_guardrail,
 )
 from agents.usage import Usage
 
@@ -369,8 +376,63 @@ async def test_nested_agent_tool_resumes_after_rejection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_nested_agent_tool_interruptions_dont_collide_on_duplicate_call_ids() -> None:
-    """Nested agent tool interruptions should survive duplicate outer call IDs."""
+async def test_changed_nested_parent_fails_before_tool_inventory_callbacks() -> None:
+    enabled_calls: list[str] = []
+
+    async def enabled(_context: RunContextWrapper[Any], agent: AgentBase[Any]) -> bool:
+        enabled_calls.append(agent.name)
+        return True
+
+    @function_tool(needs_approval=True)
+    async def inner_hitl_tool() -> str:
+        return "ok"
+
+    @function_tool(is_enabled=enabled)
+    async def observer() -> str:
+        return "unused"
+
+    inner_model = FakeModel()
+    inner_model.add_multiple_turn_outputs(
+        [[make_function_tool_call(inner_hitl_tool.name, call_id="inner-1")]]
+    )
+    inner_agent = Agent(name="Inner", model=inner_model, tools=[inner_hitl_tool])
+    agent_tool = inner_agent.as_tool(
+        tool_name="inner_agent_tool",
+        tool_description="Inner agent tool with HITL",
+        needs_approval=True,
+    )
+    outer_model = FakeModel(
+        initial_output=[
+            make_function_tool_call(
+                agent_tool.name,
+                call_id="outer-1",
+                arguments='{"input":"safe"}',
+            )
+        ]
+    )
+    outer_agent = Agent(name="Outer", model=outer_model, tools=[agent_tool, observer])
+
+    first = await Runner.run(outer_agent, "start")
+    first_state = first.to_state()
+    first_state.approve(first.interruptions[0])
+    second = await Runner.run(outer_agent, first_state)
+    assert second.interruptions[0].tool_name == inner_hitl_tool.name
+
+    resume_state = second.to_state()
+    assert resume_state._last_processed_response is not None
+    enabled_calls.clear()
+    resume_state._last_processed_response.functions[0].tool_call.arguments = '{"input":"evil"}'
+    resume_state.approve(second.interruptions[0])
+
+    with pytest.raises(ModelBehaviorError, match="unique call ID"):
+        await Runner.run(outer_agent, resume_state)
+
+    assert enabled_calls == []
+
+
+@pytest.mark.asyncio
+async def test_nested_agent_tool_interruptions_remain_distinct_across_outer_calls() -> None:
+    """Nested agent tool interruptions should survive multiple outer calls."""
 
     @function_tool(needs_approval=True)
     async def inner_hitl_tool() -> str:
@@ -397,10 +459,10 @@ async def test_nested_agent_tool_interruptions_dont_collide_on_duplicate_call_id
         [
             [
                 make_function_tool_call(
-                    agent_tool.name, call_id="outer-dup", arguments='{"input":"a"}'
+                    agent_tool.name, call_id="outer-a", arguments='{"input":"a"}'
                 ),
                 make_function_tool_call(
-                    agent_tool.name, call_id="outer-dup", arguments='{"input":"b"}'
+                    agent_tool.name, call_id="outer-b", arguments='{"input":"b"}'
                 ),
             ]
         ]
@@ -698,8 +760,8 @@ async def test_deserialize_interruptions_preserve_mcp_tools(
 
 
 @pytest.mark.asyncio
-async def test_hosted_mcp_approval_matches_unknown_tool_key() -> None:
-    """Approved hosted MCP interruptions should resume even when the tool name is missing."""
+async def test_hosted_mcp_approval_with_unknown_legacy_identity_requires_reapproval() -> None:
+    """Incomplete legacy MCP approvals cannot receive an authorization decision."""
     agent = make_agent()
     context_wrapper = make_context_wrapper()
 
@@ -711,51 +773,8 @@ async def test_hosted_mcp_approval_matches_unknown_tool_key() -> None:
         include_name=False,
         use_call_id=False,
     )
-    context_wrapper.approve_tool(approval_item)
-
-    class DummyMcpTool:
-        on_approval_request: Any = None
-
-    processed_response = ProcessedResponse(
-        new_items=[],
-        handoffs=[],
-        functions=[],
-        computer_actions=[],
-        local_shell_calls=[],
-        shell_calls=[],
-        apply_patch_calls=[],
-        tools_used=[],
-        mcp_approval_requests=[
-            ToolRunMCPApprovalRequest(
-                request_item=McpApprovalRequest(
-                    id="mcp-123",
-                    type="mcp_approval_request",
-                    server_label="test_server",
-                    arguments="{}",
-                    name="hosted_mcp",
-                ),
-                mcp_tool=cast(Any, DummyMcpTool()),
-            )
-        ],
-        interruptions=[],
-    )
-
-    result = await _resolve_interrupted_turn(
-        agent=agent,
-        original_input="test",
-        original_pre_step_items=[approval_item],
-        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
-        processed_response=processed_response,
-        hooks=RunHooks(),
-        context_wrapper=context_wrapper,
-        run_config=RunConfig(),
-        run_state=None,
-    )
-
-    assert any(
-        isinstance(item, MCPApprovalResponseItem) and item.raw_item.get("approve") is True
-        for item in result.new_step_items
-    ), "Approved hosted MCP call should emit an approval response"
+    with pytest.raises(ModelBehaviorError, match="canonical invocation identity"):
+        context_wrapper.approve_tool(approval_item)
 
 
 @pytest.mark.asyncio
@@ -1090,6 +1109,137 @@ async def test_agent_as_tool_with_nested_approvals_propagates() -> None:
     final = await Runner.run(orchestrator, final_state)
     assert final.final_output == "done"
     assert tool_calls == ["called"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_nested_agent_tool_continuation_runs_outer_callbacks_once(streamed: bool) -> None:
+    """Nested resume re-enters only the saved agent run, not the outer callback pipeline."""
+    nested_model, nested_agent = make_model_and_agent(name="nested_agent")
+    inner_calls: list[str] = []
+    counts = {
+        "input_guardrail": 0,
+        "start": 0,
+        "output_guardrail": 0,
+        "custom_output": 0,
+        "extractor": 0,
+        "end": 0,
+    }
+
+    @function_tool(needs_approval=True)
+    async def inner_tool() -> str:
+        inner_calls.append("called")
+        return "inner output"
+
+    nested_agent.tools = [inner_tool]
+    nested_model.add_multiple_turn_outputs(
+        [
+            [
+                make_function_tool_call(
+                    "inner_tool",
+                    call_id=f"inner-call-{streamed}",
+                )
+            ],
+            [get_text_message("nested done")],
+        ]
+    )
+
+    @tool_input_guardrail
+    def track_input(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        counts["input_guardrail"] += 1
+        return ToolGuardrailFunctionOutput.allow()
+
+    @tool_output_guardrail
+    def track_output(_data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        counts["output_guardrail"] += 1
+        return ToolGuardrailFunctionOutput.allow()
+
+    def extract_custom_data(_context: Any) -> dict[str, Any]:
+        counts["extractor"] += 1
+        return {"nested": True}
+
+    async def extract_custom_output(result: Any) -> str:
+        counts["custom_output"] += 1
+        return cast(str, result.final_output)
+
+    outer_tool = nested_agent.as_tool(
+        tool_name="delegate",
+        tool_description="Delegate to the nested agent",
+        custom_output_extractor=extract_custom_output,
+    )
+    outer_tool.tool_input_guardrails = [track_input]
+    outer_tool.tool_output_guardrails = [track_output]
+    outer_tool.custom_data_extractor = extract_custom_data
+
+    outer_model = FakeModel()
+    outer_model.add_multiple_turn_outputs(
+        [
+            [
+                make_function_tool_call(
+                    "delegate",
+                    call_id=f"outer-call-{streamed}",
+                    arguments='{"input":"hello"}',
+                )
+            ],
+            [get_text_message("outer done")],
+        ]
+    )
+    outer_agent = Agent(name="outer_agent", model=outer_model, tools=[outer_tool])
+
+    class CountingHooks(RunHooks[Any]):
+        async def on_tool_start(
+            self,
+            _context: Any,
+            _agent: Agent[Any],
+            tool: Any,
+        ) -> None:
+            if tool.name == "delegate":
+                counts["start"] += 1
+
+        async def on_tool_end(
+            self,
+            _context: Any,
+            _agent: Agent[Any],
+            tool: Any,
+            _result: object,
+        ) -> None:
+            if tool.name == "delegate":
+                counts["end"] += 1
+
+    hooks = CountingHooks()
+
+    async def run(input_value: Any) -> Any:
+        if not streamed:
+            return await Runner.run(outer_agent, input_value, hooks=hooks)
+        result = Runner.run_streamed(outer_agent, input_value, hooks=hooks)
+        async for _event in result.stream_events():
+            pass
+        return result
+
+    interrupted = await run("start")
+    assert interrupted.interruptions
+    assert counts["input_guardrail"] <= 1
+    assert counts["start"] <= 1
+    assert counts["output_guardrail"] == 0
+    assert counts["custom_output"] == 0
+    assert counts["extractor"] == 0
+    assert counts["end"] == 0
+
+    state = interrupted.to_state()
+    state.approve(state.get_interruptions()[0])
+    restored = await RunState.from_json(outer_agent, state.to_json())
+    final = await run(restored)
+
+    assert final.final_output == "outer done"
+    assert inner_calls == ["called"]
+    assert counts == {
+        "input_guardrail": 1,
+        "start": 1,
+        "output_guardrail": 1,
+        "custom_output": 1,
+        "extractor": 1,
+        "end": 1,
+    }
 
 
 @pytest.mark.asyncio
@@ -1464,6 +1614,56 @@ async def test_resume_rechecks_rejection_after_function_approval_checker() -> No
     assert rejections == [tool_call.call_id]
 
 
+@pytest.mark.asyncio
+async def test_resume_rejects_changed_handoff_under_approved_function_call_id() -> None:
+    """A resumed handoff must match the invocation that received approval."""
+    target = Agent(name="target")
+    route_handoff = handoff(target, tool_name_override="route")
+    agent = Agent(name="agent", handoffs=[route_handoff])
+    approved_call = make_function_tool_call(
+        "route",
+        call_id="call-shared",
+        arguments='{"destination":"safe"}',
+    )
+    changed_call = make_function_tool_call(
+        "route",
+        call_id="call-shared",
+        arguments='{"destination":"safe"}',
+    )
+    approval_item = ToolApprovalItem(agent=agent, raw_item=approved_call, tool_name="route")
+    context_wrapper = make_context_wrapper()
+    context_wrapper.approve_tool(approval_item, always_approve=True)
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[ToolRunHandoff(handoff=route_handoff, tool_call=changed_call)],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    with pytest.raises(ModelBehaviorError, match="unique call ID"):
+        await _resolve_interrupted_turn(
+            agent=agent,
+            original_input="resume handoff",
+            original_pre_step_items=[approval_item],
+            new_response=ModelResponse(
+                output=[changed_call],
+                usage=Usage(),
+                response_id="resp",
+            ),
+            processed_response=processed_response,
+            hooks=RunHooks(),
+            context_wrapper=context_wrapper,
+            run_config=RunConfig(),
+            run_state=make_state_with_interruptions(agent, [approval_item]),
+        )
+
+
 @pytest.mark.parametrize("approved", [True, False], ids=["approved", "rejected"])
 @pytest.mark.asyncio
 async def test_execute_path_prefers_decision_resolved_during_rejecting_guardrail(
@@ -1566,6 +1766,53 @@ async def test_execute_path_skips_needs_approval_checker_when_status_resolved() 
         isinstance(item, ToolCallOutputItem) and item.output == "ran:x"
         for item in resumed.new_items
     )
+
+
+@pytest.mark.asyncio
+async def test_resume_checkpoints_tool_output_before_tool_use_behavior_failure() -> None:
+    """A failed post-tool callback must leave the exact output replayable without reexecution."""
+    executions: list[str] = []
+
+    @function_tool(needs_approval=True)
+    async def sensitive(value: str) -> str:
+        executions.append(value)
+        return f"ran:{value}"
+
+    def failing_behavior(_ctx: Any, _results: Any) -> Any:
+        raise RuntimeError("tool use behavior failed")
+
+    model = FakeModel()
+    agent = Agent(
+        name="agent",
+        model=model,
+        tools=[sensitive],
+        tool_use_behavior=failing_behavior,
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [make_function_tool_call(sensitive.name, call_id="call-1", arguments='{"value":"x"}')],
+            [get_text_message("done")],
+        ]
+    )
+
+    first = await Runner.run(agent, "hello")
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    with pytest.raises(RuntimeError, match="tool use behavior failed"):
+        await Runner.run(agent, state)
+
+    assert executions == ["x"]
+    assert any(
+        isinstance(item, ToolCallOutputItem) and item.output == "ran:x"
+        for item in state._generated_items
+    )
+
+    agent.tool_use_behavior = "run_llm_again"
+    resumed = await Runner.run(agent, state)
+
+    assert resumed.final_output == "done"
+    assert executions == ["x"]
 
 
 @pytest.mark.parametrize("tool_kind", ["function", "shell", "custom", "apply_patch"])
@@ -1709,6 +1956,120 @@ async def test_execute_path_honors_sticky_rejection_before_checker(tool_kind: st
         assert editor.operations == []
 
     assert executed == []
+
+
+@pytest.mark.parametrize("tool_kind", ["shell", "custom", "apply_patch"])
+@pytest.mark.asyncio
+async def test_tool_execution_rejects_changed_approval_recorded_while_policy_waits(
+    tool_kind: str,
+) -> None:
+    """A concurrent decision for changed content must not authorize the waiting call."""
+    checker_started = asyncio.Event()
+    release_checker = asyncio.Event()
+    executed: list[str] = []
+    context_wrapper = make_context_wrapper()
+    tool: Any
+    current_raw: Any
+    changed_raw: Any
+    execution_task: asyncio.Task[RunItem]
+
+    async def needs_approval(_ctx: Any, _payload: Any, _call_id: str) -> bool:
+        checker_started.set()
+        await release_checker.wait()
+        return True
+
+    if tool_kind == "shell":
+
+        def execute_shell(_request: Any) -> str:
+            executed.append("shell")
+            return "should-not-run"
+
+        tool = ShellTool(executor=execute_shell, needs_approval=needs_approval)
+        agent = Agent(name="agent", tools=[tool])
+        current_raw = cast(dict[str, Any], make_shell_call("call-shared", commands=["safe"]))
+        changed_raw = cast(dict[str, Any], make_shell_call("call-shared", commands=["changed"]))
+        execution_task = asyncio.create_task(
+            ShellAction.execute(
+                agent=agent,
+                call=ToolRunShellCall(tool_call=current_raw, shell_tool=tool),
+                hooks=RunHooks(),
+                context_wrapper=context_wrapper,
+                config=RunConfig(),
+            )
+        )
+    elif tool_kind == "custom":
+
+        async def invoke_custom(_ctx: Any, _raw: str) -> str:
+            executed.append("custom")
+            return "should-not-run"
+
+        tool = CustomTool(
+            name="raw_editor",
+            description="Edit raw text.",
+            on_invoke_tool=invoke_custom,
+            format={"type": "text"},
+            needs_approval=needs_approval,
+        )
+        agent = Agent(name="agent", tools=[tool])
+        current_raw = ResponseCustomToolCall(
+            type="custom_tool_call",
+            name=tool.name,
+            call_id="call-shared",
+            input="safe",
+        )
+        changed_raw = ResponseCustomToolCall(
+            type="custom_tool_call",
+            name=tool.name,
+            call_id="call-shared",
+            input="changed",
+        )
+        execution_task = asyncio.create_task(
+            CustomToolAction.execute(
+                agent=agent,
+                call=ToolRunCustom(tool_call=current_raw, custom_tool=tool),
+                hooks=RunHooks(),
+                context_wrapper=context_wrapper,
+                config=RunConfig(),
+            )
+        )
+    else:
+        editor = RecordingEditor()
+        tool = ApplyPatchTool(editor=editor, needs_approval=needs_approval)
+        agent = Agent(name="agent", tools=[tool])
+        current_raw = {
+            "type": "apply_patch_call",
+            "call_id": "call-shared",
+            "operation": {"type": "delete_file", "path": "safe.txt"},
+        }
+        changed_raw = {
+            "type": "apply_patch_call",
+            "call_id": "call-shared",
+            "operation": {"type": "delete_file", "path": "changed.txt"},
+        }
+        execution_task = asyncio.create_task(
+            ApplyPatchAction.execute(
+                agent=agent,
+                call=ToolRunApplyPatchCall(tool_call=current_raw, apply_patch_tool=tool),
+                hooks=RunHooks(),
+                context_wrapper=context_wrapper,
+                config=RunConfig(),
+            )
+        )
+
+    try:
+        await asyncio.wait_for(checker_started.wait(), timeout=1)
+        context_wrapper.approve_tool(
+            ToolApprovalItem(agent=agent, raw_item=changed_raw, tool_name=tool.name)
+        )
+        release_checker.set()
+        with pytest.raises(ModelBehaviorError, match="unique call ID"):
+            await execution_task
+    finally:
+        release_checker.set()
+
+    assert executed == []
+    if tool_kind == "apply_patch":
+        assert editor.operations == []
 
 
 @pytest.mark.asyncio
@@ -2508,6 +2869,100 @@ async def test_resume_skips_shell_calls_with_existing_output() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_validates_changed_shell_before_sibling_approval_callback() -> None:
+    """Changed completed calls must fail before sibling approval callbacks run."""
+    checker_calls: list[str] = []
+
+    async def needs_approval(_ctx: Any, _args: dict[str, Any], call_id: str) -> bool:
+        checker_calls.append(call_id)
+        return False
+
+    @function_tool(needs_approval=needs_approval)
+    async def sibling_tool() -> str:
+        return "should-not-run"
+
+    shell_tool = ShellTool(executor=lambda _request: "should-not-run", needs_approval=True)
+    enabled_calls: list[str] = []
+    target = Agent(name="target")
+
+    def handoff_is_enabled(_ctx: Any, _agent: Agent[Any]) -> bool:
+        enabled_calls.append("handoff")
+        return True
+
+    agent = Agent(
+        name="agent",
+        tools=[sibling_tool, shell_tool],
+        handoffs=[handoff(target, is_enabled=handoff_is_enabled)],
+    )
+    context_wrapper = make_context_wrapper()
+    approved_shell_call = cast(
+        dict[str, Any],
+        make_shell_call("call-reused", commands=["echo safe"], status="completed"),
+    )
+    changed_shell_call = cast(
+        dict[str, Any],
+        make_shell_call("call-reused", commands=["echo changed"], status="completed"),
+    )
+    context_wrapper.approve_tool(
+        ToolApprovalItem(
+            agent=agent,
+            raw_item=approved_shell_call,
+            tool_name=shell_tool.name,
+        )
+    )
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[
+            ToolRunFunction(
+                tool_call=make_function_tool_call(sibling_tool.name, call_id="call-sibling"),
+                function_tool=sibling_tool,
+            )
+        ],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[
+            ToolRunShellCall(tool_call=changed_shell_call, shell_tool=shell_tool),
+        ],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+    original_pre_step_items = [
+        ToolCallOutputItem(
+            agent=agent,
+            raw_item=cast(
+                dict[str, Any],
+                {
+                    "type": "shell_call_output",
+                    "call_id": "call-reused",
+                    "status": "completed",
+                    "output": "prior run",
+                },
+            ),
+            output="prior run",
+        )
+    ]
+
+    with pytest.raises(ModelBehaviorError, match="unique call ID"):
+        await _resolve_interrupted_turn(
+            agent=agent,
+            original_input="resume run",
+            original_pre_step_items=cast(list[RunItem], original_pre_step_items),
+            new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+            processed_response=processed_response,
+            hooks=RunHooks(),
+            context_wrapper=context_wrapper,
+            run_config=RunConfig(),
+            run_state=None,
+        )
+
+    assert checker_calls == []
+    assert enabled_calls == []
+
+
+@pytest.mark.asyncio
 async def test_resume_keeps_approved_shell_outputs_with_pending_interruptions() -> None:
     """Approved shell outputs should be emitted even when other approvals are still pending."""
 
@@ -2629,6 +3084,84 @@ async def test_resume_executes_pending_computer_actions() -> None:
     assert outputs, "Computer action should run when resuming without prior output"
     assert computer.calls, "Computer should have been invoked"
     assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+async def test_resume_checkpoints_computer_output_before_custom_data_failure() -> None:
+    """A failed extractor must not make a completed computer side effect retryable."""
+
+    computer = TrackingComputer()
+
+    def fail_custom_data(_context: Any) -> dict[str, Any]:
+        raise RuntimeError("custom data failed")
+
+    computer_tool = ComputerTool(
+        computer=computer,
+        custom_data_extractor=fail_custom_data,
+    )
+    _model, agent = make_model_and_agent(tools=[computer_tool])
+    computer_call = ResponseComputerToolCall(
+        type="computer_call",
+        id="comp_checkpoint",
+        call_id="comp_checkpoint",
+        status="in_progress",
+        action=ActionScreenshot(type="screenshot"),
+        pending_safety_checks=[],
+    )
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[
+            ToolRunComputerAction(tool_call=computer_call, computer_tool=computer_tool)
+        ],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[computer_tool.name],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+    context_wrapper = make_context_wrapper()
+    run_state = make_state_with_interruptions(agent, [])
+    run_state._context = context_wrapper
+
+    with pytest.raises(RuntimeError, match="custom data failed"):
+        await _resolve_interrupted_turn(
+            agent=agent,
+            original_input="resume computer",
+            original_pre_step_items=[],
+            new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+            processed_response=processed_response,
+            hooks=RunHooks(),
+            context_wrapper=context_wrapper,
+            run_config=RunConfig(),
+            run_state=run_state,
+        )
+
+    checkpointed_items = list(run_state._generated_items)
+    assert len(checkpointed_items) == 1
+    assert isinstance(checkpointed_items[0], ToolCallOutputItem)
+    assert checkpointed_items[0].call_id == "comp_checkpoint"
+    assert checkpointed_items[0].custom_data is None
+
+    computer_tool.custom_data_extractor = None
+    resumed = await _resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume computer",
+        original_pre_step_items=checkpointed_items,
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+        run_state=run_state,
+    )
+
+    assert computer.calls == ["screenshot"]
+    assert resumed.new_step_items == []
+    assert run_state._generated_items == checkpointed_items
+    assert isinstance(resumed.next_step, NextStepRunAgain)
 
 
 @pytest.mark.asyncio
@@ -3016,3 +3549,157 @@ async def test_mcp_callback_approvals_are_processed() -> None:
         for item in result.new_step_items
     ), "MCP callback approvals should emit approval responses"
     assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+async def test_mcp_callback_exact_retry_reuses_stored_decision() -> None:
+    """An exact uncommitted MCP retry must not invoke the approval callback twice."""
+    callback_calls: list[str] = []
+    agent = make_agent()
+    context_wrapper = make_context_wrapper()
+
+    class DummyMcpTool:
+        def on_approval_request(self, request: Any) -> dict[str, Any]:
+            callback_calls.append(request.data.id)
+            return {"approve": True, "reason": "ok"}
+
+    approval_request = ToolRunMCPApprovalRequest(
+        request_item=McpApprovalRequest(
+            id="mcp-callback-retry",
+            type="mcp_approval_request",
+            server_label="server",
+            arguments="{}",
+            name="hosted_mcp",
+        ),
+        mcp_tool=cast(HostedMCPTool, DummyMcpTool()),
+    )
+
+    first = await execute_mcp_approval_requests(
+        agent=agent,
+        approval_requests=[approval_request],
+        context_wrapper=context_wrapper,
+    )
+    second = await execute_mcp_approval_requests(
+        agent=agent,
+        approval_requests=[approval_request],
+        context_wrapper=context_wrapper,
+    )
+
+    assert callback_calls == ["mcp-callback-retry"]
+    responses = [item for item in [*first, *second] if isinstance(item, MCPApprovalResponseItem)]
+    assert [item.raw_item["approve"] for item in responses] == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_mcp_callback_failure_is_not_retried_for_same_request() -> None:
+    """A callback that started without a committed response fails closed on retry."""
+    callback_calls: list[str] = []
+    agent = make_agent()
+    context_wrapper = make_context_wrapper()
+
+    class DummyMcpTool:
+        def on_approval_request(self, request: Any) -> dict[str, Any]:
+            callback_calls.append(request.data.id)
+            raise RuntimeError("callback failed")
+
+    approval_request = ToolRunMCPApprovalRequest(
+        request_item=McpApprovalRequest(
+            id="mcp-callback-failure",
+            type="mcp_approval_request",
+            server_label="server",
+            arguments="{}",
+            name="hosted_mcp",
+        ),
+        mcp_tool=cast(HostedMCPTool, DummyMcpTool()),
+    )
+
+    with pytest.raises(RuntimeError, match="callback failed"):
+        await execute_mcp_approval_requests(
+            agent=agent,
+            approval_requests=[approval_request],
+            context_wrapper=context_wrapper,
+        )
+    with pytest.raises(ModelBehaviorError, match="already ran"):
+        await execute_mcp_approval_requests(
+            agent=agent,
+            approval_requests=[approval_request],
+            context_wrapper=context_wrapper,
+        )
+
+    assert callback_calls == ["mcp-callback-failure"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_callback_exact_siblings_invoke_callback_once() -> None:
+    """Exact same-ID MCP siblings must share one approval callback result."""
+    callback_calls: list[str] = []
+    agent = make_agent()
+    context_wrapper = make_context_wrapper()
+
+    class DummyMcpTool:
+        async def on_approval_request(self, request: Any) -> dict[str, Any]:
+            callback_calls.append(request.data.id)
+            await asyncio.sleep(0)
+            return {"approve": True, "reason": "ok"}
+
+    mcp_tool = cast(HostedMCPTool, DummyMcpTool())
+    approval_requests = [
+        ToolRunMCPApprovalRequest(
+            request_item=McpApprovalRequest(
+                id="mcp-callback-sibling",
+                type="mcp_approval_request",
+                server_label="server",
+                arguments="{}",
+                name="hosted_mcp",
+            ),
+            mcp_tool=mcp_tool,
+        )
+        for _ in range(2)
+    ]
+
+    responses = await execute_mcp_approval_requests(
+        agent=agent,
+        approval_requests=approval_requests,
+        context_wrapper=context_wrapper,
+    )
+
+    assert callback_calls == ["mcp-callback-sibling"]
+    assert len(responses) == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_callback_changed_same_id_siblings_fail_before_callbacks() -> None:
+    """Changed same-ID MCP siblings must fail before invoking approval callbacks."""
+    callback_calls: list[str] = []
+    agent = make_agent()
+    context_wrapper = make_context_wrapper()
+
+    class DummyMcpTool:
+        async def on_approval_request(self, request: Any) -> dict[str, Any]:
+            callback_calls.append(request.data.arguments)
+            await asyncio.sleep(0)
+            return {"approve": True, "reason": "ok"}
+
+    mcp_tool = cast(HostedMCPTool, DummyMcpTool())
+    approval_requests = [
+        ToolRunMCPApprovalRequest(
+            request_item=McpApprovalRequest(
+                id="mcp-callback-sibling",
+                type="mcp_approval_request",
+                server_label="server",
+                arguments=arguments,
+                name="hosted_mcp",
+            ),
+            mcp_tool=mcp_tool,
+        )
+        for arguments in ('{"q":1}', '{"q":2}')
+    ]
+
+    with pytest.raises(ModelBehaviorError, match="reused an approval-gated tool call ID"):
+        await execute_mcp_approval_requests(
+            agent=agent,
+            approval_requests=approval_requests,
+            context_wrapper=context_wrapper,
+        )
+
+    assert callback_calls == []

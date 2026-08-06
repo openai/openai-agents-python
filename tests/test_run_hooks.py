@@ -375,10 +375,13 @@ async def test_streamed_run_hooks_count_tool_and_handoff_invocations():
     model.add_multiple_turn_outputs(
         [
             [
-                get_function_tool_call("some_function", json.dumps({"a": "b"})),
-                get_function_tool_call("some_function", json.dumps({"a": "b"})),
+                get_function_tool_call("some_function", json.dumps({"a": "b"}), call_id="call_1"),
+                get_function_tool_call("some_function", json.dumps({"a": "b"}), call_id="call_2"),
             ],
-            [get_text_message("a_message"), get_handoff_tool_call(agent_1)],
+            [
+                get_text_message("a_message"),
+                get_handoff_tool_call(agent_1, call_id="handoff_1"),
+            ],
             [get_text_message("done")],
         ]
     )

@@ -367,9 +367,14 @@ class ToolCallItem(RunItemBase[Any]):
     tool_origin: ToolOrigin | None = None
     """Optional metadata describing the source of a function-tool-backed item."""
 
+    _resolved_tool_name: str | None = field(default=None, kw_only=True, repr=False)
+    """SDK-resolved tool name when the provider payload does not carry one."""
+
     @property
     def tool_name(self) -> str | None:
         """Return the tool name from the raw item, if available."""
+        if self._resolved_tool_name is not None:
+            return self._resolved_tool_name
         if isinstance(self.raw_item, dict):
             return self.raw_item.get("name")
         return getattr(self.raw_item, "name", None)

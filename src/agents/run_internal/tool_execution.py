@@ -27,6 +27,7 @@ from .._tool_identity import (
     build_function_tool_lookup_map,
     get_function_tool_lookup_key,
     get_function_tool_lookup_key_for_call,
+    get_function_tool_lookup_key_for_tool,
     get_function_tool_trace_name,
     get_hosted_mcp_approval_request_identity,
     get_tool_approval_item_call_id,
@@ -103,6 +104,7 @@ from .agent_bindings import AgentBindings, bind_public_agent
 from .approvals import append_approval_error_output
 from .items import (
     REJECTION_MESSAGE,
+    extract_mcp_request_id,
     extract_mcp_request_id_from_run,
     function_rejection_item,
     function_tool_error_output,
@@ -128,6 +130,7 @@ __all__ = [
     "coerce_shell_call",
     "parse_apply_patch_custom_input",
     "parse_apply_patch_function_args",
+    "normalize_apply_patch_fallback_call",
     "extract_apply_patch_call_id",
     "coerce_apply_patch_operation",
     "coerce_apply_patch_operations",
@@ -634,7 +637,7 @@ def extract_tool_call_id(raw: Any) -> str | None:
 
 def extract_shell_call_id(tool_call: Any) -> str:
     """Ensure shell calls include a call_id before executing them."""
-    value = extract_tool_call_id(tool_call)
+    value = get_mapping_or_attr(tool_call, "call_id")
     if not value:
         raise ModelBehaviorError("Shell call is missing call_id.")
     return str(value)
@@ -733,9 +736,37 @@ def parse_apply_patch_function_args(arguments: str) -> dict[str, Any]:
     return _parse_apply_patch_json(arguments, label="arguments")
 
 
+def normalize_apply_patch_fallback_call(tool_call: Any) -> dict[str, Any] | None:
+    """Normalize supported custom/function apply_patch fallbacks into one pseudo-call."""
+    call_type = get_mapping_or_attr(tool_call, "type")
+    call_id = get_mapping_or_attr(tool_call, "call_id")
+    if call_type == "custom_tool_call":
+        parsed_operation = parse_apply_patch_custom_input(
+            str(get_mapping_or_attr(tool_call, "input") or "")
+        )
+        pseudo_call = {
+            "type": "apply_patch_call",
+            "call_id": call_id,
+            **parsed_operation,
+        }
+    elif call_type == "function_call":
+        parsed_operation = parse_apply_patch_function_args(
+            str(get_mapping_or_attr(tool_call, "arguments") or "")
+        )
+        pseudo_call = {
+            "type": "apply_patch_call",
+            "call_id": call_id,
+            "operation": parsed_operation,
+        }
+    else:
+        return None
+    ItemHelpers.copy_tool_call_caller(tool_call, pseudo_call)
+    return pseudo_call
+
+
 def extract_apply_patch_call_id(tool_call: Any) -> str:
     """Ensure apply_patch calls include a call_id for approvals and tracing."""
-    value = extract_tool_call_id(tool_call)
+    value = get_mapping_or_attr(tool_call, "call_id")
     if not value:
         raise ModelBehaviorError("Apply patch call is missing call_id.")
     return str(value)
@@ -754,7 +785,7 @@ def coerce_apply_patch_operation(
 
 
 def coerce_apply_patch_operations(
-    tool_call: Any,
+    tool_call: Any | None = None,
     *,
     context_wrapper: RunContextWrapper[Any],
 ) -> list[ApplyPatchOperation]:
@@ -1155,6 +1186,7 @@ async def resolve_approval_status(
         tool_namespace=tool_namespace,
         existing_pending=approval_item,
         tool_lookup_key=tool_lookup_key,
+        current_invocation=approval_item,
     )
     if approval_status is None and on_approval:
         decision_result = on_approval(context_wrapper, approval_item)
@@ -1176,6 +1208,7 @@ async def resolve_approval_status(
             tool_namespace=tool_namespace,
             existing_pending=approval_item,
             tool_lookup_key=tool_lookup_key,
+            current_invocation=approval_item,
         )
     return approval_status, approval_item
 
@@ -1201,6 +1234,7 @@ async def resolve_approval_rejection_message(
     tool_type: Literal["function", "computer", "shell", "apply_patch", "custom"],
     tool_name: str,
     call_id: str,
+    tool_call: Any | None = None,
     tool_namespace: str | None = None,
     tool_lookup_key: FunctionToolLookupKey | None = None,
     existing_pending: ToolApprovalItem | None = None,
@@ -1220,6 +1254,12 @@ async def resolve_approval_rejection_message(
     if formatter is None:
         return REJECTION_MESSAGE
 
+    if tool_call is not None:
+        context_wrapper._mark_tool_invocation_executed(
+            tool_call,
+            tool_lookup_key=tool_lookup_key,
+            tool_name=tool_name,
+        )
     try:
         maybe_message = formatter(
             ToolErrorFormatterArgs(
@@ -1320,6 +1360,49 @@ def _classify_hosted_mcp_pending_request(
     return "reuse_pending"
 
 
+def process_hosted_mcp_approvals(
+    *,
+    original_pre_step_items: Sequence[RunItem],
+    mcp_approval_requests: Sequence[Any],
+    context_wrapper: RunContextWrapper[Any],
+    agent: Agent[Any],
+    append_item: Callable[[RunItem], None],
+) -> tuple[list[ToolApprovalItem], set[str]]:
+    """Filter hosted MCP outputs and merge manual approvals so only coherent items remain."""
+    hosted_mcp_approvals_by_id: dict[str, ToolApprovalItem] = {}
+    for item in original_pre_step_items:
+        if not isinstance(item, ToolApprovalItem):
+            continue
+        raw = item.raw_item
+        if get_hosted_mcp_approval_request_identity(item) is None:
+            continue
+        request_id = extract_mcp_request_id(raw)
+        if request_id:
+            hosted_mcp_approvals_by_id[request_id] = item
+
+    resumed_requests = [
+        request
+        for request in mcp_approval_requests
+        if extract_mcp_request_id_from_run(request) in hosted_mcp_approvals_by_id
+    ]
+    responses, pending = collect_manual_mcp_approvals(
+        agent=agent,
+        requests=resumed_requests,
+        context_wrapper=context_wrapper,
+        existing_pending_by_call_id=hosted_mcp_approvals_by_id,
+    )
+    for item in responses:
+        append_item(item)
+    for item in pending:
+        append_item(item)
+    pending_ids = {
+        request_id
+        for item in pending
+        if (request_id := extract_mcp_request_id(item.raw_item)) is not None
+    }
+    return pending, pending_ids
+
+
 def collect_manual_mcp_approvals(
     *,
     agent: Agent[Any],
@@ -1352,6 +1435,11 @@ def collect_manual_mcp_approvals(
             tool_name=tool_name,
         )
         existing_pending = pending_lookup.get(request_id or "")
+        if existing_pending is not None:
+            context_wrapper._restore_pending_approval_binding(existing_pending)
+        binding_status = context_wrapper._approved_tool_invocation_status(
+            current_approval_item.raw_item
+        )
         pending_resolution = (
             _classify_hosted_mcp_pending_request(existing_pending, request_item)
             if existing_pending is not None
@@ -1390,6 +1478,20 @@ def collect_manual_mcp_approvals(
                 )
             )
 
+        if approval_status is not None and binding_status is None:
+            binding_status = context_wrapper._approved_tool_invocation_status(
+                current_approval_item.raw_item
+            )
+
+        if binding_status is None:
+            approval_item = current_approval_item
+
+        if approval_status is not None and request_id:
+            if binding_status is None:
+                approval_status = None
+            elif binding_status[1]:
+                continue
+
         if approval_status is not None and request_id:
             approval_response_raw: McpApprovalResponse = {
                 "type": "mcp_approval_response",
@@ -1422,6 +1524,23 @@ def index_approval_items_by_call_id(items: Sequence[RunItem]) -> dict[str, ToolA
     return approvals
 
 
+def should_keep_hosted_mcp_item(
+    item: RunItem,
+    *,
+    pending_hosted_mcp_approvals: Sequence[ToolApprovalItem],
+    pending_hosted_mcp_approval_ids: set[str],
+) -> bool:
+    """Keep only hosted MCP approvals that match pending requests from the provider."""
+    if not isinstance(item, ToolApprovalItem):
+        return True
+    if get_hosted_mcp_approval_request_identity(item) is None:
+        return False
+    request_id = extract_mcp_request_id(item.raw_item)
+    return item in pending_hosted_mcp_approvals or (
+        request_id is not None and request_id in pending_hosted_mcp_approval_ids
+    )
+
+
 def _uses_programmatic_output_schema(
     function_tool: FunctionTool,
     tool_call: Any,
@@ -1443,6 +1562,7 @@ class _FunctionToolBatchExecutor:
         config: RunConfig,
         isolate_parallel_failures: bool | None,
         sibling_category_failure: asyncio.Event | None,
+        tool_output_committer: Callable[[RunItem], None] | None,
     ) -> None:
         self.execution_agent = bindings.execution_agent
         self.public_agent = bindings.public_agent
@@ -1454,6 +1574,7 @@ class _FunctionToolBatchExecutor:
             len(tool_runs) > 1 if isolate_parallel_failures is None else isolate_parallel_failures
         )
         self.sibling_category_failure = sibling_category_failure
+        self.tool_output_committer = tool_output_committer
         self.tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
         self.tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
         self.tool_state_scope_id = get_agent_tool_state_scope(context_wrapper)
@@ -1462,6 +1583,7 @@ class _FunctionToolBatchExecutor:
         self.results_by_tool_run: dict[int, Any] = {}
         self.schema_bypassed_tool_runs: set[int] = set()
         self.custom_data_by_tool_run: dict[int, dict[str, Any]] = {}
+        self.output_items_by_tool_run: dict[int, ToolCallOutputItem] = {}
         self.pending_tasks: set[asyncio.Task[Any]] = set()
         self.propagating_failure: BaseException | None = None
         self.available_function_tools: list[FunctionTool] = []
@@ -1745,11 +1867,24 @@ class _FunctionToolBatchExecutor:
         tool_lookup_key = get_function_tool_lookup_key_for_call(raw_tool_call)
         if is_deferred_top_level_function_tool(func_tool):
             tool_lookup_key = ("deferred_top_level", func_tool.name)
+        current_approval_item = ToolApprovalItem(
+            agent=self.public_agent,
+            raw_item=raw_tool_call,
+            tool_name=func_tool.name,
+            tool_namespace=tool_namespace,
+            tool_origin=get_function_tool_origin(func_tool),
+            tool_lookup_key=tool_lookup_key,
+            _allow_bare_name_alias=should_allow_bare_name_approval_alias(
+                func_tool,
+                self.available_function_tools,
+            ),
+        )
         approval_status = self.context_wrapper.get_approval_status(
             func_tool.name,
             tool_call.call_id,
             tool_namespace=tool_namespace,
             tool_lookup_key=tool_lookup_key,
+            current_invocation=current_approval_item,
         )
         if approval_status is None:
             needs_approval_result = await function_needs_approval(
@@ -1762,6 +1897,7 @@ class _FunctionToolBatchExecutor:
                 tool_call.call_id,
                 tool_namespace=tool_namespace,
                 tool_lookup_key=tool_lookup_key,
+                current_invocation=current_approval_item,
             )
             if approval_status is None and not needs_approval_result:
                 return None
@@ -1790,6 +1926,7 @@ class _FunctionToolBatchExecutor:
                     tool_call.call_id,
                     tool_namespace=tool_namespace,
                     tool_lookup_key=tool_lookup_key,
+                    current_invocation=current_approval_item,
                 )
                 if approval_status is None and rejected_message is not None:
                     return FunctionToolResult(
@@ -1806,19 +1943,11 @@ class _FunctionToolBatchExecutor:
                     )
 
         if approval_status is None:
-            approval_item = ToolApprovalItem(
-                agent=self.public_agent,
-                raw_item=raw_tool_call,
-                tool_name=func_tool.name,
-                tool_namespace=tool_namespace,
-                tool_origin=get_function_tool_origin(func_tool),
-                tool_lookup_key=tool_lookup_key,
-                _allow_bare_name_alias=should_allow_bare_name_approval_alias(
-                    func_tool,
-                    self.available_function_tools,
-                ),
+            return FunctionToolResult(
+                tool=func_tool,
+                output=None,
+                run_item=current_approval_item,
             )
-            return FunctionToolResult(tool=func_tool, output=None, run_item=approval_item)
 
         if approval_status is not False:
             return None
@@ -1826,6 +1955,7 @@ class _FunctionToolBatchExecutor:
         rejection_message = await resolve_approval_rejection_message(
             context_wrapper=self.context_wrapper,
             run_config=self.config,
+            tool_call=tool_call,
             tool_type="function",
             tool_name=tool_trace_name(func_tool.name, tool_namespace) or func_tool.name,
             call_id=tool_call.call_id,
@@ -1867,24 +1997,34 @@ class _FunctionToolBatchExecutor:
         tool_context: ToolContext[Any],
         agent_hooks: Any,
     ) -> Any:
-        rejected_message = await _execute_tool_input_guardrails(
-            func_tool=func_tool,
-            tool_context=tool_context,
-            agent=self.public_agent,
-            tool_input_guardrail_results=self.tool_input_guardrail_results,
+        pending_nested_result = peek_agent_tool_run_result(
+            task_state.tool_run.tool_call,
+            scope_id=self.tool_state_scope_id,
         )
-        if rejected_message is not None:
-            self.schema_bypassed_tool_runs.add(id(task_state.tool_run))
-            return rejected_message
+        is_nested_continuation = bool(self._get_nested_tool_interruptions(pending_nested_result))
+        if not is_nested_continuation:
+            self.context_wrapper._mark_tool_invocation_executed(
+                tool_call,
+                tool_lookup_key=get_function_tool_lookup_key_for_tool(func_tool),
+            )
+            rejected_message = await _execute_tool_input_guardrails(
+                func_tool=func_tool,
+                tool_context=tool_context,
+                agent=self.public_agent,
+                tool_input_guardrail_results=self.tool_input_guardrail_results,
+            )
+            if rejected_message is not None:
+                self.schema_bypassed_tool_runs.add(id(task_state.tool_run))
+                return rejected_message
 
-        await gather_with_cancel(
-            self.hooks.on_tool_start(tool_context, self.public_agent, func_tool),
-            (
-                agent_hooks.on_tool_start(tool_context, self.public_agent, func_tool)
-                if agent_hooks
-                else _coro.noop_coroutine()
-            ),
-        )
+            await gather_with_cancel(
+                self.hooks.on_tool_start(tool_context, self.public_agent, func_tool),
+                (
+                    agent_hooks.on_tool_start(tool_context, self.public_agent, func_tool)
+                    if agent_hooks
+                    else _coro.noop_coroutine()
+                ),
+            )
 
         invoke_task = asyncio.create_task(
             self._invoke_tool_and_run_post_invoke(
@@ -1952,8 +2092,15 @@ class _FunctionToolBatchExecutor:
             )
             real_result = result
 
-        task_state.in_post_invoke_phase = True
+        nested_run_result = peek_agent_tool_run_result(
+            task_state.tool_run.tool_call,
+            scope_id=self.tool_state_scope_id,
+        )
+        nested_interruptions = self._get_nested_tool_interruptions(nested_run_result)
+        if nested_interruptions:
+            return real_result
 
+        task_state.in_post_invoke_phase = True
         output_guardrail_result = await _execute_tool_output_guardrails(
             func_tool=func_tool,
             tool_context=tool_context,
@@ -1980,6 +2127,17 @@ class _FunctionToolBatchExecutor:
             output_json_schema=None if bypass_output_schema else func_tool.output_json_schema,
             output_type_adapter=None if bypass_output_schema else func_tool._output_type_adapter,
         )
+        output_item: ToolCallOutputItem | None = None
+        if not nested_interruptions:
+            output_item = ToolCallOutputItem(
+                output=final_result,
+                raw_item=raw_output_item,
+                agent=self.public_agent,
+                tool_origin=get_function_tool_origin(func_tool),
+            )
+            self.output_items_by_tool_run[id(task_state.tool_run)] = output_item
+            if self.tool_output_committer is not None:
+                self.tool_output_committer(output_item)
         extracted_custom_data = await maybe_extract_custom_data(
             func_tool.custom_data_extractor,
             FunctionToolCustomDataContext(
@@ -1992,6 +2150,8 @@ class _FunctionToolBatchExecutor:
         custom_data = merge_custom_data(tool_context._custom_data, extracted_custom_data)
         if custom_data:
             self.custom_data_by_tool_run[id(task_state.tool_run)] = custom_data
+            if output_item is not None:
+                output_item.custom_data = custom_data
 
         await gather_with_cancel(
             self.hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result),
@@ -2095,35 +2255,37 @@ class _FunctionToolBatchExecutor:
 
             run_item: RunItem | None
             if not nested_interruptions:
-                provider_result = (
-                    function_tool_error_output(
-                        tool_run.tool_call,
-                        result,
-                        output_json_schema=tool_run.function_tool.output_json_schema,
+                run_item = self.output_items_by_tool_run.get(id(tool_run))
+                if run_item is None:
+                    provider_result = (
+                        function_tool_error_output(
+                            tool_run.tool_call,
+                            result,
+                            output_json_schema=tool_run.function_tool.output_json_schema,
+                        )
+                        if bypass_output_schema
+                        else result
                     )
-                    if bypass_output_schema
-                    else result
-                )
-                run_item = ToolCallOutputItem(
-                    output=result,
-                    raw_item=ItemHelpers.tool_call_output_item(
-                        tool_run.tool_call,
-                        provider_result,
-                        output_json_schema=(
-                            None
-                            if bypass_output_schema
-                            else tool_run.function_tool.output_json_schema
+                    run_item = ToolCallOutputItem(
+                        output=result,
+                        raw_item=ItemHelpers.tool_call_output_item(
+                            tool_run.tool_call,
+                            provider_result,
+                            output_json_schema=(
+                                None
+                                if bypass_output_schema
+                                else tool_run.function_tool.output_json_schema
+                            ),
+                            output_type_adapter=(
+                                None
+                                if bypass_output_schema
+                                else tool_run.function_tool._output_type_adapter
+                            ),
                         ),
-                        output_type_adapter=(
-                            None
-                            if bypass_output_schema
-                            else tool_run.function_tool._output_type_adapter
-                        ),
-                    ),
-                    agent=self.public_agent,
-                    tool_origin=get_function_tool_origin(tool_run.function_tool),
-                    custom_data=self.custom_data_by_tool_run.get(id(tool_run)),
-                )
+                        agent=self.public_agent,
+                        tool_origin=get_function_tool_origin(tool_run.function_tool),
+                        custom_data=self.custom_data_by_tool_run.get(id(tool_run)),
+                    )
             else:
                 # Skip tool output until nested interruptions are resolved.
                 run_item = None
@@ -2150,6 +2312,7 @@ async def execute_function_tool_calls(
     config: RunConfig,
     isolate_parallel_failures: bool | None = None,
     sibling_category_failure: asyncio.Event | None = None,
+    tool_output_committer: Callable[[RunItem], None] | None = None,
 ) -> tuple[
     list[FunctionToolResult], list[ToolInputGuardrailResult], list[ToolOutputGuardrailResult]
 ]:
@@ -2162,6 +2325,7 @@ async def execute_function_tool_calls(
         config=config,
         isolate_parallel_failures=isolate_parallel_failures,
         sibling_category_failure=sibling_category_failure,
+        tool_output_committer=tool_output_committer,
     ).execute()
 
 
@@ -2172,6 +2336,7 @@ async def execute_custom_tool_calls(
     context_wrapper: RunContextWrapper[Any],
     hooks: RunHooks[Any],
     config: RunConfig,
+    tool_output_committer: Callable[[RunItem], None] | None = None,
 ) -> list[RunItem]:
     """Run Responses custom tool calls serially and wrap outputs."""
     from .tool_actions import CustomToolAction
@@ -2185,6 +2350,7 @@ async def execute_custom_tool_calls(
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 config=config,
+                tool_output_committer=tool_output_committer,
             )
         )
     return results
@@ -2197,6 +2363,7 @@ async def execute_local_shell_calls(
     context_wrapper: RunContextWrapper[Any],
     hooks: RunHooks[Any],
     config: RunConfig,
+    tool_output_committer: Callable[[RunItem], None] | None = None,
 ) -> list[RunItem]:
     """Run local shell tool calls serially and wrap outputs."""
     from .tool_actions import LocalShellAction
@@ -2210,6 +2377,7 @@ async def execute_local_shell_calls(
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 config=config,
+                tool_output_committer=tool_output_committer,
             )
         )
     return results
@@ -2222,6 +2390,7 @@ async def execute_shell_calls(
     context_wrapper: RunContextWrapper[Any],
     hooks: RunHooks[Any],
     config: RunConfig,
+    tool_output_committer: Callable[[RunItem], None] | None = None,
 ) -> list[RunItem]:
     """Run shell tool calls serially and wrap outputs."""
     from .tool_actions import ShellAction
@@ -2235,6 +2404,7 @@ async def execute_shell_calls(
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 config=config,
+                tool_output_committer=tool_output_committer,
             )
         )
     return results
@@ -2247,6 +2417,7 @@ async def execute_apply_patch_calls(
     context_wrapper: RunContextWrapper[Any],
     hooks: RunHooks[Any],
     config: RunConfig,
+    tool_output_committer: Callable[[RunItem], None] | None = None,
 ) -> list[RunItem]:
     """Run apply_patch tool calls serially and normalize outputs."""
     from .tool_actions import ApplyPatchAction
@@ -2260,6 +2431,7 @@ async def execute_apply_patch_calls(
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 config=config,
+                tool_output_committer=tool_output_committer,
             )
         )
     return results
@@ -2272,12 +2444,17 @@ async def execute_computer_actions(
     hooks: RunHooks[Any],
     context_wrapper: RunContextWrapper[Any],
     config: RunConfig,
+    tool_output_committer: Callable[[RunItem], None] | None = None,
 ) -> list[RunItem]:
     """Run computer actions serially and emit screenshot outputs."""
     from .tool_actions import ComputerAction
 
     results: list[RunItem] = []
     for action in actions:
+        context_wrapper._mark_tool_invocation_executed(
+            action.tool_call,
+            tool_name=action.computer_tool.name,
+        )
         acknowledged: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None
         if action.tool_call.pending_safety_checks and action.computer_tool.on_safety_check:
             acknowledged = []
@@ -2309,6 +2486,7 @@ async def execute_computer_actions(
                 context_wrapper=context_wrapper,
                 config=config,
                 acknowledged_safety_checks=acknowledged,
+                tool_output_committer=tool_output_committer,
             )
         )
 
@@ -2416,6 +2594,7 @@ async def execute_approved_tools(
                 message = await resolve_approval_rejection_message(
                     context_wrapper=context_wrapper,
                     run_config=run_config,
+                    tool_call=tool_call,
                     tool_type="function",
                     tool_name=display_tool_name,
                     call_id=call_id,

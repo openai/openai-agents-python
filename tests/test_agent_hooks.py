@@ -103,7 +103,7 @@ async def test_non_streamed_agent_hooks():
 
     model.add_multiple_turn_outputs(
         [
-            [get_function_tool_call("some_function", json.dumps({"a": "b"}))],
+            [get_function_tool_call("some_function", json.dumps({"a": "b"}), call_id="tool_1")],
             [get_text_message("done")],
         ]
     )
@@ -136,11 +136,11 @@ async def test_non_streamed_agent_hooks():
     model.add_multiple_turn_outputs(
         [
             # First turn: a tool call
-            [get_function_tool_call("some_function", json.dumps({"a": "b"}))],
+            [get_function_tool_call("some_function", json.dumps({"a": "b"}), call_id="tool_1")],
             # Second turn: a message, another tool call, and a handoff
             [
                 get_text_message("a_message"),
-                get_function_tool_call("some_function", json.dumps({"a": "b"})),
+                get_function_tool_call("some_function", json.dumps({"a": "b"}), call_id="tool_2"),
                 get_handoff_tool_call(agent_1),
             ],
             # Third turn: a message and a handoff back to the orig agent
@@ -210,11 +210,11 @@ async def test_streamed_agent_hooks():
     model.add_multiple_turn_outputs(
         [
             # First turn: a tool call
-            [get_function_tool_call("some_function", json.dumps({"a": "b"}))],
+            [get_function_tool_call("some_function", json.dumps({"a": "b"}), call_id="tool_1")],
             # Second turn: a message, another tool call, and a handoff
             [
                 get_text_message("a_message"),
-                get_function_tool_call("some_function", json.dumps({"a": "b"})),
+                get_function_tool_call("some_function", json.dumps({"a": "b"}), call_id="tool_2"),
                 get_handoff_tool_call(agent_1),
             ],
             # Third turn: a message and a handoff back to the orig agent
@@ -287,11 +287,11 @@ async def test_structured_output_non_streamed_agent_hooks():
     model.add_multiple_turn_outputs(
         [
             # First turn: a tool call
-            [get_function_tool_call("some_function", json.dumps({"a": "b"}))],
+            [get_function_tool_call("some_function", json.dumps({"a": "b"}), call_id="tool_1")],
             # Second turn: a message, another tool call, and a handoff
             [
                 get_text_message("a_message"),
-                get_function_tool_call("some_function", json.dumps({"a": "b"})),
+                get_function_tool_call("some_function", json.dumps({"a": "b"}), call_id="tool_2"),
                 get_handoff_tool_call(agent_1),
             ],
             # Third turn: a message and a handoff back to the orig agent
@@ -359,11 +359,11 @@ async def test_structured_output_streamed_agent_hooks():
     model.add_multiple_turn_outputs(
         [
             # First turn: a tool call
-            [get_function_tool_call("some_function", json.dumps({"a": "b"}))],
+            [get_function_tool_call("some_function", json.dumps({"a": "b"}), call_id="tool_1")],
             # Second turn: a message, another tool call, and a handoff
             [
                 get_text_message("a_message"),
-                get_function_tool_call("some_function", json.dumps({"a": "b"})),
+                get_function_tool_call("some_function", json.dumps({"a": "b"}), call_id="tool_2"),
                 get_handoff_tool_call(agent_1),
             ],
             # Third turn: a message and a handoff back to the orig agent

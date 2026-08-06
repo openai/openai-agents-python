@@ -303,6 +303,7 @@ class TestSandboxApplyPatchTool:
         await _execute_custom_tool_call(
             tool,
             context_wrapper=context_wrapper,
+            call_id="call_create",
             raw_input=("*** Begin Patch\n*** Add File: notes.txt\n+hello\n+world\n*** End Patch\n"),
         )
         assert session.files[Path("/workspace/notes.txt")] == b"hello\nworld"
@@ -310,6 +311,7 @@ class TestSandboxApplyPatchTool:
         result = await _execute_custom_tool_call(
             tool,
             context_wrapper=context_wrapper,
+            call_id="call_update",
             raw_input=(
                 "*** Begin Patch\n"
                 "*** Update File: notes.txt\n"
@@ -329,6 +331,7 @@ class TestSandboxApplyPatchTool:
         await _execute_custom_tool_call(
             tool,
             context_wrapper=context_wrapper,
+            call_id="call_delete",
             raw_input="*** Begin Patch\n*** Delete File: moved.txt\n*** End Patch\n",
         )
         assert Path("/workspace/moved.txt") not in session.files
@@ -339,6 +342,7 @@ async def _execute_custom_tool_call(
     *,
     context_wrapper: RunContextWrapper[Any],
     raw_input: str,
+    call_id: str = "call_apply",
 ) -> Any:
     result = await CustomToolAction.execute(
         agent=Agent(name="patcher", tools=[tool]),
@@ -347,7 +351,7 @@ async def _execute_custom_tool_call(
             tool_call={
                 "type": "custom_tool_call",
                 "name": "apply_patch",
-                "call_id": "call_apply",
+                "call_id": call_id,
                 "input": raw_input,
             },
         ),

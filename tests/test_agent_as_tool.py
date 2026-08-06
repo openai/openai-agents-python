@@ -34,6 +34,7 @@ from agents import (
     TResponseInputItem,
     Usage,
     UserError,
+    function_tool,
     tool_namespace,
 )
 from agents._tool_identity import resolve_tool_name_collisions
@@ -1564,6 +1565,8 @@ async def test_agent_as_tool_wrapped_hosted_mcp_exact_decision_resumes_run(
                 "type": "mcp_approval_request",
                 "id": "inner-1",
                 "name": "lookup_account",
+                "server_label": "accounts",
+                "arguments": "{}",
             },
         },
         tool_name="lookup_account",
@@ -1705,6 +1708,154 @@ async def test_agent_as_tool_namespaced_nested_always_approve_stays_permanent(
     assert run_inputs == [resume_state]
 
 
+@pytest.mark.parametrize("clone_approval_item", [False, True], ids=["exact", "clone"])
+@pytest.mark.parametrize("approve", [True, False], ids=["approve", "reject"])
+def test_agent_as_tool_tool_context_ambiguous_approval_identity_fails_closed(
+    approve: bool,
+    clone_approval_item: bool,
+) -> None:
+    """A direct ToolContext decision must not guess between current and nested scopes."""
+    agent = Agent(name="Agent")
+    outer_call = make_function_tool_call("nested_agent_tool", call_id="outer-nested")
+    current_call = make_function_tool_call("sensitive", call_id="shared")
+    current_approval = ToolApprovalItem(agent=agent, raw_item=current_call)
+    nested_approval = (
+        ToolApprovalItem(agent=agent, raw_item=current_call.model_copy(deep=True))
+        if clone_approval_item
+        else current_approval
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name=outer_call.name,
+        tool_call_id=outer_call.call_id,
+        tool_arguments=outer_call.arguments,
+        tool_call=outer_call,
+    )
+    tool_context._tool_invocation_status(current_call)  # noqa: SLF001
+
+    class DummyState:
+        def __init__(self, nested_context: ToolContext) -> None:
+            self._context = nested_context
+
+    class DummyPendingResult:
+        interruptions = [nested_approval]
+
+        def to_state(self) -> DummyState:
+            return resume_state
+
+    nested_context = ToolContext(
+        context=None,
+        tool_name=outer_call.name,
+        tool_call_id=outer_call.call_id,
+        tool_arguments=outer_call.arguments,
+        tool_call=outer_call,
+    )
+    resume_state = DummyState(nested_context)
+    record_agent_tool_run_result(
+        outer_call,
+        cast(Any, DummyPendingResult()),
+        scope_id=get_agent_tool_state_scope(tool_context),
+    )
+
+    with pytest.raises(UserError, match="current run and a nested agent-tool run"):
+        if approve:
+            tool_context.approve_tool(current_approval)
+        else:
+            tool_context.reject_tool(current_approval)
+
+    assert (
+        tool_context.get_approval_status(
+            "sensitive",
+            "shared",
+            existing_pending=current_approval,
+        )
+        is None
+    )
+    assert (
+        nested_context.get_approval_status(
+            "sensitive",
+            "shared",
+            existing_pending=nested_approval,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_agent_as_tool_resume_survives_cancellation_after_nested_output_commit(
+    streamed: bool,
+) -> None:
+    tool_attempts: list[str] = []
+    nested_model_waiting = asyncio.Event()
+    keep_nested_model_waiting = asyncio.Event()
+
+    class BlockingSecondModel(FakeModel):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.calls = 0
+
+        async def get_response(self, *args: Any, **kwargs: Any) -> ModelResponse:
+            self.calls += 1
+            if self.calls == 2:
+                nested_model_waiting.set()
+                await keep_nested_model_waiting.wait()
+            return await super().get_response(*args, **kwargs)
+
+    @function_tool(needs_approval=True, failure_error_function=None)
+    async def sensitive() -> str:
+        tool_attempts.append("ran")
+        return "inner value"
+
+    inner_model = BlockingSecondModel(
+        initial_output=[get_function_tool_call("sensitive", "{}", call_id="inner_call")]
+    )
+    inner_model.set_next_output([get_text_message("inner done")])
+    inner_agent = Agent(name="inner", model=inner_model, tools=[sensitive])
+    nested_tool = inner_agent.as_tool(
+        tool_name="delegate",
+        tool_description="Delegate",
+    )
+    outer_model = FakeModel(
+        initial_output=[
+            get_function_tool_call(
+                "delegate",
+                '{"input":"hi"}',
+                call_id="outer_call",
+            )
+        ]
+    )
+    outer_model.set_next_output([get_text_message("outer done")])
+    outer_agent = Agent(name="outer", model=outer_model, tools=[nested_tool])
+
+    async def run_outer(input_value: Any) -> RunResult | RunResultStreaming:
+        if not streamed:
+            return await Runner.run(outer_agent, input_value)
+        result = Runner.run_streamed(outer_agent, input_value)
+        async for _event in result.stream_events():
+            pass
+        return result
+
+    interrupted = await run_outer("go")
+    state = interrupted.to_state()
+    state.approve(interrupted.interruptions[0])
+
+    resume_task = asyncio.create_task(run_outer(state))
+    await nested_model_waiting.wait()
+    assert tool_attempts == ["ran"]
+    assert inner_model.calls == 2
+
+    resume_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await resume_task
+
+    result = await run_outer(state)
+
+    assert result.final_output == "outer done"
+    assert tool_attempts == ["ran"]
+    assert inner_model.calls == 3
+
+
 @pytest.mark.parametrize(
     ("approve", "sticky", "legacy_sticky", "expected_followup"),
     [
@@ -1783,6 +1934,7 @@ async def test_agent_as_tool_hosted_mcp_nested_sticky_decision_stays_scoped(
                 }
             }
         )
+        tool_context._allow_legacy_approval_binding_reconstruction = True
     if approve:
         tool_context.approve_tool(approval_item, always_approve=sticky)
     else:
@@ -1919,6 +2071,7 @@ async def test_agent_as_tool_deferred_same_name_legacy_nested_always_approve_sta
         approved=True,
         rejected=[],
     )
+    tool_context._allow_legacy_approval_binding_reconstruction = True
     resume_state = DummyState(nested_context)
     pending_result = DummyPendingResult()
     record_agent_tool_run_result(tool_call, cast(Any, pending_result))

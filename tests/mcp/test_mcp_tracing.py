@@ -26,7 +26,10 @@ async def test_mcp_tracing():
     model.add_multiple_turn_outputs(
         [
             # First turn: a message and tool call
-            [get_text_message("a_message"), get_function_tool_call("test_tool_1", "")],
+            [
+                get_text_message("a_message"),
+                get_function_tool_call("test_tool_1", "", call_id="mcp_call_1"),
+            ],
             # Second turn: text message
             [get_text_message("done")],
         ]
@@ -88,8 +91,8 @@ async def test_mcp_tracing():
             # First turn: a message and tool call
             [
                 get_text_message("a_message"),
-                get_function_tool_call("non_mcp_tool", ""),
-                get_function_tool_call("test_tool_2", ""),
+                get_function_tool_call("non_mcp_tool", "", call_id="function_call_1"),
+                get_function_tool_call("test_tool_2", "", call_id="mcp_call_2"),
             ],
             # Second turn: text message
             [get_text_message("done")],

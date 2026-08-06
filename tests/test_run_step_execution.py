@@ -31,6 +31,8 @@ from agents import (
     HostedMCPTool,
     MCPApprovalRequestItem,
     MCPApprovalResponseItem,
+    MCPToolApprovalFunctionResult,
+    MCPToolApprovalRequest,
     MessageOutputItem,
     ModelBehaviorError,
     ModelRefusalError,
@@ -562,8 +564,8 @@ async def test_multiple_tool_calls():
     response = ModelResponse(
         output=[
             get_text_message("Hello, world!"),
-            get_function_tool_call("test_1"),
-            get_function_tool_call("test_2"),
+            get_function_tool_call("test_1", call_id="test-1"),
+            get_function_tool_call("test_2", call_id="test-2"),
         ],
         usage=Usage(),
         response_id=None,
@@ -3187,6 +3189,51 @@ def _apply_patch_tool_approval_run() -> ToolApprovalRun:
     )
 
 
+@pytest.mark.parametrize("tool_kind", ["shell", "apply_patch"])
+@pytest.mark.asyncio
+async def test_empty_action_call_id_fails_before_approval_callback(tool_kind: str) -> None:
+    approval_calls: list[str] = []
+
+    async def approve(_context: RunContextWrapper[Any], _item: ToolApprovalItem) -> Any:
+        approval_calls.append(tool_kind)
+        return {"approve": True}
+
+    if tool_kind == "shell":
+        shell_tool = ShellTool(
+            executor=lambda _request: "output",
+            needs_approval=True,
+            on_approval=approve,
+        )
+        agent = make_agent(tools=[shell_tool])
+        tool_call = cast(dict[str, Any], make_shell_call(""))
+        tool_call["id"] = "item-shell"
+        processed_response = make_processed_response(
+            shell_calls=[ToolRunShellCall(tool_call=tool_call, shell_tool=shell_tool)]
+        )
+    else:
+        apply_patch_tool = ApplyPatchTool(
+            editor=RecordingEditor(),
+            needs_approval=True,
+            on_approval=approve,
+        )
+        agent = make_agent(tools=[apply_patch_tool])
+        tool_call = cast(dict[str, Any], make_apply_patch_dict(""))
+        tool_call["id"] = "item-apply"
+        processed_response = make_processed_response(
+            apply_patch_calls=[
+                ToolRunApplyPatchCall(
+                    tool_call=tool_call,
+                    apply_patch_tool=apply_patch_tool,
+                )
+            ]
+        )
+
+    with pytest.raises(ModelBehaviorError, match="non-empty string call ID"):
+        await run_execute_with_processed_response(agent, processed_response)
+
+    assert approval_calls == []
+
+
 @pytest.mark.parametrize(
     "setup_fn",
     [
@@ -3312,6 +3359,80 @@ async def test_execute_tools_runs_hosted_mcp_callback_when_present():
     assert responses
     assert responses[0].raw_item.get("caller") == program_caller
     assert not result.processed_response or not result.processed_response.interruptions
+
+
+@pytest.mark.parametrize("with_callback", [False, True], ids=["manual", "callback"])
+@pytest.mark.asyncio
+async def test_execute_tools_omits_completed_mcp_approval_request_replay(
+    with_callback: bool,
+) -> None:
+    """A committed MCP approval replay must not emit a request or invoke its callback."""
+    callback_calls = 0
+
+    def approve_request(_request: MCPToolApprovalRequest) -> MCPToolApprovalFunctionResult:
+        nonlocal callback_calls
+        callback_calls += 1
+        return {"approve": True}
+
+    mcp_tool = HostedMCPTool(
+        tool_config={
+            "type": "mcp",
+            "server_label": "test_mcp_server",
+            "server_url": "https://example.com",
+            "require_approval": "always",
+        },
+        on_approval_request=approve_request if with_callback else None,
+    )
+    agent = make_agent(tools=[mcp_tool])
+    request_item = McpApprovalRequest(
+        id="mcp-approval-replay",
+        type="mcp_approval_request",
+        server_label="test_mcp_server",
+        arguments='{"path":"src"}',
+        name="list_files",
+    )
+    context_wrapper = make_context_wrapper()
+    context_wrapper.approve_tool(
+        ToolApprovalItem(
+            agent=agent,
+            raw_item=request_item,
+            tool_name="list_files",
+        )
+    )
+    context_wrapper._mark_tool_call_completed(
+        {
+            "type": "mcp_approval_response",
+            "approval_request_id": request_item.id,
+            "approve": True,
+        }
+    )
+    processed_response = make_processed_response(
+        new_items=[MCPApprovalRequestItem(raw_item=request_item, agent=agent)],
+        mcp_approval_requests=[
+            ToolRunMCPApprovalRequest(
+                request_item=request_item,
+                mcp_tool=mcp_tool,
+            )
+        ],
+    )
+
+    result = await run_loop.execute_tools_and_side_effects(
+        bindings=_bind_agent(agent),
+        original_input="test",
+        pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        output_schema=None,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+    )
+
+    assert callback_calls == 0
+    assert not any(
+        isinstance(item, MCPApprovalRequestItem | MCPApprovalResponseItem)
+        for item in result.new_step_items
+    )
 
 
 @pytest.mark.asyncio
@@ -3440,17 +3561,15 @@ def test_manual_hosted_mcp_approval_does_not_reuse_stale_pending_identity():
     context_wrapper._rebuild_approvals(  # noqa: SLF001
         {"lookup_account": {"approved": ["shared-request"], "rejected": []}}
     )
+    context_wrapper._allow_legacy_approval_binding_reconstruction = True  # noqa: SLF001
 
-    approved, pending = tool_execution.collect_manual_mcp_approvals(
-        agent=agent,
-        requests=[request_run],
-        context_wrapper=context_wrapper,
-        existing_pending_by_call_id={"shared-request": pending_a},
-    )
-
-    assert approved == []
-    assert len(pending) == 1
-    assert pending[0].raw_item is current_b
+    with pytest.raises(ModelBehaviorError, match="unique call ID"):
+        tool_execution.collect_manual_mcp_approvals(
+            agent=agent,
+            requests=[request_run],
+            context_wrapper=context_wrapper,
+            existing_pending_by_call_id={"shared-request": pending_a},
+        )
 
 
 def test_hosted_mcp_approval_does_not_reuse_legacy_name_for_a_different_current_tool():
@@ -3657,7 +3776,7 @@ async def test_resolve_interrupted_turn_keeps_callback_owned_hosted_mcp_request_
     assert not any(isinstance(item, ToolApprovalItem) for item in result.new_step_items)
 
 
-def test_manual_hosted_mcp_approval_keeps_incomplete_exact_call_decision():
+def test_manual_hosted_mcp_approval_rejects_incomplete_exact_call_decision():
     server_a = HostedMCPTool(
         tool_config={
             "type": "mcp",
@@ -3677,30 +3796,13 @@ def test_manual_hosted_mcp_approval_keeps_incomplete_exact_call_decision():
             },
         },
     )
-    current = McpApprovalRequest(
-        id="shared-request",
-        type="mcp_approval_request",
-        server_label="server-a",
-        arguments="{}",
-        name="lookup_account",
-    )
-    request_run = ToolRunMCPApprovalRequest(request_item=current, mcp_tool=server_a)
     context_wrapper = make_context_wrapper()
-    context_wrapper.approve_tool(pending_unknown)
 
-    approved, pending = tool_execution.collect_manual_mcp_approvals(
-        agent=agent,
-        requests=[request_run],
-        context_wrapper=context_wrapper,
-        existing_pending_by_call_id={"shared-request": pending_unknown},
-    )
-
-    assert pending == []
-    assert len(approved) == 1
-    assert approved[0].raw_item["approve"] is True
+    with pytest.raises(ModelBehaviorError, match="canonical invocation identity"):
+        context_wrapper.approve_tool(pending_unknown)
 
 
-def test_manual_hosted_mcp_approval_prefers_complete_current_scoped_identity():
+def test_manual_hosted_mcp_approval_reprompts_for_partial_pending_identity():
     server_a = HostedMCPTool(
         tool_config={
             "type": "mcp",
@@ -3741,6 +3843,7 @@ def test_manual_hosted_mcp_approval_prefers_complete_current_scoped_identity():
             }
         ]
     )
+    context_wrapper._allow_legacy_approval_binding_reconstruction = True  # noqa: SLF001
 
     approved, pending = tool_execution.collect_manual_mcp_approvals(
         agent=agent,
@@ -3749,9 +3852,9 @@ def test_manual_hosted_mcp_approval_prefers_complete_current_scoped_identity():
         existing_pending_by_call_id={"shared-request": pending_partial},
     )
 
-    assert pending == []
-    assert len(approved) == 1
-    assert approved[0].raw_item["approve"] is True
+    assert approved == []
+    assert len(pending) == 1
+    assert pending[0].raw_item is current
 
 
 def test_manual_hosted_mcp_approval_does_not_apply_legacy_exact_without_pending():
@@ -3786,8 +3889,7 @@ def test_manual_hosted_mcp_approval_does_not_apply_legacy_exact_without_pending(
     assert pending[0].raw_item is current
 
 
-@pytest.mark.asyncio
-async def test_resolve_interrupted_turn_prefers_wrapped_pending_exact_over_legacy():
+def test_resolve_interrupted_turn_rejects_incomplete_pending_decision():
     server_a = HostedMCPTool(
         tool_config={
             "type": "mcp",
@@ -3808,46 +3910,12 @@ async def test_resolve_interrupted_turn_prefers_wrapped_pending_exact_over_legac
         },
         tool_name="lookup_account",
     )
-    current = McpApprovalRequest(
-        id="shared-request",
-        type="mcp_approval_request",
-        server_label="server-a",
-        arguments="{}",
-        name="lookup_account",
-    )
     context_wrapper = make_context_wrapper()
     context_wrapper._rebuild_approvals(  # noqa: SLF001
         {"lookup_account": {"approved": ["shared-request"], "rejected": []}}
     )
-    context_wrapper.reject_tool(pending_partial, rejection_message="new exact denial")
-    processed_response = make_processed_response(
-        new_items=[MCPApprovalRequestItem(raw_item=current, agent=agent)],
-        mcp_approval_requests=[ToolRunMCPApprovalRequest(request_item=current, mcp_tool=server_a)],
-    )
-
-    result = await turn_resolution.resolve_interrupted_turn(
-        bindings=_bind_agent(agent),
-        original_input="test",
-        original_pre_step_items=[pending_partial],
-        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
-        processed_response=processed_response,
-        hooks=RunHooks(),
-        context_wrapper=context_wrapper,
-        run_config=RunConfig(),
-    )
-
-    assert not isinstance(result.next_step, NextStepInterruption)
-    responses = [
-        item
-        for item in result.new_step_items
-        if isinstance(item, MCPApprovalResponseItem)
-        and item.raw_item.get("approval_request_id") == "shared-request"
-    ]
-    assert len(responses) == 1
-    assert responses[0].raw_item["approve"] is False
-    assert responses[0].raw_item["reason"] == "new exact denial"
-    assert not any(isinstance(item, ToolApprovalItem) for item in result.pre_step_items)
-    assert not any(isinstance(item, ToolApprovalItem) for item in result.new_step_items)
+    with pytest.raises(ModelBehaviorError, match="canonical invocation identity"):
+        context_wrapper.reject_tool(pending_partial, rejection_message="new exact denial")
 
 
 def test_incomplete_current_hosted_mcp_request_does_not_reuse_scoped_pending_identity():
@@ -4022,8 +4090,12 @@ async def test_execute_handoffs_uses_public_agent_for_ignored_extra_handoffs():
     public_agent = Agent(name="triage", handoffs=[first_target, second_target])
     execution_agent = public_agent.clone()
     set_public_agent(execution_agent, public_agent)
+    first_call = cast(ResponseFunctionToolCall, get_handoff_tool_call(first_target))
+    first_call.call_id = "handoff-alpha"
+    second_call = cast(ResponseFunctionToolCall, get_handoff_tool_call(second_target))
+    second_call.call_id = "handoff-beta"
     response = ModelResponse(
-        output=[get_handoff_tool_call(first_target), get_handoff_tool_call(second_target)],
+        output=[first_call, second_call],
         usage=Usage(),
         response_id="resp",
     )

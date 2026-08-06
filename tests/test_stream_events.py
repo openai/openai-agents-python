@@ -1,5 +1,6 @@
 import asyncio
 import time
+from copy import deepcopy
 from typing import Any, cast
 
 import pytest
@@ -32,10 +33,11 @@ from openai.types.responses.response_output_item import (
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 
 from agents import Agent, HandoffCallItem, Runner, function_tool
-from agents.extensions.handoff_filters import remove_all_tools
-from agents.handoffs import handoff
+from agents.extensions.handoff_filters import nest_handoff_history, remove_all_tools
+from agents.handoffs import HandoffInputData, handoff
 from agents.items import (
     CompactionItem,
+    ItemHelpers,
     MCPApprovalRequestItem,
     MCPApprovalResponseItem,
     MCPListToolsItem,
@@ -400,35 +402,35 @@ async def test_complete_streaming_events():
     assert events[8].type == "raw_response_event"
     assert isinstance(events[8].data, ResponseOutputItemDoneEvent)
 
-    # Event 9: ReasoningItem run_item_stream_event
-    assert events[9].type == "run_item_stream_event"
-    assert events[9].name == "reasoning_item_created"
-    assert isinstance(events[9].item, ReasoningItem)
+    # Event 9: ResponseOutputItemAddedEvent (function call)
+    assert events[9].type == "raw_response_event"
+    assert isinstance(events[9].data, ResponseOutputItemAddedEvent)
 
-    # Event 10: ResponseOutputItemAddedEvent (function call)
+    # Event 10: ResponseFunctionCallArgumentsDeltaEvent
     assert events[10].type == "raw_response_event"
-    assert isinstance(events[10].data, ResponseOutputItemAddedEvent)
+    assert isinstance(events[10].data, ResponseFunctionCallArgumentsDeltaEvent)
 
-    # Event 11: ResponseFunctionCallArgumentsDeltaEvent
+    # Event 11: ResponseFunctionCallArgumentsDoneEvent
     assert events[11].type == "raw_response_event"
-    assert isinstance(events[11].data, ResponseFunctionCallArgumentsDeltaEvent)
+    assert isinstance(events[11].data, ResponseFunctionCallArgumentsDoneEvent)
 
-    # Event 12: ResponseFunctionCallArgumentsDoneEvent
+    # Event 12: ResponseOutputItemDoneEvent (function call)
     assert events[12].type == "raw_response_event"
-    assert isinstance(events[12].data, ResponseFunctionCallArgumentsDoneEvent)
+    assert isinstance(events[12].data, ResponseOutputItemDoneEvent)
 
-    # Event 13: ResponseOutputItemDoneEvent (function call)
+    # Event 13: ResponseCompletedEvent (first turn ended)
     assert events[13].type == "raw_response_event"
-    assert isinstance(events[13].data, ResponseOutputItemDoneEvent)
+    assert isinstance(events[13].data, ResponseCompletedEvent)
 
-    # Event 14: ToolCallItem run_item_stream_event
+    # Event 14: ReasoningItem after the complete response passes canonical validation
     assert events[14].type == "run_item_stream_event"
-    assert events[14].name == "tool_called"
-    assert isinstance(events[14].item, ToolCallItem)
+    assert events[14].name == "reasoning_item_created"
+    assert isinstance(events[14].item, ReasoningItem)
 
-    # Event 15: ResponseCompletedEvent (first turn ended)
-    assert events[15].type == "raw_response_event"
-    assert isinstance(events[15].data, ResponseCompletedEvent)
+    # Event 15: ToolCallItem after the complete response passes canonical validation
+    assert events[15].type == "run_item_stream_event"
+    assert events[15].name == "tool_called"
+    assert isinstance(events[15].item, ToolCallItem)
 
     # Event 16: ToolCallOutputItem run_item_stream_event
     assert events[16].type == "run_item_stream_event"
@@ -475,6 +477,97 @@ async def test_complete_streaming_events():
     assert events[26].type == "run_item_stream_event"
     assert events[26].name == "message_output_created"
     assert isinstance(events[26].item, MessageOutputItem)
+
+
+@pytest.mark.asyncio
+async def test_tool_call_event_preserves_order_before_later_reasoning_item() -> None:
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call("foo", '{"arg": "value"}'),
+                get_reasoning_item(),
+            ],
+            [get_text_message("Final response")],
+        ]
+    )
+    agent = Agent(name="TestAgent", model=model, tools=[foo])
+
+    result = Runner.run_streamed(agent, input="Hello")
+    semantic_event_names = [
+        event.name
+        async for event in result.stream_events()
+        if event.type == "run_item_stream_event"
+    ]
+
+    assert semantic_event_names[:3] == [
+        "tool_called",
+        "reasoning_item_created",
+        "tool_output",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handoff_event_preserves_order_before_later_reasoning_item() -> None:
+    english_agent = Agent(
+        name="EnglishAgent",
+        model=FakeModel(initial_output=[get_text_message("Done")]),
+    )
+    model = FakeModel(
+        initial_output=[
+            get_handoff_tool_call(english_agent),
+            get_reasoning_item(),
+        ]
+    )
+    triage_agent = Agent(name="TriageAgent", model=model, handoffs=[english_agent])
+
+    result = Runner.run_streamed(triage_agent, input="Start")
+    semantic_event_names = [
+        event.name
+        async for event in result.stream_events()
+        if event.type == "run_item_stream_event"
+    ]
+
+    assert semantic_event_names[:2] == [
+        "handoff_requested",
+        "reasoning_item_created",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handoff_filter_copy_does_not_duplicate_streamed_model_items() -> None:
+    def copied_filter(data: HandoffInputData) -> HandoffInputData:
+        nested = nest_handoff_history(data)
+        return nested.clone(new_items=deepcopy(nested.new_items))
+
+    english_agent = Agent(
+        name="EnglishAgent",
+        model=FakeModel(initial_output=[get_text_message("Done")]),
+    )
+    model = FakeModel(
+        initial_output=[
+            get_text_message("Transferring"),
+            get_handoff_tool_call(english_agent),
+        ]
+    )
+    triage_agent = Agent(
+        name="TriageAgent",
+        model=model,
+        handoffs=[handoff(english_agent, input_filter=copied_filter)],
+    )
+
+    result = Runner.run_streamed(triage_agent, input="Start")
+    item_events = [
+        event async for event in result.stream_events() if event.type == "run_item_stream_event"
+    ]
+
+    message_texts = [
+        ItemHelpers.text_message_output(event.item)
+        for event in item_events
+        if isinstance(event.item, MessageOutputItem)
+    ]
+    assert message_texts == ["Transferring", "Done"]
+    assert sum(event.name == "handoff_requested" for event in item_events) == 1
 
 
 @pytest.mark.asyncio

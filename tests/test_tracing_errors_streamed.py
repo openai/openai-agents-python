@@ -292,8 +292,8 @@ async def test_multiple_handoff_doesnt_error():
             # Second turn: a message and 2 handoff
             [
                 get_text_message("a_message"),
-                get_handoff_tool_call(agent_1),
-                get_handoff_tool_call(agent_2),
+                get_handoff_tool_call(agent_1, call_id="handoff_1"),
+                get_handoff_tool_call(agent_2, call_id="handoff_2"),
             ],
             # Third turn: text message
             [get_text_message("done")],
@@ -421,7 +421,7 @@ async def test_handoffs_lead_to_correct_agent_spans():
     model.add_multiple_turn_outputs(
         [
             # First turn: a tool call
-            [get_function_tool_call("some_function", json.dumps({"a": "b"}))],
+            [get_function_tool_call("some_function", json.dumps({"a": "b"}), call_id="tool_1")],
             # Second turn: a message and 2 handoff
             [
                 get_text_message("a_message"),
@@ -429,7 +429,7 @@ async def test_handoffs_lead_to_correct_agent_spans():
                 get_handoff_tool_call(agent_2),
             ],
             # Third turn: tool call
-            [get_function_tool_call("some_function", json.dumps({"a": "b"}))],
+            [get_function_tool_call("some_function", json.dumps({"a": "b"}), call_id="tool_2")],
             # Fourth turn: handoff
             [get_handoff_tool_call(agent_3)],
             # Fifth turn: text message
@@ -532,11 +532,11 @@ async def test_max_turns_exceeded():
 
     model.add_multiple_turn_outputs(
         [
-            [get_function_tool_call("foo")],
-            [get_function_tool_call("foo")],
-            [get_function_tool_call("foo")],
-            [get_function_tool_call("foo")],
-            [get_function_tool_call("foo")],
+            [get_function_tool_call("foo", call_id="tool_1")],
+            [get_function_tool_call("foo", call_id="tool_2")],
+            [get_function_tool_call("foo", call_id="tool_3")],
+            [get_function_tool_call("foo", call_id="tool_4")],
+            [get_function_tool_call("foo", call_id="tool_5")],
         ]
     )
 

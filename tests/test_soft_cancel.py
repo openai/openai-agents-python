@@ -453,8 +453,8 @@ async def test_soft_cancel_with_multiple_tool_calls():
     model.add_multiple_turn_outputs(
         [
             [
-                get_function_tool_call("tool1", "{}"),
-                get_function_tool_call("tool2", "{}"),
+                get_function_tool_call("tool1", "{}", call_id="tool_1"),
+                get_function_tool_call("tool2", "{}", call_id="tool_2"),
             ],
             [get_text_message("Both tools executed")],
         ]
@@ -679,8 +679,8 @@ async def test_soft_cancel_with_session_and_multiple_turns():
     # Setup 3 turns
     model.add_multiple_turn_outputs(
         [
-            [get_function_tool_call("tool1", "{}")],
-            [get_function_tool_call("tool1", "{}")],
+            [get_function_tool_call("tool1", "{}", call_id="tool_1")],
+            [get_function_tool_call("tool1", "{}", call_id="tool_2")],
             [get_text_message("Final")],
         ]
     )

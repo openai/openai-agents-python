@@ -7,26 +7,20 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses as _dc
-import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Any, TypeVar, cast
+from uuid import uuid4
 
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
-    ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
 )
-from openai.types.responses.response_output_item import McpCall, McpListTools, ResponseOutputItem
+from openai.types.responses.response_output_item import ResponseOutputItem
 from openai.types.responses.response_prompt_param import ResponsePromptParam
-from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
-from .._mcp_tool_metadata import collect_mcp_list_tools_metadata
 from .._tool_identity import (
-    NamedToolLookupKey,
-    build_function_tool_lookup_map,
-    get_function_tool_lookup_key_for_call,
     get_tool_trace_name_for_tool,
     resolve_tool_name_collisions,
 )
@@ -46,19 +40,11 @@ from ..exceptions import (
 )
 from ..handoffs import Handoff
 from ..items import (
-    HandoffCallItem,
     ItemHelpers,
     ModelResponse,
-    ReasoningItem,
     RunItem,
     ToolApprovalItem,
-    ToolCallItem,
-    ToolCallItemTypes,
-    ToolSearchCallItem,
-    ToolSearchOutputItem,
     TResponseInputItem,
-    coerce_tool_search_call_raw_item,
-    coerce_tool_search_output_raw_item,
 )
 from ..lifecycle import RunHooks
 from ..logger import (
@@ -83,16 +69,11 @@ from ..sandbox.runtime import SandboxRuntime
 from ..stream_events import (
     AgentUpdatedStreamEvent,
     RawResponsesStreamEvent,
-    RunItemStreamEvent,
 )
 from ..tool import (
-    FunctionTool,
     ProgrammaticToolCallingTool,
     Tool,
-    ToolOrigin,
-    ToolOriginType,
     dispose_resolved_computers,
-    get_function_tool_origin,
 )
 from ..tracing import Span, SpanError, agent_span, get_current_trace, task_span, turn_span
 from ..tracing.config import include_task_and_turn_spans
@@ -174,7 +155,6 @@ from .session_persistence import (
 from .streaming import stream_step_items_to_queue, stream_step_result_to_queue
 from .tool_actions import ApplyPatchAction, ComputerAction, LocalShellAction, ShellAction
 from .tool_execution import (
-    build_litellm_json_tool_call,
     coerce_shell_call,
     execute_apply_patch_calls,
     execute_computer_actions,
@@ -189,7 +169,6 @@ from .tool_execution import (
 )
 from .tool_planning import execute_mcp_approval_requests
 from .tool_use_tracker import (
-    TOOL_CALL_TYPES,
     AgentToolUseTracker,
     hydrate_tool_use_tracker,
     serialize_tool_use_tracker,
@@ -209,7 +188,6 @@ from .turn_resolution import (
     execute_handoffs,
     execute_tools_and_side_effects,
     get_single_step_result_from_response,
-    is_handoff_tool_call,
     process_model_response,
     resolve_interrupted_turn,
     run_final_output_hooks,
@@ -277,6 +255,21 @@ __all__ = [
     "get_model",
     "input_guardrail_tripwire_triggered_for_stream",
 ]
+
+_STREAM_EVENT_ITEM_OCCURRENCE_KEY = "_agents_stream_event_item_occurrence_key"
+
+
+def _stream_event_item_occurrence_key(item: RunItem) -> str | None:
+    key = getattr(item, _STREAM_EVENT_ITEM_OCCURRENCE_KEY, None)
+    return key if isinstance(key, str) and key else None
+
+
+def _ensure_stream_event_item_occurrence_key(item: RunItem) -> str:
+    key = _stream_event_item_occurrence_key(item)
+    if key is None:
+        key = uuid4().hex
+        setattr(item, _STREAM_EVENT_ITEM_OCCURRENCE_KEY, key)
+    return key
 
 
 async def cleanup_models_after_run(tool_use_tracker: AgentToolUseTracker) -> None:
@@ -1511,22 +1504,6 @@ async def run_single_turn_streamed(
         if tripwire_result is not None:
             raise InputGuardrailTripwireTriggered(tripwire_result)
 
-    emitted_tool_call_ids: set[str] = set()
-    emitted_reasoning_item_ids: set[str] = set()
-    emitted_tool_search_fingerprints: set[str] = set()
-
-    def _tool_search_fingerprint(raw_item: Any) -> str:
-        if isinstance(raw_item, Mapping):
-            payload: Any = dict(raw_item)
-        elif hasattr(raw_item, "model_dump"):
-            payload = cast(Any, raw_item).model_dump(exclude_unset=True)
-        else:
-            payload = {
-                "type": getattr(raw_item, "type", None),
-                "id": getattr(raw_item, "id", None),
-            }
-        return json.dumps(payload, sort_keys=True, default=str)
-
     try:
         turn_input = ItemHelpers.input_to_new_input_list(streamed_result.input)
     except Exception:
@@ -1537,9 +1514,9 @@ async def run_single_turn_streamed(
         agent_hook_context = AgentHookContext(
             context=context_wrapper.context,
             usage=context_wrapper.usage,
-            _approvals=context_wrapper._approvals,
             turn_input=turn_input,
         )
+        context_wrapper._share_tool_state_with(agent_hook_context)
         await gather_with_cancel(
             hooks.on_agent_start(agent_hook_context, public_agent),
             (
@@ -1573,22 +1550,6 @@ async def run_single_turn_streamed(
             if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
         ]
 
-    # Precompute the lookup map used for streaming descriptions. Function tools use the same
-    # collision-free lookup keys as runtime dispatch, including deferred top-level aliases.
-    tool_map: dict[NamedToolLookupKey, Any] = cast(
-        dict[NamedToolLookupKey, Any],
-        build_function_tool_lookup_map(
-            [tool for tool in all_tools if isinstance(tool, FunctionTool)]
-        ),
-    )
-    for tool in all_tools:
-        tool_name = getattr(tool, "name", None)
-        if not isinstance(tool_name, str) or not tool_name:
-            continue
-        if isinstance(tool, FunctionTool):
-            continue
-        tool_map[tool_name] = tool
-    handoff_tool_names = {handoff.tool_name for handoff in handoffs}
     model = get_model(execution_agent, run_config)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(execution_agent, run_config)
@@ -1596,6 +1557,7 @@ async def run_single_turn_streamed(
 
     final_response: ModelResponse | None = None
     streamed_response_output: list[ResponseOutputItem] = []
+    emitted_model_item_occurrence_keys: set[str] = set()
 
     if server_conversation_tracker is not None:
         items_for_input = (
@@ -1625,9 +1587,6 @@ async def run_single_turn_streamed(
     )
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
-    hosted_mcp_tool_metadata = collect_mcp_list_tools_metadata(streamed_result._model_input_items)
-    if isinstance(filtered.input, list):
-        hosted_mcp_tool_metadata.update(collect_mcp_list_tools_metadata(filtered.input))
     if server_conversation_tracker is not None:
         logger.debug(
             "filtered.input has %s items; ids=%s",
@@ -1783,109 +1742,27 @@ async def run_single_turn_streamed(
             )
 
         if isinstance(event, ResponseOutputItemDoneEvent):
-            output_item = event.item
-            streamed_response_output.append(output_item)
-            output_item_type = getattr(output_item, "type", None)
+            streamed_response_output.append(event.item)
 
-            if output_item_type == "tool_search_call":
-                emitted_tool_search_fingerprints.add(_tool_search_fingerprint(output_item))
-                streamed_result._event_queue.put_nowait(
-                    RunItemStreamEvent(
-                        item=ToolSearchCallItem(
-                            raw_item=coerce_tool_search_call_raw_item(output_item),
-                            agent=public_agent,
-                        ),
-                        name="tool_search_called",
-                    )
-                )
+    if not final_response:
+        raise ModelBehaviorError("Model did not produce a final response!")
 
-            elif output_item_type == "tool_search_output":
-                emitted_tool_search_fingerprints.add(_tool_search_fingerprint(output_item))
-                streamed_result._event_queue.put_nowait(
-                    RunItemStreamEvent(
-                        item=ToolSearchOutputItem(
-                            raw_item=coerce_tool_search_output_raw_item(output_item),
-                            agent=public_agent,
-                        ),
-                        name="tool_search_output_created",
-                    )
-                )
+    context_wrapper.usage.add(final_response.usage)
 
-            elif isinstance(output_item, McpListTools):
-                hosted_mcp_tool_metadata.update(collect_mcp_list_tools_metadata([output_item]))
+    if server_conversation_tracker is not None:
+        # Streaming uses the same rewind helper, so a successful retry must restore delivered
+        # input tracking before the next turn computes server-managed deltas.
+        server_conversation_tracker.mark_input_as_sent(filtered.input)
+        server_conversation_tracker.track_server_items(final_response)
 
-            elif isinstance(output_item, TOOL_CALL_TYPES) and not is_handoff_tool_call(
-                output_item, handoff_tool_names
-            ):
-                # Handoff calls are streamed as `handoff_requested` once the turn is processed,
-                # so emitting them here too would duplicate the item under a second event name.
-                output_call_id: str | None = getattr(
-                    output_item, "call_id", getattr(output_item, "id", None)
-                )
-
-                if (
-                    output_call_id
-                    and isinstance(output_call_id, str)
-                    and output_call_id not in emitted_tool_call_ids
-                ):
-                    emitted_tool_call_ids.add(output_call_id)
-
-                    # Look up tool description from precomputed map ("last wins" matches
-                    # execution behavior in process_model_response).
-                    tool_lookup_key = get_function_tool_lookup_key_for_call(output_item)
-                    matched_tool = (
-                        tool_map.get(tool_lookup_key) if tool_lookup_key is not None else None
-                    )
-                    if (
-                        matched_tool is None
-                        and output_schema is not None
-                        and isinstance(output_item, ResponseFunctionToolCall)
-                        and output_item.name == "json_tool_call"
-                    ):
-                        matched_tool = build_litellm_json_tool_call(output_item)
-                    tool_description: str | None = None
-                    tool_title: str | None = None
-                    tool_origin = None
-                    if isinstance(output_item, McpCall):
-                        metadata = hosted_mcp_tool_metadata.get(
-                            (output_item.server_label, output_item.name)
-                        )
-                        if metadata is not None:
-                            tool_description = metadata.description
-                            tool_title = metadata.title
-                        tool_origin = ToolOrigin(
-                            type=ToolOriginType.MCP,
-                            mcp_server_name=output_item.server_label,
-                        )
-                    elif matched_tool is not None:
-                        tool_description = getattr(matched_tool, "description", None)
-                        tool_title = getattr(matched_tool, "_mcp_title", None)
-                        tool_origin = get_function_tool_origin(matched_tool)
-
-                    tool_item = ToolCallItem(
-                        raw_item=cast(ToolCallItemTypes, output_item),
-                        agent=public_agent,
-                        description=tool_description,
-                        title=tool_title,
-                        tool_origin=tool_origin,
-                    )
-                    streamed_result._event_queue.put_nowait(
-                        RunItemStreamEvent(item=tool_item, name="tool_called")
-                    )
-
-            elif isinstance(output_item, ResponseReasoningItem):
-                reasoning_id: str | None = getattr(output_item, "id", None)
-
-                if reasoning_id and reasoning_id not in emitted_reasoning_item_ids:
-                    emitted_reasoning_item_ids.add(reasoning_id)
-
-                    reasoning_item = ReasoningItem(raw_item=output_item, agent=public_agent)
-                    streamed_result._event_queue.put_nowait(
-                        RunItemStreamEvent(item=reasoning_item, name="reasoning_item_created")
-                    )
-
-    if final_response is not None:
-        context_wrapper.usage.add(final_response.usage)
+    async def after_invocation_validation(
+        model_items: list[RunItem] | None,
+    ) -> None:
+        if model_items is not None:
+            emitted_model_item_occurrence_keys.update(
+                _ensure_stream_event_item_occurrence_key(item) for item in model_items
+            )
+            stream_step_items_to_queue(model_items, streamed_result._event_queue)
         await gather_with_cancel(
             (
                 public_agent.hooks.on_llm_end(context_wrapper, public_agent, final_response)
@@ -1895,14 +1772,8 @@ async def run_single_turn_streamed(
             hooks.on_llm_end(context_wrapper, public_agent, final_response),
         )
 
-    if not final_response:
-        raise ModelBehaviorError("Model did not produce a final response!")
-
-    if server_conversation_tracker is not None:
-        # Streaming uses the same rewind helper, so a successful retry must restore delivered
-        # input tracking before the next turn computes server-managed deltas.
-        server_conversation_tracker.mark_input_as_sent(filtered.input)
-        server_conversation_tracker.track_server_items(final_response)
+    async def check_input_guardrails_before_side_effects() -> None:
+        await raise_if_input_guardrail_tripwire_known()
 
     single_step_result = await get_single_step_result_from_response(
         bindings=bindings,
@@ -1918,47 +1789,17 @@ async def run_single_turn_streamed(
         error_handlers=error_handlers,
         tool_use_tracker=tool_use_tracker,
         server_manages_conversation=server_conversation_tracker is not None,
-        event_queue=streamed_result._event_queue,
-        before_side_effects=raise_if_input_guardrail_tripwire_known,
+        after_invocation_validation=after_invocation_validation,
+        before_side_effects=check_input_guardrails_before_side_effects,
     )
 
     items_to_filter = session_items_for_turn(single_step_result)
 
-    if emitted_tool_call_ids:
-        items_to_filter = [
-            item
-            for item in items_to_filter
-            if not (
-                isinstance(item, ToolCallItem)
-                and (
-                    call_id := getattr(item.raw_item, "call_id", getattr(item.raw_item, "id", None))
-                )
-                and call_id in emitted_tool_call_ids
-            )
-        ]
-
-    if emitted_reasoning_item_ids:
-        items_to_filter = [
-            item
-            for item in items_to_filter
-            if not (
-                isinstance(item, ReasoningItem)
-                and (reasoning_id := getattr(item.raw_item, "id", None))
-                and reasoning_id in emitted_reasoning_item_ids
-            )
-        ]
-
-    if emitted_tool_search_fingerprints:
-        items_to_filter = [
-            item
-            for item in items_to_filter
-            if not (
-                isinstance(item, ToolSearchCallItem | ToolSearchOutputItem)
-                and _tool_search_fingerprint(item.raw_item) in emitted_tool_search_fingerprints
-            )
-        ]
-
-    items_to_filter = [item for item in items_to_filter if not isinstance(item, HandoffCallItem)]
+    items_to_filter = [
+        item
+        for item in items_to_filter
+        if _stream_event_item_occurrence_key(item) not in emitted_model_item_occurrence_keys
+    ]
 
     filtered_result = _dc.replace(single_step_result, new_step_items=items_to_filter)
     stream_step_result_to_queue(filtered_result, streamed_result._event_queue)
@@ -1997,9 +1838,9 @@ async def run_single_turn(
         agent_hook_context = AgentHookContext(
             context=context_wrapper.context,
             usage=context_wrapper.usage,
-            _approvals=context_wrapper._approvals,
             turn_input=turn_input,
         )
+        context_wrapper._share_tool_state_with(agent_hook_context)
         await gather_with_cancel(
             hooks.on_agent_start(agent_hook_context, public_agent),
             (
@@ -2050,7 +1891,20 @@ async def run_single_turn(
         session=session,
         session_items_to_rewind=session_items_to_rewind,
         prompt_cache_key_resolver=prompt_cache_key_resolver,
+        defer_llm_end_hooks=True,
     )
+
+    async def after_invocation_validation(
+        _validated_model_items: list[RunItem] | None,
+    ) -> None:
+        await gather_with_cancel(
+            (
+                public_agent.hooks.on_llm_end(context_wrapper, public_agent, new_response)
+                if public_agent.hooks
+                else _coro.noop_coroutine()
+            ),
+            hooks.on_llm_end(context_wrapper, public_agent, new_response),
+        )
 
     return await get_single_step_result_from_response(
         bindings=bindings,
@@ -2066,6 +1920,7 @@ async def run_single_turn(
         error_handlers=error_handlers,
         tool_use_tracker=tool_use_tracker,
         server_manages_conversation=server_conversation_tracker is not None,
+        after_invocation_validation=after_invocation_validation,
     )
 
 
@@ -2085,6 +1940,7 @@ async def get_new_response(
     session: Session | None = None,
     session_items_to_rewind: list[TResponseInputItem] | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
+    defer_llm_end_hooks: bool = False,
 ) -> ModelResponse:
     """Call the model and return the raw response, handling retries and hooks."""
     public_agent = bindings.public_agent
@@ -2192,13 +2048,14 @@ async def get_new_response(
 
     context_wrapper.usage.add(new_response.usage)
 
-    await gather_with_cancel(
-        (
-            public_agent.hooks.on_llm_end(context_wrapper, public_agent, new_response)
-            if public_agent.hooks
-            else _coro.noop_coroutine()
-        ),
-        hooks.on_llm_end(context_wrapper, public_agent, new_response),
-    )
+    if not defer_llm_end_hooks:
+        await gather_with_cancel(
+            (
+                public_agent.hooks.on_llm_end(context_wrapper, public_agent, new_response)
+                if public_agent.hooks
+                else _coro.noop_coroutine()
+            ),
+            hooks.on_llm_end(context_wrapper, public_agent, new_response),
+        )
 
     return new_response

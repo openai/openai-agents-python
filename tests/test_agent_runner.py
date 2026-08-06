@@ -1825,13 +1825,23 @@ async def test_structured_output():
     model.add_multiple_turn_outputs(
         [
             # First turn: a tool call
-            [get_function_tool_call("foo", json.dumps({"bar": "baz"}))],
+            [
+                get_function_tool_call(
+                    "foo",
+                    json.dumps({"bar": "baz"}),
+                    call_id="call_foo",
+                )
+            ],
             # Second turn: a message and a handoff
             [get_text_message("a_message"), get_handoff_tool_call(agent_1)],
             # Third turn: tool call with preamble message
             [
                 get_text_message(json.dumps(Foo(bar="preamble"))),
-                get_function_tool_call("bar", json.dumps({"bar": "baz"})),
+                get_function_tool_call(
+                    "bar",
+                    json.dumps({"bar": "baz"}),
+                    call_id="call_bar",
+                ),
             ],
             # Fourth turn: structured output
             [get_final_output_message(json.dumps(Foo(bar="baz")))],
@@ -4440,8 +4450,8 @@ async def test_tool_use_behavior_first_output():
             # First turn: a message and tool call
             [
                 get_text_message("a_message"),
-                get_function_tool_call("test_tool_one", None),
-                get_function_tool_call("test_tool_two", None),
+                get_function_tool_call("test_tool_one", None, call_id="tool-one"),
+                get_function_tool_call("test_tool_two", None, call_id="tool-two"),
             ],
         ]
     )
@@ -4477,13 +4487,13 @@ async def test_tool_use_behavior_custom_function():
             # First turn: a message and tool call
             [
                 get_text_message("a_message"),
-                get_function_tool_call("test_tool_two", None),
+                get_function_tool_call("test_tool_two", None, call_id="call-tool-two-first"),
             ],
             # Second turn: a message and tool call
             [
                 get_text_message("a_message"),
-                get_function_tool_call("test_tool_one", None),
-                get_function_tool_call("test_tool_two", None),
+                get_function_tool_call("test_tool_one", None, call_id="call-tool-one"),
+                get_function_tool_call("test_tool_two", None, call_id="call-tool-two-second"),
             ],
         ]
     )
@@ -4690,9 +4700,19 @@ async def test_conversation_id_only_sends_new_items_multi_turn():
     model.add_multiple_turn_outputs(
         [
             # First turn: a message and tool call
-            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            [
+                get_text_message("a_message"),
+                get_function_tool_call(
+                    "test_func", '{"arg": "foo"}', call_id="call-test-func-first"
+                ),
+            ],
             # Second turn: another message and tool call
-            [get_text_message("b_message"), get_function_tool_call("test_func", '{"arg": "bar"}')],
+            [
+                get_text_message("b_message"),
+                get_function_tool_call(
+                    "test_func", '{"arg": "bar"}', call_id="call-test-func-second"
+                ),
+            ],
             # Third turn: final text message
             [get_text_message("done")],
         ]
@@ -4740,9 +4760,19 @@ async def test_conversation_id_only_sends_new_items_multi_turn_streamed():
     model.add_multiple_turn_outputs(
         [
             # First turn: a message and tool call
-            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            [
+                get_text_message("a_message"),
+                get_function_tool_call(
+                    "test_func", '{"arg": "foo"}', call_id="call-test-func-first"
+                ),
+            ],
             # Second turn: another message and tool call
-            [get_text_message("b_message"), get_function_tool_call("test_func", '{"arg": "bar"}')],
+            [
+                get_text_message("b_message"),
+                get_function_tool_call(
+                    "test_func", '{"arg": "bar"}', call_id="call-test-func-second"
+                ),
+            ],
             # Third turn: final text message
             [get_text_message("done")],
         ]
@@ -5485,8 +5515,8 @@ async def test_dynamic_tool_addition_run() -> None:
 
     model.add_multiple_turn_outputs(
         [
-            [get_function_tool_call("add_tool", json.dumps({}))],
-            [get_function_tool_call("tool2", json.dumps({}))],
+            [get_function_tool_call("add_tool", json.dumps({}), call_id="call-add-tool")],
+            [get_function_tool_call("tool2", json.dumps({}), call_id="call-tool-two")],
             [get_text_message("done")],
         ]
     )
@@ -5811,6 +5841,44 @@ async def test_execute_approved_tools_with_rejected_tool():
     assert len(generated_items) == 1
     assert "not approved" in generated_items[0].output.lower()
     assert not tool_called  # Tool should not have been executed
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_rejects_changed_pending_invocation() -> None:
+    """A decision for one payload must not authorize a changed interruption."""
+    tool_called = False
+
+    async def test_tool(value: str) -> str:
+        nonlocal tool_called
+        tool_called = True
+        return value
+
+    tool = function_tool(test_tool, name_override="test_tool")
+    _, agent = make_model_and_agent(tools=[tool])
+    approved_call = get_function_tool_call(
+        "test_tool",
+        '{"value":"safe"}',
+        call_id="call-shared",
+    )
+    changed_call = get_function_tool_call(
+        "test_tool",
+        '{"value":"changed"}',
+        call_id="call-shared",
+    )
+    assert isinstance(approved_call, ResponseFunctionToolCall)
+    assert isinstance(changed_call, ResponseFunctionToolCall)
+    approved_item = ToolApprovalItem(agent=agent, raw_item=approved_call)
+    changed_item = ToolApprovalItem(agent=agent, raw_item=changed_call)
+
+    with pytest.raises(ModelBehaviorError, match="unique call ID"):
+        await run_execute_approved_tools(
+            agent=agent,
+            approval_item=changed_item,
+            approve=None,
+            mutate_state=lambda state, _item: state.approve(approved_item),
+        )
+
+    assert tool_called is False
 
 
 @pytest.mark.asyncio
@@ -6228,21 +6296,18 @@ async def test_execute_approved_tools_uses_last_duplicate_top_level_function():
 
 
 @pytest.mark.asyncio
-async def test_execute_approved_tools_with_missing_call_id():
-    """Test _execute_approved_tools handles tool approvals without call IDs."""
+async def test_execute_approved_tools_rejects_missing_call_id():
+    """Test _execute_approved_tools rejects tool approvals without call IDs."""
     _, agent = make_model_and_agent()
     tool_call = {"type": "function_call", "name": "test_tool"}
     approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
 
-    generated_items = await run_execute_approved_tools(
-        agent=agent,
-        approval_item=approval_item,
-        approve=True,
-    )
-
-    assert len(generated_items) == 1
-    assert isinstance(generated_items[0], ToolCallOutputItem)
-    assert "missing call id" in generated_items[0].output.lower()
+    with pytest.raises(ModelBehaviorError, match="non-empty call ID"):
+        await run_execute_approved_tools(
+            agent=agent,
+            approval_item=approval_item,
+            approve=True,
+        )
 
 
 @pytest.mark.asyncio
@@ -6254,7 +6319,12 @@ async def test_execute_approved_tools_with_invalid_raw_item_type():
 
     tool = function_tool(test_tool, name_override="test_tool")
     _, agent = make_model_and_agent(tools=[tool])
-    tool_call = {"type": "function_call", "name": "test_tool", "call_id": "call-1"}
+    tool_call = {
+        "type": "function_call",
+        "name": "test_tool",
+        "call_id": "call-1",
+        "arguments": "{}",
+    }
     approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
 
     generated_items = await run_execute_approved_tools(

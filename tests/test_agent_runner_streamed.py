@@ -1036,13 +1036,23 @@ async def test_structured_output():
     model.add_multiple_turn_outputs(
         [
             # First turn: a tool call
-            [get_function_tool_call("foo", json.dumps({"bar": "baz"}))],
+            [
+                get_function_tool_call(
+                    "foo",
+                    json.dumps({"bar": "baz"}),
+                    call_id="call_foo",
+                )
+            ],
             # Second turn: a message and a handoff
             [get_text_message("a_message"), get_handoff_tool_call(agent_1)],
             # Third turn: tool call with preamble message
             [
                 get_text_message(json.dumps(Foo(bar="preamble"))),
-                get_function_tool_call("bar", json.dumps({"bar": "baz"})),
+                get_function_tool_call(
+                    "bar",
+                    json.dumps({"bar": "baz"}),
+                    call_id="call_bar",
+                ),
             ],
             # Fourth turn: structured output
             [get_final_output_message(json.dumps(Foo(bar="baz")))],
@@ -1882,11 +1892,23 @@ async def test_streaming_events():
     model.add_multiple_turn_outputs(
         [
             # First turn: a tool call
-            [get_function_tool_call("foo", json.dumps({"bar": "baz"}))],
+            [
+                get_function_tool_call(
+                    "foo",
+                    json.dumps({"bar": "baz"}),
+                    call_id="call_foo",
+                )
+            ],
             # Second turn: a message and a handoff
             [get_text_message("a_message"), get_handoff_tool_call(agent_1)],
             # Third turn: tool call
-            [get_function_tool_call("bar", json.dumps({"bar": "baz"}))],
+            [
+                get_function_tool_call(
+                    "bar",
+                    json.dumps({"bar": "baz"}),
+                    call_id="call_bar",
+                )
+            ],
             # Fourth turn: structured output
             [get_final_output_message(json.dumps(Foo(bar="baz")))],
         ]
@@ -1978,8 +2000,8 @@ async def test_dynamic_tool_addition_run_streamed() -> None:
 
     model.add_multiple_turn_outputs(
         [
-            [get_function_tool_call("add_tool", json.dumps({}))],
-            [get_function_tool_call("tool2", json.dumps({}))],
+            [get_function_tool_call("add_tool", json.dumps({}), call_id="call-add-tool")],
+            [get_function_tool_call("tool2", json.dumps({}), call_id="call-tool-two")],
             [get_text_message("done")],
         ]
     )

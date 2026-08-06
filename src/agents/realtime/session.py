@@ -14,9 +14,11 @@ from typing_extensions import assert_never
 from .. import _debug
 from .._tool_identity import (
     FunctionToolLookupKey,
+    get_function_tool_lookup_key,
     get_function_tool_lookup_key_for_tool,
     get_function_tool_namespace,
 )
+from .._tool_invocation import tool_invocation_identity
 from ..agent import Agent
 from ..exceptions import (
     ModelBehaviorError,
@@ -228,8 +230,11 @@ class RealtimeSession(RealtimeModelListener):
         self._cleanup_task: asyncio.Task[None] | None = None
         self._stored_exception: BaseException | None = None
         self._pending_tool_calls: dict[str, _PendingToolCall] = {}
-        self._active_tool_call_ids: set[str] = set()
-        self._completed_tool_call_ids: set[str] = set()
+        self._tool_invocation_routes: dict[
+            str,
+            tuple[FunctionToolLookupKey | None, str | None],
+        ] = {}
+        self._active_tool_invocations: dict[str, tuple[str, str, str]] = {}
         self._pending_tool_outputs: dict[str, _PendingToolOutput] = {}
         self._current_dispatch_snapshot: _RealtimeDispatchSnapshot | None = None
 
@@ -793,9 +798,8 @@ class RealtimeSession(RealtimeModelListener):
         if not guardrails:
             return None
 
-        tool_context = ToolContext(
-            context=self._context_wrapper.context,
-            usage=self._context_wrapper.usage,
+        tool_context = ToolContext.from_agent_context(
+            self._context_wrapper,
             tool_name=tool_call.name,
             tool_call_id=tool_call.call_id,
             tool_arguments=tool_call.arguments,
@@ -843,6 +847,7 @@ class RealtimeSession(RealtimeModelListener):
         rejection_message = await self._resolve_approval_rejection_message(
             tool=tool,
             call_id=event.call_id,
+            tool_call=self._build_tool_approval_item(tool, event, agent).raw_item,
         )
         await self._send_tool_output_completion(
             _PendingToolOutput(
@@ -866,21 +871,29 @@ class RealtimeSession(RealtimeModelListener):
         call_id = pending_output.tool_call.call_id
         self._pending_tool_outputs[call_id] = pending_output
         try:
-            await self._send_pending_tool_output(pending_output)
+            output_sent = await self._send_pending_tool_output(pending_output)
         except Exception as exc:
             if self._closing or self._closed:
                 self._pending_tool_outputs.pop(call_id, None)
                 return
             raise _PendingToolOutputSendError(call_id, exc) from exc
-        self._pending_tool_outputs.pop(call_id, None)
-
-    async def _send_pending_tool_output(self, pending_output: _PendingToolOutput) -> None:
-        if self._closing or self._closed:
+        if not output_sent:
+            self._pending_tool_outputs.pop(call_id, None)
             return
+        self._context_wrapper._mark_tool_call_completed(
+            {"type": "function_call_output", "call_id": call_id},
+        )
+        self._pending_tool_outputs.pop(call_id, None)
+        if pending_output.tool_end_event is not None:
+            self._put_event_nowait(pending_output.tool_end_event)
+
+    async def _send_pending_tool_output(self, pending_output: _PendingToolOutput) -> bool:
+        if self._closing or self._closed:
+            return False
         if pending_output.session_update is not None:
             await self._model.send_event(pending_output.session_update)
         if self._closing or self._closed:
-            return
+            return False
         await self._model.send_event(
             RealtimeModelSendToolOutput(
                 tool_call=pending_output.tool_call,
@@ -888,12 +901,15 @@ class RealtimeSession(RealtimeModelListener):
                 start_response=pending_output.start_response,
             )
         )
-        if self._closing or self._closed:
-            return
-        if pending_output.tool_end_event is not None:
-            await self._put_event(pending_output.tool_end_event)
+        return True
 
-    async def _resolve_approval_rejection_message(self, *, tool: FunctionTool, call_id: str) -> str:
+    async def _resolve_approval_rejection_message(
+        self,
+        *,
+        tool: FunctionTool,
+        call_id: str,
+        tool_call: Any | None = None,
+    ) -> str:
         """Resolve model-visible output text for approval rejections."""
         explicit_message = self._context_wrapper.get_rejection_message(
             tool.name,
@@ -907,6 +923,11 @@ class RealtimeSession(RealtimeModelListener):
         if formatter is None:
             return REJECTION_MESSAGE
 
+        if tool_call is not None:
+            self._context_wrapper._mark_tool_invocation_executed(
+                tool_call,
+                tool_lookup_key=get_function_tool_lookup_key_for_tool(tool),
+            )
         try:
             maybe_message = formatter(
                 ToolErrorFormatterArgs(
@@ -948,7 +969,17 @@ class RealtimeSession(RealtimeModelListener):
         if pending is None:
             return
 
-        if not self._begin_tool_call(call_id, from_pending_approval=True):
+        pending_identity = tool_invocation_identity(
+            pending.approval_item.raw_item,
+            tool_lookup_key=pending.approval_item.tool_lookup_key,
+        )
+        if pending_identity is None:
+            raise ModelBehaviorError("Realtime tool calls require a canonical invocation identity.")
+        if not self._begin_tool_call(
+            call_id,
+            pending_identity,
+            from_pending_approval=True,
+        ):
             return
 
         try:
@@ -971,7 +1002,7 @@ class RealtimeSession(RealtimeModelListener):
                     call_id_reserved=True,
                 )
         except Exception:
-            if call_id in self._active_tool_call_ids:
+            if call_id in self._active_tool_invocations:
                 self._finish_tool_call(call_id, mark_completed=False)
             raise
 
@@ -990,7 +1021,17 @@ class RealtimeSession(RealtimeModelListener):
         if pending is None:
             return
 
-        if not self._begin_tool_call(call_id, from_pending_approval=True):
+        pending_identity = tool_invocation_identity(
+            pending.approval_item.raw_item,
+            tool_lookup_key=pending.approval_item.tool_lookup_key,
+        )
+        if pending_identity is None:
+            raise ModelBehaviorError("Realtime tool calls require a canonical invocation identity.")
+        if not self._begin_tool_call(
+            call_id,
+            pending_identity,
+            from_pending_approval=True,
+        ):
             return
 
         mark_completed = False
@@ -1020,15 +1061,91 @@ class RealtimeSession(RealtimeModelListener):
     ) -> None:
         """Handle a tool call event."""
         mark_completed = False
+        agent = dispatch_snapshot.agent if dispatch_snapshot is not None else agent_snapshot
+        agent = agent or self._current_agent
+        recorded_route = self._tool_invocation_routes.get(event.call_id)
+        recorded_role = recorded_route[1] if recorded_route is not None else None
+        if (
+            recorded_route is not None
+            and recorded_route[0] is not None
+            and recorded_route[0][-1] != event.name
+        ):
+            raise ModelBehaviorError(
+                "Model reused a Realtime tool call ID for a different invocation. "
+                "Use a unique call ID for each tool invocation."
+            )
+        dispatch_role = self._resolve_tool_dispatch_role(
+            event.name,
+            agent=agent,
+            dispatch_snapshot=dispatch_snapshot,
+        )
+        if (
+            recorded_route is not None
+            and dispatch_role is not None
+            and recorded_role != dispatch_role
+        ):
+            raise ModelBehaviorError(
+                "Model reused a Realtime tool call ID for a different invocation. "
+                "Use a unique call ID for each tool invocation."
+            )
+        identity_role = (
+            recorded_role if dispatch_role is None and recorded_route is not None else dispatch_role
+        )
+        current_raw_item = {
+            "type": "function_call",
+            "name": event.name,
+            "call_id": event.call_id,
+            "arguments": event.arguments,
+        }
+        current_lookup_key = (
+            recorded_route[0]
+            if recorded_route is not None
+            else get_function_tool_lookup_key(event.name, None)
+        )
+        current_identity = tool_invocation_identity(
+            current_raw_item,
+            tool_lookup_key=current_lookup_key,
+            invocation_role="handoff" if identity_role == "handoff" else None,
+        )
+        if current_identity is None:
+            raise ModelBehaviorError("Realtime tool calls require a non-empty string call ID.")
+        active_identity = self._active_tool_invocations.get(event.call_id)
+        if active_identity is not None and active_identity != current_identity:
+            raise ModelBehaviorError(
+                "Model reused a Realtime tool call ID for a different invocation. "
+                "Use a unique call ID for each tool invocation."
+            )
+        invocation_status = self._context_wrapper._tool_invocation_status(
+            current_raw_item,
+            tool_lookup_key=current_lookup_key,
+            invocation_role="handoff" if identity_role == "handoff" else None,
+        )
+        if invocation_status is None:
+            raise ModelBehaviorError("Realtime tool calls require a non-empty string call ID.")
+
+        pending_output = self._pending_tool_outputs.get(event.call_id)
+        has_pending_output = pending_output is not None
+        is_duplicate_call = (
+            active_identity is not None
+            or event.call_id in self._pending_tool_calls
+            or invocation_status[1]
+        )
+        if not call_id_reserved:
+            if is_duplicate_call:
+                return
+            if invocation_status[2] and not invocation_status[1] and not has_pending_output:
+                raise ModelBehaviorError(
+                    "A Realtime tool call already executed, but its output was not committed. "
+                    "Start a new call instead of retrying the invocation."
+                )
         if not call_id_reserved and not self._begin_tool_call(
-            event.call_id, from_pending_approval=from_pending_approval
+            event.call_id,
+            current_identity,
+            from_pending_approval=from_pending_approval,
         ):
             return
 
-        agent = dispatch_snapshot.agent if dispatch_snapshot is not None else agent_snapshot
-        agent = agent or self._current_agent
         try:
-            pending_output = self._pending_tool_outputs.get(event.call_id)
             if pending_output is not None:
                 await self._send_tool_output_completion(pending_output)
                 mark_completed = True
@@ -1046,6 +1163,14 @@ class RealtimeSession(RealtimeModelListener):
 
             if event.name in function_map:
                 func_tool = function_map[event.name]
+                approval_item = self._build_tool_approval_item(func_tool, event, agent)
+                self._bind_resolved_tool_invocation(
+                    event.call_id,
+                    approval_item.raw_item,
+                    preliminary_identity=current_identity,
+                    tool_lookup_key=approval_item.tool_lookup_key,
+                    route_role="function",
+                )
                 approval_status = await self._maybe_request_tool_approval(
                     event,
                     function_tool=func_tool,
@@ -1065,6 +1190,10 @@ class RealtimeSession(RealtimeModelListener):
                 if approval_status is None:
                     return
 
+                self._context_wrapper._mark_tool_invocation_executed(
+                    approval_item.raw_item,
+                    tool_lookup_key=approval_item.tool_lookup_key,
+                )
                 rejected_message = await self._run_tool_input_guardrails(
                     tool=func_tool,
                     tool_call=event,
@@ -1095,9 +1224,8 @@ class RealtimeSession(RealtimeModelListener):
                 if self._closing or self._closed:
                     return
 
-                tool_context = ToolContext(
-                    context=self._context_wrapper.context,
-                    usage=self._context_wrapper.usage,
+                tool_context = ToolContext.from_agent_context(
+                    self._context_wrapper,
                     tool_name=event.name,
                     tool_call_id=event.call_id,
                     tool_arguments=event.arguments,
@@ -1128,9 +1256,15 @@ class RealtimeSession(RealtimeModelListener):
                 mark_completed = True
             elif event.name in handoff_map:
                 handoff = handoff_map[event.name]
-                tool_context = ToolContext(
-                    context=self._context_wrapper.context,
-                    usage=self._context_wrapper.usage,
+                self._bind_resolved_tool_invocation(
+                    event.call_id,
+                    current_raw_item,
+                    preliminary_identity=current_identity,
+                    tool_lookup_key=get_function_tool_lookup_key(event.name, None),
+                    route_role="handoff",
+                )
+                tool_context = ToolContext.from_agent_context(
+                    self._context_wrapper,
                     tool_name=event.name,
                     tool_call_id=event.call_id,
                     tool_arguments=event.arguments,
@@ -1138,6 +1272,11 @@ class RealtimeSession(RealtimeModelListener):
                 )
 
                 # Execute the handoff to get the new agent
+                self._context_wrapper._mark_tool_invocation_executed(
+                    current_raw_item,
+                    tool_lookup_key=get_function_tool_lookup_key(event.name, None),
+                    invocation_role="handoff",
+                )
                 result = await handoff.on_invoke_handoff(self._context_wrapper, event.arguments)
                 if self._closing or self._closed:
                     return
@@ -1185,6 +1324,14 @@ class RealtimeSession(RealtimeModelListener):
                 )
                 mark_completed = True
             else:
+                fallback_role = "handoff" if identity_role == "handoff" else None
+                self._bind_resolved_tool_invocation(
+                    event.call_id,
+                    current_raw_item,
+                    preliminary_identity=current_identity,
+                    tool_lookup_key=get_function_tool_lookup_key(event.name, None),
+                    route_role=fallback_role,
+                )
                 error_message = f"Tool {event.name} not found"
                 await self._send_tool_output_completion(
                     _PendingToolOutput(
@@ -1203,20 +1350,101 @@ class RealtimeSession(RealtimeModelListener):
         finally:
             self._finish_tool_call(event.call_id, mark_completed=mark_completed)
 
-    def _begin_tool_call(self, call_id: str, *, from_pending_approval: bool) -> bool:
+    def _begin_tool_call(
+        self,
+        call_id: str,
+        identity: tuple[str, str, str],
+        *,
+        from_pending_approval: bool,
+    ) -> bool:
         if self._closing or self._closed:
             return False
-        if call_id in self._active_tool_call_ids or call_id in self._completed_tool_call_ids:
+        active_identity = self._active_tool_invocations.get(call_id)
+        if active_identity is not None:
+            if active_identity != identity:
+                raise ModelBehaviorError(
+                    "Model reused a Realtime tool call ID for a different invocation. "
+                    "Use a unique call ID for each tool invocation."
+                )
             return False
         if not from_pending_approval and call_id in self._pending_tool_calls:
             return False
-        self._active_tool_call_ids.add(call_id)
+        self._active_tool_invocations[call_id] = identity
         return True
 
+    def _bind_resolved_tool_invocation(
+        self,
+        call_id: str,
+        raw_item: Any,
+        *,
+        preliminary_identity: tuple[str, str, str],
+        tool_lookup_key: FunctionToolLookupKey | None,
+        route_role: str | None,
+    ) -> None:
+        """Atomically replace a provisional Realtime identity with its resolved identity."""
+        resolved_identity = tool_invocation_identity(
+            raw_item,
+            tool_lookup_key=tool_lookup_key,
+            invocation_role="handoff" if route_role == "handoff" else None,
+        )
+        if resolved_identity is None:
+            raise ModelBehaviorError("Realtime tool calls require a canonical invocation identity.")
+
+        active_identity = self._active_tool_invocations.get(call_id)
+        if active_identity not in {None, preliminary_identity, resolved_identity}:
+            raise ModelBehaviorError(
+                "Model reused a Realtime tool call ID for a different invocation. "
+                "Use a unique call ID for each tool invocation."
+            )
+        self._context_wrapper._rebind_tool_invocation(
+            raw_item,
+            previous_identity=preliminary_identity,
+            tool_lookup_key=tool_lookup_key,
+            invocation_role="handoff" if route_role == "handoff" else None,
+        )
+        if active_identity is not None:
+            self._active_tool_invocations[call_id] = resolved_identity
+        self._tool_invocation_routes[call_id] = (tool_lookup_key, route_role)
+
+    def _resolve_tool_dispatch_role(
+        self,
+        tool_name: str,
+        *,
+        agent: RealtimeAgent[Any],
+        dispatch_snapshot: _RealtimeDispatchSnapshot | None,
+    ) -> str | None:
+        """Return the known dispatch role without invoking dynamic tool resolvers."""
+        snapshot = dispatch_snapshot
+        if snapshot is None and self._current_dispatch_snapshot is not None:
+            if self._current_dispatch_snapshot.agent is agent:
+                snapshot = self._current_dispatch_snapshot
+
+        tools: Sequence[Any]
+        handoffs: Sequence[Any]
+        if snapshot is not None:
+            tools = snapshot.tools
+            handoffs = snapshot.handoffs
+        else:
+            raw_tools = getattr(agent, "tools", ())
+            raw_handoffs = getattr(agent, "handoffs", ())
+            tools = raw_tools if isinstance(raw_tools, Sequence) else ()
+            handoffs = raw_handoffs if isinstance(raw_handoffs, Sequence) else ()
+
+        if any(
+            (isinstance(handoff, Handoff) and handoff.tool_name == tool_name)
+            or (
+                isinstance(handoff, RealtimeAgent)
+                and Handoff.default_tool_name(handoff) == tool_name
+            )
+            for handoff in handoffs
+        ):
+            return "handoff"
+        if any(isinstance(tool, FunctionTool) and tool.name == tool_name for tool in tools):
+            return "function"
+        return None
+
     def _finish_tool_call(self, call_id: str, *, mark_completed: bool) -> None:
-        self._active_tool_call_ids.discard(call_id)
-        if mark_completed and not self._closing and not self._closed:
-            self._completed_tool_call_ids.add(call_id)
+        self._active_tool_invocations.pop(call_id, None)
 
     @classmethod
     def _get_new_history(
@@ -1770,9 +1998,9 @@ class RealtimeSession(RealtimeModelListener):
 
         # Clear pending approval tracking
         self._pending_tool_calls.clear()
+        self._tool_invocation_routes.clear()
         self._pending_tool_outputs.clear()
-        self._active_tool_call_ids.clear()
-        self._completed_tool_call_ids.clear()
+        self._active_tool_invocations.clear()
 
         # Mark as closed
         self._closed = True
