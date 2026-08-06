@@ -295,6 +295,18 @@ class LitellmModel(Model):
                 usage = Usage()
                 logger.warning("No usage information returned from Litellm")
 
+            message_tool_calls = getattr(message, "tool_calls", None) if message else None
+            ChatCmplHelpers.raise_if_tool_calls_truncated(
+                getattr(first_choice, "finish_reason", None) if first_choice else None,
+                has_function_tool_calls=bool(
+                    message_tool_calls
+                    and any(
+                        getattr(tool_call, "type", None) == "function"
+                        for tool_call in message_tool_calls
+                    )
+                ),
+            )
+
             if tracing.include_data():
                 span_generation.span_data.output = (
                     [message.model_dump()] if message is not None else []

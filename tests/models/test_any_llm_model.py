@@ -447,6 +447,32 @@ async def test_any_llm_chat_path_is_used_when_responses_are_unsupported(monkeypa
     assert getattr(response.usage.input_tokens_details, "cache_write_tokens", None) == 4
 
 
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_path_rejects_length_terminated_function_tool_call(
+    monkeypatch,
+) -> None:
+    completion = _chat_completion_with_tool_call(thought_signature="sig-123")
+    completion.choices[0].finish_reason = "length"
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=completion)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+
+    with pytest.raises(ModelBehaviorError, match="finish_reason='length'"):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+
+
 def _content_filtered_chat_completion(content: str) -> ChatCompletion:
     completion = _chat_completion(content)
     completion.choices[0].finish_reason = "content_filter"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import httpx
 import pytest
@@ -49,7 +49,7 @@ from agents import (
     generation_span,
     trace,
 )
-from agents.exceptions import UserError
+from agents.exceptions import ModelBehaviorError, UserError
 from agents.models._retry_runtime import provider_managed_retries_disabled
 from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE, ChatCmplHelpers
 from agents.models.fake_id import FAKE_RESPONSES_ID
@@ -740,7 +740,72 @@ async def test_get_response_with_tool_call(monkeypatch) -> None:
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_get_response_rejects_custom_tool_call_in_strict_mode(monkeypatch) -> None:
+async def test_get_response_rejects_length_terminated_tool_call(monkeypatch) -> None:
+    tool_call = ChatCompletionMessageFunctionToolCall(
+        id="call-id",
+        type="function",
+        function=Function(name="do_thing", arguments='{"cmd":"unterminated'),
+    )
+
+    with pytest.raises(ModelBehaviorError, match="finish_reason='length'"):
+        await _get_response_for_choice(
+            monkeypatch,
+            Choice(
+                index=0,
+                finish_reason="length",
+                message=ChatCompletionMessage(role="assistant", tool_calls=[tool_call]),
+            ),
+        )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_preserves_length_terminated_text(monkeypatch) -> None:
+    response = await _get_response_for_choice(
+        monkeypatch,
+        Choice(
+            index=0,
+            finish_reason="length",
+            message=ChatCompletionMessage(role="assistant", content="partial text"),
+        ),
+    )
+
+    assert len(response.output) == 1
+    assert isinstance(response.output[0], ResponseOutputMessage)
+    assert isinstance(response.output[0].content[0], ResponseOutputText)
+    assert response.output[0].content[0].text == "partial text"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_preserves_default_handling_for_length_terminated_custom_tool_call(
+    monkeypatch,
+) -> None:
+    tool_call = ChatCompletionMessageCustomToolCall(
+        id="tool1",
+        type="custom",
+        custom=Custom(name="raw_tool", input="payload"),
+    )
+
+    response = await _get_response_for_choice(
+        monkeypatch,
+        Choice(
+            index=0,
+            finish_reason="length",
+            message=ChatCompletionMessage(role="assistant", tool_calls=[tool_call]),
+        ),
+    )
+
+    assert response.output == []
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_reason", ["tool_calls", "length"])
+async def test_get_response_rejects_custom_tool_call_in_strict_mode(
+    monkeypatch,
+    finish_reason: Literal["tool_calls", "length"],
+) -> None:
     tool_call = ChatCompletionMessageCustomToolCall(
         id="tool1",
         type="custom",
@@ -752,7 +817,7 @@ async def test_get_response_rejects_custom_tool_call_in_strict_mode(monkeypatch)
         created=0,
         model="fake",
         object="chat.completion",
-        choices=[Choice(index=0, finish_reason="tool_calls", message=msg)],
+        choices=[Choice(index=0, finish_reason=finish_reason, message=msg)],
         usage=None,
     )
 

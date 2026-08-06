@@ -546,6 +546,103 @@ async def test_stream_handler_keeps_empty_choice_usage_chunks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_handler_rejects_length_terminated_tool_call() -> None:
+    tool_call_delta = ChoiceDeltaToolCall(
+        index=0,
+        id="call-id",
+        function=ChoiceDeltaToolCallFunction(
+            name="exec_command",
+            arguments='{"cmd":"unterminated',
+        ),
+        type="function",
+    )
+    chunks = [
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call_delta]))],
+        ),
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta(), finish_reason="length")],
+        ),
+    ]
+    events: list[Any] = []
+
+    with pytest.raises(ModelBehaviorError, match="finish_reason='length'"):
+        async for event in ChatCmplStreamHandler.handle_stream(
+            _empty_response(), cast(Any, _completion_stream(*chunks))
+        ):
+            events.append(event)
+
+    assert "response.output_item.done" not in [event.type for event in events]
+    assert "response.completed" not in [event.type for event in events]
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_preserves_length_terminated_text() -> None:
+    chunk = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[
+            Choice(
+                index=0,
+                delta=ChoiceDelta(content="partial text"),
+                finish_reason="length",
+            )
+        ],
+    )
+
+    events = await _collect_handler_events(chunk)
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    assert isinstance(completed_event, ResponseCompletedEvent)
+    message = completed_event.response.output[0]
+    assert isinstance(message, ResponseOutputMessage)
+    assert isinstance(message.content[0], ResponseOutputText)
+    assert message.content[0].text == "partial text"
+
+
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_rejects_length_terminated_tool_call() -> None:
+    tool_call_delta = ChoiceDeltaToolCall(
+        index=0,
+        id="call-id",
+        function=ChoiceDeltaToolCallFunction(
+            name="exec_command",
+            arguments='{"cmd":"unterminated',
+        ),
+        type="function",
+    )
+    chunks = [
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call_delta]))],
+        ),
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta(), finish_reason="length")],
+        ),
+    ]
+
+    with pytest.raises(ModelBehaviorError, match="finish_reason='length'"):
+        await _collect_buffered_tool_call_chunks(*chunks)
+
+
+@pytest.mark.asyncio
 async def test_stream_handler_rejects_multiple_choices_in_strict_mode() -> None:
     chunk = ChatCompletionChunk(
         id="chunk-id",

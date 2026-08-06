@@ -3,6 +3,7 @@ import pytest
 from litellm.types.utils import Choices, Message, ModelResponse, Usage
 from openai.types.responses import ResponseOutputMessage, ResponseOutputRefusal
 
+from agents.exceptions import ModelBehaviorError
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.model_settings import ModelSettings
 from agents.models.interface import ModelTracing
@@ -87,3 +88,42 @@ async def test_normal_stop_is_unaffected(monkeypatch):
         if isinstance(content, ResponseOutputRefusal)
     ]
     assert not refusals
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_length_terminated_function_tool_call_is_rejected(monkeypatch):
+    """A syntactically valid partial function call must not be executed."""
+
+    async def fake_acompletion(model, messages=None, **kwargs):
+        msg = Message(
+            role="assistant",
+            content=None,
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "exec_command",
+                        "arguments": '{"cmd":"true"}',
+                    },
+                }
+            ],
+        )
+        choice = Choices(index=0, finish_reason="length", message=msg)
+        return ModelResponse(choices=[choice], usage=Usage(0, 0, 0))
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    model = LitellmModel(model="test-model")
+
+    with pytest.raises(ModelBehaviorError, match="finish_reason='length'"):
+        await model.get_response(
+            system_instructions=None,
+            input=[],
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+        )

@@ -307,6 +307,15 @@ class OpenAIChatCompletionsModel(Model):
             ):
                 message.refusal = "Response withheld by the provider's content filter."
 
+            ChatCmplHelpers.raise_if_tool_calls_truncated(
+                first_choice.finish_reason if first_choice is not None else None,
+                has_function_tool_calls=bool(
+                    message is not None
+                    and message.tool_calls
+                    and any(tool_call.type == "function" for tool_call in message.tool_calls)
+                ),
+            )
+
             if tracing.include_data():
                 span_generation.span_data.output = (
                     [message.model_dump()] if message is not None else []

@@ -430,6 +430,11 @@ class ChatCmplStreamHandler:
                         "but did not include any streamed tool call deltas."
                     )
 
+                ChatCmplHelpers.raise_if_tool_calls_truncated(
+                    choice.finish_reason,
+                    has_function_tool_calls=bool(buffered_calls),
+                )
+
                 if has_passthrough_output:
                     passthrough_choices.append(choice)
                 elif choice.finish_reason == "content_filter":
@@ -600,6 +605,7 @@ class ChatCmplStreamHandler:
         # empty delta and no refusal field. Track it so we can synthesize an
         # explicit refusal after the stream if nothing else was emitted.
         saw_content_filter = False
+        saw_length = False
         async for chunk in stream:
             if not state.started:
                 state.started = True
@@ -642,6 +648,8 @@ class ChatCmplStreamHandler:
 
             if choice.finish_reason == "content_filter":
                 saw_content_filter = True
+            elif choice.finish_reason == "length":
+                saw_length = True
 
             if not choice.delta:
                 continue
@@ -1053,6 +1061,11 @@ class ChatCmplStreamHandler:
                             type="response.function_call_arguments.delta",
                             sequence_number=sequence_number.get_and_increment(),
                         )
+
+        ChatCmplHelpers.raise_if_tool_calls_truncated(
+            "length" if saw_length else None,
+            has_function_tool_calls=bool(state.function_calls),
+        )
 
         # Content-filter refusal with no emitted output: synthesize a refusal so
         # the completed response carries a ResponseOutputRefusal rather than an

@@ -10,6 +10,7 @@ from openai.types.responses.response_text_delta_event import (
     LogprobTopLogprob as DeltaTopLogprob,
 )
 
+from ..exceptions import ModelBehaviorError
 from ..model_settings import ModelSettings
 from ..version import __version__
 from .openai_client_utils import is_official_openai_client
@@ -23,6 +24,20 @@ HEADERS_OVERRIDE: ContextVar[dict[str, str] | None] = ContextVar(
 
 
 class ChatCmplHelpers:
+    @classmethod
+    def raise_if_tool_calls_truncated(
+        cls,
+        finish_reason: str | None,
+        *,
+        has_function_tool_calls: bool,
+    ) -> None:
+        """Reject function tool calls that the provider explicitly truncated."""
+        if finish_reason == "length" and has_function_tool_calls:
+            raise ModelBehaviorError(
+                "Chat Completions response was truncated while generating tool calls "
+                "(finish_reason='length')."
+            )
+
     @classmethod
     def is_openai(cls, client: AsyncOpenAI) -> bool:
         return is_official_openai_client(client)
