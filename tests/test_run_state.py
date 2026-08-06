@@ -7290,7 +7290,9 @@ def test_resolve_resumed_context_propagates_override_into_nested_agent_tool_stat
 
         cached = peek_agent_tool_run_result(nested_call, scope_id=scope_id)
         assert cached is not None
-        assert cached.to_state()._context.context is override
+        cached_context = cached.to_state()._context
+        assert cached_context is not None
+        assert cached_context.context is override
     finally:
         drop_agent_tool_run_result(nested_call, scope_id=scope_id)
 
@@ -7421,12 +7423,8 @@ def test_resolve_resumed_context_skips_non_agent_functions_for_propagation() -> 
     agent_tool._is_agent_tool = True
 
     # Same provider signature, different tool-call objects / runs.
-    ordinary_call = make_tool_call(
-        call_id="shared-call", name="shared_name", arguments="{}"
-    )
-    agent_call = make_tool_call(
-        call_id="shared-call", name="shared_name", arguments="{}"
-    )
+    ordinary_call = make_tool_call(call_id="shared-call", name="shared_name", arguments="{}")
+    agent_call = make_tool_call(call_id="shared-call", name="shared_name", arguments="{}")
 
     nested_wrapper = RunContextWrapper(context={"user": "agent-run"})
     nested_state = make_state_with_interruptions(

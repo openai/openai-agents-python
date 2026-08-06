@@ -267,9 +267,7 @@ def apply_application_context_to_agent_tool_states(
         if tool_call is None:
             continue
 
-        run_result = _peek_agent_tool_run_result_for_propagation(
-            tool_call, scope_id=scope_id
-        )
+        run_result = _peek_agent_tool_run_result_for_propagation(tool_call, scope_id=scope_id)
         if run_result is None:
             continue
 

@@ -301,9 +301,7 @@ def resolve_resumed_context(
         existing_context = run_state._context
         if existing_context is not None:
             application_context = (
-                context.context
-                if isinstance(context, RunContextWrapper)
-                else cast(TContext, context)
+                context.context if isinstance(context, RunContextWrapper) else context
             )
             if existing_context is not context:
                 existing_context.context = application_context
@@ -311,9 +309,7 @@ def resolve_resumed_context(
                 run_state,
                 application_context=application_context,
             )
-            set_agent_tool_state_scope(
-                existing_context, run_state._agent_tool_state_scope_id
-            )
+            set_agent_tool_state_scope(existing_context, run_state._agent_tool_state_scope_id)
             run_state._context = existing_context
             return existing_context
 
