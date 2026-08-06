@@ -54,7 +54,15 @@ from ..agent_tool_state import (
     peek_agent_tool_run_result,
     record_agent_tool_run_result,
 )
-from ..exceptions import ModelBehaviorError, ModelRefusalError, UserError
+from ..exceptions import (
+    _DATA_REDACTED_ERROR_MESSAGE,
+    ModelBehaviorError,
+    ModelRefusalError,
+    UserError,
+    _detach_data_redacted_error_traceback,
+    _is_error_data_redacted,
+    _mark_error_data_redacted,
+)
 from ..handoffs import Handoff, HandoffInputData, HandoffInputFilter, nest_handoff_history
 from ..handoffs.history import (
     _get_nested_history_owned_items,
@@ -415,32 +423,63 @@ async def _resolve_invalid_final_output(
     new_items: list[RunItem],
     context_wrapper: RunContextWrapper[TContext],
 ) -> tuple[Any, MessageOutputItem | None] | None:
+    redacted = _is_error_data_redacted(error) or _debug.DONT_LOG_MODEL_DATA
     run_error_data = build_run_error_data(
         input=original_input,
         new_items=new_items,
         raw_responses=[new_response],
         last_agent=public_agent,
     )
-    handler_result = await resolve_run_error_handler_result(
-        error_handlers=error_handlers,
-        error_kind="invalid_final_output",
-        error=error,
-        context_wrapper=context_wrapper,
-        run_data=run_error_data,
-    )
-    if handler_result is None:
-        return None
-
-    final_output = validate_handler_final_output(public_agent, handler_result.final_output)
-    message_item = (
-        create_message_output_item(
-            public_agent,
-            format_final_output_text(public_agent, final_output),
+    _detach_data_redacted_error_traceback(error)
+    safe_error: UserError | None = None
+    try:
+        handler_result = await resolve_run_error_handler_result(
+            error_handlers=error_handlers,
+            error_kind="invalid_final_output",
+            error=error,
+            context_wrapper=context_wrapper,
+            run_data=run_error_data,
         )
-        if handler_result.include_in_history
-        else None
-    )
-    return final_output, message_item
+        if handler_result is None:
+            return None
+
+        final_output = validate_handler_final_output(
+            public_agent,
+            handler_result.final_output,
+            data_redacted=redacted,
+        )
+        message_item = (
+            create_message_output_item(
+                public_agent,
+                format_final_output_text(
+                    public_agent,
+                    final_output,
+                    data_redacted=redacted,
+                ),
+            )
+            if handler_result.include_in_history
+            else None
+        )
+        return final_output, message_item
+    except Exception:
+        if not redacted:
+            raise
+        safe_error = UserError(_DATA_REDACTED_ERROR_MESSAGE)
+        _mark_error_data_redacted(safe_error)
+
+    error = cast(Any, None)
+    error_handlers = cast(Any, None)
+    public_agent = cast(Any, None)
+    original_input = cast(Any, None)
+    new_response = cast(Any, None)
+    new_items = cast(Any, None)
+    context_wrapper = cast(Any, None)
+    run_error_data = cast(Any, None)
+    handler_result = cast(Any, None)
+    final_output = cast(Any, None)
+    message_item = cast(Any, None)
+    assert safe_error is not None
+    raise safe_error from None
 
 
 def _resolve_server_managed_handoff_behavior(
@@ -902,12 +941,32 @@ async def execute_tools_and_side_effects(
                 )
             if output_schema and not output_schema.is_plain_text():
                 if potential_final_output_text:
+                    validation_error: ModelBehaviorError | None = None
                     try:
                         final_output = output_schema.validate_json(potential_final_output_text)
                     except ModelBehaviorError as error:
+                        if _is_error_data_redacted(error):
+                            validation_error = error
+                        else:
+                            resolved_handler_output = await _resolve_invalid_final_output(
+                                error_handlers=error_handlers,
+                                error=error,
+                                public_agent=public_agent,
+                                original_input=original_input,
+                                new_response=new_response,
+                                new_items=pre_step_items + new_step_items,
+                                context_wrapper=context_wrapper,
+                            )
+                            if resolved_handler_output is None:
+                                raise
+                            final_output, message_item = resolved_handler_output
+                            if message_item is not None:
+                                new_step_items.append(message_item)
+
+                    if validation_error is not None:
                         resolved_handler_output = await _resolve_invalid_final_output(
                             error_handlers=error_handlers,
-                            error=error,
+                            error=validation_error,
                             public_agent=public_agent,
                             original_input=original_input,
                             new_response=new_response,
@@ -915,7 +974,7 @@ async def execute_tools_and_side_effects(
                             context_wrapper=context_wrapper,
                         )
                         if resolved_handler_output is None:
-                            raise
+                            raise validation_error
                         final_output, message_item = resolved_handler_output
                         if message_item is not None:
                             new_step_items.append(message_item)

@@ -18,6 +18,8 @@ from .exceptions import (
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     RunErrorDetails,
+    _detach_data_redacted_error_traceback,
+    _is_error_data_redacted,
     _should_drain_stream_events_before_raising,
 )
 from .guardrail import InputGuardrailResult, OutputGuardrailResult
@@ -129,7 +131,7 @@ def _populate_state_from_result(
         snapshot_refs,
     )
     state._nested_history_owned_session_item_refs = live_refs
-    state._model_responses = result.raw_responses
+    state._model_responses = list(result.raw_responses)
     state._input_guardrail_results = result.input_guardrail_results
     state._output_guardrail_results = result.output_guardrail_results
     state._tool_input_guardrail_results = result.tool_input_guardrail_results
@@ -528,7 +530,8 @@ class RunResultStreaming(RunResultBase):
 
     The streaming method will raise:
     - A MaxTurnsExceeded exception if the agent exceeds the max_turns limit.
-    - A GuardrailTripwireTriggered exception if a guardrail is tripped.
+    - A tripwire exception if a guardrail is tripped, e.g. InputGuardrailTripwireTriggered
+      or OutputGuardrailTripwireTriggered.
     """
 
     current_agent: Agent[Any]
@@ -729,7 +732,10 @@ class RunResultStreaming(RunResultBase):
         task = self.run_loop_task
         if task is None or not task.done() or task.cancelled():
             return None
-        return task.exception()
+        error = task.exception()
+        if isinstance(error, Exception) and _is_error_data_redacted(error):
+            _detach_data_redacted_error_traceback(error)
+        return error
 
     def cancel(self, mode: Literal["immediate", "after_turn"] = "immediate") -> None:
         """Cancel the streaming run.
@@ -802,7 +808,8 @@ class RunResultStreaming(RunResultBase):
 
         This will raise:
         - A MaxTurnsExceeded exception if the agent exceeds the max_turns limit.
-        - A GuardrailTripwireTriggered exception if a guardrail is tripped.
+        - A tripwire exception if a guardrail is tripped, e.g. InputGuardrailTripwireTriggered
+          or OutputGuardrailTripwireTriggered.
         """
         consumer_registered = False
         registered_consumer_task: asyncio.Task[Any] | None = None
@@ -927,8 +934,16 @@ class RunResultStreaming(RunResultBase):
                 self._drain_event_queue()
                 self._drain_input_guardrail_queue()
 
-        if self._stored_exception:
-            raise self._stored_exception
+        stored_exception = self._stored_exception
+        if stored_exception:
+            if _is_error_data_redacted(stored_exception):
+                _detach_data_redacted_error_traceback(stored_exception)
+                # The streaming result retains caller-visible run data. Drop the local reference
+                # before raising so the redacted exception cannot retain it through this frame.
+                self = cast(Any, None)
+                registered_consumer_task = None
+                item = cast(Any, None)
+            raise stored_exception
 
     def _create_error_details(self) -> RunErrorDetails | None:
         """Return a `RunErrorDetails` object considering the current attributes of the class.
@@ -974,7 +989,11 @@ class RunResultStreaming(RunResultBase):
             if not self.run_loop_task.cancelled():
                 run_impl_exc = self.run_loop_task.exception()
                 if run_impl_exc and isinstance(run_impl_exc, Exception):
-                    if isinstance(run_impl_exc, AgentsException) and run_impl_exc.run_data is None:
+                    if (
+                        isinstance(run_impl_exc, AgentsException)
+                        and run_impl_exc.run_data is None
+                        and not _is_error_data_redacted(run_impl_exc)
+                    ):
                         run_impl_exc.run_data = self._create_error_details()
                     self._stored_exception = run_impl_exc
 
@@ -982,7 +1001,11 @@ class RunResultStreaming(RunResultBase):
             if not self._input_guardrails_task.cancelled():
                 in_guard_exc = self._input_guardrails_task.exception()
                 if in_guard_exc and isinstance(in_guard_exc, Exception):
-                    if isinstance(in_guard_exc, AgentsException) and in_guard_exc.run_data is None:
+                    if (
+                        isinstance(in_guard_exc, AgentsException)
+                        and in_guard_exc.run_data is None
+                        and not _is_error_data_redacted(in_guard_exc)
+                    ):
                         in_guard_exc.run_data = self._create_error_details()
                     self._stored_exception = in_guard_exc
 
@@ -993,6 +1016,7 @@ class RunResultStreaming(RunResultBase):
                     if (
                         isinstance(out_guard_exc, AgentsException)
                         and out_guard_exc.run_data is None
+                        and not _is_error_data_redacted(out_guard_exc)
                     ):
                         out_guard_exc.run_data = self._create_error_details()
                     self._stored_exception = out_guard_exc

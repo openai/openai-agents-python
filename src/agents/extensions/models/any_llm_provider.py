@@ -4,6 +4,7 @@ from ...models.default_models import get_default_model
 from ...models.interface import Model, ModelProvider
 from .any_llm_model import AnyLLMModel
 
+# This is kept for backward compatibility but using get_default_model() method is recommended.
 DEFAULT_MODEL: str = f"openai/{get_default_model()}"
 
 
@@ -28,7 +29,7 @@ class AnyLLMProvider(ModelProvider):
 
     def get_model(self, model_name: str | None) -> Model:
         return AnyLLMModel(
-            model=model_name or DEFAULT_MODEL,
+            model=model_name or f"openai/{get_default_model()}",
             api_key=self.api_key,
             base_url=self.base_url,
             api=self.api,

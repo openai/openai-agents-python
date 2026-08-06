@@ -3,14 +3,49 @@
 import asyncio
 import sqlite3
 import tempfile
+import threading
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
 from agents import Agent, RunConfig, Runner, SessionSettings, SQLiteSession, TResponseInputItem
+from agents.memory.sqlite_session import _await_mutation
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
+
+
+@pytest.mark.asyncio
+async def test_await_mutation_cancellation_hides_later_failure_without_loop_error() -> None:
+    """A failed mutation must not leak a false loop error after caller cancellation."""
+    mutation_started = asyncio.Event()
+    allow_failure = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    previous_exception_handler = loop.get_exception_handler()
+    loop_errors: list[dict[str, Any]] = []
+
+    async def mutation() -> None:
+        mutation_started.set()
+        await allow_failure.wait()
+        raise RuntimeError("mutation failed")
+
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    task = asyncio.create_task(_await_mutation(mutation()))
+    try:
+        await mutation_started.wait()
+        task.cancel("caller-cancelled")
+        allow_failure.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0)
+        assert loop_errors == []
+    finally:
+        loop.set_exception_handler(previous_exception_handler)
+        allow_failure.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 # Helper functions for parametrized testing of different Runner methods
@@ -232,6 +267,18 @@ async def test_sqlite_session_close_closes_worker_thread_connections():
         assert session._connections == set()
         with pytest.raises(sqlite3.ProgrammingError):
             connections[0].execute("SELECT 1")
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_closed_rejects_empty_add_items():
+    """add_items([]) must not bypass the closed check through the empty-list fast path."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "closed_empty_add.db"
+        session = SQLiteSession("closed_empty_add_test", db_path)
+        session.close()
+
+        with pytest.raises(RuntimeError, match="SQLiteSession is closed"):
+            await session.add_items([])
 
 
 @pytest.mark.asyncio
@@ -955,3 +1002,213 @@ async def test_runner_with_session_settings_override():
         assert len(history_items) == 2
 
         session.close()
+
+
+def _drop_sqlite_table(db_path: Path, table: str) -> None:
+    """Drop a table from an independent connection to make a later statement fail."""
+    helper = sqlite3.connect(str(db_path))
+    try:
+        helper.execute(f"DROP TABLE {table}")
+        helper.commit()
+    finally:
+        helper.close()
+
+
+def _sqlite_write_lock_is_free(db_path: Path) -> bool:
+    """Return whether an independent writer can take the SQLite write lock."""
+    probe = sqlite3.connect(str(db_path), timeout=0)
+    try:
+        probe.execute("CREATE TABLE IF NOT EXISTS probe_lock (x INTEGER)")
+        probe.commit()
+        return True
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        probe.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_failed_clear_session_rolls_back():
+    """A failed clear must restore earlier statements and release the cached write lock."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "clear_rollback.db"
+        session = SQLiteSession("clear_rollback", db_path)
+        await session.add_items([{"role": "user", "content": "kept"}])
+
+        _drop_sqlite_table(db_path, "agent_sessions")
+
+        with pytest.raises(sqlite3.OperationalError):
+            await session.clear_session()
+
+        assert all(not conn.in_transaction for conn in session._connections)
+        assert _sqlite_write_lock_is_free(db_path)
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_failed_pop_item_releases_write_lock():
+    """A failed pop must not leave a write transaction on the cached connection."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "pop_rollback.db"
+        session = SQLiteSession("pop_rollback", db_path)
+        await session.add_items([{"role": "user", "content": "kept"}])
+
+        _drop_sqlite_table(db_path, "agent_messages")
+
+        with pytest.raises(sqlite3.OperationalError):
+            await session.pop_item()
+
+        assert all(not conn.in_transaction for conn in session._connections)
+        assert _sqlite_write_lock_is_free(db_path)
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_rollback_failure_evicts_connection(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A file connection that cannot roll back must be closed and replaced."""
+
+    class FailingRollbackConnection(sqlite3.Connection):
+        def rollback(self) -> None:
+            raise RuntimeError("rollback failed")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "rollback_failure.db"
+        session = SQLiteSession("rollback_failure", db_path)
+        conn = sqlite3.connect(
+            str(db_path),
+            check_same_thread=False,
+            factory=FailingRollbackConnection,
+        )
+        with session._connections_lock:
+            session._connections.add(conn)
+        real_get_connection = session._get_connection
+        monkeypatch.setattr(session, "_get_connection", lambda: conn)
+        unserializable = cast(TResponseInputItem, {"role": "user", "content": object()})
+
+        with pytest.raises(TypeError):
+            await session.add_items([unserializable])
+
+        assert conn not in session._connections
+        assert _sqlite_write_lock_is_free(db_path)
+
+        monkeypatch.setattr(session, "_get_connection", real_get_connection)
+        await session.add_items([{"role": "user", "content": "after failure"}])
+        assert [item.get("content") for item in await session.get_items()] == ["after failure"]
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_close_retries_quarantined_connection(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A failed invalidation close must remain owned until a later close succeeds."""
+
+    class FailingRollbackAndCloseConnection(sqlite3.Connection):
+        fail_close = True
+
+        def rollback(self) -> None:
+            raise RuntimeError("rollback failed")
+
+        def close(self) -> None:
+            if self.fail_close:
+                raise RuntimeError("close failed")
+            super().close()
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "close_retry.db"
+        session = SQLiteSession("close_retry", db_path)
+        conn = sqlite3.connect(
+            str(db_path),
+            check_same_thread=False,
+            factory=FailingRollbackAndCloseConnection,
+        )
+        with session._connections_lock:
+            session._connections.add(conn)
+        monkeypatch.setattr(session, "_get_connection", lambda: conn)
+        unserializable = cast(TResponseInputItem, {"role": "user", "content": object()})
+
+        with pytest.raises(TypeError):
+            await session.add_items([unserializable])
+
+        assert session._closed is True
+        assert conn in session._quarantined_connections
+        assert _sqlite_write_lock_is_free(db_path) is False
+
+        conn.fail_close = False
+        session.close()
+
+        assert session._quarantined_connections == set()
+        assert _sqlite_write_lock_is_free(db_path)
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["add", "pop", "clear"])
+async def test_sqlite_session_post_commit_cancellation_propagates_after_known_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+):
+    """Cancellation after a worker commit must propagate without inviting a retry."""
+
+    class PausingCommitConnection(sqlite3.Connection):
+        pause_commit = False
+        commit_finished = threading.Event()
+        allow_return = threading.Event()
+
+        def commit(self) -> None:
+            super().commit()
+            if self.pause_commit:
+                self.pause_commit = False
+                self.commit_finished.set()
+                assert self.allow_return.wait(timeout=10)
+
+    db_path = tmp_path / f"post_commit_{operation}.db"
+    session = SQLiteSession(f"post_commit_{operation}", db_path)
+    item: TResponseInputItem = {"role": "user", "content": "once"}
+    if operation != "add":
+        await session.add_items([item])
+
+    conn = sqlite3.connect(
+        str(db_path),
+        check_same_thread=False,
+        factory=PausingCommitConnection,
+    )
+    with session._connections_lock:
+        session._connections.add(conn)
+    monkeypatch.setattr(session, "_get_connection", lambda: conn)
+    conn.pause_commit = True
+
+    if operation == "add":
+        mutation: asyncio.Task[Any] = asyncio.create_task(session.add_items([item]))
+    elif operation == "pop":
+        mutation = asyncio.create_task(session.pop_item())
+    else:
+        mutation = asyncio.create_task(session.clear_session())
+
+    try:
+        assert await asyncio.to_thread(conn.commit_finished.wait, 10)
+        mutation.cancel()
+        await asyncio.sleep(0)
+        mutation.cancel()
+        await asyncio.sleep(0)
+        conn.allow_return.set()
+        with pytest.raises(asyncio.CancelledError):
+            await mutation
+    finally:
+        conn.allow_return.set()
+        if not mutation.done():
+            mutation.cancel()
+            await asyncio.gather(mutation, return_exceptions=True)
+
+    if operation == "add":
+        assert await session.get_items() == [item]
+    elif operation == "pop":
+        assert await session.get_items() == []
+    else:
+        assert await session.get_items() == []
+    assert mutation.cancelled()
+    session.close()

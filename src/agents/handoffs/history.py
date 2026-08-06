@@ -429,7 +429,9 @@ def _format_transcript_item_legacy(item: TResponseInputItem) -> str:
         if isinstance(name, str) and name:
             prefix = f"{prefix} ({name})"
         content_str = _stringify_content(item.get("content"))
-        return f"{prefix}: {content_str}" if content_str else prefix
+        # Always emit the separator. A bare role has no record separator for the parser to
+        # find, so the turn is dropped when the summary is flattened on the next handoff.
+        return f"{prefix}: {content_str}"
 
     item_type = item.get("type", "item")
     rest = {k: v for k, v in item.items() if k not in ("type", "provider_data")}
@@ -535,7 +537,21 @@ def _parse_summary_line(line: str) -> TResponseInputItem | None:
 
     role_part, sep, remainder = stripped.partition(":")
     if not sep:
-        return None
+        # Summaries written before the separator was always emitted record an empty turn as
+        # a bare role, so recover those instead of dropping the turn. Restricted to a lone
+        # role token, optionally with a "(name)" suffix, so prose inside the block is still
+        # rejected rather than turning into a fabricated message.
+        if not _is_bare_role_record(stripped):
+            return None
+        role, name = _split_role_and_name(stripped)
+        recovered: dict[str, Any] = {"role": role}
+        if name:
+            recovered["name"] = name
+        # Keep an explicit empty content. Adapters such as the Chat Completions converter
+        # only recognize a message when both keys are present, so a role-only item is not
+        # replayable.
+        recovered["content"] = ""
+        return cast(TResponseInputItem, recovered)
     role_text = role_part.strip()
     if not role_text:
         return None
@@ -548,7 +564,9 @@ def _parse_summary_line(line: str) -> TResponseInputItem | None:
         legacy_typed_item = _parse_legacy_typed_item(role, content)
         if legacy_typed_item is not None:
             return legacy_typed_item
-        reconstructed["content"] = content
+    # Set content even when empty, so a turn that carried none stays a replayable message
+    # rather than a role-only item that adapters do not recognize.
+    reconstructed["content"] = content
     return cast(TResponseInputItem, reconstructed)
 
 
@@ -589,6 +607,17 @@ def _strip_transcript_item_metadata(item: TResponseInputItem) -> TResponseInputI
     from ..run_internal.items import strip_internal_input_item_metadata
 
     return strip_internal_input_item_metadata(item)
+
+
+_KNOWN_TRANSCRIPT_ROLES = frozenset({"user", "assistant", "system", "developer"})
+
+
+def _is_bare_role_record(stripped: str) -> bool:
+    """Return whether a separator-less record is a lone role, optionally with a name."""
+    candidate = stripped
+    if candidate.endswith(")") and "(" in candidate:
+        candidate = candidate[: candidate.rfind("(")].strip()
+    return candidate in _KNOWN_TRANSCRIPT_ROLES
 
 
 def _split_role_and_name(role_text: str) -> tuple[str, str | None]:

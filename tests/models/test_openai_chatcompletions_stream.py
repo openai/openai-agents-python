@@ -1326,6 +1326,13 @@ async def test_stream_handler_places_text_after_existing_refusal_part() -> None:
 
     events = await _collect_handler_events(*chunks)
 
+    refusal_part_added = next(
+        event
+        for event in events
+        if event.type == "response.content_part.added"
+        and isinstance(event.part, ResponseOutputRefusal)
+    )
+    assert refusal_part_added.content_index == 0
     text_part_added = next(
         event
         for event in events
@@ -1337,10 +1344,12 @@ async def test_stream_handler_places_text_after_existing_refusal_part() -> None:
     completed_event = next(event for event in events if event.type == "response.completed")
     assistant_item = completed_event.response.output[0]
     assert isinstance(assistant_item, ResponseOutputMessage)
-    assert isinstance(assistant_item.content[0], ResponseOutputText)
-    assert isinstance(assistant_item.content[1], ResponseOutputRefusal)
-    assert assistant_item.content[0].text == "partial"
-    assert assistant_item.content[1].refusal == "blocked"
+    # The completed content must line up with the content indexes announced above: the
+    # refusal opened first at index 0 and the text followed at index 1.
+    assert isinstance(assistant_item.content[0], ResponseOutputRefusal)
+    assert isinstance(assistant_item.content[1], ResponseOutputText)
+    assert assistant_item.content[0].refusal == "blocked"
+    assert assistant_item.content[1].text == "partial"
 
 
 @pytest.mark.allow_call_model_methods
@@ -3536,3 +3545,123 @@ async def test_buffer_tool_call_stream_does_not_duplicate_tool_calls_finish() ->
     ]
     assert len(finish_choices) == 1
     assert finish_choices[0].delta.tool_calls
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_propagates_request_id(monkeypatch) -> None:
+    """The OpenAI request ID must reach the terminal streamed response.
+
+    `Runner` reads `_request_id` off the terminal response to populate
+    `ModelResponse.request_id`, so the streamed Chat Completions path has to carry the
+    `x-request-id` header from the underlying HTTP response.
+    """
+    chunk = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(content="Hello"))],
+    )
+
+    class FakeStream:
+        """Mimics `openai.AsyncStream`, which exposes the raw HTTP response."""
+
+        def __init__(self) -> None:
+            self.response = httpx.Response(
+                200,
+                headers={"x-request-id": "req_streamed_456"},
+                request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+            )
+
+        def __aiter__(self) -> AsyncIterator[ChatCompletionChunk]:
+            async def gen() -> AsyncIterator[ChatCompletionChunk]:
+                yield chunk
+
+            return gen()
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, FakeStream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    completed: ResponseCompletedEvent | None = None
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    ):
+        if event.type == "response.completed":
+            completed = event
+
+    assert completed is not None
+    assert getattr(completed.response, "_request_id", None) == "req_streamed_456"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_without_http_response_has_no_request_id(monkeypatch) -> None:
+    """Custom clients and test doubles that yield a bare async iterator still stream."""
+    chunk = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(content="Hello"))],
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        yield chunk
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    completed: ResponseCompletedEvent | None = None
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    ):
+        if event.type == "response.completed":
+            completed = event
+
+    assert completed is not None
+    assert getattr(completed.response, "_request_id", None) is None

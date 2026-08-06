@@ -207,12 +207,22 @@ class _ServerSentEvent:
 
 class _SSELineDecoder:
     _buf: bytes
+    _skip_leading_lf: bool
 
     def __init__(self) -> None:
         self._buf = b""
+        self._skip_leading_lf = False
 
     def decode(self, text: str) -> list[str]:
-        raw = self._buf + text.encode("utf-8")
+        data = text.encode("utf-8")
+        if self._skip_leading_lf and data:
+            # The previous chunk ended on a CR, which already terminated its line. A LF
+            # opening this chunk is the second half of that CRLF, so consume it instead of
+            # reading it as a blank line, which SSE treats as an event dispatch.
+            self._skip_leading_lf = False
+            if data.startswith(b"\n"):
+                data = data[1:]
+        raw = self._buf + data
         self._buf = b""
 
         lines: list[str] = []
@@ -231,7 +241,12 @@ class _SSELineDecoder:
                 if cr + 1 < length and raw[cr + 1 : cr + 2] == b"\n":
                     i = cr + 2
                 elif cr + 1 == length:
-                    self._buf = b"\r"
+                    # A CR is a complete line ending on its own, so deliver the line now
+                    # rather than waiting to learn whether a LF follows. Only remember that
+                    # a LF opening the next chunk belongs to this CRLF; without that, the
+                    # LF reads as a blank line and dispatches the event early, splitting one
+                    # multi-line event into several.
+                    self._skip_leading_lf = True
                     lines.append(line.decode("utf-8"))
                     break
                 else:
@@ -247,11 +262,11 @@ class _SSELineDecoder:
     def flush(self) -> list[str]:
         buf = self._buf
         self._buf = b""
-        if buf == b"\r":
-            return [""]
-        if buf:
-            return [buf.decode("utf-8")]
-        return []
+        # A trailing CR already delivered its line, so there is nothing pending for it here.
+        self._skip_leading_lf = False
+        if not buf:
+            return []
+        return [buf.decode("utf-8")]
 
 
 class _SSEDecoder:

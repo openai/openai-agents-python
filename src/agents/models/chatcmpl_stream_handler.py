@@ -1205,10 +1205,17 @@ class ChatCmplStreamHandler:
             )
             if state.provider_data:
                 assistant_msg.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+            # Assemble the parts in the order of the content indexes already announced by
+            # the content_part events. A refusal that opened before any text holds index 0
+            # and the text holds index 1, so appending text first would contradict the
+            # indexes consumers already received.
+            content_parts: list[tuple[int, ResponseOutputText | ResponseOutputRefusal]] = []
             if state.text_content_index_and_output:
-                assistant_msg.content.append(state.text_content_index_and_output[1])
+                content_parts.append(state.text_content_index_and_output)
             if state.refusal_content_index_and_output:
-                assistant_msg.content.append(state.refusal_content_index_and_output[1])
+                content_parts.append(state.refusal_content_index_and_output)
+            content_parts.sort(key=lambda entry: entry[0])
+            assistant_msg.content.extend(part for _, part in content_parts)
             outputs.append(assistant_msg)
 
             # send a ResponseOutputItemDone for the assistant message

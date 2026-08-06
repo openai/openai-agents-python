@@ -18,7 +18,15 @@ from .._tool_identity import (
     get_function_tool_namespace,
 )
 from ..agent import Agent
-from ..exceptions import ToolInputGuardrailTripwireTriggered, UserError
+from ..exceptions import (
+    ModelBehaviorError,
+    ToolInputGuardrailTripwireTriggered,
+    UserError,
+    _clear_data_redacted_error_traceback,
+    _detach_data_redacted_error_traceback,
+    _is_error_data_redacted,
+    _raise_data_redacted_error,
+)
 from ..handoffs import Handoff
 from ..items import ToolApprovalItem
 from ..logger import (
@@ -304,7 +312,16 @@ class RealtimeSession(RealtimeModelListener):
             if self._stored_exception is not None:
                 # Clean up resources before raising
                 await self.close()
-                raise self._stored_exception
+                stored_exception = self._stored_exception
+                if isinstance(stored_exception, Exception) and _is_error_data_redacted(
+                    stored_exception
+                ):
+                    _detach_data_redacted_error_traceback(stored_exception)
+                    # Do not retain the session or the previously yielded raw event in the
+                    # traceback frame that exposes a redacted error to the caller.
+                    self = cast(Any, None)
+                    event = cast(Any, None)
+                raise stored_exception
 
             self._event_iterator_waiters += 1
             try:
@@ -398,7 +415,22 @@ class RealtimeSession(RealtimeModelListener):
                 handle_kwargs: dict[str, Any] = {"agent_snapshot": agent_snapshot}
                 if dispatch_snapshot is not None:
                     handle_kwargs["dispatch_snapshot"] = dispatch_snapshot
-                await self._handle_tool_call(event, **handle_kwargs)
+                redacted_error: ModelBehaviorError | None = None
+                try:
+                    await self._handle_tool_call(event, **handle_kwargs)
+                except ModelBehaviorError as error:
+                    if not _is_error_data_redacted(error):
+                        raise
+                    _detach_data_redacted_error_traceback(error)
+                    redacted_error = error
+
+                if redacted_error is not None:
+                    self = cast(Any, None)
+                    event = cast(Any, None)
+                    agent_snapshot = cast(Any, None)
+                    dispatch_snapshot = cast(Any, None)
+                    handle_kwargs = {}
+                    _raise_data_redacted_error(redacted_error)
         elif event.type == "audio":
             if event.response_id not in self._interrupted_response_ids:
                 await self._put_event(
@@ -1625,14 +1657,16 @@ class RealtimeSession(RealtimeModelListener):
     def _on_tool_call_task_done(self, task: asyncio.Task[Any]) -> None:
         self._tool_call_tasks.discard(task)
 
-        if self._closing or self._closed:
-            self._consume_task_result(task)
-            return
-
         if task.cancelled():
             return
 
         exception = task.exception()
+        if isinstance(exception, ModelBehaviorError):
+            _clear_data_redacted_error_traceback(exception)
+
+        if self._closing or self._closed:
+            return
+
         if exception is None:
             return
 

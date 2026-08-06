@@ -38,7 +38,11 @@ from agents.handoffs import (
     reset_conversation_history_wrappers,
     set_conversation_history_wrappers,
 )
-from agents.handoffs.history import _get_nested_history_owned_items
+from agents.handoffs.history import (
+    _extract_nested_history_transcript,
+    _get_nested_history_owned_items,
+    get_conversation_history_wrappers,
+)
 from agents.items import (
     HandoffCallItem,
     HandoffOutputItem,
@@ -49,6 +53,7 @@ from agents.items import (
     ToolCallOutputItem,
     TResponseInputItem,
 )
+from agents.models.chatcmpl_converter import Converter
 from agents.result import RunResult, RunResultStreaming
 from agents.run_internal.items import (
     NestedHistoryOwnedItem,
@@ -2298,3 +2303,175 @@ async def test_first_nested_handoff_after_restore_uses_explicit_occurrence_linea
     expected_occurrences = 2 if legacy_snapshot else 1
     assert replay_types.count("tool_search_call") == expected_occurrences
     assert replay_types.count("tool_search_output") == expected_occurrences
+
+
+@pytest.mark.parametrize(
+    "empty_item",
+    [
+        {"role": "user", "content": ""},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": None},
+        {"role": "user", "name": "bob", "content": ""},
+    ],
+    ids=["user_empty", "assistant_empty", "user_none", "named_empty"],
+)
+def test_nested_history_keeps_turns_with_no_content(empty_item: dict[str, Any]) -> None:
+    """A turn with no content must survive being summarized and flattened again.
+
+    An empty turn was rendered as a bare role with no separator, and the parser that
+    flattens the summary on the next handoff requires one, so the turn was dropped. The
+    next agent then saw a transcript with a turn missing, which also breaks the
+    user/assistant alternation.
+    """
+    history = (
+        {"role": "user", "content": "first question"},
+        empty_item,
+        {"role": "user", "content": "second question"},
+    )
+    data = HandoffInputData(
+        input_history=cast(Any, history),
+        pre_handoff_items=(),
+        new_items=(),
+        run_context=None,
+    )
+
+    nested = nest_handoff_history(data)
+    transcript = _extract_nested_history_transcript(cast(Any, nested.input_history)[0])
+
+    assert transcript is not None
+    assert len(transcript) == len(history)
+    assert [item.get("role") for item in transcript] == ["user", empty_item["role"], "user"]
+
+
+def test_nested_history_survives_repeated_handoffs() -> None:
+    """Flattening and re-nesting must not shed the empty turn on each hop."""
+    history = (
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": "second question"},
+    )
+    data = HandoffInputData(
+        input_history=cast(Any, history),
+        pre_handoff_items=(),
+        new_items=(),
+        run_context=None,
+    )
+
+    nested = nest_handoff_history(data)
+    for _ in range(3):
+        nested = nest_handoff_history(nested)
+        transcript = _extract_nested_history_transcript(cast(Any, nested.input_history)[0])
+        assert transcript is not None
+        assert len(transcript) == len(history)
+
+
+def test_bare_role_record_from_an_older_summary_is_recovered() -> None:
+    """Summaries written before the separator was always emitted must still flatten."""
+    start_marker, end_marker = get_conversation_history_wrappers()
+    legacy = {
+        "role": "assistant",
+        "content": "\n".join(
+            [
+                "For context, here is the conversation so far between the user and the "
+                "previous agent:",
+                start_marker,
+                "1. user: first question",
+                "2. assistant",
+                "3. user: second question",
+                end_marker,
+            ]
+        ),
+    }
+
+    transcript = _extract_nested_history_transcript(cast(Any, legacy))
+
+    assert transcript is not None
+    assert [item.get("role") for item in transcript] == ["user", "assistant", "user"]
+
+
+def test_prose_inside_the_summary_block_is_still_rejected() -> None:
+    """The bare-role recovery must not turn arbitrary text into a fabricated turn.
+
+    The prose is numbered so it becomes its own record. An unnumbered line is folded into
+    the previous record as continuation text and never reaches the rejection branch.
+    """
+    start_marker, end_marker = get_conversation_history_wrappers()
+    with_prose = {
+        "role": "assistant",
+        "content": "\n".join(
+            [
+                "For context, here is the conversation so far between the user and the "
+                "previous agent:",
+                start_marker,
+                "1. user: first question",
+                "2. some stray prose with no separator",
+                "3. user: second question",
+                end_marker,
+            ]
+        ),
+    }
+
+    transcript = _extract_nested_history_transcript(cast(Any, with_prose))
+
+    assert transcript is not None
+    assert [item.get("role") for item in transcript] == ["user", "user"]
+    assert [item.get("content") for item in transcript] == [
+        "first question",
+        "second question",
+    ]
+
+
+def test_recovered_empty_turn_keeps_explicit_content() -> None:
+    """A recovered turn must carry content, not just a role.
+
+    Adapters such as the Chat Completions converter only recognize a message when both
+    keys are present, so a role-only item is not replayable.
+    """
+    start_marker, end_marker = get_conversation_history_wrappers()
+    legacy = {
+        "role": "assistant",
+        "content": "\n".join(
+            [
+                "For context, here is the conversation so far between the user and the "
+                "previous agent:",
+                start_marker,
+                "1. user: first question",
+                "2. assistant",
+                "3. assistant: ",
+                end_marker,
+            ]
+        ),
+    }
+
+    transcript = _extract_nested_history_transcript(cast(Any, legacy))
+
+    assert transcript is not None
+    # Both the recovered bare role and the separator-only record keep empty content.
+    assert transcript[1] == {"role": "assistant", "content": ""}
+    assert transcript[2] == {"role": "assistant", "content": ""}
+
+
+def test_second_pass_nesting_keeps_empty_turns_provider_valid() -> None:
+    """After a second handoff the empty turn must still convert for a real adapter."""
+    history = (
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": "second question"},
+    )
+    data = HandoffInputData(
+        input_history=cast(Any, history),
+        pre_handoff_items=(),
+        new_items=(),
+        run_context=None,
+    )
+
+    nested = nest_handoff_history(nest_handoff_history(data))
+    transcript = _extract_nested_history_transcript(cast(Any, nested.input_history)[0])
+
+    assert transcript is not None
+    assert transcript[1] == {"role": "assistant", "content": ""}
+
+    # The reconstructed transcript must convert through a supported adapter.
+    messages = Converter.items_to_messages(cast(Any, transcript))
+    assert [message["role"] for message in messages] == ["user", "assistant", "user"]
+    assert messages[1].get("content") == ""

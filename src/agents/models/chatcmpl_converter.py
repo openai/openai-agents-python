@@ -42,6 +42,10 @@ from openai.types.responses import (
     ResponseReasoningItemParam,
 )
 from openai.types.responses.response_input_param import FunctionCallOutput, ItemReference, Message
+from openai.types.responses.response_output_text import (
+    Annotation as ResponseOutputTextAnnotation,
+    AnnotationURLCitation,
+)
 from openai.types.responses.response_reasoning_item import Content, Summary
 
 from ..agent_output import AgentOutputSchemaBase
@@ -199,7 +203,10 @@ class Converter:
         if message.content:
             message_item.content.append(
                 ResponseOutputText(
-                    text=message.content, type="output_text", annotations=[], logprobs=[]
+                    text=message.content,
+                    type="output_text",
+                    annotations=cls._convert_annotations(message),
+                    logprobs=[],
                 )
             )
         if message.refusal:
@@ -251,6 +258,27 @@ class Converter:
                         )
 
         return items
+
+    @classmethod
+    def _convert_annotations(
+        cls, message: ChatCompletionMessage
+    ) -> list[ResponseOutputTextAnnotation]:
+        """Convert Chat Completions url citations into output text annotations."""
+        annotations: list[ResponseOutputTextAnnotation] = []
+        for annotation in message.annotations or []:
+            url_citation = getattr(annotation, "url_citation", None)
+            if getattr(annotation, "type", None) != "url_citation" or url_citation is None:
+                continue
+            annotations.append(
+                AnnotationURLCitation(
+                    type="url_citation",
+                    start_index=url_citation.start_index,
+                    end_index=url_citation.end_index,
+                    url=url_citation.url,
+                    title=url_citation.title,
+                )
+            )
+        return annotations
 
     @classmethod
     def maybe_easy_input_message(cls, item: Any) -> EasyInputMessageParam | None:

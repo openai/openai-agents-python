@@ -17,7 +17,12 @@ from openai.types.chat import (
 from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice, ChoiceDelta
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
-from openai.types.responses import Response, ResponseCompletedEvent, ResponseOutputMessage
+from openai.types.responses import (
+    Response,
+    ResponseCompletedEvent,
+    ResponseOutputMessage,
+    ResponseOutputRefusal,
+)
 from openai.types.responses.response_created_event import ResponseCreatedEvent
 from openai.types.responses.response_error_event import ResponseErrorEvent
 from openai.types.responses.response_failed_event import ResponseFailedEvent
@@ -440,6 +445,82 @@ async def test_any_llm_chat_path_is_used_when_responses_are_unsupported(monkeypa
     assert response.output[0].content[0].text == "Hello"
     assert response.usage.input_tokens_details.cached_tokens == 2
     assert getattr(response.usage.input_tokens_details, "cache_write_tokens", None) == 4
+
+
+def _content_filtered_chat_completion(content: str) -> ChatCompletion:
+    completion = _chat_completion(content)
+    completion.choices[0].finish_reason = "content_filter"
+    return completion
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_path_surfaces_content_filter_refusal(monkeypatch) -> None:
+    """A filtered turn must become a refusal instead of an empty output."""
+    provider = FakeAnyLLMProvider(
+        supports_responses=False,
+        chat_response=_content_filtered_chat_completion(""),
+    )
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+    response = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    refusals = [
+        content
+        for item in response.output
+        if isinstance(item, ResponseOutputMessage)
+        for content in item.content
+        if isinstance(content, ResponseOutputRefusal)
+    ]
+    assert refusals, f"expected a refusal item, got: {response.output}"
+    assert refusals[0].refusal
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_path_content_filter_keeps_real_content(monkeypatch) -> None:
+    """A filtered turn that still carries text keeps the text and gains no refusal."""
+    provider = FakeAnyLLMProvider(
+        supports_responses=False,
+        chat_response=_content_filtered_chat_completion("here is the answer"),
+    )
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+    response = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    refusals = [
+        content
+        for item in response.output
+        if isinstance(item, ResponseOutputMessage)
+        for content in item.content
+        if isinstance(content, ResponseOutputRefusal)
+    ]
+    assert not refusals
+    assert response.output[0].content[0].text == "here is the answer"
 
 
 @pytest.mark.allow_call_model_methods
@@ -1111,6 +1192,19 @@ def test_any_llm_provider_passes_api_override() -> None:
 
     assert isinstance(model, AnyLLMModel)
     assert model.api == "chat_completions"
+
+
+def test_any_llm_provider_reads_default_model_at_call_time(monkeypatch: Any) -> None:
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
+    from agents.extensions.models.any_llm_provider import AnyLLMProvider
+
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-4.1")
+    provider = AnyLLMProvider()
+
+    assert cast(Any, provider.get_model(None)).model == "openai/gpt-4.1"
 
 
 def test_any_llm_reasoning_objects_prefer_content_attributes_over_iterable_pairs() -> None:

@@ -4,14 +4,38 @@ import asyncio
 import json
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Awaitable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeVar
 
 from ..items import TResponseInputItem
 from .session import SessionABC
 from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
+
+_T = TypeVar("_T")
+
+
+async def _await_mutation(awaitable: Awaitable[_T]) -> _T:
+    """Wait for a mutation outcome despite repeated caller cancellation."""
+    task = asyncio.ensure_future(awaitable)
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+
+    try:
+        result = task.result()
+    except BaseException:
+        if cancellation is not None:
+            raise cancellation from None
+        raise
+    if cancellation is not None:
+        raise cancellation from None
+    return result
 
 
 class SQLiteSession(SessionABC):
@@ -57,6 +81,7 @@ class SQLiteSession(SessionABC):
         self.messages_table = messages_table
         self._local = threading.local()
         self._connections: set[sqlite3.Connection] = set()
+        self._quarantined_connections: set[sqlite3.Connection] = set()
         self._connections_lock = threading.Lock()
         self._closed = False
 
@@ -120,10 +145,47 @@ class SQLiteSession(SessionABC):
         with self._lock:
             yield self._get_connection()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """Get a database connection."""
+    def _check_not_closed(self) -> None:
+        """Raise if the session has already been closed."""
         if self._closed:
             raise RuntimeError("SQLiteSession is closed")
+
+    @contextmanager
+    def _write_connection(self) -> Iterator[sqlite3.Connection]:
+        """Provide a connection that cannot retain a failed write transaction."""
+        with self._locked_connection() as conn:
+            try:
+                yield conn
+            except BaseException:
+                try:
+                    conn.rollback()
+                except BaseException:
+                    self._invalidate_connection(conn)
+                raise
+
+    def _invalidate_connection(self, conn: sqlite3.Connection) -> None:
+        """Close and evict a connection that could not roll back safely."""
+        try:
+            conn.close()
+        except BaseException:
+            close_failed = True
+        else:
+            close_failed = False
+
+        with self._connections_lock:
+            self._connections.discard(conn)
+            if close_failed:
+                self._quarantined_connections.add(conn)
+            else:
+                self._quarantined_connections.discard(conn)
+        if getattr(self._local, "connection", None) is conn:
+            del self._local.connection
+        if self._is_memory_db or close_failed:
+            self._closed = True
+
+    def _get_connection(self) -> sqlite3.Connection:
+        """Get a database connection."""
+        self._check_not_closed()
 
         if self._is_memory_db:
             # Use shared connection for in-memory database to avoid thread isolation
@@ -283,24 +345,18 @@ class SQLiteSession(SessionABC):
         Args:
             items: List of input items to add to the history
         """
+        # Checked before the empty-list fast path, which would otherwise return
+        # successfully on a closed session.
+        self._check_not_closed()
         if not items:
             return
 
         def _add_items_sync():
-            with self._locked_connection() as conn:
-                try:
-                    self._insert_items(conn, items)
-                    conn.commit()
-                except Exception:
-                    # _locked_connection() does not manage transactions; roll back
-                    # explicitly so a failure partway through the insert never leaves a
-                    # partial mutation or an open transaction on this cached connection.
-                    # An open write transaction would hold the SQLite write lock for the
-                    # lifetime of the connection and block every later writer.
-                    conn.rollback()
-                    raise
+            with self._write_connection() as conn:
+                self._insert_items(conn, items)
+                conn.commit()
 
-        await asyncio.to_thread(_add_items_sync)
+        await _await_mutation(asyncio.to_thread(_add_items_sync))
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
@@ -310,7 +366,7 @@ class SQLiteSession(SessionABC):
         """
 
         def _pop_item_sync():
-            with self._locked_connection() as conn:
+            with self._write_connection() as conn:
                 # Use DELETE with RETURNING to atomically delete and return the most recent item
                 cursor = conn.execute(
                     f"""
@@ -354,13 +410,13 @@ class SQLiteSession(SessionABC):
 
                 return None
 
-        return await asyncio.to_thread(_pop_item_sync)
+        return await _await_mutation(asyncio.to_thread(_pop_item_sync))
 
     async def clear_session(self) -> None:
         """Clear all items for this session."""
 
         def _clear_session_sync():
-            with self._locked_connection() as conn:
+            with self._write_connection() as conn:
                 conn.execute(
                     f"DELETE FROM {self.messages_table} WHERE session_id = ?",
                     (self.session_id,),
@@ -371,24 +427,44 @@ class SQLiteSession(SessionABC):
                 )
                 conn.commit()
 
-        await asyncio.to_thread(_clear_session_sync)
+        await _await_mutation(asyncio.to_thread(_clear_session_sync))
 
     def close(self) -> None:
         """Close the database connection."""
         with self._lock:
-            if self._closed:
-                return
-
             self._closed = True
+            with self._connections_lock:
+                connections = self._connections | self._quarantined_connections
             if self._is_memory_db:
                 if hasattr(self, "_shared_connection"):
-                    self._shared_connection.close()
-            else:
-                with self._connections_lock:
-                    connections = list(self._connections)
-                    self._connections.clear()
-                for connection in connections:
+                    connections.add(self._shared_connection)
+
+            first_error: BaseException | None = None
+            for connection in connections:
+                try:
                     connection.close()
-            if self._lock_path is not None and not self._lock_released:
-                self._release_file_lock(self._lock_path)
-                self._lock_released = True
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+                    with self._connections_lock:
+                        self._connections.discard(connection)
+                        self._quarantined_connections.add(connection)
+                else:
+                    with self._connections_lock:
+                        self._connections.discard(connection)
+                        self._quarantined_connections.discard(connection)
+
+            if getattr(self._local, "connection", None) in connections:
+                del self._local.connection
+
+            with self._connections_lock:
+                has_unclosed_connections = bool(self._quarantined_connections)
+            if not has_unclosed_connections and self._lock_path is not None:
+                with self._connections_lock:
+                    self._connections.clear()
+                if not self._lock_released:
+                    self._release_file_lock(self._lock_path)
+                    self._lock_released = True
+
+            if first_error is not None:
+                raise first_error

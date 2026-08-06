@@ -5,6 +5,8 @@ import contextlib
 import json
 import logging
 import multiprocessing
+import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -29,6 +31,17 @@ from tests.test_responses import get_text_message
 
 # Mark all tests in this file as asyncio
 pytestmark = pytest.mark.asyncio
+
+
+def _multiprocessing_context() -> Any:
+    method = "spawn" if sys.platform == "win32" else "forkserver"
+    return multiprocessing.get_context(method)
+
+
+def _assert_cancel_message(exc: asyncio.CancelledError, expected: str) -> None:
+    """Account for Python 3.10 dropping Task cancellation messages when re-awaited."""
+    expected_args = (expected,) if sys.version_info >= (3, 11) else ()
+    assert exc.args == expected_args
 
 
 @function_tool
@@ -328,6 +341,21 @@ async def test_add_items_failure_preserves_existing_history():
         session.close()
 
 
+async def test_advanced_sqlite_session_closed_rejects_empty_add_items():
+    """add_items([]) must not bypass the closed check through the empty-list fast path."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "closed_empty_add.db"
+        session = AdvancedSQLiteSession(
+            session_id="advanced_closed_empty_add",
+            db_path=db_path,
+            create_tables=True,
+        )
+        session.close()
+
+        with pytest.raises(RuntimeError, match="SQLiteSession is closed"):
+            await session.add_items([])
+
+
 async def test_add_items_rolls_back_partial_structure_metadata_write():
     """Partial metadata writes should roll back with the message rows in the same batch."""
     session = PartiallyFailingStructureMetadataSession(
@@ -355,6 +383,297 @@ async def test_add_items_rolls_back_partial_structure_metadata_write():
         assert message_count == 0
         assert structure_count == 0
     finally:
+        session.close()
+
+
+async def test_add_items_rollback_failure_invalidates_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Advanced add failures must use the base rollback-failure invalidation path."""
+
+    class FailingRollbackConnection(sqlite3.Connection):
+        def rollback(self) -> None:
+            raise RuntimeError("rollback failed")
+
+    db_path = tmp_path / "advanced_rollback_failure.db"
+    session = AdvancedSQLiteSession(
+        session_id="advanced_rollback_failure",
+        db_path=db_path,
+        create_tables=True,
+    )
+    conn = sqlite3.connect(
+        str(db_path),
+        check_same_thread=False,
+        factory=FailingRollbackConnection,
+    )
+    with session._connections_lock:
+        session._connections.add(conn)
+    real_get_connection = session._get_connection
+    real_insert_structure_metadata = session._insert_structure_metadata
+    monkeypatch.setattr(session, "_get_connection", lambda: conn)
+
+    def fail_structure_metadata(*_args: Any) -> None:
+        raise RuntimeError("structure metadata failed")
+
+    monkeypatch.setattr(session, "_insert_structure_metadata", fail_structure_metadata)
+
+    with pytest.raises(RuntimeError, match="structure metadata failed"):
+        await session.add_items([{"role": "user", "content": "not saved"}])
+
+    assert conn not in session._connections
+    probe = sqlite3.connect(str(db_path), timeout=0)
+    try:
+        probe.execute("CREATE TABLE IF NOT EXISTS probe_lock (x INTEGER)")
+        probe.commit()
+    finally:
+        probe.close()
+
+    monkeypatch.setattr(session, "_get_connection", real_get_connection)
+    monkeypatch.setattr(session, "_insert_structure_metadata", real_insert_structure_metadata)
+    await session.add_items([{"role": "user", "content": "after failure"}])
+    assert await session.get_items() == [{"role": "user", "content": "after failure"}]
+    session.close()
+
+
+async def test_structure_initialization_failure_invalidates_connection(
+    tmp_path: Path,
+):
+    """Initialization must release its write lock even when rollback also fails."""
+
+    class FailingRollbackConnection(sqlite3.Connection):
+        def rollback(self) -> None:
+            raise RuntimeError("rollback failed")
+
+    captured_connections: list[sqlite3.Connection] = []
+
+    class FailingRollbackInitSession(AdvancedSQLiteSession):
+        def _get_connection(self) -> sqlite3.Connection:
+            if not hasattr(self, "_test_connection"):
+                connection = sqlite3.connect(
+                    str(self.db_path),
+                    check_same_thread=False,
+                    factory=FailingRollbackConnection,
+                )
+                self._test_connection = connection
+                captured_connections.append(connection)
+                with self._connections_lock:
+                    self._connections.add(connection)
+            return self._test_connection
+
+    db_path = tmp_path / "advanced_init_failure.db"
+    setup = AdvancedSQLiteSession(
+        session_id="advanced_init_failure",
+        db_path=db_path,
+        create_tables=True,
+    )
+    try:
+        await setup.add_items([{"role": "user", "content": "existing"}])
+    finally:
+        setup.close()
+
+    conflict = sqlite3.connect(str(db_path))
+    try:
+        conflict.execute("DROP TABLE branch_reservations")
+        conflict.execute("DROP INDEX idx_structure_session_seq")
+        conflict.execute("CREATE TABLE idx_structure_session_seq (value INTEGER)")
+        conflict.commit()
+    finally:
+        conflict.close()
+
+    with pytest.raises(sqlite3.OperationalError, match="already a table"):
+        FailingRollbackInitSession(
+            session_id="advanced_init_failure",
+            db_path=db_path,
+            create_tables=True,
+        )
+
+    assert len(captured_connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        captured_connections[0].execute("SELECT 1")
+
+    probe = sqlite3.connect(str(db_path), timeout=0)
+    try:
+        probe.execute("CREATE TABLE IF NOT EXISTS probe_lock (x INTEGER)")
+        probe.commit()
+    finally:
+        probe.close()
+
+
+@pytest.mark.parametrize("operation", ["add", "pop", "clear"])
+async def test_post_commit_cancellation_propagates_after_known_mutation_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+):
+    """Cancellation after commit must propagate without inviting a mutation retry."""
+
+    class PausingCommitConnection(sqlite3.Connection):
+        pause_commit = False
+        commit_finished = threading.Event()
+        allow_return = threading.Event()
+
+        def commit(self) -> None:
+            super().commit()
+            if self.pause_commit:
+                self.pause_commit = False
+                self.commit_finished.set()
+                assert self.allow_return.wait(timeout=10)
+
+    db_path = tmp_path / f"advanced_post_commit_{operation}.db"
+    session = AdvancedSQLiteSession(
+        session_id=f"advanced_post_commit_{operation}",
+        db_path=db_path,
+        create_tables=True,
+    )
+    item: TResponseInputItem = {"role": "user", "content": "once"}
+    if operation != "add":
+        await session.add_items([item])
+
+    conn = sqlite3.connect(
+        str(db_path),
+        check_same_thread=False,
+        factory=PausingCommitConnection,
+    )
+    with session._connections_lock:
+        session._connections.add(conn)
+    monkeypatch.setattr(session, "_get_connection", lambda: conn)
+    conn.pause_commit = True
+
+    if operation == "add":
+        mutation: asyncio.Task[Any] = asyncio.create_task(session.add_items([item]))
+    elif operation == "pop":
+        mutation = asyncio.create_task(session.pop_item())
+    else:
+        mutation = asyncio.create_task(session.clear_session())
+
+    try:
+        assert await asyncio.to_thread(conn.commit_finished.wait, 10)
+        mutation.cancel()
+        await asyncio.sleep(0)
+        mutation.cancel()
+        await asyncio.sleep(0)
+        conn.allow_return.set()
+        with pytest.raises(asyncio.CancelledError):
+            await mutation
+    finally:
+        conn.allow_return.set()
+        if not mutation.done():
+            mutation.cancel()
+            await asyncio.gather(mutation, return_exceptions=True)
+
+    if operation == "add":
+        assert await session.get_items() == [item]
+    elif operation == "pop":
+        assert await session.get_items() == []
+    else:
+        assert await session.get_items() == []
+    assert mutation.cancelled()
+    session.close()
+
+
+@pytest.mark.parametrize("operation", ["create_branch", "delete_branch", "cleanup", "usage"])
+async def test_auxiliary_mutation_cancellation_waits_for_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    usage_data: Usage,
+    operation: str,
+):
+    """Branch and ancillary mutations must settle before cancellation propagates."""
+
+    class PausingCommitConnection(sqlite3.Connection):
+        pause_commit = False
+        commit_finished = threading.Event()
+        allow_return = threading.Event()
+
+        def commit(self) -> None:
+            super().commit()
+            if self.pause_commit:
+                self.pause_commit = False
+                self.commit_finished.set()
+                assert self.allow_return.wait(timeout=10)
+
+    session = AdvancedSQLiteSession(
+        session_id=f"advanced_auxiliary_cancel_{operation}",
+        db_path=tmp_path / f"advanced_auxiliary_cancel_{operation}.db",
+        create_tables=True,
+    )
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+    mutation: asyncio.Task[Any] | None = None
+
+    try:
+        if operation in {"create_branch", "delete_branch"}:
+            await session.add_items(items)
+        if operation == "delete_branch":
+            await session.create_branch_from_turn(2, "cancelled_branch")
+            await session.switch_to_branch("main")
+        elif operation == "cleanup":
+            with session._write_connection() as setup_connection:
+                session._insert_items(
+                    setup_connection,
+                    [{"role": "user", "content": "orphan"}],
+                )
+                setup_connection.commit()
+        elif operation == "usage":
+            await session.add_items([{"role": "user", "content": "usage turn"}])
+
+        connection = sqlite3.connect(
+            str(session.db_path),
+            check_same_thread=False,
+            factory=PausingCommitConnection,
+        )
+        with session._connections_lock:
+            session._connections.add(connection)
+        monkeypatch.setattr(session, "_get_connection", lambda: connection)
+        connection.pause_commit = True
+
+        if operation == "create_branch":
+            mutation = asyncio.create_task(session.create_branch_from_turn(2, "cancelled_branch"))
+        elif operation == "delete_branch":
+            mutation = asyncio.create_task(session.delete_branch("cancelled_branch"))
+        elif operation == "cleanup":
+            mutation = asyncio.create_task(session._cleanup_orphaned_messages())
+        else:
+            mutation = asyncio.create_task(
+                session.store_run_usage(create_mock_run_result(usage_data))
+            )
+
+        assert await asyncio.to_thread(connection.commit_finished.wait, 10)
+        mutation.cancel("first-caller-cancel")
+        await asyncio.sleep(0)
+        mutation.cancel("second-caller-cancel")
+        await asyncio.sleep(0)
+        connection.allow_return.set()
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await mutation
+
+        _assert_cancel_message(exc_info.value, "first-caller-cancel")
+        assert mutation.cancelled()
+
+        if operation == "create_branch":
+            branches = await session.list_branches()
+            assert {branch["branch_id"] for branch in branches} == {"main", "cancelled_branch"}
+            assert session._current_branch_id == "cancelled_branch"
+        elif operation == "delete_branch":
+            branches = await session.list_branches()
+            assert {branch["branch_id"] for branch in branches} == {"main"}
+        elif operation == "cleanup":
+            assert _count_rows(session, session.messages_table) == 0
+        else:
+            turn_usage = await session.get_turn_usage(1)
+            assert isinstance(turn_usage, dict)
+            assert turn_usage["total_tokens"] == usage_data.total_tokens
+    finally:
+        PausingCommitConnection.allow_return.set()
+        if mutation is not None and not mutation.done():
+            mutation.cancel()
+            await asyncio.gather(mutation, return_exceptions=True)
         session.close()
 
 
@@ -736,6 +1055,30 @@ def _create_branch_in_process(
         session.close()
 
 
+def _pop_item_in_process(
+    db_path: str,
+    session_id: str,
+    ready: Any,
+    start: Any,
+    results: Any,
+) -> None:
+    """Pop one AdvancedSQLite item in a separately synchronized process."""
+    session = AdvancedSQLiteSession(
+        session_id=session_id,
+        db_path=db_path,
+        create_tables=False,
+    )
+    try:
+        ready.set()
+        if not start.wait(timeout=10):
+            raise TimeoutError("Timed out waiting to start pop")
+        results.put(("ok", asyncio.run(session.pop_item())))
+    except Exception as exc:
+        results.put(("error", type(exc).__name__, str(exc)))
+    finally:
+        session.close()
+
+
 @pytest.mark.parametrize("branch_id", ["main", "existing_branch"])
 async def test_create_branch_rejects_populated_branch_id(branch_id: str):
     """Creating a branch must not append history to a populated branch."""
@@ -997,7 +1340,7 @@ async def test_branch_allocation_is_serialized_across_processes(
     await setup_session.add_items(items)
     setup_session.close()
 
-    context = multiprocessing.get_context("spawn")
+    context = _multiprocessing_context()
     results = context.Queue()
     release_check = context.Event()
     processes = []
@@ -1032,12 +1375,12 @@ async def test_branch_allocation_is_serialized_across_processes(
 
         first_ready, first_start, _, first_checked = worker_events[0]
         second_ready, second_start, second_attempted, second_checked = worker_events[1]
-        assert first_ready.wait(timeout=10)
+        assert first_ready.wait(timeout=30)
         first_start.set()
-        assert first_checked.wait(timeout=10)
-        assert second_ready.wait(timeout=10)
+        assert first_checked.wait(timeout=30)
+        assert second_ready.wait(timeout=30)
         second_start.set()
-        assert second_attempted.wait(timeout=10)
+        assert second_attempted.wait(timeout=30)
 
         # The second process has entered branch creation, but SQLite's write transaction
         # must keep it from reserving an ID until the first process commits.
@@ -1658,6 +2001,46 @@ async def test_usage_tracking_storage(agent: Agent, usage_data: Usage):
     assert all_turn_usage[1]["user_turn_number"] == 2
 
     session.close()
+
+
+async def test_failed_usage_write_rolls_back_cached_connection(usage_data: Usage):
+    """A swallowed usage-write failure must not strand a transaction or SQLite lock."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "usage_rollback.db"
+        session = AdvancedSQLiteSession(
+            session_id="usage_rollback",
+            db_path=db_path,
+            create_tables=True,
+        )
+        await session.add_items([{"role": "user", "content": "turn"}])
+
+        helper = session._get_connection()
+        helper.execute(
+            """
+            CREATE TRIGGER fail_turn_usage
+            BEFORE INSERT ON turn_usage
+            BEGIN
+                SELECT RAISE(ABORT, 'usage write failed');
+            END
+            """
+        )
+        helper.commit()
+
+        await session.store_run_usage(create_mock_run_result(usage_data))
+
+        assert all(not conn.in_transaction for conn in session._connections)
+        probe = sqlite3.connect(str(db_path), timeout=0)
+        try:
+            probe.execute("CREATE TABLE usage_lock_probe (x INTEGER)")
+            probe.commit()
+        finally:
+            probe.close()
+
+        helper.execute("DROP TRIGGER fail_turn_usage")
+        helper.commit()
+        await session.store_run_usage(create_mock_run_result(usage_data))
+        assert await session.get_turn_usage(1)
+        session.close()
 
 
 async def test_runner_integration_with_usage_tracking(agent: Agent):
@@ -2701,6 +3084,51 @@ async def test_pop_item_uses_branch_snapshot_when_branch_switches_concurrently()
         session.close()
 
 
+async def test_pop_item_claim_is_unique_across_processes(tmp_path: Path):
+    """Two processes must not return the same destructively read item."""
+    db_path = tmp_path / "advanced_pop_processes.db"
+    session_id = "advanced_pop_processes"
+    item: TResponseInputItem = {"role": "user", "content": "only"}
+    setup = AdvancedSQLiteSession(session_id=session_id, db_path=db_path, create_tables=True)
+    await setup.add_items([item])
+    setup.close()
+
+    context = _multiprocessing_context()
+    start = context.Event()
+    results = context.Queue()
+    ready_events = [context.Event(), context.Event()]
+    processes = [
+        context.Process(
+            target=_pop_item_in_process,
+            args=(str(db_path), session_id, ready, start, results),
+        )
+        for ready in ready_events
+    ]
+
+    try:
+        for process in processes:
+            process.start()
+        for ready in ready_events:
+            assert ready.wait(timeout=30)
+        start.set()
+        for process in processes:
+            process.join(timeout=10)
+            assert process.exitcode == 0
+
+        outcomes = [results.get(timeout=5), results.get(timeout=5)]
+        assert all(outcome[0] == "ok" for outcome in outcomes)
+        popped_items = [outcome[1] for outcome in outcomes]
+        assert popped_items.count(item) == 1
+        assert popped_items.count(None) == 1
+    finally:
+        start.set()
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=5)
+        results.close()
+
+
 async def test_stale_switch_after_clear_does_not_repoint_to_deleted_branch():
     """A switch_to_branch that commits its pointer after clear_session must not
     resurrect the deleted branch; the generation guard makes it a no-op.
@@ -2940,6 +3368,305 @@ async def test_clear_session_resets_current_branch_to_main():
         assert _count_rows(session, "branch_reservations") == 2
     finally:
         session.close()
+
+
+async def test_external_clear_resets_stale_branch_before_next_write(tmp_path: Path):
+    """A second instance's clear must prevent stale branch resurrection."""
+    db_path = tmp_path / "external_clear_generation.db"
+    stale = AdvancedSQLiteSession(
+        session_id="external_clear_generation",
+        db_path=db_path,
+        create_tables=True,
+    )
+    clearer = AdvancedSQLiteSession(
+        session_id="external_clear_generation",
+        db_path=db_path,
+    )
+
+    try:
+        await stale.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+            ]
+        )
+        await stale.create_branch_from_turn(2, "stale")
+        assert stale._current_branch_id == "stale"
+
+        await clearer.clear_session()
+        await stale.add_items([{"role": "user", "content": "after clear"}])
+
+        assert stale._current_branch_id == "main"
+        assert [item.get("content") for item in await stale.get_items()] == ["after clear"]
+        assert await stale.get_items(branch_id="stale") == []
+        assert {branch["branch_id"] for branch in await stale.list_branches()} == {"main"}
+    finally:
+        stale.close()
+        clearer.close()
+
+
+async def test_external_clear_resets_stale_branch_before_pop(tmp_path: Path):
+    """A stale instance must pop the current main tail after an external clear."""
+    db_path = tmp_path / "external_clear_pop_generation.db"
+    stale = AdvancedSQLiteSession(
+        session_id="external_clear_pop_generation",
+        db_path=db_path,
+        create_tables=True,
+    )
+    clearer = AdvancedSQLiteSession(
+        session_id="external_clear_pop_generation",
+        db_path=db_path,
+    )
+
+    try:
+        await stale.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+            ]
+        )
+        await stale.create_branch_from_turn(2, "stale")
+        assert stale._current_branch_id == "stale"
+
+        await clearer.clear_session()
+        item: TResponseInputItem = {"role": "user", "content": "after clear"}
+        await clearer.add_items([item])
+
+        assert await stale.pop_item() == item
+        assert stale._current_branch_id == "main"
+        assert await clearer.get_items() == []
+    finally:
+        stale.close()
+        clearer.close()
+
+
+@pytest.mark.parametrize(
+    "read_path",
+    ["items", "turns", "search", "conversation", "tools", "usage", "branches"],
+)
+async def test_external_clear_resets_stale_branch_before_default_reads(
+    tmp_path: Path,
+    usage_data: Usage,
+    read_path: str,
+):
+    """Default reads must recover from a stale branch pointer after an external clear."""
+    db_path = tmp_path / f"external_clear_read_generation_{read_path}.db"
+    session_id = f"external_clear_read_generation_{read_path}"
+    stale = AdvancedSQLiteSession(
+        session_id=session_id,
+        db_path=db_path,
+        create_tables=True,
+    )
+    clearer = AdvancedSQLiteSession(session_id=session_id, db_path=db_path)
+
+    try:
+        await stale.add_items(
+            [
+                {"role": "user", "content": "old question"},
+                {"role": "assistant", "content": "old answer"},
+                {"role": "user", "content": "old follow-up"},
+            ]
+        )
+        await stale.create_branch_from_turn(2, "stale")
+        assert stale._current_branch_id == "stale"
+
+        await clearer.clear_session()
+        new_items: list[TResponseInputItem] = [
+            {"role": "user", "content": "new main question"},
+            {
+                "type": "function_call",
+                "name": "lookup",
+                "arguments": '{"query": "new"}',
+                "call_id": "lookup-new-main",
+            },
+            {"role": "assistant", "content": "new main answer"},
+        ]
+        await clearer.add_items(new_items)
+        await clearer.store_run_usage(create_mock_run_result(usage_data))
+
+        if read_path == "items":
+            assert await stale.get_items() == new_items
+        elif read_path == "turns":
+            assert [turn["full_content"] for turn in await stale.get_conversation_turns()] == [
+                "new main question"
+            ]
+        elif read_path == "search":
+            assert [turn["full_content"] for turn in await stale.find_turns_by_content("new")] == [
+                "new main question"
+            ]
+        elif read_path == "conversation":
+            assert set(await stale.get_conversation_by_turns()) == {1}
+        elif read_path == "tools":
+            assert await stale.get_tool_usage() == [("lookup", 1, 1)]
+        elif read_path == "usage":
+            assert await stale.get_turn_usage(1) == {
+                "requests": 1,
+                "input_tokens": 50,
+                "output_tokens": 30,
+                "total_tokens": 80,
+                "input_tokens_details": {"cache_write_tokens": 0, "cached_tokens": 10},
+                "output_tokens_details": {"reasoning_tokens": 5},
+            }
+        else:
+            assert [
+                (branch["branch_id"], branch["is_current"])
+                for branch in await stale.list_branches()
+            ] == [("main", True)]
+
+        assert stale._current_branch_id == "main"
+    finally:
+        stale.close()
+        clearer.close()
+
+
+async def test_default_read_does_not_initialize_clear_generation_table(tmp_path: Path):
+    """Reading a legacy database must not create the clear-generation table."""
+    session = AdvancedSQLiteSession(
+        session_id="legacy_generation_read",
+        db_path=tmp_path / "legacy_generation_read.db",
+        create_tables=True,
+    )
+
+    try:
+        await session.add_items([{"role": "user", "content": "legacy history"}])
+        with session._locked_connection() as conn:
+            conn.execute("DROP TABLE session_clear_generations")
+            conn.commit()
+
+        assert await session.get_items() == [{"role": "user", "content": "legacy history"}]
+
+        with session._locked_connection() as conn:
+            table_exists = conn.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'session_clear_generations'
+                """
+            ).fetchone()
+        assert table_exists is None
+    finally:
+        session.close()
+
+
+async def test_switch_validation_cancellation_waits_for_generation_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Legacy generation initialization must settle before cancellation propagates."""
+
+    class PausingCommitConnection(sqlite3.Connection):
+        pause_commit = False
+        commit_finished = threading.Event()
+        allow_return = threading.Event()
+
+        def commit(self) -> None:
+            super().commit()
+            if self.pause_commit:
+                self.pause_commit = False
+                self.commit_finished.set()
+                assert self.allow_return.wait(timeout=10)
+
+    db_path = tmp_path / "switch_validation_cancellation.db"
+    session = AdvancedSQLiteSession(
+        session_id="switch_validation_cancellation",
+        db_path=db_path,
+        create_tables=True,
+    )
+    mutation: asyncio.Task[Any] | None = None
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+            ]
+        )
+        await session.create_branch_from_turn(2, "target")
+        await session.switch_to_branch("main")
+        with session._write_connection() as setup_connection:
+            setup_connection.execute("DROP TABLE session_clear_generations")
+            setup_connection.commit()
+
+        connection = sqlite3.connect(
+            str(db_path),
+            check_same_thread=False,
+            factory=PausingCommitConnection,
+        )
+        with session._connections_lock:
+            session._connections.add(connection)
+        monkeypatch.setattr(session, "_get_connection", lambda: connection)
+        connection.pause_commit = True
+
+        mutation = asyncio.create_task(session.switch_to_branch("target"))
+        assert await asyncio.to_thread(connection.commit_finished.wait, 10)
+        mutation.cancel("first-caller-cancel")
+        await asyncio.sleep(0)
+        mutation.cancel("second-caller-cancel")
+        await asyncio.sleep(0)
+        assert mutation.done() is False
+        connection.allow_return.set()
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await mutation
+
+        _assert_cancel_message(exc_info.value, "first-caller-cancel")
+        assert session._current_branch_id == "main"
+        row = connection.execute(
+            "SELECT generation FROM session_clear_generations WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()
+        assert row == (0,)
+    finally:
+        PausingCommitConnection.allow_return.set()
+        if mutation is not None and not mutation.done():
+            mutation.cancel()
+            await asyncio.gather(mutation, return_exceptions=True)
+        session.close()
+
+
+async def test_post_clear_switch_synchronizes_generation_before_next_write(tmp_path: Path):
+    """A new instance may select and write to a branch created after an earlier clear."""
+    db_path = tmp_path / "post_clear_branch_switch.db"
+    owner = AdvancedSQLiteSession(
+        session_id="post_clear_branch_switch",
+        db_path=db_path,
+        create_tables=True,
+    )
+    other = AdvancedSQLiteSession(
+        session_id="post_clear_branch_switch",
+        db_path=db_path,
+    )
+
+    try:
+        await owner.clear_session()
+        await owner.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+            ]
+        )
+        await owner.create_branch_from_turn(2, "fresh")
+
+        await other.switch_to_branch("fresh")
+        await other.add_items([{"role": "assistant", "content": "on fresh"}])
+
+        assert other._current_branch_id == "fresh"
+        assert [item.get("content") for item in await other.get_items()] == [
+            "u1",
+            "a1",
+            "on fresh",
+        ]
+        assert [item.get("content") for item in await other.get_items(branch_id="main")] == [
+            "u1",
+            "a1",
+            "u2",
+        ]
+    finally:
+        owner.close()
+        other.close()
 
 
 async def test_pop_item_rolls_back_on_failure_after_earlier_delete():

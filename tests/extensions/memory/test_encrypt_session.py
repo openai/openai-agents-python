@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -10,7 +10,14 @@ pytest.importorskip("cryptography")  # Skip tests if cryptography is not install
 
 from cryptography.fernet import Fernet
 
-from agents import Agent, Runner, SessionSettings, SQLiteSession, TResponseInputItem
+from agents import (
+    Agent,
+    RunContextWrapper,
+    Runner,
+    SessionSettings,
+    SQLiteSession,
+    TResponseInputItem,
+)
 from agents.extensions.memory.encrypt_session import EncryptedSession
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
@@ -159,6 +166,66 @@ async def test_encrypted_session_clear(encryption_key: str, underlying_session: 
     assert len(items) == 0
 
     underlying_session.close()
+
+
+async def test_encrypted_session_forwards_wrapper_to_all_underlying_operations(
+    encryption_key: str,
+):
+    class ContextAwareUnderlying:
+        def __init__(self) -> None:
+            self.session_id = "test_session"
+            self.session_settings = None
+            self.items: list[TResponseInputItem] = []
+            self.wrappers: list[RunContextWrapper[Any] | None] = []
+
+        async def get_items(
+            self,
+            limit: int | None = None,
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> list[TResponseInputItem]:
+            self.wrappers.append(wrapper)
+            return list(self.items if limit is None else self.items[-limit:])
+
+        async def add_items(
+            self,
+            items: list[TResponseInputItem],
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> None:
+            self.wrappers.append(wrapper)
+            self.items.extend(items)
+
+        async def pop_item(
+            self,
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> TResponseInputItem | None:
+            self.wrappers.append(wrapper)
+            return self.items.pop() if self.items else None
+
+        async def clear_session(
+            self,
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> None:
+            self.wrappers.append(wrapper)
+            self.items.clear()
+
+    underlying = ContextAwareUnderlying()
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=cast(Any, underlying),
+        encryption_key=encryption_key,
+    )
+    wrapper = RunContextWrapper(context={"tenant": "a"})
+
+    await session.add_items([{"role": "user", "content": "hello"}], wrapper=wrapper)
+    assert await session.get_items(wrapper=wrapper) == [{"role": "user", "content": "hello"}]
+    assert await session.pop_item(wrapper=wrapper) == {"role": "user", "content": "hello"}
+    await session.clear_session(wrapper=wrapper)
+
+    assert underlying.wrappers == [wrapper, wrapper, wrapper, wrapper]
 
 
 async def test_encrypted_session_ttl_expiration(

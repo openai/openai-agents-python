@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Iterable
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast, overload
 
 from pydantic import TypeAdapter
 from typing_extensions import TypeVar
 
-from ..exceptions import ModelBehaviorError, UserError
-from ..handoffs import Handoff
+from ..exceptions import (
+    ModelBehaviorError,
+    UserError,
+)
+from ..handoffs import Handoff, _invoke_handoff_with_redaction
 from ..run_context import RunContextWrapper, TContext
 from ..strict_schema import ensure_strict_json_schema
 from ..tracing.spans import SpanError
@@ -146,7 +150,7 @@ def realtime_handoff(
             if len(sig.parameters) != 1:
                 raise UserError("on_handoff must take one argument: context")
 
-    async def _invoke_handoff(
+    async def _invoke_handoff_impl(
         ctx: RunContextWrapper[Any], input_json: str | None = None
     ) -> RealtimeAgent[TContext]:
         if input_type is not None and type_adapter is not None:
@@ -164,6 +168,7 @@ def realtime_handoff(
                 type_adapter=type_adapter,
                 partial=False,
                 strict=True,
+                contains_tool_data=True,
             )
             input_func = cast(OnHandoffWithInput[THandoffInput], on_handoff)
             result = input_func(ctx, validated_input)
@@ -196,7 +201,7 @@ def realtime_handoff(
         tool_name=tool_name,
         tool_description=tool_description,
         input_json_schema=input_json_schema,
-        on_invoke_handoff=_invoke_handoff,
+        on_invoke_handoff=partial(_invoke_handoff_with_redaction, _invoke_handoff_impl),
         input_filter=None,  # Not supported for RealtimeAgent handoffs
         agent_name=agent.name,
         is_enabled=_is_enabled if callable(is_enabled) else is_enabled,

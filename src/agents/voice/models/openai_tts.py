@@ -1,7 +1,7 @@
 from collections.abc import AsyncIterator
 from typing import Literal
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, omit
 
 from ..model import TTSModel, TTSModelSettings
 
@@ -44,6 +44,7 @@ class OpenAITTSModel(TTSModel):
             voice=settings.voice or DEFAULT_VOICE,
             input=text,
             response_format="pcm",
+            speed=settings.speed if settings.speed is not None else omit,
             extra_body={
                 "instructions": settings.instructions,
             },

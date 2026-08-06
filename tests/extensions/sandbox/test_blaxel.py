@@ -934,6 +934,64 @@ class TestHelpers:
         assert "sessionId=sess-1" in url
         assert "workingDir=/workspace" in url
 
+    @pytest.mark.parametrize(
+        "field, value",
+        [
+            ("cwd", "/workspace/my project"),
+            ("cwd", "/workspace/a&rows=9999"),
+            ("cwd", "/workspace/a#b"),
+            ("cwd", "/workspace/café"),
+            ("token", "ab+cd/ef=="),
+            ("session_id", "a&b"),
+        ],
+        ids=["space", "ampersand", "hash", "non_ascii", "token_plus", "session_amp"],
+    )
+    def test_build_ws_url_percent_encodes_query_values(self, field: str, value: str) -> None:
+        """Caller-controlled values must survive the round trip intact.
+
+        The workspace path and session id can contain characters that are structural in a
+        query string. Interpolating them raw let a path such as `/w/a&rows=1` append or
+        override parameters, let a `#` truncate the rest into a fragment, and let a `+` in a
+        token decode back as a space.
+        """
+        from urllib.parse import parse_qs, urlsplit
+
+        from agents.extensions.sandbox.blaxel.sandbox import _build_ws_url
+
+        kwargs: dict[str, Any] = {
+            "sandbox_url": "https://test.bl.run",
+            "token": "tok123",
+            "session_id": "sess-1",
+            "cwd": "/workspace",
+        }
+        kwargs[field] = value
+
+        url = _build_ws_url(**kwargs)
+        parts = urlsplit(url)
+        query = parse_qs(parts.query, keep_blank_values=True)
+
+        assert parts.fragment == ""
+        assert " " not in url
+        assert query["token"] == [kwargs["token"]]
+        assert query["sessionId"] == [kwargs["session_id"]]
+        assert query["workingDir"] == [kwargs["cwd"]]
+        # A structural character in a value must not add or override a parameter.
+        assert query["rows"] == ["24"]
+        assert query["cols"] == ["80"]
+
+    def test_build_ws_url_rewrites_only_the_scheme(self) -> None:
+        """`replace` also rewrote an occurrence inside the path, such as a proxied URL."""
+        from agents.extensions.sandbox.blaxel.sandbox import _build_ws_url
+
+        url = _build_ws_url(
+            sandbox_url="https://test.bl.run/proxy/http://inner",
+            token="t",
+            session_id="s",
+            cwd="/workspace",
+        )
+
+        assert url.startswith("wss://test.bl.run/proxy/http://inner/terminal/ws?")
+
     def test_extract_preview_url(self) -> None:
         from agents.extensions.sandbox.blaxel.sandbox import _extract_preview_url
 
@@ -2689,6 +2747,7 @@ class TestFinalCoverageGaps:
     @pytest.mark.asyncio
     async def test_prune_returns_none_when_no_pid(self, fake_sandbox: _FakeSandboxInstance) -> None:
         """Cover line 819: prune returns None when process_id_to_prune_from_meta returns None."""
+        from agents.extensions.sandbox.blaxel import sandbox as blaxel_sandbox
         from agents.extensions.sandbox.blaxel.sandbox import _BlaxelPtySessionEntry
         from agents.sandbox.session.pty_types import PTY_PROCESSES_MAX
 
@@ -2704,10 +2763,7 @@ class TestFinalCoverageGaps:
             session._pty_sessions[i + 300] = entry
             session._reserved_pty_process_ids.add(i + 300)
 
-        with patch(
-            "agents.extensions.sandbox.blaxel.sandbox.process_id_to_prune_from_meta",
-            return_value=None,
-        ):
+        with patch.object(blaxel_sandbox, "process_id_to_prune_from_meta", return_value=None):
             result = session._prune_pty_sessions_if_needed()
             assert result is None
 

@@ -15,6 +15,39 @@ from .processor_interface import TracingProcessor
 from .scope import Scope
 
 
+def _finish_on_generator_exit(trace: Trace) -> None:
+    """Finish a trace whose ``with`` block is unwinding because of ``GeneratorExit``.
+
+    A generator closed from the task that advanced it resets normally, which is the common
+    case. An abandoned async generator is instead finalized from whichever task happens to
+    run its ``aclose``, so the body resumes in a context that never set the token and
+    ``ContextVar.reset`` raises ``ValueError``. Nothing can be done about that from here:
+    a ``Token`` is only valid in the ``Context`` that created it, so the task doing the
+    finalizing cannot rewrite the caller's context, and the caller keeps seeing this trace
+    as current until its own scope ends. Raising would only add a crash on top of that.
+
+    The tolerance is deliberately limited to this path, and within it to the reset itself.
+    An explicit ``finish`` from the wrong context is a context-ownership violation rather
+    than an unavoidable one, so it still raises, and a processor that fails during
+    ``finish`` still surfaces rather than being mistaken for a foreign token.
+
+    The reset runs in a ``finally`` so that a failing ``finish`` still releases the scope
+    instead of leaving the finished trace current, and the token is cleared only once the
+    reset has either succeeded or hit the foreign-context ``ValueError`` it expects. An
+    unexpected reset failure therefore leaves the handle in place rather than losing it.
+    """
+    try:
+        trace.finish(reset_current=False)
+    finally:
+        token: contextvars.Token[Trace | None] | None = trace._prev_context_token  # type: ignore[attr-defined]
+        if token is not None:
+            try:
+                Scope.reset_current_trace(token)
+            except ValueError:
+                logger.debug("Skipping trace context reset, token belongs to another context")
+            trace._prev_context_token = None  # type: ignore[attr-defined]
+
+
 class Trace(abc.ABC):
     """A complete end-to-end workflow containing related spans and metadata.
 
@@ -339,7 +372,10 @@ class ReattachedTrace(Trace):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.finish(reset_current=exc_type is not GeneratorExit)
+        if exc_type is GeneratorExit:
+            _finish_on_generator_exit(self)
+        else:
+            self.finish(reset_current=True)
 
     def export(self) -> dict[str, Any] | None:
         return {
@@ -399,7 +435,10 @@ class NoOpTrace(Trace):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.finish(reset_current=True)
+        if exc_type is GeneratorExit:
+            _finish_on_generator_exit(self)
+        else:
+            self.finish(reset_current=True)
 
     def start(self, mark_as_current: bool = False):
         if mark_as_current:
@@ -521,7 +560,10 @@ class TraceImpl(Trace):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.finish(reset_current=exc_type is not GeneratorExit)
+        if exc_type is GeneratorExit:
+            _finish_on_generator_exit(self)
+        else:
+            self.finish(reset_current=True)
 
     def export(self) -> dict[str, Any] | None:
         return {

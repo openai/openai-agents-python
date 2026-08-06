@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, cast
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 from pydantic import BaseModel, Field
 
@@ -1280,15 +1280,32 @@ def _build_ws_url(
 ) -> str:
     """Build the WebSocket URL for a Blaxel terminal session."""
     base = sandbox_url.rstrip("/")
-    ws_base = base.replace("https://", "wss://").replace("http://", "ws://")
-    return (
-        f"{ws_base}/terminal/ws"
-        f"?token={token}"
-        f"&cols={cols}"
-        f"&rows={rows}"
-        f"&sessionId={session_id}"
-        f"&workingDir={cwd}"
+    # Rewrite only the scheme. `replace` would also rewrite an occurrence inside the path,
+    # such as a proxied URL.
+    if base.startswith("https://"):
+        ws_base = f"wss://{base.removeprefix('https://')}"
+    elif base.startswith("http://"):
+        ws_base = f"ws://{base.removeprefix('http://')}"
+    else:
+        ws_base = base
+    # Percent-encode the values. The workspace path and session id are caller-controlled and
+    # may contain characters that are structural in a query string, so interpolating them
+    # raw lets a path such as `/w/a&rows=1` add or override parameters, and lets a `#`
+    # silently truncate the rest into a fragment. A `+` in a token would also decode back as
+    # a space.
+    # `/` stays literal because it is legal in a query value and keeps paths readable.
+    query = urlencode(
+        {
+            "token": token,
+            "cols": cols,
+            "rows": rows,
+            "sessionId": session_id,
+            "workingDir": cwd,
+        },
+        quote_via=quote,
+        safe="/",
     )
+    return f"{ws_base}/terminal/ws?{query}"
 
 
 __all__ = [

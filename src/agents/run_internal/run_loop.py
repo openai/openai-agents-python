@@ -40,6 +40,9 @@ from ..exceptions import (
     OutputGuardrailTripwireTriggered,
     RunErrorDetails,
     UserError,
+    _clear_data_redacted_error_traceback,
+    _detach_data_redacted_error_traceback,
+    _is_error_data_redacted,
 )
 from ..handoffs import Handoff
 from ..items import (
@@ -157,6 +160,7 @@ from .run_steps import (
     ToolRunShellCall,
 )
 from .session_persistence import (
+    _session_get_items,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
@@ -367,6 +371,7 @@ async def _save_resumed_stream_items(
         response_id=response_id,
         reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
         store=store,
+        wrapper=streamed_result.context_wrapper,
     )
     if run_state is not None:
         run_state._current_turn_persisted_item_count = (
@@ -398,6 +403,7 @@ async def _save_stream_items(
         run_state,
         response_id=response_id,
         store=store,
+        wrapper=streamed_result.context_wrapper,
     )
     if update_persisted_count and streamed_result._state is not None:
         streamed_result._current_turn_persisted_item_count = (
@@ -428,15 +434,17 @@ async def _run_output_guardrails_for_stream(
 
     try:
         return cast(list[Any], await streamed_result._output_guardrails_task)
-    except OutputGuardrailTripwireTriggered:
-        streamed_result.output_guardrail_results = (
-            streamed_result.output_guardrail_results + completed_results
-        )
-        raise
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        log_model_action_error(logger, "Unexpected error in output guardrails", exc)
+        # Publish at a single boundary so no failure path can omit results that already
+        # finished. A guardrail raising a non-tripwire error reports the same completed
+        # results a tripwire does.
+        streamed_result.output_guardrail_results = (
+            streamed_result.output_guardrail_results + completed_results
+        )
+        if not isinstance(exc, OutputGuardrailTripwireTriggered):
+            log_model_action_error(logger, "Unexpected error in output guardrails", exc)
         raise
 
 
@@ -728,7 +736,10 @@ async def start_streaming(
             session_items: list[TResponseInputItem] | None = None
             if session is not None:
                 try:
-                    session_items = await session.get_items()
+                    session_items = await _session_get_items(
+                        session,
+                        wrapper=context_wrapper,
+                    )
                 except Exception:
                     session_items = None
             server_conversation_tracker.hydrate_from_state(
@@ -768,6 +779,7 @@ async def start_streaming(
                 run_config.session_settings,
                 include_history_in_prepared_input=not server_manages_conversation,
                 preserve_dropped_new_items=True,
+                wrapper=context_wrapper,
             )
             streamed_result.input = prepared_input
             streamed_result._original_input = copy_input_items(prepared_input)
@@ -871,6 +883,7 @@ async def start_streaming(
                                 store=current_agent.model_settings.resolve(
                                     run_config.model_settings
                                 ).store,
+                                wrapper=context_wrapper,
                             )
                         )
                         raise InputGuardrailTripwireTriggered(result)
@@ -1180,6 +1193,7 @@ async def start_streaming(
                                     store=current_agent.model_settings.resolve(
                                         run_config.model_settings
                                     ).store,
+                                    wrapper=context_wrapper,
                                 )
                             )
                             raise InputGuardrailTripwireTriggered(result)
@@ -1387,17 +1401,21 @@ async def start_streaming(
     except AgentsException as exc:
         streamed_result.is_complete = True
         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-        exc.run_data = RunErrorDetails(
-            input=streamed_result.input,
-            new_items=streamed_result.new_items,
-            raw_responses=streamed_result.raw_responses,
-            last_agent=current_agent,
-            context_wrapper=context_wrapper,
-            input_guardrail_results=streamed_result.input_guardrail_results,
-            output_guardrail_results=streamed_result.output_guardrail_results,
-            tool_input_guardrail_results=streamed_result.tool_input_guardrail_results,
-            tool_output_guardrail_results=streamed_result.tool_output_guardrail_results,
-        )
+        if _is_error_data_redacted(exc):
+            _detach_data_redacted_error_traceback(exc)
+        else:
+            _clear_data_redacted_error_traceback(exc)
+            exc.run_data = RunErrorDetails(
+                input=streamed_result.input,
+                new_items=streamed_result.new_items,
+                raw_responses=streamed_result.raw_responses,
+                last_agent=current_agent,
+                context_wrapper=context_wrapper,
+                input_guardrail_results=streamed_result.input_guardrail_results,
+                output_guardrail_results=streamed_result.output_guardrail_results,
+                tool_input_guardrail_results=streamed_result.tool_input_guardrail_results,
+                tool_output_guardrail_results=streamed_result.tool_output_guardrail_results,
+            )
         raise
     except Exception as e:
         attach_generic_agent_error(
@@ -1648,7 +1666,13 @@ async def run_single_turn_streamed(
             )
         ]
         if input_items_to_save:
-            await save_result_to_session(session, input_items_to_save, [], streamed_result._state)
+            await save_result_to_session(
+                session,
+                input_items_to_save,
+                [],
+                streamed_result._state,
+                wrapper=context_wrapper,
+            )
 
     previous_response_id = (
         server_conversation_tracker.previous_response_id
@@ -2121,7 +2145,12 @@ async def get_new_response(
     async def rewind_model_request() -> None:
         if server_conversation_tracker is not None:
             items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
-            await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
+            await rewind_session_items(
+                session,
+                items_to_rewind,
+                server_conversation_tracker,
+                wrapper=context_wrapper,
+            )
             server_conversation_tracker.rewind_input(filtered.input)
 
     with model_run_context(tool_use_tracker):

@@ -3178,6 +3178,27 @@ class TestRunStateResumption:
         assert result2.final_output == "Second response"
 
     @pytest.mark.asyncio
+    async def test_resume_from_run_state_does_not_mutate_source_result(self):
+        """Resuming from a state must not append to the raw_responses already returned."""
+        model = FakeModel()
+        agent = Agent(name="TestAgent", model=model)
+
+        model.set_next_output([get_text_message("First response")])
+        result1 = await Runner.run(agent, "First input")
+        assert len(result1.raw_responses) == 1
+
+        state = result1.to_state()
+
+        model.set_next_output([get_text_message("Second response")])
+        result2 = await Runner.run(agent, state)
+
+        # The second run accumulates on top of the first, but the RunResult that was
+        # already handed back to the caller must keep only its own response.
+        assert len(result2.raw_responses) == 2
+        assert len(result1.raw_responses) == 1
+        assert result1.raw_responses is not result2.raw_responses
+
+    @pytest.mark.asyncio
     async def test_resume_from_run_state_with_context(self):
         """Test resuming a run from a RunState with context override."""
         model = FakeModel()

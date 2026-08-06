@@ -478,7 +478,7 @@ Server-side compaction is different from [`OpenAIResponsesCompactionSession`][ag
 
 Use `extra_args` when you need provider-specific or newer request fields that the SDK does not expose directly at the top level yet.
 
-Also, when you use OpenAI's Responses API, [there are a few other optional parameters](https://platform.openai.com/docs/api-reference/responses/create) (e.g., `user`, `service_tier`, and so on). If they are not available at the top level, you can use `extra_args` to pass them as well. Do not also set the same request field through a direct `ModelSettings` field.
+When you use an OpenAI model, `extra_args` can pass optional parameters to both the Responses API and Chat Completions API (for example, `user` and `service_tier`). For supported models, set `extra_args={"service_tier": "fast"}` to use [Fast mode](https://developers.openai.com/api/docs/guides/fast-mode); `"priority"` remains equivalent. Do not also set the same request field through a direct `ModelSettings` field.
 
 ```python
 from agents import Agent, ModelSettings

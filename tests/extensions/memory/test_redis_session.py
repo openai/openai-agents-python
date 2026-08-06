@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import sys
+import time
+from collections.abc import Awaitable
 from typing import Any, cast
 
 import pytest
@@ -13,6 +18,21 @@ from tests.test_responses import get_text_message
 
 # Keep the fallback-to-real-Redis path isolated from xdist workers.
 pytestmark = [pytest.mark.asyncio, pytest.mark.serial]
+
+
+def _assert_cancel_message(exc: asyncio.CancelledError, expected: str) -> None:
+    """Account for Python 3.10 dropping Task cancellation messages when re-awaited."""
+    expected_args = (expected,) if sys.version_info >= (3, 11) else ()
+    assert exc.args == expected_args
+
+
+async def _release_after_detaching_pipeline_connection(delegate: Any) -> None:
+    """Model Redis 8.1 clearing its pipeline reference before awaiting release."""
+    connection = delegate.connection
+    delegate.connection = None
+    if connection is not None:
+        await delegate.connection_pool.release(connection)
+
 
 # Try to use fakeredis for in-memory testing, fall back to real Redis if not available
 try:
@@ -123,6 +143,60 @@ async def test_redis_session_direct_ops():
 
     finally:
         await session.close()
+
+
+@pytest.mark.parametrize("operation", ["pop", "clear"])
+async def test_mutation_cancellation_waits_for_authoritative_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """Cancellation must wait after Redis applies a destructive mutation."""
+    session = await _create_test_session()
+    item: TResponseInputItem = {"role": "user", "content": "once"}
+    await session.add_items([item])
+    mutation_applied = asyncio.Event()
+    allow_return = asyncio.Event()
+
+    if operation == "pop":
+        original_rpop = session._redis.rpop
+
+        async def controlled_rpop(*args: Any, **kwargs: Any) -> Any:
+            result = await cast(Awaitable[Any], original_rpop(*args, **kwargs))
+            mutation_applied.set()
+            await allow_return.wait()
+            return result
+
+        monkeypatch.setattr(session._redis, "rpop", controlled_rpop)
+        task: asyncio.Task[Any] = asyncio.create_task(session.pop_item())
+    else:
+        original_delete = session._redis.delete
+
+        async def controlled_delete(*args: Any, **kwargs: Any) -> Any:
+            result = await original_delete(*args, **kwargs)
+            mutation_applied.set()
+            await allow_return.wait()
+            return result
+
+        monkeypatch.setattr(session._redis, "delete", controlled_delete)
+        task = asyncio.create_task(session.clear_session())
+
+    try:
+        await mutation_applied.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert task.done() is False
+        allow_return.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        allow_return.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert await session.get_items() == []
 
 
 async def test_runner_integration(agent: Agent):
@@ -679,9 +753,11 @@ async def test_get_next_id_method():
         await session.close()
 
 
-async def test_add_items_preserves_created_at_metadata():
+async def test_add_items_preserves_created_at_metadata(monkeypatch: pytest.MonkeyPatch):
     """`created_at` must be set once and not overwritten by subsequent add_items calls."""
     session = await _create_test_session("created_at_test")
+    current_time = 1_000
+    monkeypatch.setattr("agents.extensions.memory.redis_session.time.time", lambda: current_time)
 
     try:
         await session.clear_session()
@@ -690,10 +766,8 @@ async def test_add_items_preserves_created_at_metadata():
         first_created = first_meta.get(b"created_at") or first_meta.get("created_at")
         assert first_created is not None
 
-        # Force a clock advance so a regression would surface as a different value.
-        import time
-
-        time.sleep(1.1)
+        # Advance the controlled clock so a regression would surface as a different value.
+        current_time += 1
 
         await session.add_items([{"role": "user", "content": "second"}])
         second_meta = await session._redis.hgetall(session._session_key)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
@@ -1265,6 +1339,1704 @@ async def test_redis_session_close_is_noop_for_injected_client():
     assert len(await other.get_items()) == 2
 
     await session.clear_session()
+
+
+async def test_add_items_applies_ttl_in_the_write_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TTL setup must not create a post-commit failure window for add_items."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for pipeline instrumentation")
+
+    client = fakeredis.aioredis.FakeRedis()
+    session = RedisSession(
+        session_id="atomic_ttl",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+        ttl=60,
+    )
+    real_pipeline = client.pipeline
+    execute_calls = 0
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+
+        class PipelineProxy:
+            def __getattr__(self, name: str) -> Any:
+                return getattr(delegate, name)
+
+            def __setattr__(self, name: str, value: Any) -> None:
+                setattr(delegate, name, value)
+
+            async def execute(self) -> Any:
+                nonlocal execute_calls
+                execute_calls += 1
+                result = await delegate.execute()
+                if execute_calls == 2:
+                    raise RuntimeError("post-commit TTL failure")
+                return result
+
+        return PipelineProxy()
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    item: TResponseInputItem = {"role": "user", "content": "once"}
+
+    await session.add_items([item])
+
+    assert execute_calls == 1
+    assert await session.get_items() == [item]
+
+
+async def test_add_items_rejects_unrepresentable_ttl_before_writing() -> None:
+    """An invalid Redis TTL must not turn a failed write retry into duplicates."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis()
+    session = RedisSession(
+        session_id="invalid_ttl",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+        ttl=2**63,
+    )
+    item: TResponseInputItem = {"role": "user", "content": "never committed"}
+
+    for _ in range(2):
+        with pytest.raises(ValueError, match="outside Redis's supported expiration range"):
+            await session.add_items([item])
+
+    assert await session.get_items() == []
+
+
+async def test_add_items_rejects_wrong_metadata_key_type_before_writing() -> None:
+    """A metadata type error must not commit history that a retry duplicates."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    from redis.exceptions import ResponseError
+
+    client = fakeredis.aioredis.FakeRedis()
+    session = RedisSession(
+        session_id="wrong_metadata_type",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    await client.set(session._session_key, "not a hash")
+    item: TResponseInputItem = {"role": "user", "content": "never committed"}
+
+    for _ in range(2):
+        with pytest.raises(ResponseError, match="metadata key must contain a hash"):
+            await session.add_items([item])
+
+    assert await session.get_items() == []
+
+
+async def test_add_items_uses_server_absolute_expiration_after_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TTL validation must not become stale between serialization and Redis execution."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis()
+    server_seconds = 1_750_000_000
+    server_microseconds = 500_000
+    server_time_ms = server_seconds * 1000 + server_microseconds // 1000
+    ttl = (2**63 - 1 - server_time_ms) // 1000
+    expected_expiration_ms = server_time_ms + ttl * 1000
+    order: list[str] = []
+    real_pipeline = client.pipeline
+
+    session = RedisSession(
+        session_id="absolute_ttl",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+        ttl=ttl,
+    )
+
+    async def serialize(item: TResponseInputItem) -> str:
+        order.append("serialize")
+        return json.dumps(item)
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+
+        class PipelineProxy:
+            def __getattr__(self, name: str) -> Any:
+                return getattr(delegate, name)
+
+            async def time(self) -> tuple[int, int]:
+                order.append("time")
+                return server_seconds, server_microseconds
+
+        return PipelineProxy()
+
+    monkeypatch.setattr(session, "_serialize_item", serialize)
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    item: TResponseInputItem = {"role": "user", "content": "once"}
+
+    await session.add_items([item])
+
+    assert order == ["serialize", "time"]
+    assert -(2**63) <= expected_expiration_ms <= 2**63 - 1
+    assert await session.get_items() == [item]
+
+
+async def test_add_items_refreshes_server_timestamps_after_watch_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A watched retry must derive metadata and expiration from its own attempt."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis()
+    ttl = 60
+    first_seconds = int(time.time())
+    second_seconds = first_seconds + ttl * 2
+    server_times = iter([(first_seconds, 0), (second_seconds, 0)])
+    expirations: list[int] = []
+    pipeline_attempt = 0
+    real_pipeline = client.pipeline
+
+    session = RedisSession(
+        session_id="watch_retry_timestamps",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+        ttl=ttl,
+    )
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        nonlocal pipeline_attempt
+        pipeline_attempt += 1
+        attempt = pipeline_attempt
+        delegate = real_pipeline(*args, **kwargs)
+
+        class PipelineProxy:
+            def __getattr__(self, name: str) -> Any:
+                return getattr(delegate, name)
+
+            def __setattr__(self, name: str, value: Any) -> None:
+                setattr(delegate, name, value)
+
+            def pexpireat(self, key: str, expiration_time_ms: int) -> Any:
+                expirations.append(expiration_time_ms)
+                return delegate.pexpireat(key, expiration_time_ms)
+
+            async def time(self) -> tuple[int, int]:
+                return next(server_times)
+
+            async def execute(self) -> Any:
+                if attempt == 1:
+                    await client.hset(  # type: ignore[misc]
+                        session._session_key, "concurrent_write", "1"
+                    )
+                return await delegate.execute()
+
+        return PipelineProxy()
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    item: TResponseInputItem = {"role": "user", "content": "once"}
+
+    await session.add_items([item])
+
+    first_expiration = (first_seconds + ttl) * 1000
+    second_expiration = (second_seconds + ttl) * 1000
+    assert expirations == [first_expiration] * 3 + [second_expiration] * 3
+    metadata = await client.hgetall(session._session_key)  # type: ignore[misc]
+    updated_at = metadata.get(b"updated_at") or metadata.get("updated_at")
+    assert updated_at in (str(second_seconds), str(second_seconds).encode())
+    assert await session.get_items() == [item]
+
+
+async def test_ambiguous_exec_watch_error_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transport-derived WatchError after a possible commit must remain ambiguous."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    from redis.exceptions import WatchError
+
+    client = fakeredis.aioredis.FakeRedis()
+    session = RedisSession(
+        session_id="ambiguous_exec_watch_error",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    real_pipeline = client.pipeline
+    attempts = 0
+    item: TResponseInputItem = {"role": "user", "content": "once"}
+    serialized = json.dumps(item, separators=(",", ":"))
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        delegate = real_pipeline(*args, **kwargs)
+
+        class PipelineProxy:
+            def __getattr__(self, name: str) -> Any:
+                return getattr(delegate, name)
+
+            async def execute(self) -> Any:
+                await client.rpush(session._messages_key, serialized)  # type: ignore[misc]
+                raise WatchError("A ConnectionError occurred while watching one or more keys")
+
+        return PipelineProxy()
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+
+    with pytest.raises(WatchError, match="ConnectionError"):
+        await session.add_items([item])
+
+    assert attempts == 1
+    assert await session.get_items() == [item]
+
+
+async def test_redis81_standard_pool_checkout_records_native_observability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The retained checkout path must preserve Redis 8.1 standard-pool metrics."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    import agents.extensions.memory.redis_session as redis_session_module
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    pool = client.connection_pool
+    session = RedisSession(
+        session_id="redis81_standard_observability",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    counts: list[tuple[str, int]] = []
+    create_times: list[float] = []
+    real_release = pool.release
+
+    class ConnectionState:
+        IDLE = "idle"
+        USED = "used"
+
+    async def record_connection_count(
+        *, pool_name: str, connection_state: str, counter: int
+    ) -> None:
+        assert pool_name == "test-pool"
+        counts.append((connection_state, counter))
+
+    async def record_connection_create_time(
+        *, connection_pool: Any, duration_seconds: float
+    ) -> None:
+        assert connection_pool is pool
+        create_times.append(duration_seconds)
+
+    async def release(connection: Any) -> None:
+        await real_release(connection)
+        await record_connection_count(
+            pool_name="test-pool", connection_state=ConnectionState.USED, counter=-1
+        )
+        await record_connection_count(
+            pool_name="test-pool", connection_state=ConnectionState.IDLE, counter=1
+        )
+
+    connection_module = cast(Any, redis_session_module)._redis_connection_api
+    has_native_release_metrics = hasattr(connection_module, "record_connection_count")
+    monkeypatch.setattr(connection_module, "ConnectionState", ConnectionState, raising=False)
+    monkeypatch.setattr(
+        connection_module, "get_pool_name", lambda _pool: "test-pool", raising=False
+    )
+    monkeypatch.setattr(
+        connection_module, "record_connection_count", record_connection_count, raising=False
+    )
+    monkeypatch.setattr(
+        connection_module,
+        "record_connection_create_time",
+        record_connection_create_time,
+        raising=False,
+    )
+    if not has_native_release_metrics:
+        monkeypatch.setattr(pool, "release", release)
+
+    await session.add_items([{"role": "user", "content": "once"}])
+
+    assert sum(counter for state, counter in counts if state == ConnectionState.USED) == 0
+    assert sum(counter for state, counter in counts if state == ConnectionState.IDLE) == 1
+    assert len(create_times) == 1
+
+
+@pytest.mark.parametrize("has_maintenance_lock", [False, True])
+async def test_redis8_blocking_pool_checkout_preserves_native_timing(
+    monkeypatch: pytest.MonkeyPatch,
+    has_maintenance_lock: bool,
+) -> None:
+    """The retained checkout path must preserve Redis 8.0 and 8.1 timing hooks."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    from contextlib import asynccontextmanager
+
+    from redis.asyncio import BlockingConnectionPool
+
+    import agents.extensions.memory.redis_session as redis_session_module
+
+    seed_client = fakeredis.aioredis.FakeRedis()
+    source_pool = seed_client.connection_pool
+    pool = BlockingConnectionPool(
+        max_connections=1,
+        timeout=1,
+        connection_class=source_pool.connection_class,
+        **source_pool.connection_kwargs,
+    )
+    client = fakeredis.aioredis.FakeRedis(connection_pool=pool)
+    session = RedisSession(
+        session_id="redis81_blocking_observability",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    maintenance_entries = 0
+    create_times: list[float] = []
+    wait_times: list[float] = []
+
+    @asynccontextmanager
+    async def maybe_pool_lock() -> Any:
+        nonlocal maintenance_entries
+        maintenance_entries += 1
+        yield
+
+    async def record_connection_create_time(
+        *, connection_pool: Any, duration_seconds: float
+    ) -> None:
+        assert connection_pool is pool
+        create_times.append(duration_seconds)
+
+    async def record_connection_wait_time(*, pool_name: str, duration_seconds: float) -> None:
+        assert pool_name == "test-pool"
+        wait_times.append(duration_seconds)
+
+    connection_module = cast(Any, redis_session_module)._redis_connection_api
+    if has_maintenance_lock:
+        monkeypatch.setattr(pool, "_maybe_pool_lock", maybe_pool_lock, raising=False)
+    monkeypatch.setattr(
+        connection_module, "get_pool_name", lambda _pool: "test-pool", raising=False
+    )
+    monkeypatch.setattr(
+        connection_module,
+        "record_connection_create_time",
+        record_connection_create_time,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        connection_module,
+        "record_connection_wait_time",
+        record_connection_wait_time,
+        raising=False,
+    )
+
+    await session.add_items([{"role": "user", "content": "once"}])
+
+    assert maintenance_entries == int(has_maintenance_lock)
+    assert len(create_times) == 1
+    assert len(wait_times) == 1
+
+
+async def test_add_items_with_ttl_supports_single_connection_pool() -> None:
+    """WATCH and server time must share one caller-managed Redis connection."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    session = RedisSession(
+        session_id="single_connection_ttl",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+        ttl=60,
+    )
+    item: TResponseInputItem = {"role": "user", "content": "once"}
+
+    await session.add_items([item])
+
+    assert await session.get_items() == [item]
+
+
+async def test_cancelled_watch_releases_single_connection_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation before an immediate command must discard the watched connection."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    session = RedisSession(
+        session_id="cancelled_watch_cleanup",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+        ttl=60,
+    )
+    real_pipeline = client.pipeline
+    pool = client.connection_pool
+    time_started = asyncio.Event()
+    dirty_connection: Any = None
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+
+        async def controlled_time() -> tuple[int, int]:
+            nonlocal dirty_connection
+            dirty_connection = delegate.connection
+            assert dirty_connection is not None
+            time_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(delegate, "time", controlled_time)
+        return delegate
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    add_task = asyncio.create_task(session.add_items([{"role": "user", "content": "cancelled"}]))
+    try:
+        await time_started.wait()
+        add_task.cancel("first-pre-exec-cancel")
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await add_task
+    finally:
+        if not add_task.done():
+            add_task.cancel()
+            await asyncio.gather(add_task, return_exceptions=True)
+
+    _assert_cancel_message(exc_info.value, "first-pre-exec-cancel")
+    assert dirty_connection not in pool._in_use_connections
+    assert dirty_connection not in pool._available_connections
+    assert await session.get_items() == []
+    assert await client.ping() is True  # type: ignore[misc]
+
+
+async def test_cancelled_in_flight_watch_command_reconnects_before_pool_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation with an unread reply must discard the dirty connection."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    session = RedisSession(
+        session_id="cancelled_in_flight_watch_command",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    real_pipeline = client.pipeline
+    pool = client.connection_pool
+    real_release = pool.release
+    response_read_started = asyncio.Event()
+    dirty_connection: Any = None
+    close_calls = 0
+    released_connections: list[Any] = []
+
+    async def track_release(connection: Any) -> None:
+        released_connections.append(connection)
+        await real_release(connection)
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+        real_type = delegate.type
+
+        async def controlled_type(key: str) -> Any:
+            nonlocal close_calls, dirty_connection
+            connection = delegate.connection
+            assert connection is not None
+            dirty_connection = connection
+            real_read_response = connection.read_response
+            real_close = connection._close
+            read_calls = 0
+
+            async def block_first_read(*args: Any, **kwargs: Any) -> Any:
+                nonlocal read_calls
+                read_calls += 1
+                if read_calls == 1:
+                    response_read_started.set()
+                    await asyncio.Event().wait()
+                    raise AssertionError("unreachable")
+                return await real_read_response(*args, **kwargs)
+
+            def track_close() -> None:
+                nonlocal close_calls
+                close_calls += 1
+                real_close()
+
+            monkeypatch.setattr(connection, "read_response", block_first_read)
+            monkeypatch.setattr(connection, "_close", track_close)
+            return await real_type(key)
+
+        monkeypatch.setattr(delegate, "type", controlled_type)
+        return delegate
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    monkeypatch.setattr(pool, "release", track_release)
+    add_task = asyncio.create_task(session.add_items([{"role": "user", "content": "cancelled"}]))
+    try:
+        await response_read_started.wait()
+        add_task.cancel("cancel-during-response-read")
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await add_task
+    finally:
+        if not add_task.done():
+            add_task.cancel()
+            await asyncio.gather(add_task, return_exceptions=True)
+
+    _assert_cancel_message(exc_info.value, "cancel-during-response-read")
+    assert dirty_connection is not None
+    assert close_calls == 1
+    assert released_connections == []
+    assert dirty_connection not in pool._in_use_connections
+    assert dirty_connection not in pool._available_connections
+    assert await client.ping() is True  # type: ignore[misc]
+    assert len(released_connections) == 1
+    assert released_connections[0] is not dirty_connection
+    assert await session.get_items() == []
+
+
+@pytest.mark.parametrize("blocking_pool", [False, True])
+@pytest.mark.parametrize("validation_fails", [False, True])
+async def test_cancelled_connection_acquisition_is_discarded_before_release(
+    monkeypatch: pytest.MonkeyPatch,
+    blocking_pool: bool,
+    validation_fails: bool,
+) -> None:
+    """Cancellation during pool validation must retain and discard the acquired identity."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    from redis.asyncio import BlockingConnectionPool
+    from redis.event import AsyncAfterConnectionReleasedEvent
+
+    pool: Any
+    if blocking_pool:
+        seed_client = fakeredis.aioredis.FakeRedis()
+        source_pool = seed_client.connection_pool
+        pool = BlockingConnectionPool(
+            max_connections=1,
+            timeout=1,
+            connection_class=source_pool.connection_class,
+            **source_pool.connection_kwargs,
+        )
+        client = fakeredis.aioredis.FakeRedis(connection_pool=pool)
+    else:
+        client = fakeredis.aioredis.FakeRedis(max_connections=1)
+        pool = client.connection_pool
+
+    session = RedisSession(
+        session_id=f"cancelled_connection_acquisition_{blocking_pool}",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    dispatcher = pool._event_dispatcher
+    assert dispatcher is not None
+    listeners = dispatcher._event_listeners_mapping[AsyncAfterConnectionReleasedEvent]
+    released_connections: list[Any] = []
+    ensure_started = asyncio.Event()
+    allow_ensure = asyncio.Event()
+    dirty_connection: Any = None
+    real_ensure_connection = pool.ensure_connection
+    loop = asyncio.get_running_loop()
+    previous_exception_handler = loop.get_exception_handler()
+    loop_errors: list[dict[str, Any]] = []
+
+    class RecordingReleaseListener:
+        async def listen(self, event: Any) -> None:
+            released_connections.append(event.connection)
+
+    async def controlled_ensure_connection(connection: Any) -> None:
+        nonlocal dirty_connection
+        if dirty_connection is None:
+            dirty_connection = connection
+            ensure_started.set()
+            await allow_ensure.wait()
+            if validation_fails:
+                raise RuntimeError("connection validation failed")
+        await real_ensure_connection(connection)
+
+    monkeypatch.setitem(
+        dispatcher._event_listeners_mapping,
+        AsyncAfterConnectionReleasedEvent,
+        [*listeners, RecordingReleaseListener()],
+    )
+    monkeypatch.setattr(pool, "ensure_connection", controlled_ensure_connection)
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    add_task = asyncio.create_task(session.add_items([{"role": "user", "content": "cancelled"}]))
+    waiter: asyncio.Task[Any] | None = None
+    try:
+        await ensure_started.wait()
+        add_task.cancel("cancel-during-acquisition")
+        if blocking_pool:
+
+            async def ping() -> Any:
+                return await client.ping()  # type: ignore[misc]
+
+            waiter = asyncio.create_task(ping())
+            await asyncio.sleep(0)
+        allow_ensure.set()
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await add_task
+        _assert_cancel_message(exc_info.value, "cancel-during-acquisition")
+
+        assert dirty_connection is not None
+        assert dirty_connection not in pool._in_use_connections
+        assert dirty_connection not in pool._available_connections
+        assert dirty_connection not in released_connections
+        if waiter is not None:
+            assert await waiter is True
+        else:
+            assert await client.ping() is True  # type: ignore[misc]
+        assert released_connections
+        assert all(connection is not dirty_connection for connection in released_connections)
+        assert await session.get_items() == []
+        await asyncio.sleep(0)
+        assert loop_errors == []
+    finally:
+        loop.set_exception_handler(previous_exception_handler)
+        allow_ensure.set()
+        pending = [task for task in (add_task, waiter) if task is not None and not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
+@pytest.mark.parametrize(
+    "cleanup_mode",
+    ["internal_reset", "failing_internal_reset"],
+)
+async def test_post_commit_cancellation_propagates_after_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_mode: str,
+) -> None:
+    """Cancellation after EXEC must propagate once driver cleanup settles."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    session = RedisSession(
+        session_id=f"post_commit_cancellation_{cleanup_mode}",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    real_pipeline = client.pipeline
+    internal_reset_started = asyncio.Event()
+    allow_internal_reset = asyncio.Event()
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+        real_reset = delegate.reset
+        reset_calls = 0
+
+        async def controlled_reset() -> None:
+            nonlocal reset_calls
+            reset_calls += 1
+            if reset_calls == 1:
+                internal_reset_started.set()
+                await allow_internal_reset.wait()
+            await real_reset()
+            if cleanup_mode == "failing_internal_reset" and reset_calls == 1:
+                raise RuntimeError("post-commit reset failed")
+
+        monkeypatch.setattr(delegate, "reset", controlled_reset)
+        return delegate
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
+    add_task = asyncio.create_task(session.add_items([item]))
+    try:
+        await internal_reset_started.wait()
+        add_task.cancel("first-post-commit-cancel")
+        await asyncio.sleep(0)
+        add_task.cancel("second-during-cleanup")
+        await asyncio.sleep(0)
+        allow_internal_reset.set()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await add_task
+    finally:
+        allow_internal_reset.set()
+        if not add_task.done():
+            add_task.cancel()
+            await asyncio.gather(add_task, return_exceptions=True)
+
+    assert await session.get_items() == [item]
+    _assert_cancel_message(exc_info.value, "first-post-commit-cancel")
+    assert add_task.cancelled()
+    assert await client.ping() is True  # type: ignore[misc]
+
+
+async def test_post_commit_response_callback_failure_does_not_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A response callback failure after EXEC must not duplicate the committed batch."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    session = RedisSession(
+        session_id="post_commit_callback_failure",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+
+    def fail_rpush_callback(response: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("response callback failed")
+
+    client.set_response_callback("RPUSH", fail_rpush_callback)
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
+
+    await session.add_items([item])
+
+    monkeypatch.delitem(client.response_callbacks, "RPUSH")
+    assert await session.get_items() == [item]
+    assert await client.ping() is True  # type: ignore[misc]
+
+
+async def test_successful_batch_response_with_sibling_error_does_not_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful RPUSH remains committed when a sibling EXEC response fails."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    session = RedisSession(
+        session_id="successful_batch_with_sibling_error",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    real_pipeline = client.pipeline
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+        real_hset = delegate.hset
+        hset_calls = 0
+
+        def replace_updated_at_with_wrong_type(*args: Any, **kwargs: Any) -> Any:
+            nonlocal hset_calls
+            hset_calls += 1
+            if hset_calls == 2:
+                return delegate.incr(session._session_key)
+            return real_hset(*args, **kwargs)
+
+        monkeypatch.setattr(delegate, "hset", replace_updated_at_with_wrong_type)
+        return delegate
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
+
+    await session.add_items([item])
+
+    monkeypatch.setattr(client, "pipeline", real_pipeline)
+    assert await session.get_items() == [item]
+    assert await client.ping() is True  # type: ignore[misc]
+
+
+async def test_post_commit_reset_self_cancellation_does_not_cancel_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reset child cancellation after EXEC must not impersonate caller cancellation."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    session = RedisSession(
+        session_id="post_commit_reset_self_cancel",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    real_pipeline = client.pipeline
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+        real_reset = delegate.reset
+        reset_calls = 0
+
+        async def controlled_reset() -> None:
+            nonlocal reset_calls
+            reset_calls += 1
+            if reset_calls == 1:
+                raise asyncio.CancelledError("reset self-cancelled")
+            await real_reset()
+
+        monkeypatch.setattr(delegate, "reset", controlled_reset)
+        return delegate
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
+
+    await session.add_items([item])
+
+    assert await session.get_items() == [item]
+    assert await client.ping() is True  # type: ignore[misc]
+
+
+async def test_post_commit_reset_failure_detaches_without_release_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reset failure must detach rather than release through a reborrowing listener."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    from redis.event import AsyncAfterConnectionReleasedEvent
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    pool = client.connection_pool
+    session = RedisSession(
+        session_id="post_commit_repeated_reset_failure",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    real_pipeline = client.pipeline
+    dispatcher = pool._event_dispatcher
+    assert dispatcher is not None
+    listeners = dispatcher._event_listeners_mapping[AsyncAfterConnectionReleasedEvent]
+    listener_calls = 0
+    borrowed_connection: Any = None
+
+    class ReborrowingFailingReleaseListener:
+        async def listen(self, event: Any) -> None:
+            nonlocal borrowed_connection, listener_calls
+            listener_calls += 1
+            borrowed_connection = await pool.get_connection()
+            raise RuntimeError("release listener failed after reborrow")
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+        real_reset = delegate.reset
+        reset_calls = 0
+
+        async def fail_two_resets_before_release() -> None:
+            nonlocal reset_calls
+            reset_calls += 1
+            if reset_calls <= 2:
+                raise RuntimeError("reset failed before release")
+            await real_reset()
+
+        monkeypatch.setattr(delegate, "reset", fail_two_resets_before_release)
+        return delegate
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    monkeypatch.setitem(
+        dispatcher._event_listeners_mapping,
+        AsyncAfterConnectionReleasedEvent,
+        [*listeners, ReborrowingFailingReleaseListener()],
+    )
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
+
+    await session.add_items([item])
+
+    assert listener_calls == 0
+    assert borrowed_connection is None
+    assert not pool._in_use_connections
+    monkeypatch.setitem(
+        dispatcher._event_listeners_mapping,
+        AsyncAfterConnectionReleasedEvent,
+        listeners,
+    )
+    assert await session.get_items() == [item]
+    assert await client.ping() is True  # type: ignore[misc]
+
+
+async def test_reconnect_required_release_detaches_without_listener_reborrow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reconnect-required identity must never enter shared-pool release."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    from redis.event import AsyncAfterConnectionReleasedEvent
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    pool = client.connection_pool
+    session = RedisSession(
+        session_id="reconnect_required_release",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    real_pipeline = client.pipeline
+    dispatcher = pool._event_dispatcher
+    assert dispatcher is not None
+    listeners = dispatcher._event_listeners_mapping[AsyncAfterConnectionReleasedEvent]
+    listener_calls = 0
+    borrowed_connection: Any = None
+
+    class ReborrowingFailingReleaseListener:
+        async def listen(self, event: Any) -> None:
+            nonlocal borrowed_connection, listener_calls
+            listener_calls += 1
+            borrowed_connection = await pool.get_connection()
+            raise RuntimeError("release listener failed after reborrow")
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+        real_reset = delegate.reset
+
+        async def mark_for_reconnect_before_reset() -> None:
+            connection = delegate.connection
+            assert connection is not None
+            connection.mark_for_reconnect()
+            await real_reset()
+
+        monkeypatch.setattr(delegate, "reset", mark_for_reconnect_before_reset)
+        return delegate
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    monkeypatch.setitem(
+        dispatcher._event_listeners_mapping,
+        AsyncAfterConnectionReleasedEvent,
+        [*listeners, ReborrowingFailingReleaseListener()],
+    )
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
+
+    await session.add_items([item])
+
+    assert listener_calls == 0
+    assert borrowed_connection is None
+    assert not pool._in_use_connections
+    monkeypatch.setitem(
+        dispatcher._event_listeners_mapping,
+        AsyncAfterConnectionReleasedEvent,
+        listeners,
+    )
+    monkeypatch.setattr(client, "pipeline", real_pipeline)
+    assert await session.get_items() == [item]
+    assert await client.ping() is True  # type: ignore[misc]
+
+
+async def test_reconnect_marked_inside_release_failure_is_detached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reconnect race before native transfer must retain cleanup ownership."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    pool = client.connection_pool
+    session = RedisSession(
+        session_id="reconnect_during_release",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    real_release = pool.release
+    real_pipeline = client.pipeline
+    close_calls = 0
+    detached_connection: Any = None
+
+    async def redis81_raced_release(connection: Any) -> None:
+        nonlocal close_calls, detached_connection
+        detached_connection = connection
+        real_close = connection._close
+
+        def tracked_close() -> None:
+            nonlocal close_calls
+            close_calls += 1
+            real_close()
+
+        monkeypatch.setattr(connection, "_close", tracked_close)
+        connection.mark_for_reconnect()
+        pool._in_use_connections.remove(connection)
+        raise RuntimeError("disconnect failed before pool transfer")
+
+    monkeypatch.setattr(pool, "release", redis81_raced_release)
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
+
+    await session.add_items([item])
+
+    assert detached_connection is not None
+    assert close_calls == 1
+    assert detached_connection not in pool._in_use_connections
+    assert detached_connection not in pool._available_connections
+    monkeypatch.setattr(pool, "release", real_release)
+    monkeypatch.setattr(client, "pipeline", real_pipeline)
+    assert await session.get_items() == [item]
+    assert await client.ping() is True  # type: ignore[misc]
+
+
+async def test_post_commit_release_listener_failure_does_not_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A listener failure after pool release must not make a committed batch retryable."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    from redis.event import AsyncAfterConnectionReleasedEvent
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    session = RedisSession(
+        session_id="post_commit_release_listener_failure",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    dispatcher = client.connection_pool._event_dispatcher
+    assert dispatcher is not None
+    listeners = dispatcher._event_listeners_mapping[AsyncAfterConnectionReleasedEvent]
+
+    class FailingReleaseListener:
+        async def listen(self, event: Any) -> None:
+            raise RuntimeError("release listener failed after pool return")
+
+    monkeypatch.setitem(
+        dispatcher._event_listeners_mapping,
+        AsyncAfterConnectionReleasedEvent,
+        [*listeners, FailingReleaseListener()],
+    )
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
+
+    await session.add_items([item])
+
+    monkeypatch.setitem(
+        dispatcher._event_listeners_mapping,
+        AsyncAfterConnectionReleasedEvent,
+        listeners,
+    )
+    assert await session.get_items() == [item]
+    assert await client.ping() is True  # type: ignore[misc]
+
+
+async def test_pre_exec_close_failure_is_quarantined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed dirty-connection close must remain owned for close retry."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    session = RedisSession(
+        session_id="pre_exec_disconnect_failure",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+        ttl=60,
+    )
+    real_pipeline = client.pipeline
+    time_started = asyncio.Event()
+    dirty_connection: Any = None
+    real_close: Any = None
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+
+        async def controlled_time() -> tuple[int, int]:
+            nonlocal dirty_connection, real_close
+            dirty_connection = delegate.connection
+            assert dirty_connection is not None
+            real_close = dirty_connection._close
+
+            def fail_close() -> None:
+                raise RuntimeError("close failed")
+
+            monkeypatch.setattr(dirty_connection, "_close", fail_close)
+            time_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(delegate, "time", controlled_time)
+        return delegate
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    add_task = asyncio.create_task(session.add_items([{"role": "user", "content": "cancelled"}]))
+    await time_started.wait()
+    add_task.cancel("caller-cancel")
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await add_task
+
+    _assert_cancel_message(exc_info.value, "caller-cancel")
+    assert session._detached_connections == {dirty_connection}
+    assert dirty_connection not in client.connection_pool._in_use_connections
+    assert dirty_connection not in client.connection_pool._available_connections
+    monkeypatch.setattr(dirty_connection, "_close", real_close)
+    await session.close()
+    assert session._detached_connections == set()
+    monkeypatch.setattr(client, "pipeline", real_pipeline)
+    assert await client.ping() is True  # type: ignore[misc]
+    assert await session.get_items() == []
+
+
+async def test_pre_exec_cancellation_skips_pipeline_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A protocol-dirty cancellation must not expose the connection through reset."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    session = RedisSession(
+        session_id="pre_exec_cancel_released_reset_failure",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+        ttl=60,
+    )
+    real_pipeline = client.pipeline
+    time_started = asyncio.Event()
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+
+        async def controlled_time() -> tuple[int, int]:
+            time_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def fail_if_reset() -> None:
+            raise AssertionError("dirty connection reached pipeline reset")
+
+        monkeypatch.setattr(delegate, "time", controlled_time)
+        monkeypatch.setattr(delegate, "reset", fail_if_reset)
+        return delegate
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    add_task = asyncio.create_task(session.add_items([{"role": "user", "content": "cancelled"}]))
+    await time_started.wait()
+    add_task.cancel("first-caller-cancel")
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await add_task
+
+    _assert_cancel_message(exc_info.value, "first-caller-cancel")
+    assert await client.ping() is True  # type: ignore[misc]
+    assert await session.get_items() == []
+
+
+async def test_blocking_pool_cancellation_completion_owns_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caller cancellation must not interrupt blocking-pool cleanup after it starts."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    from redis.asyncio import BlockingConnectionPool
+
+    seed_client = fakeredis.aioredis.FakeRedis()
+    source_pool = seed_client.connection_pool
+    pool = BlockingConnectionPool(
+        max_connections=1,
+        timeout=1,
+        connection_class=source_pool.connection_class,
+        **source_pool.connection_kwargs,
+    )
+    client = fakeredis.aioredis.FakeRedis(connection_pool=pool)
+    session = RedisSession(
+        session_id="blocking_pool_cancelled_release",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+        ttl=60,
+    )
+    real_pipeline = client.pipeline
+    time_started = asyncio.Event()
+    fail_time = asyncio.Event()
+    reset_started = asyncio.Event()
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+        real_reset = delegate.reset
+
+        async def controlled_time() -> tuple[int, int]:
+            time_started.set()
+            await fail_time.wait()
+            raise RuntimeError("pre-execute failure")
+
+        async def observed_reset() -> None:
+            reset_started.set()
+            await real_reset()
+
+        monkeypatch.setattr(delegate, "time", controlled_time)
+        monkeypatch.setattr(delegate, "reset", observed_reset)
+        return delegate
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    add_task = asyncio.create_task(session.add_items([{"role": "user", "content": "failed"}]))
+    await time_started.wait()
+    await pool._condition.acquire()
+    try:
+        fail_time.set()
+        await reset_started.wait()
+        add_task.cancel("caller-cancel")
+        await asyncio.sleep(0)
+    finally:
+        pool._condition.release()
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await add_task
+
+    _assert_cancel_message(exc_info.value, "caller-cancel")
+    assert not pool._in_use_connections
+    monkeypatch.setattr(client, "pipeline", real_pipeline)
+    assert await client.ping() is True  # type: ignore[misc]
+    assert await session.get_items() == []
+
+
+async def test_ordinary_pool_cancellation_completion_owns_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caller cancellation must not interrupt ordinary-pool cleanup after it starts."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    pool = client.connection_pool
+    session = RedisSession(
+        session_id="ordinary_pool_cancelled_release",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+        ttl=60,
+    )
+    real_pipeline = client.pipeline
+    time_started = asyncio.Event()
+    fail_time = asyncio.Event()
+    reset_started = asyncio.Event()
+    allow_reset = asyncio.Event()
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+        real_reset = delegate.reset
+
+        async def controlled_time() -> tuple[int, int]:
+            time_started.set()
+            await fail_time.wait()
+            raise RuntimeError("pre-execute failure")
+
+        async def controlled_reset() -> None:
+            reset_started.set()
+            await allow_reset.wait()
+            await real_reset()
+
+        monkeypatch.setattr(delegate, "time", controlled_time)
+        monkeypatch.setattr(delegate, "reset", controlled_reset)
+        return delegate
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    add_task = asyncio.create_task(session.add_items([{"role": "user", "content": "failed"}]))
+    try:
+        await time_started.wait()
+        fail_time.set()
+        await reset_started.wait()
+        add_task.cancel("caller-cancel")
+        await asyncio.sleep(0)
+        allow_reset.set()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await add_task
+    finally:
+        allow_reset.set()
+        if not add_task.done():
+            add_task.cancel()
+            await asyncio.gather(add_task, return_exceptions=True)
+
+    _assert_cancel_message(exc_info.value, "caller-cancel")
+    assert not pool._in_use_connections
+    monkeypatch.setattr(client, "pipeline", real_pipeline)
+    assert await client.ping() is True  # type: ignore[misc]
+    assert await session.get_items() == []
+
+
+async def test_transparent_overridden_pool_release_is_supported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A custom release that preserves pool ownership semantics remains supported."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    pool = client.connection_pool
+    session = RedisSession(
+        session_id="overridden_pool_release",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    real_release = pool.release
+    release_calls = 0
+
+    async def transparent_release(connection: Any) -> None:
+        nonlocal release_calls
+        release_calls += 1
+        await real_release(connection)
+
+    monkeypatch.setattr(pool, "release", transparent_release)
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
+
+    await session.add_items([item])
+
+    assert release_calls > 0
+    assert not pool._in_use_connections
+    monkeypatch.setattr(pool, "release", real_release)
+    assert await session.get_items() == [item]
+
+
+async def test_release_failure_after_reborrow_preserves_new_borrower(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A release-then-reborrow failure must not reclaim the new borrower's connection."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    pool = client.connection_pool
+    session = RedisSession(
+        session_id="ambiguous_pool_release",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    real_release = pool.release
+    real_pipeline = client.pipeline
+    release_calls = 0
+    borrowed_connection: Any = None
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+        monkeypatch.setattr(
+            delegate,
+            "reset",
+            lambda: _release_after_detaching_pipeline_connection(delegate),
+        )
+        return delegate
+
+    async def transfer_reborrow_then_fail(connection: Any) -> None:
+        nonlocal borrowed_connection, release_calls
+        release_calls += 1
+        await real_release(connection)
+        if release_calls == 1:
+            borrowed_connection = await pool.get_connection()
+            assert borrowed_connection is connection
+            raise RuntimeError("release failed after reborrow")
+
+    monkeypatch.setattr(pool, "release", transfer_reborrow_then_fail)
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
+
+    await session.add_items([item])
+
+    assert release_calls == 1
+    assert borrowed_connection is not None
+    assert borrowed_connection in pool._in_use_connections
+    assert borrowed_connection not in pool._available_connections
+    monkeypatch.setattr(pool, "release", real_release)
+    monkeypatch.setattr(client, "pipeline", real_pipeline)
+    await real_release(borrowed_connection)
+    replacement_connection = await pool.get_connection()
+    assert replacement_connection is borrowed_connection
+    await real_release(replacement_connection)
+    assert await session.get_items() == [item]
+
+
+async def test_post_commit_disconnect_failure_is_not_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A detached failed-disconnect connection must not make a committed batch retryable."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    session = RedisSession(
+        session_id="post_commit_disconnect_failure",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    real_pipeline = client.pipeline
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+        reset_calls = 0
+
+        async def fail_disconnect_after_commit() -> None:
+            nonlocal reset_calls
+            reset_calls += 1
+            if reset_calls == 1:
+                connection = delegate.connection
+                assert connection is not None
+                connection.mark_for_reconnect()
+
+                async def fail_disconnect(nowait: bool = False) -> None:
+                    raise RuntimeError("disconnect failed")
+
+                monkeypatch.setattr(connection, "disconnect", fail_disconnect)
+            await _release_after_detaching_pipeline_connection(delegate)
+
+        monkeypatch.setattr(delegate, "reset", fail_disconnect_after_commit)
+        return delegate
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
+
+    await session.add_items([item])
+
+    monkeypatch.setattr(client, "pipeline", real_pipeline)
+    assert await session.get_items() == [item]
+    assert await client.ping() is True  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_post_commit_detached_close_failure_is_quarantined(
+    monkeypatch: pytest.MonkeyPatch,
+    cancelled: bool,
+) -> None:
+    """A non-reusable connection close failure must not make a commit retryable."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    pool = client.connection_pool
+    session = RedisSession(
+        session_id=f"post_commit_detached_close_failure_{cancelled}",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    real_pipeline = client.pipeline
+    reset_started = asyncio.Event()
+    allow_reset = asyncio.Event()
+    detached_connection: Any = None
+    real_close: Any = None
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+
+        async def fail_disconnect_and_close_after_commit() -> None:
+            nonlocal detached_connection, real_close
+            reset_started.set()
+            await allow_reset.wait()
+            if detached_connection is None:
+                detached_connection = delegate.connection
+                assert detached_connection is not None
+                real_close = detached_connection._close
+                detached_connection.mark_for_reconnect()
+
+                async def fail_disconnect(nowait: bool = False) -> None:
+                    raise RuntimeError("disconnect failed")
+
+                def fail_close() -> None:
+                    raise RuntimeError("close failed")
+
+                monkeypatch.setattr(detached_connection, "disconnect", fail_disconnect)
+                monkeypatch.setattr(detached_connection, "_close", fail_close)
+            await _release_after_detaching_pipeline_connection(delegate)
+
+        monkeypatch.setattr(delegate, "reset", fail_disconnect_and_close_after_commit)
+        return delegate
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
+    add_task = asyncio.create_task(session.add_items([item]))
+    try:
+        await reset_started.wait()
+        if cancelled:
+            add_task.cancel("caller-cancel")
+            await asyncio.sleep(0)
+        allow_reset.set()
+        if cancelled:
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await add_task
+            _assert_cancel_message(exc_info.value, "caller-cancel")
+        else:
+            await add_task
+
+        assert not pool._in_use_connections
+        assert session._detached_connections == {detached_connection}
+        monkeypatch.setattr(detached_connection, "_close", real_close)
+        await session.close()
+        assert session._detached_connections == set()
+        assert await session.get_items() == [item]
+        assert await client.ping() is True  # type: ignore[misc]
+    finally:
+        allow_reset.set()
+        if not add_task.done():
+            add_task.cancel()
+            await asyncio.gather(add_task, return_exceptions=True)
+        if detached_connection is not None and real_close is not None:
+            monkeypatch.setattr(detached_connection, "_close", real_close)
+        await session.close()
+
+
+async def test_blocking_pool_listener_failure_notifies_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed blocking-pool release must notify a waiter despite listener failure."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    from redis.asyncio import BlockingConnectionPool
+    from redis.event import AsyncAfterConnectionReleasedEvent
+
+    seed_client = fakeredis.aioredis.FakeRedis()
+    source_pool = seed_client.connection_pool
+    pool = BlockingConnectionPool(
+        max_connections=1,
+        timeout=1,
+        connection_class=source_pool.connection_class,
+        **source_pool.connection_kwargs,
+    )
+    client = fakeredis.aioredis.FakeRedis(connection_pool=pool)
+    session = RedisSession(
+        session_id="blocking_pool_listener_failure",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    dispatcher = pool._event_dispatcher
+    assert dispatcher is not None
+    listeners = dispatcher._event_listeners_mapping[AsyncAfterConnectionReleasedEvent]
+    real_pipeline = client.pipeline
+    reset_started = asyncio.Event()
+    allow_reset = asyncio.Event()
+
+    class FailFirstReleaseListener:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def listen(self, event: Any) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("release listener failed")
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+        real_reset = delegate.reset
+
+        async def controlled_reset() -> None:
+            reset_started.set()
+            await allow_reset.wait()
+            await real_reset()
+
+        monkeypatch.setattr(delegate, "reset", controlled_reset)
+        return delegate
+
+    monkeypatch.setitem(
+        dispatcher._event_listeners_mapping,
+        AsyncAfterConnectionReleasedEvent,
+        [*listeners, FailFirstReleaseListener()],
+    )
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
+    add_task = asyncio.create_task(session.add_items([item]))
+    ping_task: asyncio.Task[Any] | None = None
+
+    async def ping() -> Any:
+        return await client.ping()  # type: ignore[misc]
+
+    try:
+        await reset_started.wait()
+        ping_task = asyncio.create_task(ping())
+        await asyncio.sleep(0)
+        allow_reset.set()
+        await add_task
+        assert await ping_task is True
+    finally:
+        allow_reset.set()
+        pending = [task for task in (add_task, ping_task) if task is not None and not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    monkeypatch.setattr(client, "pipeline", real_pipeline)
+    assert await session.get_items() == [item]
+
+
+async def test_blocking_pool_detached_disconnect_notifies_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing a detached blocking-pool connection must notify an existing waiter."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    from redis.asyncio import BlockingConnectionPool
+
+    seed_client = fakeredis.aioredis.FakeRedis()
+    source_pool = seed_client.connection_pool
+    pool = BlockingConnectionPool(
+        max_connections=1,
+        timeout=1,
+        connection_class=source_pool.connection_class,
+        **source_pool.connection_kwargs,
+    )
+    client = fakeredis.aioredis.FakeRedis(connection_pool=pool)
+    session = RedisSession(
+        session_id="blocking_pool_detached_disconnect",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    real_pipeline = client.pipeline
+    reset_started = asyncio.Event()
+    allow_reset = asyncio.Event()
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+
+        async def fail_disconnect_after_commit() -> None:
+            reset_started.set()
+            await allow_reset.wait()
+            connection = delegate.connection
+            assert connection is not None
+            connection.mark_for_reconnect()
+
+            async def fail_disconnect(nowait: bool = False) -> None:
+                raise RuntimeError("disconnect failed")
+
+            monkeypatch.setattr(connection, "disconnect", fail_disconnect)
+            await _release_after_detaching_pipeline_connection(delegate)
+
+        monkeypatch.setattr(delegate, "reset", fail_disconnect_after_commit)
+        return delegate
+
+    async def ping() -> Any:
+        return await client.ping()  # type: ignore[misc]
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
+    add_task = asyncio.create_task(session.add_items([item]))
+    ping_task: asyncio.Task[Any] | None = None
+    try:
+        await reset_started.wait()
+        ping_task = asyncio.create_task(ping())
+        await asyncio.sleep(0)
+        allow_reset.set()
+        await add_task
+        assert await ping_task is True
+    finally:
+        allow_reset.set()
+        pending = [task for task in (add_task, ping_task) if task is not None and not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    monkeypatch.setattr(client, "pipeline", real_pipeline)
+    assert await session.get_items() == [item]
+
+
+async def test_post_commit_internal_reset_failure_does_not_report_write_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cleanup failure after a successful EXEC must not invite a duplicate retry."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    session = RedisSession(
+        session_id="post_commit_reset_failure",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    real_pipeline = client.pipeline
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        delegate = real_pipeline(*args, **kwargs)
+        real_reset = delegate.reset
+        reset_calls = 0
+
+        async def fail_first_reset_after_release() -> None:
+            nonlocal reset_calls
+            reset_calls += 1
+            await real_reset()
+            if reset_calls == 1:
+                raise RuntimeError("post-commit reset failed")
+
+        monkeypatch.setattr(delegate, "reset", fail_first_reset_after_release)
+        return delegate
+
+    monkeypatch.setattr(client, "pipeline", pipeline)
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
+
+    await session.add_items([item])
+
+    assert await session.get_items() == [item]
+    assert await client.ping() is True  # type: ignore[misc]
 
 
 async def test_redis_session_operation_waiting_behind_close_raises():

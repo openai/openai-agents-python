@@ -1,4 +1,5 @@
 import types
+from typing import Any
 
 from typing_extensions import assert_type
 
@@ -6,6 +7,7 @@ import agents.decorators as decorators_module
 import agents.tool as tool_module
 from agents import (
     FunctionTool,
+    ToolGuardrailFunctionOutput,
     function_tool,
     input_guardrail,
     output_guardrail,
@@ -13,6 +15,12 @@ from agents import (
     tool_output_guardrail,
 )
 from agents.decorators import function_tool as decorators_function_tool, tool
+from agents.tool_guardrails import (
+    ToolInputGuardrail,
+    ToolInputGuardrailData,
+    ToolOutputGuardrail,
+    ToolOutputGuardrailData,
+)
 
 
 def test_decorator_module_preserves_existing_imports_and_identities() -> None:
@@ -40,3 +48,30 @@ def test_tool_alias_supports_bare_and_configured_decorator_forms() -> None:
     assert_type(configured_alias, FunctionTool)
     assert bare_alias.name == "bare_alias"
     assert configured_alias.name == "configured_alias"
+
+
+def test_tool_guardrail_decorators_keep_their_type_in_bare_form() -> None:
+    @tool_input_guardrail
+    def bare_input(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow()
+
+    @tool_input_guardrail(name="configured_input")
+    def configured_input(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow()
+
+    @tool_output_guardrail
+    def bare_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow()
+
+    @tool_output_guardrail(name="configured_output")
+    def configured_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow()
+
+    assert_type(bare_input, ToolInputGuardrail[Any])
+    assert_type(configured_input, ToolInputGuardrail[Any])
+    assert_type(bare_output, ToolOutputGuardrail[Any])
+    assert_type(configured_output, ToolOutputGuardrail[Any])
+    assert bare_input.get_name() == "bare_input"
+    assert configured_input.get_name() == "configured_input"
+    assert bare_output.get_name() == "bare_output"
+    assert configured_output.get_name() == "configured_output"
