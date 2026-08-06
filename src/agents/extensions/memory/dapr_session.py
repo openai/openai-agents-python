@@ -390,10 +390,17 @@ class DaprSession(SessionABC):
                         continue
                     raise
 
-            # Update metadata, preserving created_at across subsequent writes. This mirrors the
-            # etag-guarded loop used for the messages key above. A plain write would let two
-            # processes appending to the same new session each read no metadata, pick their own
-            # now, and have the later save overwrite created_at with the later timestamp.
+            # Update metadata, preserving created_at across subsequent writes. A plain write
+            # would let a later append overwrite created_at with its own now, so the save is
+            # guarded by the etag that backed the value that was read.
+            #
+            # The guard only applies once metadata exists. Dapr documents a write without an
+            # etag as last-write-wins even when first-write concurrency is requested, so
+            # asking for it on the create is not a race guarantee and is left off rather than
+            # implying one. Two writers creating the key concurrently can therefore both
+            # succeed, and the loser's created_at wins by a fraction of a second. Every write
+            # after that is etag guarded, which is the case that actually matters, since it is
+            # what stops a later append from resetting an established created_at.
             #
             # The messages key is already committed once we reach here, so raising would tell
             # the caller the append failed while their items are in the session, and the
@@ -416,7 +423,11 @@ class DaprSession(SessionABC):
                         value=json.dumps(metadata),
                         etag=metadata_etag,
                         state_metadata=self._get_metadata(),
-                        options=self._get_state_options(concurrency=Concurrency.first_write),
+                        options=self._get_state_options(
+                            concurrency=(
+                                Concurrency.first_write if metadata_etag is not None else None
+                            )
+                        ),
                     )
                     break
                 except Exception as error:
