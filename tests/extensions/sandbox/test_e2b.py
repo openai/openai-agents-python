@@ -10,7 +10,7 @@ import shlex
 import tarfile
 import uuid
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import pytest
 from pydantic import Field, PrivateAttr
@@ -486,6 +486,9 @@ class _FakeMountSession(BaseSandboxSession):
         )
         self._results = list(results or [])
         self.exec_calls: list[str] = []
+        # A single ordered timeline shared with the delegate recorder further down, so
+        # that sequencing between sandbox preparation and delegation can be asserted.
+        self.events: list[str] = []
 
     async def _exec_internal(
         self,
@@ -495,6 +498,7 @@ class _FakeMountSession(BaseSandboxSession):
         _ = timeout
         cmd_str = " ".join(str(c) for c in command)
         self.exec_calls.append(cmd_str)
+        self.events.append(f"exec:{cmd_str}")
         if self._results:
             return self._results.pop(0)
         return ExecResult(stdout=b"", stderr=b"", exit_code=0)
@@ -2652,3 +2656,165 @@ async def test_e2b_pty_start_maps_missing_sandbox_not_found_to_transport_error(
     assert exc_info.value.context["provider_error"] == "The sandbox was not found: request failed"
     assert exc_info.value.context["reason"] == "_FakeNotFound"
     assert exc_info.value.retryable is False
+
+
+class _RecordingDelegate:
+    """Records delegate calls onto the session's own timeline.
+
+    Recording into ``session.events`` rather than a separate list is what makes the
+    ordering assertions real: if delegation were moved ahead of FUSE or rclone
+    preparation, the delegate entry would no longer be last in the timeline.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.calls: list[tuple[str, RcloneMountPattern]] = []
+        recorder = self
+
+        def _make(name: str) -> Any:
+            async def _hook(self: Any, mount: Any, session: Any, *args: Any) -> list[Any]:
+                _ = (mount, args)
+                session.events.append(f"delegate:{name}")
+                recorder.calls.append((name, self.pattern))
+                return []
+
+            return _hook
+
+        for name in ("activate", "deactivate", "teardown_for_snapshot", "restore_after_snapshot"):
+            monkeypatch.setattr(InContainerMountStrategy, name, _make(name))
+
+
+def _bucket_mount() -> S3Mount:
+    return S3Mount(bucket="my-bucket", mount_strategy=E2BCloudBucketMountStrategy())
+
+
+@pytest.mark.asyncio
+async def test_e2b_ensure_fuse_raises_when_fuse_is_unavailable() -> None:
+    session = _FakeMountSession([_exec_fail()])
+
+    with pytest.raises(MountConfigError, match="FUSE support"):
+        await _ensure_fuse_support(session)
+
+    # The chmod must not run once the capability check has failed.
+    assert len(session.exec_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_e2b_ensure_fuse_raises_when_chmod_fails() -> None:
+    session = _FakeMountSession([_exec_ok(), _exec_fail()])
+
+    with pytest.raises(MountConfigError, match="/dev/fuse accessible") as exc_info:
+        await _ensure_fuse_support(session)
+
+    assert exc_info.value.context["exit_code"] == 1
+
+
+@pytest.mark.asyncio
+async def test_e2b_activate_prepares_fuse_and_rclone_before_delegating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fuse mount needs FUSE and rclone in place before the delegate runs."""
+    delegate = _RecordingDelegate(monkeypatch)
+    session = _FakeMountSession()
+    strategy = E2BCloudBucketMountStrategy()
+
+    await strategy.activate(_bucket_mount(), session, Path("/workspace/b"), Path("/tmp"))
+
+    # Delegation is the final step, after every preparation command.
+    assert session.events[-1] == "delegate:activate"
+    assert session.events.count("delegate:activate") == 1
+    prepared = session.events[:-1]
+    assert any("/dev/fuse" in event for event in prepared)
+    assert any("rclone" in event for event in prepared)
+    # The session-resolved pattern carries the fuse access args the raw pattern lacks.
+    assert "--allow-other" in delegate.calls[0][1].extra_args
+
+
+@pytest.mark.asyncio
+async def test_e2b_activate_skips_fuse_setup_for_nfs_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only fuse mounts need /dev/fuse, but every mode still needs rclone."""
+    delegate = _RecordingDelegate(monkeypatch)
+    session = _FakeMountSession()
+    strategy = E2BCloudBucketMountStrategy(pattern=RcloneMountPattern(mode="nfs"))
+
+    await strategy.activate(_bucket_mount(), session, Path("/workspace/b"), Path("/tmp"))
+
+    assert not any("/dev/fuse" in event for event in session.events)
+    assert any("rclone" in event for event in session.events)
+    # nfs still reaches the delegate, carrying the nfs pattern untouched.
+    assert session.events[-1] == "delegate:activate"
+    assert [name for name, _ in delegate.calls] == ["activate"]
+    delegated_pattern = delegate.calls[0][1]
+    assert delegated_pattern.mode == "nfs"
+    assert "--allow-other" not in delegated_pattern.extra_args
+
+
+@pytest.mark.asyncio
+async def test_e2b_restore_after_snapshot_reprepares_the_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restored sandbox may be a fresh container, so setup has to run again."""
+    delegate = _RecordingDelegate(monkeypatch)
+    session = _FakeMountSession()
+    strategy = E2BCloudBucketMountStrategy()
+
+    await strategy.restore_after_snapshot(_bucket_mount(), session, Path("/workspace/b"))
+
+    assert session.events[-1] == "delegate:restore_after_snapshot"
+    prepared = session.events[:-1]
+    assert any("/dev/fuse" in event for event in prepared)
+    assert any("rclone" in event for event in prepared)
+    assert "--allow-other" in delegate.calls[0][1].extra_args
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["deactivate", "teardown_for_snapshot"])
+async def test_e2b_teardown_paths_do_not_reinstall_tooling(
+    monkeypatch: pytest.MonkeyPatch, method: str
+) -> None:
+    """Unmounting must not try to install FUSE or rclone on the way out."""
+    delegate = _RecordingDelegate(monkeypatch)
+    session = _FakeMountSession()
+    strategy = E2BCloudBucketMountStrategy()
+
+    if method == "deactivate":
+        await strategy.deactivate(_bucket_mount(), session, Path("/workspace/b"), Path("/tmp"))
+    else:
+        await strategy.teardown_for_snapshot(_bucket_mount(), session, Path("/workspace/b"))
+
+    assert session.events == [f"delegate:{method}"]
+    assert [name for name, _ in delegate.calls] == [method]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method", ["activate", "deactivate", "teardown_for_snapshot", "restore_after_snapshot"]
+)
+async def test_e2b_strategy_rejects_a_foreign_session_before_touching_it(method: str) -> None:
+    """The session guard must run before any command is issued."""
+
+    class _WrongSession(_FakeMountSession):
+        pass
+
+    _WrongSession.__name__ = "NotAnE2BSession"
+    session = _WrongSession()
+    strategy = E2BCloudBucketMountStrategy()
+    mount = _bucket_mount()
+
+    with pytest.raises(MountConfigError, match="E2BSandboxSession"):
+        if method == "activate":
+            await strategy.activate(mount, session, Path("/w/b"), Path("/tmp"))
+        elif method == "deactivate":
+            await strategy.deactivate(mount, session, Path("/w/b"), Path("/tmp"))
+        elif method == "teardown_for_snapshot":
+            await strategy.teardown_for_snapshot(mount, session, Path("/w/b"))
+        else:
+            await strategy.restore_after_snapshot(mount, session, Path("/w/b"))
+
+    # The guard runs before anything is issued to the foreign sandbox.
+    assert session.events == []
+
+
+def test_e2b_strategy_has_no_docker_volume_driver_config() -> None:
+    assert E2BCloudBucketMountStrategy().build_docker_volume_driver_config(_bucket_mount()) is None
