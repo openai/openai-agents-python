@@ -1778,19 +1778,16 @@ async def test_cancelled_watch_releases_single_connection_pool(
     def pipeline(*args: Any, **kwargs: Any) -> Any:
         delegate = real_pipeline(*args, **kwargs)
 
-        class PipelineProxy:
-            def __getattr__(self, name: str) -> Any:
-                return getattr(delegate, name)
+        async def controlled_time() -> tuple[int, int]:
+            nonlocal dirty_connection
+            dirty_connection = delegate.connection
+            assert dirty_connection is not None
+            time_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
 
-            async def time(self) -> tuple[int, int]:
-                nonlocal dirty_connection
-                dirty_connection = delegate.connection
-                assert dirty_connection is not None
-                time_started.set()
-                await asyncio.Event().wait()
-                raise AssertionError("unreachable")
-
-        return PipelineProxy()
+        monkeypatch.setattr(delegate, "time", controlled_time)
+        return delegate
 
     monkeypatch.setattr(client, "pipeline", pipeline)
     add_task = asyncio.create_task(session.add_items([{"role": "user", "content": "cancelled"}]))
