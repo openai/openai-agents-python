@@ -1664,3 +1664,163 @@ def test_sse_line_decoder_flush_emits_only_an_unterminated_line() -> None:
     partial = _SSELineDecoder()
     assert partial.decode("data: b") == []
     assert partial.flush() == ["data: b"]
+
+
+class _RecordingBucketSession:
+    """Cloudflare-shaped session that records bucket mount calls."""
+
+    def __init__(self) -> None:
+        # _resolve_mount_path() reads the manifest root off the session.
+        self.state = _make_state(manifest=Manifest(root="/workspace"))
+        self.mounted: list[dict[str, Any]] = []
+        self.unmounted: list[Path] = []
+        # A single ordered timeline, so that tests claiming an order between mount
+        # and unmount actually constrain it rather than checking two separate lists.
+        self.events: list[str] = []
+
+    async def mount_bucket(
+        self, *, bucket: str, mount_path: Path, options: dict[str, object]
+    ) -> None:
+        self.mounted.append({"bucket": bucket, "mount_path": mount_path, "options": options})
+        self.events.append(f"mount:{mount_path}")
+
+    async def unmount_bucket(self, mount_path: Path) -> None:
+        self.unmounted.append(mount_path)
+        self.events.append(f"unmount:{mount_path}")
+
+
+_RecordingBucketSession.__name__ = "CloudflareSandboxSession"
+
+
+def _cf_s3_mount(strategy: CloudflareBucketMountStrategy, **kwargs: Any) -> S3Mount:
+    defaults: dict[str, Any] = {
+        "bucket": "bucket",
+        "access_key_id": "access-key",
+        "secret_access_key": "secret-key",
+        "mount_strategy": strategy,
+    }
+    defaults.update(kwargs)
+    return S3Mount(**defaults)
+
+
+@pytest.mark.parametrize(
+    "prefix, expected",
+    [(None, None), ("", "/"), ("/", "/"), ("data", "/data/"), ("/a/b/", "/a/b/")],
+    ids=["none", "empty", "slash", "bare", "wrapped"],
+)
+def test_cloudflare_prefix_is_normalised_to_a_bounded_path(
+    prefix: str | None, expected: str | None
+) -> None:
+    assert CloudflareBucketMountStrategy._normalize_prefix(prefix) == expected
+
+
+def test_cloudflare_config_rejects_a_half_supplied_credential_pair() -> None:
+    """Mount construction validates the strategy, so the pair is checked up front."""
+    strategy = CloudflareBucketMountStrategy()
+
+    with pytest.raises(MountConfigError, match="both access_key_id and secret_access_key"):
+        _cf_s3_mount(strategy, secret_access_key=None)
+
+
+def test_cloudflare_config_rejects_an_unsupported_mount_type() -> None:
+    strategy = CloudflareBucketMountStrategy()
+
+    with pytest.raises(MountConfigError, match="not supported for this mount type"):
+        strategy._build_cloudflare_bucket_mount_config(cast(Any, Dir()))
+
+
+def test_cloudflare_request_options_carry_credentials_and_prefix() -> None:
+    strategy = CloudflareBucketMountStrategy()
+    config = strategy._build_cloudflare_bucket_mount_config(
+        _cf_s3_mount(strategy, prefix="nested", read_only=False)
+    )
+
+    options = config.to_request_options()
+
+    assert options["endpoint"] == "https://s3.amazonaws.com"
+    assert options["readOnly"] is False
+    assert options["prefix"] == "/nested/"
+    assert options["credentials"] == {
+        "accessKeyId": "access-key",
+        "secretAccessKey": "secret-key",
+    }
+
+
+def test_cloudflare_request_options_omit_absent_optional_fields() -> None:
+    strategy = CloudflareBucketMountStrategy()
+    config = strategy._build_cloudflare_bucket_mount_config(
+        S3Mount(bucket="bucket", mount_strategy=strategy)
+    )
+
+    options = config.to_request_options()
+
+    assert "prefix" not in options
+    assert "credentials" not in options
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_activate_and_deactivate_drive_the_bucket_endpoints() -> None:
+    strategy = CloudflareBucketMountStrategy()
+    mount = _cf_s3_mount(strategy, prefix="nested")
+    session = cast(Any, _RecordingBucketSession())
+
+    assert await strategy.activate(mount, session, Path("/workspace/data"), Path("/tmp")) == []
+    await strategy.deactivate(mount, session, Path("/workspace/data"), Path("/tmp"))
+
+    path = Path("/workspace/data")
+    assert session.events == [f"mount:{path}", f"unmount:{path}"]
+    assert session.mounted[0]["bucket"] == "bucket"
+    assert session.mounted[0]["options"]["prefix"] == "/nested/"
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_snapshot_hooks_unmount_then_remount_the_same_path() -> None:
+    """A snapshot must not capture a live bucket, and the mount must come back after."""
+    strategy = CloudflareBucketMountStrategy()
+    mount = _cf_s3_mount(strategy)
+    session = cast(Any, _RecordingBucketSession())
+    path = Path("/workspace/data")
+
+    await strategy.teardown_for_snapshot(mount, session, path)
+    await strategy.restore_after_snapshot(mount, session, path)
+
+    # The order is the point: unmount has to precede the remount, or the snapshot
+    # would capture a live bucket.
+    assert session.events == [f"unmount:{path}", f"mount:{path}"]
+    assert session.mounted[0]["mount_path"] == path
+    assert session.mounted[0]["bucket"] == "bucket"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method", ["activate", "deactivate", "teardown_for_snapshot", "restore_after_snapshot"]
+)
+async def test_cloudflare_strategy_rejects_a_foreign_session(method: str) -> None:
+    """Every lifecycle method must refuse a session from another backend."""
+
+    class _WrongSession(_RecordingBucketSession):
+        pass
+
+    _WrongSession.__name__ = "NotACloudflareSession"
+    session = cast(Any, _WrongSession())
+    strategy = CloudflareBucketMountStrategy()
+    mount = _cf_s3_mount(strategy)
+
+    with pytest.raises(MountConfigError, match="not supported by this sandbox backend"):
+        if method == "activate":
+            await strategy.activate(mount, session, Path("/w/d"), Path("/tmp"))
+        elif method == "deactivate":
+            await strategy.deactivate(mount, session, Path("/w/d"), Path("/tmp"))
+        elif method == "teardown_for_snapshot":
+            await strategy.teardown_for_snapshot(mount, session, Path("/w/d"))
+        else:
+            await strategy.restore_after_snapshot(mount, session, Path("/w/d"))
+
+    # The guard runs before anything reaches the foreign sandbox.
+    assert session.events == []
+
+
+def test_cloudflare_strategy_has_no_docker_volume_driver_config() -> None:
+    strategy = CloudflareBucketMountStrategy()
+
+    assert strategy.build_docker_volume_driver_config(_cf_s3_mount(strategy)) is None
