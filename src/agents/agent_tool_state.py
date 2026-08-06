@@ -187,20 +187,37 @@ def peek_agent_tool_run_result(
     return _agent_tool_run_results_by_obj.get(candidate_id)
 
 
+def _peek_agent_tool_run_result_for_propagation(
+    tool_call: ResponseFunctionToolCall,
+    *,
+    scope_id: str | None,
+) -> RunResult | RunResultStreaming | None:
+    """Peek nested agent-tool state for context propagation.
+
+    Live top-level runs share ``scope_id=None``. For those, only resolve by tool-call
+    object identity so an ordinary function with a colliding provider signature cannot
+    pull another run's pending ``Agent.as_tool()`` cache entry via signature fallback.
+    """
+    if scope_id is None:
+        obj_id = id(tool_call)
+        if not _tool_call_obj_matches_scope(obj_id, scope_id=None):
+            return None
+        return _agent_tool_run_results_by_obj.get(obj_id)
+    return peek_agent_tool_run_result(tool_call, scope_id=scope_id)
+
+
 def _pending_nested_state_from_run_result(
     run_result: RunResult | RunResultStreaming | Any,
 ) -> Any | None:
     """Return the nested RunState for a cached agent-tool result, if available.
 
-    Prefer the stable ``_state`` on serialized pending results. Only call
-    ``to_state()`` when there is no live ``context_wrapper`` (serialized stubs),
-    since live results rebuild a fresh state from the wrapper on each call.
+    Prefer the stable ``_state`` on serialized pending results. For live results,
+    call ``to_state()`` so deeper nested agent-tool interruptions (A→B→C) remain
+    reachable after the live wrapper itself has been updated in place.
     """
     nested_state = getattr(run_result, "_state", None)
     if nested_state is not None:
         return nested_state
-    if getattr(run_result, "context_wrapper", None) is not None:
-        return None
     to_state = getattr(run_result, "to_state", None)
     if not callable(to_state):
         return None
@@ -208,6 +225,12 @@ def _pending_nested_state_from_run_result(
         return to_state()
     except Exception:
         return None
+
+
+def _is_agent_as_tool(function_run: Any) -> bool:
+    """Return True when a pending function run is an ``Agent.as_tool()`` tool."""
+    function_tool = getattr(function_run, "function_tool", None)
+    return bool(getattr(function_tool, "_is_agent_tool", False))
 
 
 def apply_application_context_to_agent_tool_states(
@@ -220,10 +243,10 @@ def apply_application_context_to_agent_tool_states(
 
     Nested ``Agent.as_tool()`` resumes read their own restored ``RunState`` (often with
     ``context=None``), so replacing only the parent wrapper would leave nested tools on
-    the pre-override application context. Walk only this ``RunState``'s pending function
-    tool calls (via cache peek) so unscoped live runs cannot overwrite unrelated
-    concurrent interruptions. Preserve nested run-owned fields such as approvals and
-    ``tool_input``.
+    the pre-override application context. Walk only this ``RunState``'s pending
+    agent-as-tool function calls (via cache peek) so unscoped live runs cannot overwrite
+    unrelated concurrent interruptions. Preserve nested run-owned fields such as
+    approvals and ``tool_input``.
     """
     seen = _seen_states if _seen_states is not None else set()
     state_id = id(run_state)
@@ -238,11 +261,15 @@ def apply_application_context_to_agent_tool_states(
 
     scope_id = getattr(run_state, "_agent_tool_state_scope_id", None)
     for function_run in function_runs:
+        if not _is_agent_as_tool(function_run):
+            continue
         tool_call = getattr(function_run, "tool_call", None)
         if tool_call is None:
             continue
 
-        run_result = peek_agent_tool_run_result(tool_call, scope_id=scope_id)
+        run_result = _peek_agent_tool_run_result_for_propagation(
+            tool_call, scope_id=scope_id
+        )
         if run_result is None:
             continue
 
