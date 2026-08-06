@@ -867,7 +867,10 @@ class Agent(AgentBase, Generic[TContext]):
                     run_result_streaming = Runner.run_streamed(
                         starting_agent=cast(Agent[Any], self),
                         input=resume_state or resolved_input,
-                        context=None if resume_state is not None else cast(Any, nested_context),
+                        # On resume, pass the parent application context so
+                        # resolve_resumed_context can update the nested restored
+                        # wrapper's .context without dropping nested approvals.
+                        context=cast(Any, nested_context),
                         run_config=resolved_run_config,
                         max_turns=resolved_max_turns,
                         hooks=hooks,
@@ -936,7 +939,10 @@ class Agent(AgentBase, Generic[TContext]):
                     run_result = await Runner.run(
                         starting_agent=cast(Agent[Any], self),
                         input=resume_state or resolved_input,
-                        context=None if resume_state is not None else cast(Any, nested_context),
+                        # On resume, pass the parent application context so
+                        # resolve_resumed_context can update the nested restored
+                        # wrapper's .context without dropping nested approvals.
+                        context=cast(Any, nested_context),
                         run_config=resolved_run_config,
                         max_turns=resolved_max_turns,
                         hooks=hooks,

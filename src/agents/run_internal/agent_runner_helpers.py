@@ -8,10 +8,7 @@ from typing import Any, cast
 from openai.types.responses.response_usage import OutputTokensDetails
 
 from ..agent import Agent
-from ..agent_tool_state import (
-    apply_application_context_to_agent_tool_states,
-    set_agent_tool_state_scope,
-)
+from ..agent_tool_state import set_agent_tool_state_scope
 from ..exceptions import UserError
 from ..guardrail import InputGuardrailResult
 from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
@@ -292,10 +289,9 @@ def resolve_resumed_context(
     authoritative. Only its application ``context`` value is replaced so
     run-owned wrapper state (approvals, usage, turn input, tool input, …)
     survives the override instead of being dropped by a fresh wrapper.
-
-    The same application value is also propagated into nested ``Agent.as_tool()``
-    run states pending on this ``RunState``, so nested tools see the override
-    when they resume with ``context=None``.
+    Nested ``Agent.as_tool()`` resumes should pass the parent application
+    context into ``Runner.run`` / ``Runner.run_streamed`` so this same path
+    applies there.
     """
     if context is not None:
         existing_context = run_state._context
@@ -305,10 +301,6 @@ def resolve_resumed_context(
             )
             if existing_context is not context:
                 existing_context.context = application_context
-            apply_application_context_to_agent_tool_states(
-                run_state,
-                application_context=application_context,
-            )
             set_agent_tool_state_scope(existing_context, run_state._agent_tool_state_scope_id)
             run_state._context = existing_context
             return existing_context

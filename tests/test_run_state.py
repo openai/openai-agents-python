@@ -7237,225 +7237,6 @@ def test_resolve_resumed_context_keeps_restored_wrapper_and_replaces_app_context
     assert resolved_again.tool_input == {"scoped": True}
 
 
-def test_resolve_resumed_context_propagates_override_into_nested_agent_tool_state() -> None:
-    """Parent context= override must reach cached nested Agent.as_tool() run states."""
-    from agents.agent_tool_state import (
-        drop_agent_tool_run_result,
-        peek_agent_tool_run_result,
-        record_agent_tool_run_result,
-        set_agent_tool_state_scope,
-    )
-    from agents.run_context import _ApprovalRecord
-    from agents.run_state import _SerializedAgentToolRunResult
-
-    scope_id = "scope-override-nested"
-    outer_wrapper = RunContextWrapper(context={"user": "original"})
-    set_agent_tool_state_scope(outer_wrapper, scope_id)
-    agent = Agent(name="OuterAgent")
-    nested_tool = function_tool(lambda: "nested", name_override="nested_agent_tool")
-    nested_tool._is_agent_tool = True
-    agent.tools = [nested_tool]
-    nested_call = make_tool_call(call_id="nested-call", name="nested_agent_tool")
-
-    nested_wrapper = RunContextWrapper(context={"user": "original"})
-    nested_wrapper.tool_input = {"scoped": True}
-    nested_approvals = nested_wrapper._approvals
-    nested_approvals["inner"] = _ApprovalRecord(approved=["1"])
-    nested_state = make_state_with_interruptions(
-        agent,
-        [make_tool_approval_item(agent, call_id="inner-1", name="inner")],
-        original_input="nested",
-    )
-    nested_state._context = nested_wrapper
-    nested_state._agent_tool_state_scope_id = "nested-scope"
-
-    parent_state = make_state(agent, context=outer_wrapper)
-    parent_state._agent_tool_state_scope_id = scope_id
-    parent_state._last_processed_response = make_processed_response(
-        functions=[ToolRunFunction(tool_call=nested_call, function_tool=nested_tool)]
-    )
-
-    pending = _SerializedAgentToolRunResult(nested_state)
-    try:
-        record_agent_tool_run_result(nested_call, cast(Any, pending), scope_id=scope_id)
-        override = {"user": "reviewer"}
-        resolved = resolve_resumed_context(run_state=parent_state, context=override)
-
-        assert resolved is outer_wrapper
-        assert resolved.context is override
-        assert nested_wrapper.context is override
-        assert nested_wrapper.tool_input == {"scoped": True}
-        assert nested_wrapper._approvals is nested_approvals
-        assert nested_wrapper._approvals["inner"].approved == ["1"]
-
-        cached = peek_agent_tool_run_result(nested_call, scope_id=scope_id)
-        assert cached is not None
-        cached_context = cached.to_state()._context
-        assert cached_context is not None
-        assert cached_context.context is override
-    finally:
-        drop_agent_tool_run_result(nested_call, scope_id=scope_id)
-
-
-def test_resolve_resumed_context_does_not_leak_override_across_unscoped_runs() -> None:
-    """Unscoped live resumes must not overwrite another run's nested agent-tool context."""
-    from agents.agent_tool_state import (
-        drop_agent_tool_run_result,
-        record_agent_tool_run_result,
-    )
-    from agents.run_state import _SerializedAgentToolRunResult
-
-    agent = Agent(name="OuterAgent")
-    nested_tool = function_tool(lambda: "nested", name_override="nested_agent_tool")
-    nested_tool._is_agent_tool = True
-    agent.tools = [nested_tool]
-
-    def _pending_pair(call_id: str, user: str) -> tuple[Any, Any, Any, Any]:
-        nested_call = make_tool_call(call_id=call_id, name="nested_agent_tool")
-        nested_wrapper = RunContextWrapper(context={"user": user})
-        nested_state = make_state_with_interruptions(
-            agent,
-            [make_tool_approval_item(agent, call_id=f"{call_id}-inner", name="inner")],
-            original_input="nested",
-        )
-        nested_state._context = nested_wrapper
-        outer_wrapper = RunContextWrapper(context={"user": user})
-        parent_state = make_state(agent, context=outer_wrapper)
-        # Live top-level runs share scope_id=None until JSON restore assigns one.
-        parent_state._agent_tool_state_scope_id = None
-        parent_state._last_processed_response = make_processed_response(
-            functions=[ToolRunFunction(tool_call=nested_call, function_tool=nested_tool)]
-        )
-        pending = _SerializedAgentToolRunResult(nested_state)
-        record_agent_tool_run_result(nested_call, cast(Any, pending), scope_id=None)
-        return nested_call, nested_wrapper, parent_state, outer_wrapper
-
-    call_a, wrapper_a, state_a, outer_a = _pending_pair("call-a", "run-a")
-    call_b, wrapper_b, state_b, _outer_b = _pending_pair("call-b", "run-b")
-    try:
-        override = {"user": "reviewer-a"}
-        resolved = resolve_resumed_context(run_state=state_a, context=override)
-
-        assert resolved is outer_a
-        assert resolved.context is override
-        assert wrapper_a.context is override
-        # Unrelated concurrent unscoped run must keep its original nested context.
-        assert wrapper_b.context == {"user": "run-b"}
-        assert state_b._context is not None
-        assert state_b._context.context == {"user": "run-b"}
-    finally:
-        drop_agent_tool_run_result(call_a, scope_id=None)
-        drop_agent_tool_run_result(call_b, scope_id=None)
-
-
-def test_resolve_resumed_context_propagates_through_live_nested_agent_tools() -> None:
-    """Live A→B→C nesting must recurse past B's live wrapper into pending C."""
-    from agents.agent_tool_state import (
-        drop_agent_tool_run_result,
-        record_agent_tool_run_result,
-    )
-    from agents.run_state import _SerializedAgentToolRunResult
-
-    agent = Agent(name="OuterAgent")
-    b_tool = function_tool(lambda: "b", name_override="agent_b")
-    b_tool._is_agent_tool = True
-    c_tool = function_tool(lambda: "c", name_override="agent_c")
-    c_tool._is_agent_tool = True
-    agent.tools = [b_tool]
-
-    b_call = make_tool_call(call_id="b-call", name="agent_b")
-    c_call = make_tool_call(call_id="c-call", name="agent_c")
-
-    c_wrapper = RunContextWrapper(context={"user": "original"})
-    c_state = make_state_with_interruptions(
-        agent,
-        [make_tool_approval_item(agent, call_id="c-inner", name="inner")],
-        original_input="c",
-    )
-    c_state._context = c_wrapper
-
-    b_wrapper = RunContextWrapper(context={"user": "original"})
-    b_state = make_state(agent, context=b_wrapper)
-    b_state._agent_tool_state_scope_id = None
-    b_state._last_processed_response = make_processed_response(
-        functions=[ToolRunFunction(tool_call=c_call, function_tool=c_tool)]
-    )
-    live_b = SimpleNamespace(
-        context_wrapper=b_wrapper,
-        interruptions=c_state.get_interruptions(),
-        to_state=lambda: b_state,
-    )
-
-    outer_wrapper = RunContextWrapper(context={"user": "original"})
-    parent_state = make_state(agent, context=outer_wrapper)
-    parent_state._agent_tool_state_scope_id = None
-    parent_state._last_processed_response = make_processed_response(
-        functions=[ToolRunFunction(tool_call=b_call, function_tool=b_tool)]
-    )
-
-    try:
-        record_agent_tool_run_result(b_call, cast(Any, live_b), scope_id=None)
-        record_agent_tool_run_result(
-            c_call, cast(Any, _SerializedAgentToolRunResult(c_state)), scope_id=None
-        )
-        override = {"user": "reviewer"}
-        resolved = resolve_resumed_context(run_state=parent_state, context=override)
-
-        assert resolved is outer_wrapper
-        assert b_wrapper.context is override
-        assert c_wrapper.context is override
-    finally:
-        drop_agent_tool_run_result(b_call, scope_id=None)
-        drop_agent_tool_run_result(c_call, scope_id=None)
-
-
-def test_resolve_resumed_context_skips_non_agent_functions_for_propagation() -> None:
-    """Ordinary functions must not signature-match into another run's agent-tool cache."""
-    from agents.agent_tool_state import (
-        drop_agent_tool_run_result,
-        record_agent_tool_run_result,
-    )
-    from agents.run_state import _SerializedAgentToolRunResult
-
-    agent = Agent(name="OuterAgent")
-    ordinary_tool = function_tool(lambda: "plain", name_override="shared_name")
-    agent_tool = function_tool(lambda: "agent", name_override="shared_name")
-    agent_tool._is_agent_tool = True
-
-    # Same provider signature, different tool-call objects / runs.
-    ordinary_call = make_tool_call(call_id="shared-call", name="shared_name", arguments="{}")
-    agent_call = make_tool_call(call_id="shared-call", name="shared_name", arguments="{}")
-
-    nested_wrapper = RunContextWrapper(context={"user": "agent-run"})
-    nested_state = make_state_with_interruptions(
-        agent,
-        [make_tool_approval_item(agent, call_id="inner", name="inner")],
-        original_input="nested",
-    )
-    nested_state._context = nested_wrapper
-    record_agent_tool_run_result(
-        agent_call, cast(Any, _SerializedAgentToolRunResult(nested_state)), scope_id=None
-    )
-
-    outer_wrapper = RunContextWrapper(context={"user": "ordinary-run"})
-    ordinary_state = make_state(agent, context=outer_wrapper)
-    ordinary_state._agent_tool_state_scope_id = None
-    ordinary_state._last_processed_response = make_processed_response(
-        functions=[ToolRunFunction(tool_call=ordinary_call, function_tool=ordinary_tool)]
-    )
-
-    try:
-        override = {"user": "reviewer"}
-        resolved = resolve_resumed_context(run_state=ordinary_state, context=override)
-
-        assert resolved is outer_wrapper
-        assert resolved.context is override
-        # Unrelated agent-tool cache entry must stay untouched.
-        assert nested_wrapper.context == {"user": "agent-run"}
-    finally:
-        drop_agent_tool_run_result(agent_call, scope_id=None)
-
-
 async def _interrupted_approval_state_with_tool_input(
     *,
     calls: list[str],
@@ -7538,6 +7319,86 @@ async def test_resume_approved_function_approval_streamed_with_context_override(
     assert calls == ["one"]
     assert seen_contexts == [override]
     assert seen_tool_inputs == [{"scoped": True}]
+    assert resumed.context_wrapper is restored_wrapper
+    assert resumed.context_wrapper.context == override
+    assert resumed.context_wrapper.tool_input == {"scoped": True}
+    assert resumed.context_wrapper._approvals is restored_wrapper._approvals
+
+
+@pytest.mark.asyncio
+async def test_resume_nested_agent_as_tool_with_context_override() -> None:
+    """Nested Agent.as_tool() resume sees context= while keeping nested wrapper-owned state."""
+    seen_contexts: list[dict[str, str]] = []
+    seen_tool_inputs: list[object] = []
+    calls: list[str] = []
+
+    @dataclass
+    class NestedParams:
+        input: str
+
+    @function_tool(needs_approval=True)
+    async def needs_ok(ctx: RunContextWrapper[dict[str, str]], text: str) -> str:
+        seen_contexts.append(dict(ctx.context))
+        seen_tool_inputs.append(ctx.tool_input)
+        calls.append(text)
+        return text
+
+    nested_model = FakeModel()
+    nested_agent = Agent(name="nested", tools=[needs_ok], model=nested_model)
+    nested_model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("needs_ok", json.dumps({"text": "one"}), call_id="inner-1")],
+            [get_final_output_message("nested-done")],
+        ]
+    )
+
+    outer_model = FakeModel()
+    outer = Agent(
+        name="outer",
+        tools=[
+            nested_agent.as_tool(
+                tool_name="nested_agent",
+                tool_description="Run nested agent",
+                parameters=NestedParams,
+            )
+        ],
+        model=outer_model,
+    )
+    outer_model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "nested_agent",
+                    json.dumps({"input": "hi"}),
+                    call_id="outer-1",
+                )
+            ],
+            [get_final_output_message("done")],
+        ]
+    )
+
+    first = await Runner.run(outer, input="hi", context={"user": "original"})
+    assert first.interruptions
+    assert first.interruptions[0].tool_name == "needs_ok"
+
+    state = first.to_state()
+    assert state._context is not None
+    state._context.tool_input = {"scoped": True}
+    state.approve(first.interruptions[0])
+    restored = await RunState.from_json(outer, state.to_json())
+    restored_wrapper = restored._context
+    assert restored_wrapper is not None
+    assert restored_wrapper.tool_input == {"scoped": True}
+    assert restored_wrapper._approvals
+    override = {"user": "reviewer"}
+
+    resumed = await Runner.run(outer, input=restored, context=override)
+
+    assert resumed.final_output == "done"
+    assert resumed.interruptions == []
+    assert calls == ["one"]
+    assert seen_contexts == [override]
+    assert seen_tool_inputs == [{"input": "hi"}]
     assert resumed.context_wrapper is restored_wrapper
     assert resumed.context_wrapper.context == override
     assert resumed.context_wrapper.tool_input == {"scoped": True}
