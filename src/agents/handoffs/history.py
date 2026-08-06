@@ -547,6 +547,10 @@ def _parse_summary_line(line: str) -> TResponseInputItem | None:
         recovered: dict[str, Any] = {"role": role}
         if name:
             recovered["name"] = name
+        # Keep an explicit empty content. Adapters such as the Chat Completions converter
+        # only recognize a message when both keys are present, so a role-only item is not
+        # replayable.
+        recovered["content"] = ""
         return cast(TResponseInputItem, recovered)
     role_text = role_part.strip()
     if not role_text:
@@ -560,7 +564,9 @@ def _parse_summary_line(line: str) -> TResponseInputItem | None:
         legacy_typed_item = _parse_legacy_typed_item(role, content)
         if legacy_typed_item is not None:
             return legacy_typed_item
-        reconstructed["content"] = content
+    # Set content even when empty, so a turn that carried none stays a replayable message
+    # rather than a role-only item that adapters do not recognize.
+    reconstructed["content"] = content
     return cast(TResponseInputItem, reconstructed)
 
 
