@@ -50,6 +50,7 @@ from ...memory.session_settings import (
     coerce_session_settings,
     resolve_session_limit,
 )
+from ...memory.sqlite_session import _await_mutation
 
 # Type alias for consistency levels
 ConsistencyLevel = Literal["eventual", "strong"]
@@ -334,23 +335,67 @@ class DaprSession(SessionABC):
         async with self._lock:
             self._check_not_closed()
             serialized_items: list[str] = [await self._serialize_item(item) for item in items]
+            await _await_mutation(self._add_items_locked(serialized_items))
 
-            # Persist ancillary metadata before the authoritative history so a metadata
-            # failure cannot make a committed batch look safe to retry.
-            now = str(int(time.time()))
-            metadata = {
-                "session_id": self.session_id,
-                "created_at": now,
-                "updated_at": now,
-            }
-            await self._dapr_client.save_state(
+    async def _add_items_locked(self, serialized_items: list[str]) -> None:
+        """Persist one batch while the caller retains the session lock."""
+        # Persist ancillary metadata before the authoritative history so a metadata
+        # failure cannot make a committed batch look safe to retry.
+        now = str(int(time.time()))
+        metadata = {
+            "session_id": self.session_id,
+            "created_at": now,
+            "updated_at": now,
+        }
+        await self._dapr_client.save_state(
+            store_name=self._state_store_name,
+            key=self._metadata_key,
+            value=json.dumps(metadata),
+            state_metadata=self._get_metadata(),
+            options=self._get_state_options(),
+        )
+
+        attempt = 0
+        while True:
+            attempt += 1
+            response = await self._dapr_client.get_state(
                 store_name=self._state_store_name,
-                key=self._metadata_key,
-                value=json.dumps(metadata),
-                state_metadata=self._get_metadata(),
-                options=self._get_state_options(),
+                key=self._messages_key,
+                state_metadata=self._get_read_metadata(),
             )
+            existing_messages = self._decode_messages_for_update(response.data)
+            updated_messages = existing_messages + serialized_items
+            messages_json = json.dumps(updated_messages, separators=(",", ":"))
+            etag = response.etag
+            try:
+                await self._dapr_client.save_state(
+                    store_name=self._state_store_name,
+                    key=self._messages_key,
+                    value=messages_json,
+                    etag=etag,
+                    state_metadata=self._get_metadata(),
+                    options=self._get_state_options(concurrency=Concurrency.first_write),
+                )
+                return
+            except Exception as error:
+                should_retry = await self._handle_concurrency_conflict(error, attempt)
+                if should_retry:
+                    continue
+                raise
 
+    async def pop_item(self) -> TResponseInputItem | None:
+        """Remove and return the most recent item from the session.
+
+        Returns:
+            The most recent item if it exists, None if the session is empty
+        """
+        async with self._lock:
+            self._check_not_closed()
+            return await _await_mutation(self._pop_item_locked())
+
+    async def _pop_item_locked(self) -> TResponseInputItem | None:
+        """Claim one item while the caller retains the session lock."""
+        while True:
             attempt = 0
             while True:
                 attempt += 1
@@ -359,10 +404,12 @@ class DaprSession(SessionABC):
                     key=self._messages_key,
                     state_metadata=self._get_read_metadata(),
                 )
-                existing_messages = self._decode_messages_for_update(response.data)
-                updated_messages = existing_messages + serialized_items
-                messages_json = json.dumps(updated_messages, separators=(",", ":"))
-                etag = response.etag
+                messages = self._decode_messages(response.data)
+                if not messages:
+                    return None
+                last_item = messages.pop()
+                messages_json = json.dumps(messages, separators=(",", ":"))
+                etag = getattr(response, "etag", None) or None
                 try:
                     await self._dapr_client.save_state(
                         store_name=self._state_store_name,
@@ -378,68 +425,29 @@ class DaprSession(SessionABC):
                     if should_retry:
                         continue
                     raise
-
-    async def pop_item(self) -> TResponseInputItem | None:
-        """Remove and return the most recent item from the session.
-
-        Returns:
-            The most recent item if it exists, None if the session is empty
-        """
-        async with self._lock:
-            self._check_not_closed()
-            while True:
-                attempt = 0
-                while True:
-                    attempt += 1
-                    response = await self._dapr_client.get_state(
-                        store_name=self._state_store_name,
-                        key=self._messages_key,
-                        state_metadata=self._get_read_metadata(),
-                    )
-                    messages = self._decode_messages(response.data)
-                    if not messages:
-                        return None
-                    last_item = messages.pop()
-                    messages_json = json.dumps(messages, separators=(",", ":"))
-                    etag = getattr(response, "etag", None) or None
-                    try:
-                        await self._dapr_client.save_state(
-                            store_name=self._state_store_name,
-                            key=self._messages_key,
-                            value=messages_json,
-                            etag=etag,
-                            state_metadata=self._get_metadata(),
-                            options=self._get_state_options(concurrency=Concurrency.first_write),
-                        )
-                        break
-                    except Exception as error:
-                        should_retry = await self._handle_concurrency_conflict(error, attempt)
-                        if should_retry:
-                            continue
-                        raise
-                try:
-                    if isinstance(last_item, str):
-                        return await self._deserialize_item(last_item)
-                    return last_item  # type: ignore[no-any-return]
-                except (json.JSONDecodeError, TypeError):
-                    continue
+            try:
+                if isinstance(last_item, str):
+                    return await self._deserialize_item(last_item)
+                return last_item  # type: ignore[no-any-return]
+            except (json.JSONDecodeError, TypeError):
+                continue
 
     async def clear_session(self) -> None:
         """Clear all items for this session."""
         async with self._lock:
             self._check_not_closed()
-            # Delete messages and metadata keys
-            await self._dapr_client.delete_state(
-                store_name=self._state_store_name,
-                key=self._messages_key,
-                options=self._get_state_options(),
-            )
+            await _await_mutation(self._clear_session_locked())
 
-            await self._dapr_client.delete_state(
-                store_name=self._state_store_name,
-                key=self._metadata_key,
-                options=self._get_state_options(),
-            )
+    async def _clear_session_locked(self) -> None:
+        """Delete authoritative history while the caller retains the session lock."""
+        # The messages key is the authoritative history boundary. Keep the
+        # ancillary metadata key so clear_session remains one state-store
+        # mutation instead of partially failing after history is cleared.
+        await self._dapr_client.delete_state(
+            store_name=self._state_store_name,
+            key=self._messages_key,
+            options=self._get_state_options(),
+        )
 
     async def close(self) -> None:
         """Close the Dapr client connection.

@@ -31,7 +31,7 @@ from ._optional_imports import raise_optional_dependency_error
 
 try:
     import redis.asyncio as redis
-    from redis.asyncio import BlockingConnectionPool, ConnectionPool, Redis
+    from redis.asyncio import BlockingConnectionPool, Redis
     from redis.exceptions import ResponseError, WatchError
 except ImportError as e:
     raise_optional_dependency_error(
@@ -48,6 +48,7 @@ from ...memory.session_settings import (
     coerce_session_settings,
     resolve_session_limit,
 )
+from ...memory.sqlite_session import _await_mutation
 
 
 @dataclass
@@ -65,15 +66,6 @@ class _PipelineConnectionPool:
         self._pool = pool
         self.release_started = False
         self.release_completed = False
-        release_implementation = getattr(pool.release, "__func__", None)
-        if release_implementation not in {
-            ConnectionPool.release,
-            BlockingConnectionPool.release,
-        }:
-            raise RuntimeError(
-                "RedisSession requires the standard redis-py connection pool release method"
-            )
-        self._uses_standard_release = release_implementation is ConnectionPool.release
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._pool, name)
@@ -92,12 +84,6 @@ class _PipelineConnectionPool:
             if was_in_use and connection in self._pool._available_connections:
                 self.release_completed = True
                 await self.notify_capacity_available()
-            elif (
-                was_in_use
-                and self._uses_standard_release
-                and connection in self._pool._in_use_connections
-            ):
-                self.release_completed = True
             raise
         else:
             self.release_completed = True
@@ -113,10 +99,11 @@ async def _finish_pipeline(
         return None, True, None
 
     reset_error: BaseException | None = None
-    try:
-        await pipe.reset()
-    except BaseException as exc:
-        reset_error = exc
+    if not connection_pool.release_started:
+        try:
+            await pipe.reset()
+        except BaseException as exc:
+            reset_error = exc
 
     if connection_pool.release_completed:
         pipe.connection = None
@@ -126,19 +113,22 @@ async def _finish_pipeline(
     if connection is None:
         return reset_error, True, None
 
-    if (
-        connection_pool.release_started
-        and connection not in connection_pool._pool._in_use_connections
-    ):
+    if connection_pool.release_started:
+        # The first release may have transferred and reborrowed the connection
+        # before failing. Its ownership is ambiguous, so never release it again.
+        connection_pool._pool._in_use_connections.discard(connection)
+        while connection in connection_pool._pool._available_connections:
+            connection_pool._pool._available_connections.remove(connection)
         try:
             connection._close()
         except BaseException as close_error:
             pipe.connection = None
+            connection_pool.release_completed = True
+            await connection_pool.notify_capacity_available()
             return close_error, True, connection
         await connection_pool.notify_capacity_available()
         pipe.connection = None
-        if reset_error is None:
-            reset_error = RuntimeError("Redis pipeline release did not complete")
+        connection_pool.release_completed = True
         return reset_error, True, None
 
     try:
@@ -149,14 +139,19 @@ async def _finish_pipeline(
     try:
         await connection_pool.release(connection)
     except BaseException as release_error:
-        if (
-            not connection_pool.release_completed
-            and connection not in connection_pool._pool._in_use_connections
-        ):
+        if not connection_pool.release_completed:
+            # A custom release implementation may transfer and reborrow the
+            # connection before failing. Remove ambiguous pool membership and
+            # quarantine the connection instead of leaving it checked out.
+            connection_pool._pool._in_use_connections.discard(connection)
+            while connection in connection_pool._pool._available_connections:
+                connection_pool._pool._available_connections.remove(connection)
             try:
                 connection._close()
             except BaseException as close_error:
                 pipe.connection = None
+                connection_pool.release_completed = True
+                await connection_pool.notify_capacity_available()
                 return close_error, True, connection
             await connection_pool.notify_capacity_available()
             connection_pool.release_completed = True
@@ -507,34 +502,41 @@ class RedisSession(SessionABC):
         """
         async with self._lock:
             self._check_not_closed()
-            while True:
-                # Use RPOP to atomically remove and return the rightmost (most recent) item
-                raw_msg = await self._redis.rpop(self._messages_key)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
+            return await _await_mutation(self._pop_item_locked())
 
-                if raw_msg is None:
-                    return None
+    async def _pop_item_locked(self) -> TResponseInputItem | None:
+        """Claim one item while the caller retains the session lock."""
+        while True:
+            # Use RPOP to atomically remove and return the rightmost (most recent) item
+            raw_msg = await self._redis.rpop(self._messages_key)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
 
-                try:
-                    # Handle both bytes (default) and str (decode_responses=True) Redis clients
-                    if isinstance(raw_msg, bytes):
-                        msg_str = raw_msg.decode("utf-8")
-                    else:
-                        msg_str = raw_msg  # Already a string
-                    return await self._deserialize_item(msg_str)
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    # Drop corrupted messages and keep looking for a valid item.
-                    continue
+            if raw_msg is None:
+                return None
+
+            try:
+                # Handle both bytes (default) and str (decode_responses=True) Redis clients
+                if isinstance(raw_msg, bytes):
+                    msg_str = raw_msg.decode("utf-8")
+                else:
+                    msg_str = raw_msg  # Already a string
+                return await self._deserialize_item(msg_str)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                # Drop corrupted messages and keep looking for a valid item.
+                continue
 
     async def clear_session(self) -> None:
         """Clear all items for this session."""
         async with self._lock:
             self._check_not_closed()
-            # Delete all keys associated with this session
-            await self._redis.delete(
-                self._session_key,
-                self._messages_key,
-                self._counter_key,
-            )
+            await _await_mutation(self._clear_session_locked())
+
+    async def _clear_session_locked(self) -> None:
+        """Delete all session keys while the caller retains the session lock."""
+        await self._redis.delete(
+            self._session_key,
+            self._messages_key,
+            self._counter_key,
+        )
 
     async def close(self) -> None:
         """Close the Redis connection.

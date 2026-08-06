@@ -45,6 +45,12 @@ class FakeObjectId:
     def __lt__(self, other: FakeObjectId) -> bool:
         return self._value < other._value
 
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, FakeObjectId) and self._value == other._value
+
+    def __hash__(self) -> int:
+        return hash(self._value)
+
     def __repr__(self) -> str:
         return f"FakeObjectId({self._value})"
 
@@ -130,7 +136,7 @@ class FakeAsyncCollection:
     async def find_one_and_update(
         self,
         query: dict[str, Any],
-        update: dict[str, Any],
+        update: dict[str, Any] | list[dict[str, Any]],
         upsert: bool = False,
         return_document: bool = False,
         sort: list[tuple[str, int]] | None = None,
@@ -142,6 +148,10 @@ class FakeAsyncCollection:
         if matches:
             doc = matches[0]
             before = copy.deepcopy(doc)
+            if isinstance(update, list):
+                raw = doc.get("message_data")
+                doc["message_data"] = raw[:-1] if isinstance(raw, list) else []
+                return copy.deepcopy(doc) if return_document else before
             for field, delta in update.get("$inc", {}).items():
                 doc[field] = doc.get(field, 0) + delta
             for field, value in update.get("$set", {}).items():
@@ -152,6 +162,7 @@ class FakeAsyncCollection:
                     values.pop(-1 if direction == 1 else 0)
             return copy.deepcopy(doc) if return_document else before
         if upsert:
+            assert isinstance(update, dict)
             new_doc: dict[str, Any] = {"_id": FakeObjectId()}
             new_doc.update(update.get("$setOnInsert", {}))
             new_doc.update(update.get("$set", {}))
@@ -361,10 +372,19 @@ async def test_pop_item_empty_session(session: MongoDBSession) -> None:
 
 
 async def test_clear_session(session: MongoDBSession) -> None:
-    """clear_session must remove all items and session metadata."""
+    """clear_session removes history while preserving monotonic ordering metadata."""
     await session.add_items([{"role": "user", "content": "x"}])
+    metadata: dict[str, Any] = next(iter(session._sessions._docs.values()))
+    sequence_before_clear = metadata["_seq"]
+
     await session.clear_session()
+
     assert await session.get_items() == []
+    assert next(iter(session._sessions._docs.values()))["_seq"] == sequence_before_clear
+
+    await session.add_items([{"role": "user", "content": "after clear"}])
+    batch = next(iter(session._messages._docs.values()))
+    assert batch["seq"] == sequence_before_clear
 
 
 async def test_multiple_add_calls_accumulate(session: MongoDBSession) -> None:
@@ -1081,9 +1101,7 @@ async def test_add_items_is_invisible_until_single_document_commit(
     assert await session.get_items() == [seed, *batch]
 
 
-async def test_concurrent_pop_item_claims_distinct_items_from_batch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_concurrent_pop_item_claims_distinct_items_from_batch() -> None:
     """Atomic array pops must return each item in a logical batch at most once."""
     MongoDBSession._init_state.clear()
     client = FakeAsyncMongoClient()
@@ -1099,29 +1117,10 @@ async def test_concurrent_pop_item_claims_distinct_items_from_batch(
     ]
     await session.add_items(items)
 
-    real_to_list = FakeCursor.to_list
-    initial_reads = 0
-    all_initial_reads_ready = asyncio.Event()
-
-    async def pause_initial_candidate_reads(cursor: FakeCursor) -> list[dict[str, Any]]:
-        nonlocal initial_reads
-        docs = [
-            {**doc, "message_data": copy.deepcopy(doc.get("message_data"))}
-            for doc in await real_to_list(cursor)
-        ]
-        if initial_reads < len(items):
-            initial_reads += 1
-            if initial_reads == len(items):
-                all_initial_reads_ready.set()
-            await all_initial_reads_ready.wait()
-        return docs
-
-    monkeypatch.setattr(FakeCursor, "to_list", pause_initial_candidate_reads)
     tasks = [asyncio.create_task(session.pop_item()) for _ in items]
     try:
         popped = await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
     finally:
-        all_initial_reads_ready.set()
         for task in tasks:
             if not task.done():
                 task.cancel()
@@ -1134,6 +1133,179 @@ async def test_concurrent_pop_item_claims_distinct_items_from_batch(
         "third",
     }
     assert await session.get_items() == []
+    assert session._messages._docs == {}
+
+
+async def test_pop_item_atomically_selects_newest_concurrent_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The claim operation must select a batch appended before its linearization point."""
+    MongoDBSession._init_state.clear()
+    client = FakeAsyncMongoClient()
+    session = MongoDBSession(
+        "concurrent-add-pop",
+        client=client,  # type: ignore[arg-type]
+        database="agents_test",
+    )
+    await session.add_items([{"role": "user", "content": "older"}])
+
+    real_find_one_and_update = session._messages.find_one_and_update
+    appended = False
+
+    async def append_before_claim(*args: Any, **kwargs: Any) -> Any:
+        nonlocal appended
+        if not appended:
+            appended = True
+            await session.add_items([{"role": "assistant", "content": "newer"}])
+        return await real_find_one_and_update(*args, **kwargs)
+
+    monkeypatch.setattr(session._messages, "find_one_and_update", append_before_claim)
+
+    popped = await session.pop_item()
+
+    assert popped is not None
+    assert popped.get("content") == "newer"
+    assert [item.get("content") for item in await session.get_items()] == ["older"]
+
+
+async def test_pop_item_deletes_exhausted_batch_document(session: MongoDBSession) -> None:
+    """Popping a one-item batch must not leave an empty batch document behind."""
+    await session.add_items([{"role": "user", "content": "only"}])
+
+    popped = await session.pop_item()
+    assert popped is not None
+    assert popped.get("content") == "only"
+    assert session._messages._docs == {}
+
+
+async def test_pop_item_cancellation_waits_for_exhausted_batch_cleanup(
+    session: MongoDBSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation after a claim must wait until its empty marker is deleted."""
+    await session.add_items([{"role": "user", "content": "claimed"}])
+    real_delete_one = session._messages.delete_one
+    delete_started = asyncio.Event()
+    allow_delete = asyncio.Event()
+
+    async def controlled_delete(query: dict[str, Any]) -> None:
+        delete_started.set()
+        await allow_delete.wait()
+        await real_delete_one(query)
+
+    monkeypatch.setattr(session._messages, "delete_one", controlled_delete)
+    task = asyncio.create_task(session.pop_item())
+    try:
+        await delete_started.wait()
+        task.cancel("first-caller-cancel")
+        await asyncio.sleep(0)
+        task.cancel("second-caller-cancel")
+        await asyncio.sleep(0)
+        assert task.done() is False
+        allow_delete.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        allow_delete.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert session._messages._docs == {}
+
+
+@pytest.mark.parametrize("operation", ["add", "pop", "clear"])
+async def test_mutation_cancellation_waits_for_authoritative_outcome(
+    session: MongoDBSession,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """Cancellation must wait after the server has applied a history mutation."""
+    item: TResponseInputItem = {"role": "user", "content": "once"}
+    if operation != "add":
+        await session.add_items([item])
+
+    mutation_applied = asyncio.Event()
+    allow_return = asyncio.Event()
+    task: asyncio.Task[Any]
+
+    if operation == "add":
+        original_insert = session._messages.insert_one
+
+        async def controlled_insert(document: dict[str, Any]) -> Any:
+            result = await original_insert(document)
+            mutation_applied.set()
+            await allow_return.wait()
+            return result
+
+        monkeypatch.setattr(session._messages, "insert_one", controlled_insert)
+        task = asyncio.create_task(session.add_items([item]))
+    elif operation == "pop":
+        original_claim = session._messages.find_one_and_update
+
+        async def controlled_claim(*args: Any, **kwargs: Any) -> Any:
+            result = await original_claim(*args, **kwargs)
+            mutation_applied.set()
+            await allow_return.wait()
+            return result
+
+        monkeypatch.setattr(session._messages, "find_one_and_update", controlled_claim)
+        task = asyncio.create_task(session.pop_item())
+    else:
+        original_clear = session._messages.delete_many
+
+        async def controlled_clear(*args: Any, **kwargs: Any) -> Any:
+            result = await original_clear(*args, **kwargs)
+            mutation_applied.set()
+            await allow_return.wait()
+            return result
+
+        monkeypatch.setattr(session._messages, "delete_many", controlled_clear)
+        task = asyncio.create_task(session.clear_session())
+
+    try:
+        await mutation_applied.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert task.done() is False
+        allow_return.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        allow_return.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    expected = [item] if operation == "add" else []
+    assert await session.get_items() == expected
+
+
+async def test_pop_item_cleanup_failure_does_not_hide_known_claim(
+    session: MongoDBSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed empty-marker delete must not make a claimed item retry-visible."""
+    await session.add_items([{"role": "user", "content": "claimed"}])
+    real_delete_one = session._messages.delete_one
+
+    async def fail_delete_one(query: dict[str, Any]) -> None:
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(session._messages, "delete_one", fail_delete_one)
+    popped = await session.pop_item()
+
+    assert popped is not None
+    assert popped.get("content") == "claimed"
+    assert len(session._messages._docs) == 1
+    remaining_doc: dict[str, Any] = next(iter(session._messages._docs.values()))
+    assert remaining_doc["message_data"] == []
+
+    monkeypatch.setattr(session._messages, "delete_one", real_delete_one)
+    assert await session.pop_item() is None
+    assert session._messages._docs == {}
 
 
 async def test_reads_legacy_item_documents_with_new_batch_documents() -> None:

@@ -6,6 +6,7 @@ import json
 import logging
 import multiprocessing
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -30,6 +31,12 @@ from tests.test_responses import get_text_message
 
 # Mark all tests in this file as asyncio
 pytestmark = pytest.mark.asyncio
+
+
+def _assert_cancel_message(exc: asyncio.CancelledError, expected: str) -> None:
+    """Account for Python 3.10 dropping Task cancellation messages when re-awaited."""
+    expected_args = (expected,) if sys.version_info >= (3, 11) else ()
+    assert exc.args == expected_args
 
 
 @function_tool
@@ -641,13 +648,13 @@ async def test_auxiliary_mutation_cancellation_waits_for_commit(
         with pytest.raises(asyncio.CancelledError) as exc_info:
             await mutation
 
-        assert exc_info.value.args == ("first-caller-cancel",)
+        _assert_cancel_message(exc_info.value, "first-caller-cancel")
         assert mutation.cancelled()
 
         if operation == "create_branch":
             branches = await session.list_branches()
             assert {branch["branch_id"] for branch in branches} == {"main", "cancelled_branch"}
-            assert session._current_branch_id == "main"
+            assert session._current_branch_id == "cancelled_branch"
         elif operation == "delete_branch":
             branches = await session.list_branches()
             assert {branch["branch_id"] for branch in branches} == {"main"}
@@ -3356,6 +3363,198 @@ async def test_clear_session_resets_current_branch_to_main():
         assert _count_rows(session, "branch_reservations") == 2
     finally:
         session.close()
+
+
+async def test_external_clear_resets_stale_branch_before_next_write(tmp_path: Path):
+    """A second instance's clear must prevent stale branch resurrection."""
+    db_path = tmp_path / "external_clear_generation.db"
+    stale = AdvancedSQLiteSession(
+        session_id="external_clear_generation",
+        db_path=db_path,
+        create_tables=True,
+    )
+    clearer = AdvancedSQLiteSession(
+        session_id="external_clear_generation",
+        db_path=db_path,
+    )
+
+    try:
+        await stale.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+            ]
+        )
+        await stale.create_branch_from_turn(2, "stale")
+        assert stale._current_branch_id == "stale"
+
+        await clearer.clear_session()
+        await stale.add_items([{"role": "user", "content": "after clear"}])
+
+        assert stale._current_branch_id == "main"
+        assert [item.get("content") for item in await stale.get_items()] == ["after clear"]
+        assert await stale.get_items(branch_id="stale") == []
+        assert {branch["branch_id"] for branch in await stale.list_branches()} == {"main"}
+    finally:
+        stale.close()
+        clearer.close()
+
+
+async def test_external_clear_resets_stale_branch_before_pop(tmp_path: Path):
+    """A stale instance must pop the current main tail after an external clear."""
+    db_path = tmp_path / "external_clear_pop_generation.db"
+    stale = AdvancedSQLiteSession(
+        session_id="external_clear_pop_generation",
+        db_path=db_path,
+        create_tables=True,
+    )
+    clearer = AdvancedSQLiteSession(
+        session_id="external_clear_pop_generation",
+        db_path=db_path,
+    )
+
+    try:
+        await stale.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+            ]
+        )
+        await stale.create_branch_from_turn(2, "stale")
+        assert stale._current_branch_id == "stale"
+
+        await clearer.clear_session()
+        item: TResponseInputItem = {"role": "user", "content": "after clear"}
+        await clearer.add_items([item])
+
+        assert await stale.pop_item() == item
+        assert stale._current_branch_id == "main"
+        assert await clearer.get_items() == []
+    finally:
+        stale.close()
+        clearer.close()
+
+
+async def test_switch_validation_cancellation_waits_for_generation_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Legacy generation initialization must settle before cancellation propagates."""
+
+    class PausingCommitConnection(sqlite3.Connection):
+        pause_commit = False
+        commit_finished = threading.Event()
+        allow_return = threading.Event()
+
+        def commit(self) -> None:
+            super().commit()
+            if self.pause_commit:
+                self.pause_commit = False
+                self.commit_finished.set()
+                assert self.allow_return.wait(timeout=10)
+
+    db_path = tmp_path / "switch_validation_cancellation.db"
+    session = AdvancedSQLiteSession(
+        session_id="switch_validation_cancellation",
+        db_path=db_path,
+        create_tables=True,
+    )
+    mutation: asyncio.Task[Any] | None = None
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+            ]
+        )
+        await session.create_branch_from_turn(2, "target")
+        await session.switch_to_branch("main")
+        with session._write_connection() as setup_connection:
+            setup_connection.execute("DROP TABLE session_clear_generations")
+            setup_connection.commit()
+
+        connection = sqlite3.connect(
+            str(db_path),
+            check_same_thread=False,
+            factory=PausingCommitConnection,
+        )
+        with session._connections_lock:
+            session._connections.add(connection)
+        monkeypatch.setattr(session, "_get_connection", lambda: connection)
+        connection.pause_commit = True
+
+        mutation = asyncio.create_task(session.switch_to_branch("target"))
+        assert await asyncio.to_thread(connection.commit_finished.wait, 10)
+        mutation.cancel("first-caller-cancel")
+        await asyncio.sleep(0)
+        mutation.cancel("second-caller-cancel")
+        await asyncio.sleep(0)
+        assert mutation.done() is False
+        connection.allow_return.set()
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await mutation
+
+        _assert_cancel_message(exc_info.value, "first-caller-cancel")
+        assert session._current_branch_id == "main"
+        row = connection.execute(
+            "SELECT generation FROM session_clear_generations WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()
+        assert row == (0,)
+    finally:
+        PausingCommitConnection.allow_return.set()
+        if mutation is not None and not mutation.done():
+            mutation.cancel()
+            await asyncio.gather(mutation, return_exceptions=True)
+        session.close()
+
+
+async def test_post_clear_switch_synchronizes_generation_before_next_write(tmp_path: Path):
+    """A new instance may select and write to a branch created after an earlier clear."""
+    db_path = tmp_path / "post_clear_branch_switch.db"
+    owner = AdvancedSQLiteSession(
+        session_id="post_clear_branch_switch",
+        db_path=db_path,
+        create_tables=True,
+    )
+    other = AdvancedSQLiteSession(
+        session_id="post_clear_branch_switch",
+        db_path=db_path,
+    )
+
+    try:
+        await owner.clear_session()
+        await owner.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+            ]
+        )
+        await owner.create_branch_from_turn(2, "fresh")
+
+        await other.switch_to_branch("fresh")
+        await other.add_items([{"role": "assistant", "content": "on fresh"}])
+
+        assert other._current_branch_id == "fresh"
+        assert [item.get("content") for item in await other.get_items()] == [
+            "u1",
+            "a1",
+            "on fresh",
+        ]
+        assert [item.get("content") for item in await other.get_items(branch_id="main")] == [
+            "u1",
+            "a1",
+            "u2",
+        ]
+    finally:
+        owner.close()
+        other.close()
 
 
 async def test_pop_item_rolls_back_on_failure_after_earlier_delete():

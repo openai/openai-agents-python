@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
+from collections.abc import Awaitable
 from typing import Any, cast
 
 import pytest
@@ -16,6 +18,13 @@ from tests.test_responses import get_text_message
 
 # Keep the fallback-to-real-Redis path isolated from xdist workers.
 pytestmark = [pytest.mark.asyncio, pytest.mark.serial]
+
+
+def _assert_cancel_message(exc: asyncio.CancelledError, expected: str) -> None:
+    """Account for Python 3.10 dropping Task cancellation messages when re-awaited."""
+    expected_args = (expected,) if sys.version_info >= (3, 11) else ()
+    assert exc.args == expected_args
+
 
 # Try to use fakeredis for in-memory testing, fall back to real Redis if not available
 try:
@@ -126,6 +135,60 @@ async def test_redis_session_direct_ops():
 
     finally:
         await session.close()
+
+
+@pytest.mark.parametrize("operation", ["pop", "clear"])
+async def test_mutation_cancellation_waits_for_authoritative_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """Cancellation must wait after Redis applies a destructive mutation."""
+    session = await _create_test_session()
+    item: TResponseInputItem = {"role": "user", "content": "once"}
+    await session.add_items([item])
+    mutation_applied = asyncio.Event()
+    allow_return = asyncio.Event()
+
+    if operation == "pop":
+        original_rpop = session._redis.rpop
+
+        async def controlled_rpop(*args: Any, **kwargs: Any) -> Any:
+            result = await cast(Awaitable[Any], original_rpop(*args, **kwargs))
+            mutation_applied.set()
+            await allow_return.wait()
+            return result
+
+        monkeypatch.setattr(session._redis, "rpop", controlled_rpop)
+        task: asyncio.Task[Any] = asyncio.create_task(session.pop_item())
+    else:
+        original_delete = session._redis.delete
+
+        async def controlled_delete(*args: Any, **kwargs: Any) -> Any:
+            result = await original_delete(*args, **kwargs)
+            mutation_applied.set()
+            await allow_return.wait()
+            return result
+
+        monkeypatch.setattr(session._redis, "delete", controlled_delete)
+        task = asyncio.create_task(session.clear_session())
+
+    try:
+        await mutation_applied.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert task.done() is False
+        allow_return.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        allow_return.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert await session.get_items() == []
 
 
 async def test_runner_integration(agent: Agent):
@@ -1545,7 +1608,7 @@ async def test_cancelled_watch_releases_single_connection_pool(
             add_task.cancel()
             await asyncio.gather(add_task, return_exceptions=True)
 
-    assert exc_info.value.args == ("first-pre-exec-cancel",)
+    _assert_cancel_message(exc_info.value, "first-pre-exec-cancel")
     assert await session.get_items() == []
     assert await client.ping() is True  # type: ignore[misc]
 
@@ -1609,7 +1672,7 @@ async def test_post_commit_cancellation_propagates_after_cleanup(
             await asyncio.gather(add_task, return_exceptions=True)
 
     assert await session.get_items() == [item]
-    assert exc_info.value.args == ("first-post-commit-cancel",)
+    _assert_cancel_message(exc_info.value, "first-post-commit-cancel")
     assert add_task.cancelled()
     assert await client.ping() is True  # type: ignore[misc]
 
@@ -1847,7 +1910,7 @@ async def test_pre_exec_disconnect_failure_does_not_reuse_watched_connection(
     with pytest.raises(asyncio.CancelledError) as exc_info:
         await add_task
 
-    assert exc_info.value.args == ("caller-cancel",)
+    _assert_cancel_message(exc_info.value, "caller-cancel")
     monkeypatch.setattr(client, "pipeline", real_pipeline)
     assert await client.ping() is True  # type: ignore[misc]
     assert await session.get_items() == []
@@ -1895,7 +1958,7 @@ async def test_pre_exec_cancellation_wins_after_released_reset_failure(
     with pytest.raises(asyncio.CancelledError) as exc_info:
         await add_task
 
-    assert exc_info.value.args == ("first-caller-cancel",)
+    _assert_cancel_message(exc_info.value, "first-caller-cancel")
     assert await client.ping() is True  # type: ignore[misc]
     assert await session.get_items() == []
 
@@ -1961,7 +2024,7 @@ async def test_blocking_pool_cancellation_completion_owns_release(
     with pytest.raises(asyncio.CancelledError) as exc_info:
         await add_task
 
-    assert exc_info.value.args == ("caller-cancel",)
+    _assert_cancel_message(exc_info.value, "caller-cancel")
     assert not pool._in_use_connections
     monkeypatch.setattr(client, "pipeline", real_pipeline)
     assert await client.ping() is True  # type: ignore[misc]
@@ -2024,17 +2087,17 @@ async def test_ordinary_pool_cancellation_completion_owns_release(
             add_task.cancel()
             await asyncio.gather(add_task, return_exceptions=True)
 
-    assert exc_info.value.args == ("caller-cancel",)
+    _assert_cancel_message(exc_info.value, "caller-cancel")
     assert not pool._in_use_connections
     monkeypatch.setattr(client, "pipeline", real_pipeline)
     assert await client.ping() is True  # type: ignore[misc]
     assert await session.get_items() == []
 
 
-async def test_overridden_pool_release_is_rejected_before_mutation(
+async def test_transparent_overridden_pool_release_is_supported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ambiguous pool ownership semantics must be rejected before acquiring a connection."""
+    """A custom release that preserves pool ownership semantics remains supported."""
     if not USE_FAKE_REDIS:
         pytest.skip("This test requires fakeredis")
 
@@ -2048,24 +2111,63 @@ async def test_overridden_pool_release_is_rejected_before_mutation(
     real_release = pool.release
     release_calls = 0
 
-    async def transfer_reborrow_then_fail(connection: Any) -> None:
+    async def transparent_release(connection: Any) -> None:
         nonlocal release_calls
         release_calls += 1
         await real_release(connection)
-        borrowed = await pool.get_connection()
-        assert borrowed is connection
-        raise RuntimeError("release failed after reborrow")
 
-    monkeypatch.setattr(pool, "release", transfer_reborrow_then_fail)
-    item: TResponseInputItem = {"role": "user", "content": "not committed"}
+    monkeypatch.setattr(pool, "release", transparent_release)
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
 
-    with pytest.raises(RuntimeError, match="standard redis-py connection pool release method"):
-        await session.add_items([item])
+    await session.add_items([item])
 
-    assert release_calls == 0
+    assert release_calls > 0
     assert not pool._in_use_connections
     monkeypatch.setattr(pool, "release", real_release)
-    assert await session.get_items() == []
+    assert await session.get_items() == [item]
+
+
+async def test_ambiguous_overridden_pool_release_is_detached_after_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A release-then-reborrow failure must not expose a committed batch as retryable."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(max_connections=1)
+    pool = client.connection_pool
+    session = RedisSession(
+        session_id="ambiguous_pool_release",
+        redis_client=cast("Redis", client),
+        key_prefix="test:",
+    )
+    real_release = pool.release
+    release_calls = 0
+    borrowed_connection: Any = None
+
+    async def transfer_reborrow_then_fail(connection: Any) -> None:
+        nonlocal borrowed_connection, release_calls
+        release_calls += 1
+        await real_release(connection)
+        if release_calls == 1:
+            borrowed_connection = await pool.get_connection()
+            assert borrowed_connection is connection
+            raise RuntimeError("release failed after reborrow")
+
+    monkeypatch.setattr(pool, "release", transfer_reborrow_then_fail)
+    item: TResponseInputItem = {"role": "user", "content": "committed"}
+
+    await session.add_items([item])
+
+    assert release_calls == 1
+    assert borrowed_connection is not None
+    assert not pool._in_use_connections
+    assert borrowed_connection not in pool._available_connections
+    monkeypatch.setattr(pool, "release", real_release)
+    replacement_connection = await pool.get_connection()
+    assert replacement_connection is not borrowed_connection
+    await real_release(replacement_connection)
+    assert await session.get_items() == [item]
 
 
 async def test_post_commit_disconnect_failure_is_not_retryable(
@@ -2176,7 +2278,7 @@ async def test_post_commit_detached_close_failure_is_quarantined(
         if cancelled:
             with pytest.raises(asyncio.CancelledError) as exc_info:
                 await add_task
-            assert exc_info.value.args == ("caller-cancel",)
+            _assert_cancel_message(exc_info.value, "caller-cancel")
         else:
             await add_task
 

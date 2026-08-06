@@ -7,6 +7,7 @@ import threading
 from collections.abc import Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -16,7 +17,7 @@ from openai.types.responses.response_reasoning_item_param import (
     ResponseReasoningItemParam,
     Summary,
 )
-from sqlalchemy import insert, select, text, update
+from sqlalchemy import event, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.sql import Select
 
@@ -237,120 +238,87 @@ async def test_pop_from_empty_session():
     assert popped is None
 
 
-async def test_concurrent_pop_item_returns_each_row_once(monkeypatch: pytest.MonkeyPatch):
-    """A caller that loses the DELETE race must retry instead of returning the same row."""
-    session = SQLAlchemySession.from_url("concurrent_pop", url=DB_URL, create_tables=False)
-    rows = {
-        1: json.dumps({"role": "user", "content": "first"}),
-        2: json.dumps({"role": "assistant", "content": "second"}),
-    }
-    first_reads = 0
-    both_read_newest = asyncio.Event()
-    first_payload_reads = 0
-    both_read_newest_payload = asyncio.Event()
+async def test_concurrent_pop_item_returns_each_row_once(tmp_path):
+    """Concurrent atomic DELETE claims must return each stored row at most once."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'concurrent_pop.db'}")
+    writer = SQLAlchemySession("concurrent_pop", engine=engine, create_tables=True)
+    other = SQLAlchemySession("concurrent_pop", engine=engine)
+    await writer.add_items(
+        [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+        ]
+    )
 
-    class FakeResult:
-        def __init__(self, scalar: Any = None, rowcount: int = -1) -> None:
-            self._scalar = scalar
-            self.rowcount = rowcount
-
-        def scalar_one_or_none(self) -> Any:
-            return self._scalar
-
-    class FakeTransaction:
-        async def __aenter__(self) -> None:
-            return None
-
-        async def __aexit__(self, *args: Any) -> None:
-            return None
-
-    class FakeSession:
-        def __init__(self) -> None:
-            # Model a repeatable-read transaction: selects keep reading this snapshot even
-            # after another transaction deletes from the durable rows mapping.
-            self.snapshot = dict(rows)
-            self.selected_row_id: int | None = None
-            self.selected_row: str | None = None
-
-        async def __aenter__(self) -> FakeSession:
-            return self
-
-        async def __aexit__(self, *args: Any) -> None:
-            return None
-
-        def begin(self) -> FakeTransaction:
-            return FakeTransaction()
-
-        async def execute(self, statement: Any) -> FakeResult:
-            nonlocal first_payload_reads, first_reads
-            if isinstance(statement, Select):
-                selected_columns = list(statement.selected_columns.keys())
-                if selected_columns == ["id"]:
-                    self.selected_row_id = max(self.snapshot, default=None)
-                    if first_reads < 2:
-                        first_reads += 1
-                        if first_reads == 2:
-                            both_read_newest.set()
-                        await both_read_newest.wait()
-                    return FakeResult(self.selected_row_id)
-                assert selected_columns == ["message_data"]
-                assert self.selected_row_id is not None
-                self.selected_row = self.snapshot.get(self.selected_row_id)
-                if first_payload_reads < 2:
-                    first_payload_reads += 1
-                    if first_payload_reads == 2:
-                        both_read_newest_payload.set()
-                    await both_read_newest_payload.wait()
-                return FakeResult(self.selected_row)
-
-            assert self.selected_row_id is not None
-            if self.selected_row_id in rows:
-                del rows[self.selected_row_id]
-                return FakeResult(rowcount=1)
-            return FakeResult(rowcount=0)
-
-    class FakeSessionFactory:
-        def __call__(self) -> FakeSession:
-            return FakeSession()
-
-    async def tables_ready() -> None:
-        return None
-
-    session_factory = FakeSessionFactory()
-    monkeypatch.setattr(session, "_ensure_tables", tables_ready)
-    monkeypatch.setattr(session, "_session_factory", session_factory)
-
-    tasks = [asyncio.create_task(session.pop_item()) for _ in range(2)]
+    tasks = [asyncio.create_task(session.pop_item()) for session in (writer, other)]
     try:
-        popped = await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+        popped = await asyncio.wait_for(asyncio.gather(*tasks), timeout=2)
     finally:
-        both_read_newest.set()
-        both_read_newest_payload.set()
         for task in tasks:
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await session.engine.dispose()
+        await engine.dispose()
 
     contents = {cast(dict[str, Any], item)["content"] for item in popped if item is not None}
     assert contents == {"first", "second"}
-    assert rows == {}
 
 
-async def test_pop_item_rejects_unknown_delete_rowcount(
+async def test_sqlite_fallback_reserves_writer_before_tail_claim(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unknown DELETE row count cannot authorize a destructive read."""
+    """SQLite without DELETE RETURNING must serialize the select-delete fallback."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'fallback_pop.db'}")
+    writer = SQLAlchemySession("fallback_pop", engine=engine, create_tables=True)
+    other = SQLAlchemySession("fallback_pop", engine=engine)
+    statements: list[str] = []
+
+    def record_statement(
+        conn: Any,
+        cursor: Any,
+        statement: str,
+        parameters: Any,
+        context: Any,
+        executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record_statement)
+    monkeypatch.setattr(engine.dialect, "delete_returning", False)
+    await writer.add_items([{"role": "user", "content": "only"}])
+
+    tasks = [asyncio.create_task(session.pop_item()) for session in (writer, other)]
+    try:
+        popped = await asyncio.wait_for(asyncio.gather(*tasks), timeout=2)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        event.remove(engine.sync_engine, "before_cursor_execute", record_statement)
+        await engine.dispose()
+
+    assert sum(item is not None for item in popped) == 1
+    assert [item.get("content") for item in popped if item is not None] == ["only"]
+    assert any(statement.strip().upper() == "BEGIN IMMEDIATE" for statement in statements)
+
+
+async def test_pop_item_supports_unknown_delete_rowcount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A locked fallback claim must not depend on the DBAPI DELETE row count."""
     session = SQLAlchemySession.from_url("unknown_rowcount", url=DB_URL, create_tables=False)
     transaction_exit_errors: list[type[BaseException] | None] = []
+    delete_executed = False
 
     class FakeResult:
-        def __init__(self, scalar: Any = None, rowcount: int = -1) -> None:
-            self._scalar = scalar
+        def __init__(self, row: Any = None, rowcount: int = -1) -> None:
+            self._row = row
             self.rowcount = rowcount
 
-        def scalar_one_or_none(self) -> Any:
-            return self._scalar
+        def one_or_none(self) -> Any:
+            return self._row
 
     class FakeTransaction:
         async def __aenter__(self) -> None:
@@ -375,11 +343,11 @@ async def test_pop_item_rejects_unknown_delete_rowcount(
             return FakeTransaction()
 
         async def execute(self, statement: Any) -> FakeResult:
+            nonlocal delete_executed
             if isinstance(statement, Select):
-                selected_columns = list(statement.selected_columns.keys())
-                if selected_columns == ["id"]:
-                    return FakeResult(1)
-                return FakeResult(json.dumps({"role": "user", "content": "unclaimed"}))
+                assert statement._for_update_arg is not None
+                return FakeResult((1, json.dumps({"role": "user", "content": "claimed"})))
+            delete_executed = True
             return FakeResult(rowcount=-1)
 
     class FakeSessionFactory:
@@ -391,14 +359,168 @@ async def test_pop_item_rejects_unknown_delete_rowcount(
 
     monkeypatch.setattr(session, "_ensure_tables", tables_ready)
     monkeypatch.setattr(session, "_session_factory", FakeSessionFactory())
+    monkeypatch.setattr(session.engine.dialect, "delete_returning", False)
 
     try:
-        with pytest.raises(RuntimeError, match="confirm that exactly one item was deleted"):
-            await session.pop_item()
+        popped = await session.pop_item()
     finally:
         await session.engine.dispose()
 
-    assert transaction_exit_errors == [RuntimeError]
+    assert popped is not None
+    assert popped.get("content") == "claimed"
+    assert delete_executed is True
+    assert transaction_exit_errors == [None]
+
+
+async def test_pop_item_retries_returning_claim_lost_to_concurrent_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lost DELETE RETURNING race must retry if older rows remain."""
+    session = SQLAlchemySession.from_url("returning_retry", url=DB_URL, create_tables=False)
+    session_count = 0
+
+    class FakeResult:
+        def __init__(self, value: Any = None) -> None:
+            self._value = value
+
+        def scalar_one_or_none(self) -> Any:
+            return self._value
+
+    class FakeTransaction:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakeSession:
+        def __init__(self, attempt: int) -> None:
+            self._attempt = attempt
+
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        def begin(self) -> FakeTransaction:
+            return FakeTransaction()
+
+        async def execute(self, statement: Any) -> FakeResult:
+            if self._attempt == 1:
+                if isinstance(statement, Select):
+                    return FakeResult(1)
+                return FakeResult()
+            assert not isinstance(statement, Select)
+            return FakeResult(json.dumps({"role": "user", "content": "older"}))
+
+    class FakeSessionFactory:
+        def __call__(self) -> FakeSession:
+            nonlocal session_count
+            session_count += 1
+            return FakeSession(session_count)
+
+    async def tables_ready() -> None:
+        return None
+
+    monkeypatch.setattr(session, "_ensure_tables", tables_ready)
+    monkeypatch.setattr(session, "_session_factory", FakeSessionFactory())
+    monkeypatch.setattr(session.engine.dialect, "delete_returning", True)
+
+    try:
+        popped = await session.pop_item()
+    finally:
+        await session.engine.dispose()
+
+    assert popped is not None
+    assert popped.get("content") == "older"
+    assert session_count == 2
+
+
+@pytest.mark.parametrize("operation", ["add", "pop", "clear"])
+async def test_mutation_cancellation_waits_for_transaction_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """Cancellation must wait until the transaction context finishes settling."""
+    session = SQLAlchemySession.from_url(
+        f"transaction_cancellation_{operation}",
+        url=DB_URL,
+        create_tables=False,
+    )
+    transaction_applied = asyncio.Event()
+    allow_return = asyncio.Event()
+    transaction_returned = False
+
+    class FakeResult:
+        def scalar_one_or_none(self) -> Any:
+            if operation == "add":
+                return 1
+            if operation == "pop":
+                return json.dumps({"role": "user", "content": "claimed"})
+            return None
+
+    class FakeTransaction:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *args: Any) -> None:
+            nonlocal transaction_returned
+            transaction_applied.set()
+            await allow_return.wait()
+            transaction_returned = True
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        def begin(self) -> FakeTransaction:
+            return FakeTransaction()
+
+        async def execute(self, statement: Any) -> FakeResult:
+            return FakeResult()
+
+    class FakeSessionFactory:
+        def __call__(self) -> FakeSession:
+            return FakeSession()
+
+    async def tables_ready() -> None:
+        return None
+
+    monkeypatch.setattr(session, "_ensure_tables", tables_ready)
+    monkeypatch.setattr(session, "_session_factory", FakeSessionFactory())
+    monkeypatch.setattr(session.engine.dialect, "delete_returning", True)
+
+    if operation == "add":
+        task: asyncio.Task[Any] = asyncio.create_task(
+            session.add_items([{"role": "user", "content": "once"}])
+        )
+    elif operation == "pop":
+        task = asyncio.create_task(session.pop_item())
+    else:
+        task = asyncio.create_task(session.clear_session())
+
+    try:
+        await transaction_applied.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert task.done() is False
+        allow_return.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        allow_return.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await session.engine.dispose()
+
+    assert transaction_returned is True
 
 
 async def test_pop_item_skips_corrupt_most_recent():

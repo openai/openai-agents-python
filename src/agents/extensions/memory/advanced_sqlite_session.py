@@ -77,11 +77,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                     pass
                 raise
         self._current_branch_id = "main"
-        # Bumped (under the connection lock) whenever clear_session() wipes the
-        # session. switch_to_branch / create_branch_from_turn capture the
-        # generation before their DB work and only update the branch pointer if
-        # no clear has committed since, so a stale switch/create cannot resurrect
-        # a branch that clear already removed.
+        # Synchronized with the durable session_clear_generations row whenever a
+        # branch pointer is established or a write begins. A mismatch means
+        # another instance cleared the session, so the local pointer resets to main.
         self._generation = 0
         self._logger = logger or logging.getLogger(__name__)
 
@@ -93,17 +91,29 @@ class AdvancedSQLiteSession(SQLiteSession):
         updated, False if a clear_session committed after ``generation`` was
         captured (in which case its reset to 'main' wins).
         """
-        with self._lock:
-            if self._generation != generation:
+        with self._locked_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT generation FROM session_clear_generations
+                WHERE session_id = ?
+                """,
+                (self.session_id,),
+            ).fetchone()
+            durable_generation = row[0] if row is not None else 0
+            if durable_generation != generation:
+                self._generation = durable_generation
+                self._current_branch_id = "main"
                 return False
+            self._generation = durable_generation
             self._current_branch_id = branch_id
             return True
 
     def _init_structure_tables(self):
         """Add structure and usage tracking tables.
 
-        Creates the message_structure, branch_reservations, and turn_usage tables
-        with appropriate indexes for conversation branching and usage analytics.
+        Creates the message_structure, branch_reservations, session_clear_generations,
+        and turn_usage tables with appropriate indexes for conversation branching
+        and usage analytics.
         """
         with self._write_connection() as conn:
             # Message structure with branch support
@@ -147,6 +157,7 @@ class AdvancedSQLiteSession(SQLiteSession):
             """)
 
             self._ensure_branch_reservations_table(conn)
+            self._ensure_session_clear_generations_table(conn)
 
             # Indexes
             conn.execute("""
@@ -187,6 +198,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         def _add_items_sync():
             """Synchronous helper to add items and structure metadata together."""
             with self._write_connection() as conn:
+                self._refresh_branch_after_external_clear(conn)
                 # Keep both writes in one transaction so metadata failures do not leave orphans.
                 self._insert_items(conn, items)
                 self._insert_structure_metadata(conn, items)
@@ -303,9 +315,14 @@ class AdvancedSQLiteSession(SQLiteSession):
         # switch_to_branch() cannot redirect this pop to a different branch once
         # it has been dispatched to the worker thread.
         branch_id = self._current_branch_id
+        generation = self._generation
 
         def _pop_item_sync():
             with self._write_connection() as conn:
+                self._refresh_branch_after_external_clear(conn)
+                resolved_branch_id = (
+                    self._current_branch_id if self._generation != generation else branch_id
+                )
                 while True:
                     with closing(conn.cursor()) as cursor:
                         # Preserve every legacy branch ID before a pop can remove its
@@ -325,7 +342,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                             )
                             RETURNING message_id, user_turn_number
                             """,
-                            (self.session_id, branch_id),
+                            (self.session_id, resolved_branch_id),
                         )
                         claimed_row = cursor.fetchone()
                         if claimed_row is None:
@@ -351,7 +368,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                                 WHERE session_id = ? AND branch_id = ?
                                 AND user_turn_number = ?
                                 """,
-                                (self.session_id, branch_id, user_turn_number),
+                                (self.session_id, resolved_branch_id, user_turn_number),
                             )
                             if cursor.fetchone()[0] == 0:
                                 cursor.execute(
@@ -360,7 +377,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                                     WHERE session_id = ? AND branch_id = ?
                                     AND user_turn_number = ?
                                     """,
-                                    (self.session_id, branch_id, user_turn_number),
+                                    (self.session_id, resolved_branch_id, user_turn_number),
                                 )
 
                         conn.commit()
@@ -395,6 +412,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 # Backfill legacy branch IDs before clearing their only durable
                 # identity evidence.
                 self._ensure_branch_reservations_table(conn)
+                self._ensure_session_clear_generations_table(conn)
                 conn.execute(
                     f"DELETE FROM {self.messages_table} WHERE session_id = ?",
                     (self.session_id,),
@@ -411,6 +429,21 @@ class AdvancedSQLiteSession(SQLiteSession):
                     "DELETE FROM turn_usage WHERE session_id = ?",
                     (self.session_id,),
                 )
+                conn.execute(
+                    """
+                    UPDATE session_clear_generations
+                    SET generation = generation + 1
+                    WHERE session_id = ?
+                    """,
+                    (self.session_id,),
+                )
+                generation = conn.execute(
+                    """
+                    SELECT generation FROM session_clear_generations
+                    WHERE session_id = ?
+                    """,
+                    (self.session_id,),
+                ).fetchone()[0]
                 conn.commit()
                 # All branches were removed, so reset the in-memory pointer to
                 # 'main' while still holding the lock. Doing this inside the
@@ -419,7 +452,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 # the pointer still references a deleted branch. Bumping the
                 # generation invalidates any in-flight switch/create that
                 # captured the pre-clear generation.
-                self._generation += 1
+                self._generation = generation
                 self._current_branch_id = "main"
 
         await _await_mutation(asyncio.to_thread(_clear_session_sync))
@@ -819,41 +852,43 @@ class AdvancedSQLiteSession(SQLiteSession):
             ValueError: If turn doesn't exist, doesn't contain a user message, or
                 `branch_name` has already been used in this session
         """
-        # Snapshot the source branch and clear generation together. The source turn is
-        # revalidated inside the reservation transaction below.
-        with self._lock:
-            generation = self._generation
-            source_branch_id = self._current_branch_id
 
-        # Resolve the target branch ID under the same transaction that performs the copy
-        # so concurrent creators cannot reserve the same branch.
-        branch_name, turn_content = await self._copy_messages_to_new_branch(
-            branch_name, turn_number, source_branch_id
-        )
+        async def _create_and_switch() -> tuple[str, Any, str]:
+            # Copying the branch is the first durable side effect. Keep the
+            # generation-guarded pointer update in the same completion-owned task.
+            (
+                resolved_name,
+                turn_content,
+                source_branch_id,
+                generation,
+            ) = await self._copy_messages_to_new_branch(branch_name, turn_number)
+            await asyncio.to_thread(
+                self._commit_branch_pointer,
+                resolved_name,
+                generation,
+            )
+            return resolved_name, turn_content, source_branch_id
 
-        # Switch to new branch under the lock; skipped if a clear_session has
-        # committed since `generation` was captured (its reset to 'main' wins),
-        # so we never point at a branch that clear removed.
-        await _await_mutation(
-            asyncio.to_thread(self._commit_branch_pointer, branch_name, generation)
+        resolved_branch_name, turn_content, source_branch_id = await _await_mutation(
+            _create_and_switch()
         )
 
         if _debug.DONT_LOG_MODEL_DATA:
             self._logger.debug(
                 "Created branch '%s' from turn %s in '%s'",
-                branch_name,
+                resolved_branch_name,
                 turn_number,
                 source_branch_id,
             )
         else:
             self._logger.debug(
                 "Created branch '%s' from turn %s ('%s') in '%s'",
-                branch_name,
+                resolved_branch_name,
                 turn_number,
                 turn_content,
                 source_branch_id,
             )
-        return branch_name
+        return resolved_branch_name
 
     async def create_branch_from_content(
         self, search_term: str, branch_name: str | None = None
@@ -890,14 +925,11 @@ class AdvancedSQLiteSession(SQLiteSession):
             ValueError: If the branch doesn't exist.
         """
 
-        # Capture the generation before validating so a clear that commits
-        # between validation and the pointer update is detected and skipped.
-        generation = self._generation
-
         # Validate branch exists
-        def _validate_branch():
-            """Synchronous helper to validate branch exists."""
-            with self._locked_connection() as conn:
+        def _validate_branch() -> int:
+            """Validate the branch and return its current durable clear generation."""
+            with self._write_connection() as conn:
+                self._ensure_session_clear_generations_table(conn)
                 with closing(conn.cursor()) as cursor:
                     cursor.execute(
                         """
@@ -910,8 +942,20 @@ class AdvancedSQLiteSession(SQLiteSession):
                     count = cursor.fetchone()[0]
                     if count == 0:
                         raise ValueError(f"Branch '{branch_id}' does not exist")
+                    generation = cast(
+                        int,
+                        cursor.execute(
+                            """
+                            SELECT generation FROM session_clear_generations
+                            WHERE session_id = ?
+                            """,
+                            (self.session_id,),
+                        ).fetchone()[0],
+                    )
+                conn.commit()
+                return generation
 
-        await asyncio.to_thread(_validate_branch)
+        generation = await _await_mutation(asyncio.to_thread(_validate_branch))
 
         old_branch = self._current_branch_id
         # Update the pointer under the lock; a no-op if a clear_session has
@@ -1093,6 +1137,36 @@ class AdvancedSQLiteSession(SQLiteSession):
                 (self.session_id,),
             )
 
+    def _ensure_session_clear_generations_table(self, conn: sqlite3.Connection) -> None:
+        """Create and initialize the durable clear generation for this session."""
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_clear_generations (
+                session_id TEXT PRIMARY KEY,
+                generation INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO session_clear_generations (session_id, generation)
+            VALUES (?, 0)
+            """,
+            (self.session_id,),
+        )
+
+    def _refresh_branch_after_external_clear(self, conn: sqlite3.Connection) -> None:
+        """Reset a stale branch pointer after another session instance clears history."""
+        self._ensure_session_clear_generations_table(conn)
+        generation = conn.execute(
+            """
+            SELECT generation FROM session_clear_generations
+            WHERE session_id = ?
+            """,
+            (self.session_id,),
+        ).fetchone()[0]
+        if generation != self._generation:
+            self._generation = generation
+            self._current_branch_id = "main"
+
     def _reserve_branch_id(
         self, cursor: sqlite3.Cursor, new_branch_id: str | None, from_turn_number: int
     ) -> str:
@@ -1128,29 +1202,30 @@ class AdvancedSQLiteSession(SQLiteSession):
             branch_id = f"{base_branch_id}_{suffix}"
 
     async def _copy_messages_to_new_branch(
-        self, new_branch_id: str | None, from_turn_number: int, source_branch_id: str
-    ) -> tuple[str, Any]:
+        self, new_branch_id: str | None, from_turn_number: int
+    ) -> tuple[str, Any, str, int]:
         """Copy messages before the branch point to the new branch.
 
         Args:
             new_branch_id: The ID of the new branch, or None to generate an unused ID.
             from_turn_number: The turn number to copy messages up to (exclusive).
-            source_branch_id: The branch to copy messages from.
-
         Returns:
-            The resolved branch ID and a preview of the source turn content.
+            The resolved branch ID, source preview, source branch, and clear generation.
 
         Raises:
             ValueError: If `new_branch_id` has already been used in this session.
         """
 
-        def _copy_sync() -> tuple[str, Any]:
+        def _copy_sync() -> tuple[str, Any, str, int]:
             """Synchronous helper to copy messages to new branch."""
             with self._write_connection() as conn:
                 # Acquire SQLite's write reservation before checking the branch ID so
                 # sessions in other processes cannot pass the same check concurrently.
                 conn.execute("BEGIN IMMEDIATE")
                 self._ensure_branch_reservations_table(conn)
+                self._refresh_branch_after_external_clear(conn)
+                source_branch_id = self._current_branch_id
+                generation = self._generation
                 with closing(conn.cursor()) as cursor:
                     cursor.execute(
                         f"""
@@ -1244,9 +1319,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                         )
 
                 conn.commit()
-                return branch_id, turn_content
+                return branch_id, turn_content, source_branch_id, generation
 
-        return await _await_mutation(asyncio.to_thread(_copy_sync))
+        return await asyncio.to_thread(_copy_sync)
 
     async def get_conversation_turns(self, branch_id: str | None = None) -> list[dict[str, Any]]:
         """Get user turns with content for easy browsing and branching decisions.

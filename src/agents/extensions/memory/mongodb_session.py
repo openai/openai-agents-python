@@ -31,6 +31,7 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import weakref
@@ -65,6 +66,7 @@ from ...memory.session_settings import (
     coerce_session_settings,
     resolve_session_limit,
 )
+from ...memory.sqlite_session import _await_mutation
 
 # Identifies this library in the MongoDB handshake for server-side telemetry.
 _DRIVER_INFO = DriverInfo(name="openai-agents", version=_VERSION)
@@ -326,37 +328,34 @@ class MongoDBSession(SessionABC):
             window *= 2
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
-        """Add new items to the conversation history.
-
-        Args:
-            items: List of input items to append to the session.
-        """
-        # Checked before the empty-list fast path, which would otherwise return
-        # successfully on a closed session.
+        """Add new items and wait until the batch outcome is known."""
         self._check_not_closed()
-
         if not items:
             return
-
         await self._ensure_indexes()
-
         serialized_items = [await self._serialize_item(item) for item in items]
+        await _await_mutation(self._add_items(serialized_items))
+
+    async def _add_items(self, serialized_items: list[str]) -> None:
+        """Store one pre-serialized logical batch."""
         now = datetime.now(timezone.utc)
 
         # Atomically reserve a block of sequence numbers for this batch.
-        # $inc returns the new value, so subtract len(items) to get the first
-        # number in the block.
+        # $inc returns the new value, so subtract the batch size to get the
+        # first number in the block.
         result = await self._sessions.find_one_and_update(
             {"session_id": self.session_id},
             {
                 "$setOnInsert": {"session_id": self.session_id, "created_at": now},
                 "$set": {"updated_at": now},
-                "$inc": {"_seq": len(items)},
+                "$inc": {"_seq": len(serialized_items)},
             },
             upsert=True,
             return_document=True,
         )
-        next_seq: int = (result["_seq"] if result else len(items)) - len(items)
+        next_seq: int = (result["_seq"] if result else len(serialized_items)) - len(
+            serialized_items
+        )
 
         # One document is the commit boundary for the logical batch. This keeps
         # standalone MongoDB deployments failure-atomic without requiring transactions.
@@ -369,6 +368,11 @@ class MongoDBSession(SessionABC):
         )
 
     async def pop_item(self) -> TResponseInputItem | None:
+        """Remove the most recent item after the destructive claim settles."""
+        await self._ensure_indexes()
+        return await _await_mutation(self._pop_item())
+
+    async def _pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
 
         Returns:
@@ -380,54 +384,94 @@ class MongoDBSession(SessionABC):
         is returned. This matches :meth:`get_items`, which also skips malformed
         entries, so one bad record cannot make a non-empty session look empty.
         """
-        await self._ensure_indexes()
+        # Retry cleanup left by a prior post-claim failure. Empty markers are
+        # never model-visible or claimable, so cleanup failure must not block a
+        # later valid tail claim.
+        try:
+            await self._messages.delete_many({"session_id": self.session_id, "message_data": []})
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
 
         while True:
-            docs = await (
-                self._messages.find(
+            doc = await self._messages.find_one_and_update(
+                {
+                    "session_id": self.session_id,
+                    "message_data": {"$ne": []},
+                },
+                [
                     {
-                        "session_id": self.session_id,
-                        "message_data": {"$ne": []},
+                        "$set": {
+                            "message_data": {
+                                "$cond": [
+                                    {"$isArray": "$message_data"},
+                                    {
+                                        "$slice": [
+                                            "$message_data",
+                                            {
+                                                "$subtract": [
+                                                    {"$size": "$message_data"},
+                                                    1,
+                                                ]
+                                            },
+                                        ]
+                                    },
+                                    [],
+                                ]
+                            }
+                        }
                     }
-                )
-                .sort("seq", -1)
-                .limit(1)
-                .to_list()
+                ],
+                sort=[("seq", -1)],
+                return_document=False,
             )
-            if not docs:
+            if doc is None:
                 return None
-            candidate = docs[0]
-            raw = candidate.get("message_data")
+            raw = doc.get("message_data")
 
             if isinstance(raw, list):
-                doc = await self._messages.find_one_and_update(
-                    {"_id": candidate["_id"], "message_data": {"$ne": []}},
-                    {"$pop": {"message_data": 1}},
-                    return_document=False,
-                )
-                if doc is None:
+                if not raw:
                     continue
-                claimed_batch = doc.get("message_data")
-                if not isinstance(claimed_batch, list) or not claimed_batch:
-                    continue
-                raw = claimed_batch[-1]
+                claimed_raw = raw[-1]
+                exhausted = len(raw) == 1
             else:
-                doc = await self._messages.find_one_and_delete({"_id": candidate["_id"]})
-                if doc is None:
-                    continue
-                raw = doc.get("message_data")
+                claimed_raw = raw
+                exhausted = True
+
+            if exhausted:
+                # The atomic claim above leaves an empty marker so another pop cannot
+                # claim the same item. Remove that marker before returning to avoid
+                # accumulating exhausted logical-batch and legacy documents.
+                try:
+                    await self._messages.delete_one({"_id": doc["_id"], "message_data": []})
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # The item is already claimed. Do not turn a known destructive
+                    # outcome into a retry-visible failure; the next pop retries the
+                    # best-effort empty-marker sweep above.
+                    pass
 
             try:
-                return await self._deserialize_item(raw)
+                return await self._deserialize_item(claimed_raw)
             except (json.JSONDecodeError, TypeError):
                 # Corrupt — drop it and try the next-most-recent document.
                 continue
 
     async def clear_session(self) -> None:
-        """Clear all items for this session."""
+        """Clear history after the authoritative delete settles."""
         await self._ensure_indexes()
+        await _await_mutation(self._clear_session())
+
+    async def _clear_session(self) -> None:
+        """Clear all items for this session."""
         await self._messages.delete_many({"session_id": self.session_id})
-        await self._sessions.delete_one({"session_id": self.session_id})
+        # Keep the ancillary metadata document and its sequence counter. The
+        # messages collection is the authoritative history boundary, and a
+        # second delete would make clear_session partially fail after history
+        # was already cleared. Retaining the counter also prevents a concurrent
+        # add from losing its ordering authority across this clear.
 
     # ------------------------------------------------------------------
     # Lifecycle helpers

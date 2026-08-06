@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import sys
 import tempfile
 from collections.abc import Sequence
 from datetime import datetime
@@ -22,6 +23,12 @@ from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 
 pytestmark = pytest.mark.asyncio
+
+
+def _assert_cancel_message(exc: asyncio.CancelledError, expected: str) -> None:
+    """Account for Python 3.10 dropping Task cancellation messages when re-awaited."""
+    expected_args = (expected,) if sys.version_info >= (3, 11) else ()
+    assert exc.args == expected_args
 
 
 @pytest.fixture
@@ -820,7 +827,7 @@ async def test_operation_failure_then_cancellation_during_rollback(
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
 
-        assert exc_info.value.args == ("first-caller-cancel",)
+        _assert_cancel_message(exc_info.value, "first-caller-cancel")
         assert conn.in_transaction is False
         assert _sqlite_write_lock_is_free(db_path)
         assert await session.get_items() == []
@@ -1056,7 +1063,7 @@ async def test_initialization_failure_then_cancellation_during_candidate_close(
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
 
-        assert exc_info.value.args == ("first-caller-cancel",)
+        _assert_cancel_message(exc_info.value, "first-caller-cancel")
         assert session._connection is None
         assert session.captured_connection._running is False
     finally:
