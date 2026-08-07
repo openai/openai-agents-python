@@ -11,6 +11,7 @@ The Agents SDK automatically tracks token usage for every run. You can access it
 - **request_usage_entries**: list of per-request usage breakdowns
 - **details**:
   - `input_tokens_details.cached_tokens`
+  - `input_tokens_details.cache_write_tokens`
   - `output_tokens_details.reasoning_tokens`
 
 ## Accessing usage from a run
@@ -48,6 +49,27 @@ result = await Runner.run(agent, "What's the weather in Tokyo?")
 for i, request in enumerate(result.context_wrapper.usage.request_usage_entries):
     print(f"Request {i + 1}: {request.input_tokens} in, {request.output_tokens} out")
 ```
+
+## Preserving provider usage payloads
+
+The normalized [`Usage`][agents.usage.Usage] fields give you consistent totals across model providers. If you also need provider-specific usage fields or need to distinguish an omitted field from a provider-reported zero, opt in to preserving the original usage payload with [`ModelSettings.preserve_raw_usage`][agents.model_settings.ModelSettings.preserve_raw_usage]:
+
+```python
+from agents import Agent, ModelSettings, Runner
+
+agent = Agent(
+    name="Assistant",
+    model_settings=ModelSettings(preserve_raw_usage=True),
+)
+result = await Runner.run(agent, "What's the weather in Tokyo?")
+
+for response in result.raw_responses:
+    print(response.raw_usage)
+```
+
+Each [`ModelResponse.raw_usage`][agents.items.ModelResponse.raw_usage] value is a detached, JSON-compatible snapshot of the provider payload for that model call. It is not aggregated across the run. The value remains `None` when preservation is disabled, the provider returns no usage payload, or an upstream adapter has already discarded the original field-presence information.
+
+`preserve_raw_usage` only preserves usage that reaches the model adapter; it does not ask a provider to return usage. For streaming Chat Completions providers that require an explicit usage request, also set `ModelSettings(include_usage=True)`.
 
 ## Accessing usage with sessions
 

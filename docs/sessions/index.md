@@ -641,39 +641,36 @@ if __name__ == "__main__":
 
 ## Custom session implementations
 
-You can implement your own session memory by creating a class that follows the [`Session`][agents.memory.session.Session] protocol:
+You can implement your own session memory by creating a class that structurally follows the [`Session`][agents.memory.session.Session] protocol. You do not need to inherit from `SessionABC`; implement the four history methods directly:
 
 ```python
-from agents.memory.session import SessionABC
+from agents import Agent, Runner
 from agents.items import TResponseInputItem
-from typing import List
 
-class MyCustomSession(SessionABC):
+
+class MyCustomSession:
     """Custom session implementation following the Session protocol."""
 
-    def __init__(self, session_id: str):
+    def __init__(self, session_id: str) -> None:
         self.session_id = session_id
-        # Your initialization here
+        self.items: list[TResponseInputItem] = []
 
-    async def get_items(self, limit: int | None = None) -> List[TResponseInputItem]:
-        """Retrieve conversation history for this session."""
-        # Your implementation here
-        pass
+    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        if limit is None:
+            return list(self.items)
+        if limit <= 0:
+            return []
+        return list(self.items[-limit:])
 
-    async def add_items(self, items: List[TResponseInputItem]) -> None:
-        """Store new items for this session."""
-        # Your implementation here
-        pass
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        self.items.extend(items)
 
     async def pop_item(self) -> TResponseInputItem | None:
-        """Remove and return the most recent item from this session."""
-        # Your implementation here
-        pass
+        return self.items.pop() if self.items else None
 
     async def clear_session(self) -> None:
-        """Clear all items for this session."""
-        # Your implementation here
-        pass
+        self.items.clear()
+
 
 # Use your custom session
 agent = Agent(name="Assistant")
@@ -683,6 +680,47 @@ result = await Runner.run(
     session=MyCustomSession("my_session")
 )
 ```
+
+### Accessing run context from a custom session
+
+A custom session can use the active [`RunContextWrapper`][agents.run_context.RunContextWrapper] for tenant routing, authorization, or other app-specific storage decisions. To opt in, add an explicitly named, keyword-compatible `wrapper` parameter to all four history methods:
+
+```python
+from typing import Any
+
+from agents import RunContextWrapper
+from agents.items import TResponseInputItem
+
+
+class ContextAwareSession:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]: ...
+
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None: ...
+
+    async def pop_item(
+        self,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> TResponseInputItem | None: ...
+
+    async def clear_session(
+        self,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None: ...
+```
+
+The opt-in is all-or-none: the SDK passes the wrapper only when `get_items`, `add_items`, `pop_item`, and `clear_session` all declare `wrapper`. A generic `**kwargs` parameter does not opt in. Existing session implementations keep their released call shape and continue to work without changes.
 
 ## Community session implementations
 
