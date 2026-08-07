@@ -289,10 +289,11 @@ class LitellmModel(Model):
                         ),
                     )
                     if response.usage
-                    else Usage()
+                    # The request completed, so it counts even when the provider omits usage.
+                    else Usage(requests=1)
                 )
             else:
-                usage = Usage()
+                usage = Usage(requests=1)
                 logger.warning("No usage information returned from Litellm")
 
             if tracing.include_data():
