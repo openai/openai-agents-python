@@ -4033,3 +4033,41 @@ async def test_streamed_span_records_the_request_when_provider_omits_usage(monke
     assert generation.span_data.usage["requests"] == 1
     # The provider reported no tokens, so every total stays at zero.
     assert generation.span_data.usage["total_tokens"] == 0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_span_is_recorded_for_a_consumer_that_stops_at_the_terminal_event(
+    monkeypatch,
+) -> None:
+    """A caller that stops at `response.completed` closes the generator.
+
+    Anything recorded only after the yield loop never runs for such a consumer, so the span
+    has to be populated before the terminal event is handed out.
+    """
+    monkeypatch.setattr(
+        OpenAIChatCompletionsModel, "_fetch_response", _usageless_stream_patch(usage=None)
+    )
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    with trace(workflow_name="test"):
+        stream = model.stream_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.ENABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+        async for event in stream:
+            if event.type == "response.completed":
+                break  # stop consuming, as a caller watching for the terminal event would
+        await stream.aclose()
+
+    generation = next(s for s in fetch_ordered_spans() if s.span_data.type == "generation")
+    assert generation.span_data.usage is not None
+    assert generation.span_data.usage["requests"] == 1

@@ -59,7 +59,9 @@ from ...usage import (
     _mark_request_completed_without_usage,
     _raw_usage_snapshot,
     _requests_for_response_without_usage,
+    _response_usage_to_usage,
     _span_usage_without_provider_totals,
+    model_usage_to_span_usage,
 )
 from ...util._error_tracing import model_span_errors, record_model_error_on_span
 from ...util._json import _to_dump_compatible
@@ -423,6 +425,8 @@ class AnyLLMModel(Model):
                 else Usage(requests=1)
             )
 
+            span_response.span_data.usage = model_usage_to_span_usage(usage)
+
             if tracing.include_data():
                 span_response.span_data.response = response
                 span_response.span_data.input = input
@@ -511,6 +515,14 @@ class AnyLLMModel(Model):
                         yielded_terminal_event = True
                         # Populate the span before yielding the terminal event so a consumer
                         # that stops there still leaves a fully recorded span.
+                        if final_response is not None:
+                            span_response.span_data.usage = model_usage_to_span_usage(
+                                _response_usage_to_usage(final_response.usage)
+                                if final_response.usage
+                                else Usage(
+                                    requests=_requests_for_response_without_usage(final_response)
+                                )
+                            )
                         if tracing.include_data() and final_response:
                             span_response.span_data.response = final_response
                             span_response.span_data.input = input

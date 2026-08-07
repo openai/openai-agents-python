@@ -471,6 +471,12 @@ class OpenAIChatCompletionsModel(Model):
                     if chunk.type == "response.completed":
                         final_response = chunk.response
                         yielded_terminal_event = True
+                        # Populate the span before yielding, because a caller that stops
+                        # consuming at the terminal event closes this generator and never
+                        # resumes it, which would leave the span without usage.
+                        self._populate_stream_generation_span(
+                            span_generation, final_response, tracing
+                        )
 
                     yield chunk
             except asyncio.CancelledError:
@@ -491,32 +497,36 @@ class OpenAIChatCompletionsModel(Model):
                         else:
                             raise
 
-            if tracing.include_data() and final_response:
-                span_generation.span_data.output = [final_response.model_dump()]
+    @staticmethod
+    def _populate_stream_generation_span(
+        span_generation: Span[GenerationSpanData],
+        final_response: Response,
+        tracing: ModelTracing,
+    ) -> None:
+        if tracing.include_data():
+            span_generation.span_data.output = [final_response.model_dump()]
 
-            if final_response and final_response.usage:
-                span_generation.span_data.usage = {
-                    "requests": 1,
-                    "input_tokens": final_response.usage.input_tokens,
-                    "output_tokens": final_response.usage.output_tokens,
-                    "total_tokens": final_response.usage.total_tokens,
-                    "input_tokens_details": (
-                        final_response.usage.input_tokens_details.model_dump()
-                        if final_response.usage.input_tokens_details
-                        else {"cached_tokens": 0, "cache_write_tokens": 0}
-                    ),
-                    "output_tokens_details": (
-                        final_response.usage.output_tokens_details.model_dump()
-                        if final_response.usage.output_tokens_details
-                        else {"reasoning_tokens": 0}
-                    ),
-                }
-            elif final_response is not None and _requests_for_response_without_usage(
-                final_response
-            ):
-                # Keep streamed tracing aligned with the non-streaming path, which records the
-                # request even when the provider reports no usage.
-                span_generation.span_data.usage = _span_usage_without_provider_totals()
+        if final_response.usage:
+            span_generation.span_data.usage = {
+                "requests": 1,
+                "input_tokens": final_response.usage.input_tokens,
+                "output_tokens": final_response.usage.output_tokens,
+                "total_tokens": final_response.usage.total_tokens,
+                "input_tokens_details": (
+                    final_response.usage.input_tokens_details.model_dump()
+                    if final_response.usage.input_tokens_details
+                    else {"cached_tokens": 0, "cache_write_tokens": 0}
+                ),
+                "output_tokens_details": (
+                    final_response.usage.output_tokens_details.model_dump()
+                    if final_response.usage.output_tokens_details
+                    else {"reasoning_tokens": 0}
+                ),
+            }
+        elif _requests_for_response_without_usage(final_response):
+            # Keep streamed tracing aligned with the non-streaming path, which records the
+            # request even when the provider reports no usage.
+            span_generation.span_data.usage = _span_usage_without_provider_totals()
 
     def _handle_unsupported_server_managed_conversation_state(
         self,
