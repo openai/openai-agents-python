@@ -64,6 +64,7 @@ from agents.items import (
     TResponseInputItem,
 )
 from agents.lifecycle import RunHooks
+from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.run import AgentRunner, get_default_agent_runner, set_default_agent_runner
 from agents.run_config import _default_trace_include_sensitive_data
 from agents.run_internal.agent_bindings import bind_public_agent
@@ -3923,6 +3924,99 @@ async def test_save_result_to_openai_conversation_keeps_reasoning_encrypted_cont
     assert len(session.saved_items) == 1
     saved_reasoning = cast(dict[str, Any], session.saved_items[0])
     assert saved_reasoning["encrypted_content"] == "encrypted"
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_openai_conversation_drops_placeholder_id_reasoning_item() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved_items: list[TResponseInputItem] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.saved_items.extend(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+    agent = Agent(name="agent", model=FakeModel())
+    # Chat Completions providers have no server-assigned reasoning ID, so the SDK stamps its
+    # own placeholder. That placeholder is not a server identity, so the item is no more
+    # persistable than one with no ID at all.
+    placeholder_reasoning = ReasoningItem(
+        agent=agent,
+        raw_item=ResponseReasoningItem(
+            type="reasoning",
+            id=FAKE_RESPONSES_ID,
+            summary=[Summary(text="thinking", type="summary_text")],
+        ),
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [placeholder_reasoning]),
+        None,
+    )
+
+    assert saved_count == 1
+    assert session.saved_items == []
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_openai_conversation_strips_placeholder_reasoning_id() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved_items: list[TResponseInputItem] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.saved_items.extend(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+    agent = Agent(name="agent", model=FakeModel())
+    placeholder_reasoning = ReasoningItem(
+        agent=agent,
+        raw_item=ResponseReasoningItem(
+            type="reasoning",
+            id=FAKE_RESPONSES_ID,
+            summary=[],
+            encrypted_content="encrypted",
+        ),
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [placeholder_reasoning]),
+        None,
+    )
+
+    assert saved_count == 1
+    assert len(session.saved_items) == 1
+    saved_reasoning = cast(dict[str, Any], session.saved_items[0])
+    assert saved_reasoning["encrypted_content"] == "encrypted"
+    assert "id" not in saved_reasoning
 
 
 @pytest.mark.asyncio

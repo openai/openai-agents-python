@@ -30,6 +30,7 @@ from ..memory import (
 )
 from ..memory.openai_conversations_session import OpenAIConversationsSession
 from ..memory.session import _call_session_method, _get_session_wrapper
+from ..models.fake_id import FAKE_RESPONSES_ID
 from ..run_context import RunContextWrapper
 from ..run_state import RunState
 from .items import (
@@ -794,11 +795,15 @@ def _sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInp
     persisted through the Conversations API. Reasoning items also need their server
     identity or encrypted content to remain persistable. Other item IDs remain stripped
     so replayed messages, function calls, and tool outputs do not carry stale provider IDs.
+
+    ``FAKE_RESPONSES_ID`` is the SDK's own placeholder for providers that assign no item ID,
+    so it is never a server identity and is stripped from every item type.
     """
     if isinstance(item, dict):
         clean_item = cast(dict[str, Any], strip_internal_input_item_metadata(item))
-        if clean_item.get("type") != "reasoning" and not _openai_conversation_item_requires_id(
-            clean_item
+        if clean_item.get("id") == FAKE_RESPONSES_ID or (
+            clean_item.get("type") != "reasoning"
+            and not _openai_conversation_item_requires_id(clean_item)
         ):
             clean_item.pop("id", None)
         clean_item.pop("provider_data", None)
