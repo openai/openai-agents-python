@@ -56,6 +56,19 @@ def mock_model():
 
 
 @pytest.mark.asyncio
+async def test_run_preserves_falsey_custom_model(mock_agent: Mock):
+    class FalseyRealtimeModel(MockRealtimeModel):
+        def __bool__(self) -> bool:
+            return False
+
+    model = FalseyRealtimeModel()
+
+    session = await RealtimeRunner(mock_agent, model=model).run()
+
+    assert session.model is model
+
+
+@pytest.mark.asyncio
 async def test_run_creates_session_with_no_settings(
     mock_agent: Mock, mock_model: MockRealtimeModel
 ):

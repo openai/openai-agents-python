@@ -43,7 +43,7 @@ class RealtimeRunner:
         """
         self._starting_agent = starting_agent
         self._config = config
-        self._model = model or OpenAIRealtimeWebSocketModel()
+        self._model = model if model is not None else OpenAIRealtimeWebSocketModel()
 
     async def run(
         self, *, context: TContext | None = None, model_config: RealtimeModelConfig | None = None
