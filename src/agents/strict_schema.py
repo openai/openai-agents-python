@@ -84,12 +84,43 @@ def _ensure_strict_root(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 # Adapted from https://github.com/openai/openai-python/blob/main/src/openai/lib/_pydantic.py
+# Keywords that describe an object's contents somewhere other than its own `properties` map.
+# An empty `properties` map next to one of these is not a statement that the object is empty.
+_CONTENT_SHAPING_KEYWORDS = frozenset(
+    {
+        "allOf",
+        "anyOf",
+        "const",
+        "dependentSchemas",
+        "else",
+        "enum",
+        "if",
+        "not",
+        "oneOf",
+        "patternProperties",
+        "propertyNames",
+        "then",
+        "unevaluatedProperties",
+    }
+)
+
+
+def _shapes_contents_without_properties(json_schema: dict[str, object]) -> bool:
+    return any(keyword in json_schema for keyword in _CONTENT_SHAPING_KEYWORDS)
+
+
+def _allows_only_the_empty_object(json_schema: dict[str, object]) -> bool:
+    """Whether the schema already forbids every key, so closing it changes nothing."""
+    return json_schema.get("maxProperties") == 0
+
+
 def _ensure_strict_json_schema(
     json_schema: object,
     *,
     path: tuple[str, ...],
     root: dict[str, object],
     budget: _NodeBudget | None = None,
+    in_definitions: bool = False,
 ) -> dict[str, Any]:
     if not is_dict(json_schema):
         raise TypeError(f"Expected {json_schema} to be a dictionary; path={path}")
@@ -104,7 +135,11 @@ def _ensure_strict_json_schema(
     if is_dict(defs):
         for def_name, def_schema in defs.items():
             _ensure_strict_json_schema(
-                def_schema, path=(*path, "$defs", def_name), root=root, budget=budget
+                def_schema,
+                path=(*path, "$defs", def_name),
+                root=root,
+                budget=budget,
+                in_definitions=True,
             )
 
     definitions = json_schema.get("definitions")
@@ -115,6 +150,7 @@ def _ensure_strict_json_schema(
                 path=(*path, "definitions", definition_name),
                 root=root,
                 budget=budget,
+                in_definitions=True,
             )
 
     typ = json_schema.get("type")
@@ -140,7 +176,11 @@ def _ensure_strict_json_schema(
         json_schema["required"] = list(properties.keys())
         json_schema["properties"] = {
             key: _ensure_strict_json_schema(
-                prop_schema, path=(*path, "properties", key), root=root, budget=budget
+                prop_schema,
+                path=(*path, "properties", key),
+                root=root,
+                budget=budget,
+                in_definitions=in_definitions,
             )
             for key, prop_schema in properties.items()
         }
@@ -150,7 +190,7 @@ def _ensure_strict_json_schema(
     items = json_schema.get("items")
     if is_dict(items):
         json_schema["items"] = _ensure_strict_json_schema(
-            items, path=(*path, "items"), root=root, budget=budget
+            items, path=(*path, "items"), root=root, budget=budget, in_definitions=in_definitions
         )
 
     # unions
@@ -158,7 +198,11 @@ def _ensure_strict_json_schema(
     if is_list(any_of):
         json_schema["anyOf"] = [
             _ensure_strict_json_schema(
-                variant, path=(*path, "anyOf", str(i)), root=root, budget=budget
+                variant,
+                path=(*path, "anyOf", str(i)),
+                root=root,
+                budget=budget,
+                in_definitions=in_definitions,
             )
             for i, variant in enumerate(any_of)
         ]
@@ -173,7 +217,11 @@ def _ensure_strict_json_schema(
             existing_any_of = []
         json_schema["anyOf"] = existing_any_of + [
             _ensure_strict_json_schema(
-                variant, path=(*path, "oneOf", str(i)), root=root, budget=budget
+                variant,
+                path=(*path, "oneOf", str(i)),
+                root=root,
+                budget=budget,
+                in_definitions=in_definitions,
             )
             for i, variant in enumerate(one_of)
         ]
@@ -194,11 +242,17 @@ def _ensure_strict_json_schema(
             # declares `properties`, would look like a free-form object and be rejected.
             json_schema.pop("allOf")
             json_schema.update(entry)
-            return _ensure_strict_json_schema(json_schema, path=path, root=root, budget=budget)
+            return _ensure_strict_json_schema(
+                json_schema, path=path, root=root, budget=budget, in_definitions=in_definitions
+            )
         else:
             json_schema["allOf"] = [
                 _ensure_strict_json_schema(
-                    entry, path=(*path, "allOf", str(i)), root=root, budget=budget
+                    entry,
+                    path=(*path, "allOf", str(i)),
+                    root=root,
+                    budget=budget,
+                    in_definitions=in_definitions,
                 )
                 for i, entry in enumerate(all_of)
             ]
@@ -232,14 +286,24 @@ def _ensure_strict_json_schema(
         json_schema.update({**resolved, **json_schema})
         # Since the schema expanded from `$ref` might not have `additionalProperties: false` applied
         # we call `_ensure_strict_json_schema` again to fix the inlined schema and ensure it's valid
-        return _ensure_strict_json_schema(json_schema, path=path, root=root, budget=budget)
+        return _ensure_strict_json_schema(
+            json_schema, path=path, root=root, budget=budget, in_definitions=in_definitions
+        )
 
     # Decide whether this object can be closed only once the normalizations above have run, so
     # that a `$ref` or a single-entry `allOf` has already had the chance to lift `properties` up
     # to this level. Both of those paths re-enter this function and are handled by the return
     # statements above rather than reaching here.
-    if is_object and "additionalProperties" not in json_schema:
-        if "properties" not in json_schema:
+    if is_object and "additionalProperties" not in json_schema and not in_definitions:
+        # A definition is a template rather than a value position: a broad base is routinely
+        # narrowed by the keys a `$ref` site supplies, and an unreferenced one has no effect at
+        # all. Judging one on its own would reject schemas that are perfectly strictable once
+        # inlined, so definitions keep the historical behaviour and are closed below.
+        declared = json_schema.get("properties")
+        if _allows_only_the_empty_object(json_schema):
+            # Already constrained to the empty object, so closing it changes nothing.
+            pass
+        elif not is_dict(declared):
             # Nothing at this level says which keys are allowed, so the object accepts any of
             # them. Closing it with `additionalProperties: false` would silently narrow it to
             # "the empty object is the only valid value", or, for a composed wrapper such as
@@ -248,6 +312,12 @@ def _ensure_strict_json_schema(
             # does, so callers that can degrade (such as MCP tool conversion) fall back to
             # serving the schema as non-strict.
             raise UserError(_FREE_FORM_OBJECT_ERROR)
+        elif not declared and _shapes_contents_without_properties(json_schema):
+            # An empty `properties` map next to a keyword that describes the contents some
+            # other way is not a declaration that the object is empty.
+            raise UserError(_FREE_FORM_OBJECT_ERROR)
+
+    if is_object and "additionalProperties" not in json_schema:
         json_schema["additionalProperties"] = False
 
     return json_schema

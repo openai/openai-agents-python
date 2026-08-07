@@ -490,3 +490,62 @@ def test_redundant_single_entry_allof_branch_does_not_block_conversion():
     assert result["required"] == ["a"]
     assert result["additionalProperties"] is False
     assert "allOf" not in result
+
+
+def test_broad_definition_narrowed_at_the_ref_site_still_converts():
+    # The definition is free-form on its own, but the `$ref` site supplies the shape. Judging
+    # the definition in isolation would reject a schema that is strictable once inlined.
+    result = ensure_strict_json_schema(
+        {
+            "$defs": {"Base": {"type": "object"}},
+            "type": "object",
+            "properties": {"f": {"$ref": "#/$defs/Base", "properties": {"a": {"type": "string"}}}},
+        }
+    )
+
+    field = result["properties"]["f"]
+    assert field["properties"] == {"a": {"type": "string"}}
+    assert field["required"] == ["a"]
+    assert field["additionalProperties"] is False
+
+
+def test_unreferenced_free_form_definition_does_not_block_conversion():
+    # An unused definition has no validation effect, so it must not abort the conversion.
+    result = ensure_strict_json_schema(
+        {
+            "$defs": {"Unused": {"type": "object"}},
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+        }
+    )
+
+    assert result["properties"] == {"a": {"type": "string"}}
+    assert result["additionalProperties"] is False
+
+
+def test_max_properties_zero_object_is_closed_rather_than_rejected():
+    # This already forbids every key, so closing it preserves the meaning exactly.
+    result = ensure_strict_json_schema(
+        {"type": "object", "properties": {"f": {"type": "object", "maxProperties": 0}}}
+    )
+
+    assert result["properties"]["f"]["additionalProperties"] is False
+    assert result["properties"]["f"]["maxProperties"] == 0
+
+
+@pytest.mark.parametrize(
+    "keyword_schema",
+    [
+        {"propertyNames": {"pattern": "^x"}},
+        {"patternProperties": {"^x": {"type": "string"}}},
+        {"enum": [{"a": 1}]},
+    ],
+    ids=["propertyNames", "patternProperties", "enum"],
+)
+def test_empty_properties_map_beside_a_shaping_keyword_is_not_closed(keyword_schema):
+    # An empty `properties` map next to a keyword that describes the contents another way is
+    # not a declaration that the object is empty, so closing it would reject valid values.
+    field = {"type": "object", "properties": {}, **keyword_schema}
+
+    with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
+        ensure_strict_json_schema({"type": "object", "properties": {"f": field}})
