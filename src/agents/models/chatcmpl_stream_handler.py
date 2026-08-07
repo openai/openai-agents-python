@@ -1064,6 +1064,18 @@ class ChatCmplStreamHandler:
                             sequence_number=sequence_number.get_and_increment(),
                         )
 
+        # A provider can return a 200 whose stream carries no chunks at all, and
+        # buffer_tool_call_stream can also swallow every chunk. `response.created` is only
+        # emitted from inside the loop, so open the stream here rather than let the terminal
+        # event arrive without one.
+        if not state.started:
+            state.started = True
+            yield ResponseCreatedEvent(
+                response=response,
+                type="response.created",
+                sequence_number=sequence_number.get_and_increment(),
+            )
+
         # Content-filter refusal with no emitted output: synthesize a refusal so
         # the completed response carries a ResponseOutputRefusal rather than an
         # empty turn. Only when nothing else was produced (text / refusal / tool

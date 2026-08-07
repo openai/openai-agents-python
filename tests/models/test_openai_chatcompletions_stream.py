@@ -590,6 +590,19 @@ async def test_stream_handler_keeps_empty_choice_usage_chunks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_handler_opens_a_chunkless_stream() -> None:
+    """A provider stream that yields no chunks still has to start with response.created."""
+    events = [
+        event
+        async for event in ChatCmplStreamHandler.handle_stream(
+            _empty_response(), cast(Any, _empty_chat_completion_stream())
+        )
+    ]
+
+    assert [event.type for event in events] == ["response.created", "response.completed"]
+
+
+@pytest.mark.asyncio
 async def test_stream_handler_rejects_multiple_choices_in_strict_mode() -> None:
     chunk = ChatCompletionChunk(
         id="chunk-id",
