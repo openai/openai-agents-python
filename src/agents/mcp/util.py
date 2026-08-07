@@ -538,7 +538,8 @@ class MCPUtil:
         schema, is_strict = copy.deepcopy(tool_input_schema(tool)), False
 
         # MCP spec doesn't require the inputSchema to have `properties`, but OpenAI spec does.
-        if "properties" not in schema:
+        declared_properties = "properties" in schema
+        if not declared_properties:
             schema["properties"] = {}
 
         if convert_schemas_to_strict:
@@ -547,8 +548,15 @@ class MCPUtil:
             # ``additionalProperties: false``) on a schema we still serve as
             # non-strict. Convert a separate copy so the non-strict fallback keeps
             # the original schema intact.
+            strict_source = copy.deepcopy(schema)
+            if not declared_properties:
+                # Convert what the server actually sent. The synthetic ``properties: {}`` above
+                # is an OpenAI-spec accommodation, not a statement by the server that the tool
+                # takes no arguments, so leaving it in would let a free-form root be closed as
+                # an empty object instead of falling back to non-strict.
+                strict_source.pop("properties", None)
             try:
-                schema = ensure_strict_json_schema(copy.deepcopy(schema))
+                schema = ensure_strict_json_schema(strict_source)
                 is_strict = True
             except Exception as e:
                 if _debug.DONT_LOG_TOOL_DATA:

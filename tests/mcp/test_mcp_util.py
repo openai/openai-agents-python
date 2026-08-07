@@ -2338,6 +2338,60 @@ async def test_fully_specified_object_args_still_convert_to_strict():
     function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
 
     assert function_tool.strict_json_schema is True
-    assert (
-        function_tool.params_json_schema["properties"]["options"]["additionalProperties"] is False
+    options = function_tool.params_json_schema["properties"]["options"]
+    assert options["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_free_form_root_schema_falls_back_to_non_strict():
+    """A root that declares no properties is free-form, not a no-argument tool.
+
+    `to_function_tool` adds a synthetic `properties: {}` because the OpenAI spec wants one.
+    That accommodation must not be read back as the server saying the tool takes no arguments,
+    which would close a free-form root into "call me with no arguments".
+    """
+    server = FakeMCPServer()
+    tool = MCPTool(name="passthrough", inputSchema={"type": "object"})
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert "additionalProperties" not in function_tool.params_json_schema
+
+
+@pytest.mark.asyncio
+async def test_declared_empty_properties_root_still_converts_to_strict():
+    """A server that explicitly declares `properties: {}` does mean "no arguments"."""
+    server = FakeMCPServer()
+    tool = MCPTool(name="ping", inputSchema={"type": "object", "properties": {}})
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is True
+    assert function_tool.params_json_schema["additionalProperties"] is False
+    assert function_tool.params_json_schema["required"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        {"type": "object", "anyOf": [{"properties": {"a": {"type": "string"}}}]},
+        {"type": "object", "enum": [{"a": 1}]},
+        {"type": "object", "const": {"a": 1}},
+    ],
+    ids=["composed-wrapper", "object-enum", "object-const"],
+)
+async def test_composed_and_enum_object_args_keep_their_non_strict_meaning(wrapper):
+    """Wrappers that describe contents elsewhere must be served unchanged, not closed."""
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="set_properties",
+        inputSchema={"type": "object", "properties": {"field": wrapper}},
     )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    # Served exactly as the server described it, so the branches still match.
+    assert function_tool.params_json_schema["properties"]["field"] == wrapper

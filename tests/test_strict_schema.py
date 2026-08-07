@@ -376,12 +376,12 @@ def test_free_form_object_property_is_rejected_instead_of_silently_emptied():
         },
     }
 
-    with pytest.raises(UserError, match="free-form object"):
+    with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
         ensure_strict_json_schema(schema)
 
 
 def test_free_form_object_root_is_rejected():
-    with pytest.raises(UserError, match="free-form object"):
+    with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
         ensure_strict_json_schema({"type": "object"})
 
 
@@ -411,18 +411,65 @@ def test_explicit_additional_properties_false_object_is_preserved():
 
 
 @pytest.mark.parametrize(
-    "shaped",
+    "wrapper, accepted_by_original",
     [
-        {"type": "object", "allOf": [{"properties": {"a": {"type": "string"}}}]},
-        {"type": "object", "anyOf": [{"properties": {"a": {"type": "string"}}}]},
-        {"type": "object", "patternProperties": {"^x": {"type": "string"}}},
-        {"type": "object", "enum": [{"a": 1}]},
+        ({"type": "object", "anyOf": [{"properties": {"a": {"type": "string"}}}]}, {"a": "x"}),
+        (
+            {
+                "type": "object",
+                "allOf": [
+                    {"properties": {"a": {"type": "string"}}},
+                    {"properties": {"b": {"type": "string"}}},
+                ],
+            },
+            {"a": "x", "b": "y"},
+        ),
+        ({"type": "object", "enum": [{"a": 1}]}, {"a": 1}),
+        ({"type": "object", "const": {"a": 1}}, {"a": 1}),
+        ({"type": "object", "patternProperties": {"^x": {"type": "string"}}}, {"xy": "v"}),
+        ({"type": "object", "propertyNames": {"pattern": "^x"}}, {"xy": "v"}),
     ],
-    ids=["allOf", "anyOf", "patternProperties", "enum"],
+    ids=["anyOf", "multi-allOf", "enum", "const", "patternProperties", "propertyNames"],
 )
-def test_object_shaped_by_other_keywords_is_not_treated_as_free_form(shaped):
-    # These constrain the object without using `properties`, so they are not free-form and must
-    # still convert rather than raise.
-    result = ensure_strict_json_schema({"type": "object", "properties": {"a": shaped}})
+def test_composed_object_wrappers_are_not_closed(wrapper, accepted_by_original):
+    # These describe their contents somewhere other than a `properties` map at this level.
+    # Closing the wrapper with `additionalProperties: false` would reject the very values the
+    # branches describe, so conversion must fail and let the caller stay non-strict.
+    del accepted_by_original  # documents why closing the wrapper is wrong
 
-    assert result["properties"]["a"]["additionalProperties"] is False
+    with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
+        ensure_strict_json_schema({"type": "object", "properties": {"f": wrapper}})
+
+
+def test_single_entry_allof_is_normalized_before_the_check():
+    # A single-entry `allOf` is merged into its parent, which lifts `properties` to this level,
+    # so it must still convert rather than be treated as unclosable.
+    result = ensure_strict_json_schema(
+        {
+            "type": "object",
+            "properties": {
+                "f": {"type": "object", "allOf": [{"properties": {"a": {"type": "string"}}}]}
+            },
+        }
+    )
+
+    field = result["properties"]["f"]
+    assert field["properties"] == {"a": {"type": "string"}}
+    assert field["additionalProperties"] is False
+    assert field["required"] == ["a"]
+
+
+def test_ref_to_an_object_is_normalized_before_the_check():
+    # `$ref` unravelling also lifts `properties` up, so a referenced object still converts.
+    result = ensure_strict_json_schema(
+        {
+            "type": "object",
+            "$defs": {"S": {"type": "object", "properties": {"a": {"type": "string"}}}},
+            "properties": {"f": {"$ref": "#/$defs/S", "description": "d"}},
+        }
+    )
+
+    field = result["properties"]["f"]
+    assert field["description"] == "d"
+    assert field["additionalProperties"] is False
+    assert field["required"] == ["a"]
