@@ -856,6 +856,11 @@ class Agent(AgentBase, Generic[TContext]):
                                 context,
                                 pending_run_result.interruptions,
                             )
+                            # Keep accumulating nested post-resume usage on the parent
+                            # ToolContext accumulator. resolve_resumed_context only
+                            # replaces application .context and would otherwise leave
+                            # the restored nested wrapper on a detached Usage object.
+                            resume_state._context.usage = context.usage
                         consume_agent_tool_run_result(
                             context.tool_call,
                             scope_id=tool_state_scope_id,

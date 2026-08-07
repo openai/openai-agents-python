@@ -7435,7 +7435,14 @@ async def test_resume_nested_agent_as_tool_with_context_override() -> None:
         calls.append(text)
         return text
 
+    nested_turn_usage = Usage(
+        requests=1,
+        input_tokens=17,
+        output_tokens=3,
+        total_tokens=20,
+    )
     nested_model = FakeModel()
+    nested_model.set_hardcoded_usage(nested_turn_usage)
     nested_agent = Agent(name="nested", tools=[needs_ok], model=nested_model)
     nested_model.add_multiple_turn_outputs(
         [
@@ -7482,6 +7489,7 @@ async def test_resume_nested_agent_as_tool_with_context_override() -> None:
     assert restored_wrapper is not None
     assert restored_wrapper.tool_input == {"scoped": True}
     assert restored_wrapper._approvals
+    usage_before_resume = restored_wrapper.usage.input_tokens
     override = {"user": "reviewer"}
 
     resumed = await Runner.run(outer, input=restored, context=override)
@@ -7495,3 +7503,7 @@ async def test_resume_nested_agent_as_tool_with_context_override() -> None:
     assert resumed.context_wrapper.context == override
     assert resumed.context_wrapper.tool_input == {"scoped": True}
     assert resumed.context_wrapper._approvals is restored_wrapper._approvals
+    # Nested post-resume model turns must keep accruing on the parent usage object.
+    assert resumed.context_wrapper.usage.input_tokens == (
+        usage_before_resume + nested_turn_usage.input_tokens
+    )
