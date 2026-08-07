@@ -769,8 +769,10 @@ class RunState(Generic[TContext, TAgent]):
                 seen_call_ids.add(call_id)
             generated_items.append(new_item)
 
-        if current_merge_marker is not None:
-            self._generated_items_last_processed_marker = current_merge_marker
+        # The merge result is local, so the marker must not be recorded here: doing so would make
+        # the next call take the already-merged shortcut above and return the unmerged
+        # `_generated_items`. Only callers that actually store the merged list mark it, via
+        # `_mark_generated_items_merged_with_last_processed`.
         return generated_items
 
     def to_json(

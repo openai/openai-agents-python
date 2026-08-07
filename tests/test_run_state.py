@@ -1411,6 +1411,30 @@ class TestRunState:
         ]
 
     @pytest.mark.asyncio
+    async def test_to_json_is_repeatable(self):
+        """to_json() must not lose merged items when it is called more than once."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="AgentRepeatedSerialization")
+        state = make_state(agent, context=context, original_input="input", max_turns=2)
+
+        state._generated_items = []
+        state._last_processed_response = make_processed_response(
+            new_items=[
+                MessageOutputItem(
+                    raw_item=make_message_output(message_id="msg-processed", text="processed"),
+                    agent=agent,
+                ),
+            ]
+        )
+
+        first = state.to_json()
+        second = state.to_json()
+
+        assert [item["type"] for item in first["generated_items"]] == ["message_output_item"]
+        assert second["generated_items"] == first["generated_items"]
+        assert second["generated_session_item_indexes"] == first["generated_session_item_indexes"]
+
+    @pytest.mark.asyncio
     async def test_anonymous_tool_search_items_not_duplicated_across_round_trip(self):
         """Ensure already-merged anonymous tool_search items do not grow across round-trips."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
