@@ -1912,3 +1912,39 @@ async def test_any_llm_responses_stream_lets_in_flight_close_finish_after_cancel
     finally:
         release.set()
         task.cancel()
+
+
+def test_any_llm_split_keeps_assistant_turn_without_a_usable_tool_call(monkeypatch) -> None:
+    """A tool call that produces no split must not take the assistant message with it.
+
+    The tool-result branch of the same loop already preserves results it cannot pair, so a
+    tool call carrying no id - or a malformed tool_calls value - has to keep its message.
+    """
+    provider = FakeAnyLLMProvider(supports_responses=False)
+    module, _ = _import_any_llm_module(monkeypatch, provider)
+    AnyLLMModel = module.AnyLLMModel
+
+    model = AnyLLMModel(model="anthropic/claude-3-5-sonnet")
+
+    idless: list[Any] = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "let me check",
+            "tool_calls": [
+                {"id": "", "type": "function", "function": {"name": "f", "arguments": "{}"}}
+            ],
+        },
+        {"role": "user", "content": "thanks"},
+    ]
+    result = model._fix_tool_message_ordering(idless)
+    assert [message["role"] for message in result] == ["user", "assistant", "user"]
+    assert result[1]["content"] == "let me check"
+
+    malformed: list[Any] = [
+        {"role": "assistant", "content": "A", "tool_calls": {"id": "call_1"}},
+        {"role": "user", "content": "B"},
+    ]
+    result = model._fix_tool_message_ordering(malformed)
+    assert [message["role"] for message in result] == ["assistant", "user"]
+    assert result[0]["content"] == "A"

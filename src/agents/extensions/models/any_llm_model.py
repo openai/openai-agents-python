@@ -1477,6 +1477,7 @@ class AnyLLMModel(Model):
             role = original_message.get("role")
             if role == "assistant" and original_message.get("tool_calls"):
                 tool_calls = original_message.get("tool_calls", [])
+                emitted_split = False
                 if isinstance(tool_calls, list):
                     for tool_call in tool_calls:
                         if not isinstance(tool_call, dict):
@@ -1490,12 +1491,19 @@ class AnyLLMModel(Model):
                             tool_result_index, tool_result_message = tool_result_messages[tool_id]
                             fixed_messages.append(tool_call_message)
                             fixed_messages.append(tool_result_message)
+                            emitted_split = True
                             used_indices.add(tool_call_messages[tool_id][0])
                             used_indices.add(tool_result_index)
                         elif tool_id in tool_call_messages:
                             _, tool_call_message = tool_call_messages[tool_id]
                             fixed_messages.append(tool_call_message)
+                            emitted_split = True
                             used_indices.add(tool_call_messages[tool_id][0])
+                if not emitted_split:
+                    # No split could be built, e.g. a tool call carrying no id or a tool_calls
+                    # value that is not a list. Keep the turn rather than dropping it, the same
+                    # way an unmatched tool result below is kept.
+                    fixed_messages.append(original_message)
                 used_indices.add(index)
             elif role == "tool":
                 if index not in paired_tool_result_indices:

@@ -352,3 +352,43 @@ class TestExtendedThinkingMessageOrder:
         assert result[6]["role"] == "tool"  # Orphaned result (preserved)
         assert result[6]["tool_call_id"] == "call_orphan"
         assert result[7]["role"] == "user"  # End
+
+    def test_tool_call_without_id_keeps_the_assistant_turn(self):
+        """An unusable tool call must not take the assistant message down with it.
+
+        The tool-result branch already preserves results it cannot pair, so a tool call
+        that produces no split has to keep its original message too.
+        """
+        messages: list[ChatCompletionMessageParam] = [
+            {"role": "user", "content": "Hello"},
+            cast(
+                Any,
+                {
+                    "role": "assistant",
+                    "content": "let me check",
+                    "tool_calls": [
+                        {"id": "", "type": "function", "function": {"name": "f", "arguments": "{}"}}
+                    ],
+                },
+            ),
+            {"role": "user", "content": "Thanks"},
+        ]
+
+        model = LitellmModel("test-model")
+        result = model._fix_tool_message_ordering(messages)
+
+        assert [message["role"] for message in result] == ["user", "assistant", "user"]
+        assert result[1]["content"] == "let me check"
+
+    def test_non_list_tool_calls_keep_the_assistant_turn(self):
+        """A malformed tool_calls value must not delete the assistant message either."""
+        messages: list[ChatCompletionMessageParam] = [
+            cast(Any, {"role": "assistant", "content": "A", "tool_calls": {"id": "call_1"}}),
+            {"role": "user", "content": "B"},
+        ]
+
+        model = LitellmModel("test-model")
+        result = model._fix_tool_message_ordering(messages)
+
+        assert [message["role"] for message in result] == ["assistant", "user"]
+        assert result[0]["content"] == "A"

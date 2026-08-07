@@ -823,6 +823,7 @@ class LitellmModel(Model):
             if role == "assistant" and original_message.get("tool_calls"):
                 # Process each tool call in this assistant message
                 tool_calls = original_message.get("tool_calls", [])
+                emitted_split = False
                 if isinstance(tool_calls, list):
                     for tool_call in tool_calls:
                         if isinstance(tool_call, dict):
@@ -838,6 +839,7 @@ class LitellmModel(Model):
 
                                 fixed_messages.append(tool_call_msg)
                                 fixed_messages.append(tool_result_msg)
+                                emitted_split = True
 
                                 # Mark both as used
                                 used_indices.add(tool_call_messages[tool_id][0])
@@ -846,7 +848,14 @@ class LitellmModel(Model):
                                 # Tool call without result - add just the tool call
                                 _, tool_call_msg = tool_call_messages[tool_id]
                                 fixed_messages.append(tool_call_msg)
+                                emitted_split = True
                                 used_indices.add(tool_call_messages[tool_id][0])
+
+                if not emitted_split:
+                    # No split could be built, e.g. a tool call carrying no id or a tool_calls
+                    # value that is not a list. Keep the turn rather than dropping it, the same
+                    # way an unmatched tool result below is kept.
+                    fixed_messages.append(original_message)
 
                 used_indices.add(i)  # Mark original multi-tool message as used
 
