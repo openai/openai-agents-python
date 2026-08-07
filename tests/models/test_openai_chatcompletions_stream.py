@@ -1429,7 +1429,7 @@ async def test_stream_handler_places_text_after_existing_refusal_part() -> None:
     ],
 )
 @pytest.mark.asyncio
-async def test_stream_handler_announces_assistant_message_once_for_text_and_refusal(
+async def test_stream_handler_emits_consistent_message_lifecycle_for_text_and_refusal(
     deltas: list[ChoiceDelta],
 ) -> None:
     """A message holding both a text and a refusal part is announced by a single added event."""
@@ -1471,6 +1471,9 @@ async def test_stream_handler_announces_assistant_message_once_for_text_and_refu
     part_added = [event for event in events if event.type == "response.content_part.added"]
     assert sorted(event.content_index for event in part_added) == [0, 1]
     assert {event.part.type for event in part_added} == {"output_text", "refusal"}
+    part_done = [event for event in events if event.type == "response.content_part.done"]
+    assert [event.content_index for event in part_done] == [0, 1]
+    assert [event.part.type for event in part_done] == [event.part.type for event in part_added]
 
 
 @pytest.mark.allow_call_model_methods

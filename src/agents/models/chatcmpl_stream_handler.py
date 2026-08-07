@@ -1146,24 +1146,19 @@ class ChatCmplStreamHandler:
         for event in cls._finish_reasoning_item(state, sequence_number):
             yield event
 
+        content_parts: list[tuple[int, ResponseOutputText | ResponseOutputRefusal]] = []
         if state.text_content_index_and_output:
-            # Send end event for this content part
-            yield ResponseContentPartDoneEvent(
-                content_index=state.text_content_index_and_output[0],
-                item_id=FAKE_RESPONSES_ID,
-                output_index=output_layout.assistant_message_output_index(state),
-                part=state.text_content_index_and_output[1],
-                type="response.content_part.done",
-                sequence_number=sequence_number.get_and_increment(),
-            )
-
+            content_parts.append(state.text_content_index_and_output)
         if state.refusal_content_index_and_output:
-            # Send end event for this content part
+            content_parts.append(state.refusal_content_index_and_output)
+        content_parts.sort(key=lambda entry: entry[0])
+
+        for content_index, content_part in content_parts:
             yield ResponseContentPartDoneEvent(
-                content_index=state.refusal_content_index_and_output[0],
+                content_index=content_index,
                 item_id=FAKE_RESPONSES_ID,
                 output_index=output_layout.assistant_message_output_index(state),
-                part=state.refusal_content_index_and_output[1],
+                part=content_part,
                 type="response.content_part.done",
                 sequence_number=sequence_number.get_and_increment(),
             )
@@ -1240,12 +1235,6 @@ class ChatCmplStreamHandler:
             # the content_part events. A refusal that opened before any text holds index 0
             # and the text holds index 1, so appending text first would contradict the
             # indexes consumers already received.
-            content_parts: list[tuple[int, ResponseOutputText | ResponseOutputRefusal]] = []
-            if state.text_content_index_and_output:
-                content_parts.append(state.text_content_index_and_output)
-            if state.refusal_content_index_and_output:
-                content_parts.append(state.refusal_content_index_and_output)
-            content_parts.sort(key=lambda entry: entry[0])
             assistant_msg.content.extend(part for _, part in content_parts)
             outputs.append(assistant_msg)
 
