@@ -4063,10 +4063,11 @@ async def test_stream_span_is_recorded_for_a_consumer_that_stops_at_the_terminal
             conversation_id=None,
             prompt=None,
         )
-        async for event in stream:
+        stream_agen = cast(Any, stream)
+        async for event in stream_agen:
             if event.type == "response.completed":
                 break  # stop consuming, as a caller watching for the terminal event would
-        await stream.aclose()
+        await stream_agen.aclose()
 
     generation = next(s for s in fetch_ordered_spans() if s.span_data.type == "generation")
     assert generation.span_data.usage is not None

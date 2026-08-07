@@ -60,7 +60,6 @@ from ...usage import (
     _raw_usage_snapshot,
     _requests_for_response_without_usage,
     _response_usage_to_usage,
-    _span_usage_without_provider_totals,
     model_usage_to_span_usage,
 )
 from ...util._error_tracing import model_span_errors, record_model_error_on_span
@@ -808,7 +807,7 @@ class AnyLLMModel(Model):
         elif _requests_for_response_without_usage(final_response):
             # Keep streamed tracing aligned with the non-streaming path, which records the
             # request even when the provider reports no usage.
-            span_generation.span_data.usage = _span_usage_without_provider_totals()
+            span_generation.span_data.usage = model_usage_to_span_usage(Usage(requests=1))
 
     @overload
     async def _fetch_chat_response(

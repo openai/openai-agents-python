@@ -322,22 +322,6 @@ def _mark_request_completed_without_usage(response: Any) -> None:
     object.__setattr__(response, _REQUEST_WITHOUT_USAGE_ATTR, True)
 
 
-def _span_usage_without_provider_totals() -> dict[str, Any]:
-    """Span usage for a response that completed without any provider usage payload.
-
-    The request is recorded so streamed and non-streaming tracing agree, while every token
-    total stays at zero because the provider genuinely reported none.
-    """
-    return {
-        "requests": 1,
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
-        "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
-        "output_tokens_details": {"reasoning_tokens": 0},
-    }
-
-
 def _requests_for_response_without_usage(response: Any) -> int:
     """How many requests a usage-less response represents.
 

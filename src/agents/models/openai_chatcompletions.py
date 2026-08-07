@@ -35,7 +35,7 @@ from ..usage import (
     Usage,
     _raw_usage_snapshot,
     _requests_for_response_without_usage,
-    _span_usage_without_provider_totals,
+    model_usage_to_span_usage,
 )
 from ..util._error_tracing import model_span_errors
 from ..util._json import _to_dump_compatible
@@ -526,7 +526,7 @@ class OpenAIChatCompletionsModel(Model):
         elif _requests_for_response_without_usage(final_response):
             # Keep streamed tracing aligned with the non-streaming path, which records the
             # request even when the provider reports no usage.
-            span_generation.span_data.usage = _span_usage_without_provider_totals()
+            span_generation.span_data.usage = model_usage_to_span_usage(Usage(requests=1))
 
     def _handle_unsupported_server_managed_conversation_state(
         self,

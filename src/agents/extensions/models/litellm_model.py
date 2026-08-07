@@ -63,7 +63,7 @@ from ...usage import (
     _cache_write_tokens,
     _make_input_tokens_details,
     _requests_for_response_without_usage,
-    _span_usage_without_provider_totals,
+    model_usage_to_span_usage,
 )
 from ...util._error_tracing import model_span_errors
 from ...util._json import _to_dump_compatible
@@ -486,7 +486,7 @@ class LitellmModel(Model):
         elif _requests_for_response_without_usage(final_response):
             # Keep streamed tracing aligned with the non-streaming path, which records the
             # request even when the provider reports no usage.
-            span_generation.span_data.usage = _span_usage_without_provider_totals()
+            span_generation.span_data.usage = model_usage_to_span_usage(Usage(requests=1))
 
     @overload
     async def _fetch_response(
