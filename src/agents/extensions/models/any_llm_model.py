@@ -6,7 +6,7 @@ import importlib
 import inspect
 import json
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Iterable
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Mapping
 from copy import copy
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
@@ -52,7 +52,12 @@ from ...tool import Tool
 from ...tracing import generation_span, response_span
 from ...tracing.span_data import GenerationSpanData
 from ...tracing.spans import Span
-from ...usage import Usage
+from ...usage import (
+    Usage,
+    _attach_raw_usage_snapshot,
+    _extract_raw_usage_snapshot,
+    _raw_usage_snapshot,
+)
 from ...util._error_tracing import model_span_errors, record_model_error_on_span
 from ...util._json import _to_dump_compatible
 
@@ -73,6 +78,12 @@ class InternalChatCompletionMessage(ChatCompletionMessage):
     """Internal wrapper used to carry normalized reasoning content."""
 
     reasoning_content: str = ""
+
+
+def _usage_payload(response: Any) -> Any | None:
+    if isinstance(response, Mapping):
+        return response.get("usage")
+    return getattr(response, "usage", None)
 
 
 class _AnyLLMResponsesParamsShim:
@@ -417,6 +428,11 @@ class AnyLLMModel(Model):
                 usage=usage,
                 response_id=response.id,
                 request_id=getattr(response, "_request_id", None),
+                raw_usage=(
+                    _extract_raw_usage_snapshot(response, fallback=response.usage)
+                    if model_settings.preserve_raw_usage is True
+                    else None
+                ),
             )
 
     async def _stream_response_via_responses(
@@ -463,6 +479,8 @@ class AnyLLMModel(Model):
                     chunk_type = getattr(chunk, "type", None)
                     if isinstance(chunk, ResponseCompletedEvent):
                         final_response = chunk.response
+                        if model_settings.preserve_raw_usage is True:
+                            _attach_raw_usage_snapshot(chunk.response, chunk.response.usage)
                     elif chunk_type in {"response.failed", "response.incomplete"}:
                         terminal_response = getattr(chunk, "response", None)
                         terminal_failure_error = response_terminal_failure_error(
@@ -640,7 +658,16 @@ class AnyLLMModel(Model):
             if logprob_models:
                 self._attach_logprobs_to_output(items, logprob_models)
 
-            return ModelResponse(output=items, usage=usage, response_id=None)
+            return ModelResponse(
+                output=items,
+                usage=usage,
+                response_id=None,
+                raw_usage=(
+                    _extract_raw_usage_snapshot(response, fallback=response.usage)
+                    if model_settings.preserve_raw_usage is True
+                    else None
+                ),
+            )
 
     async def _stream_response_via_chat(
         self,
@@ -686,11 +713,21 @@ class AnyLLMModel(Model):
             final_response: Response | None = None
             yielded_terminal_event = False
             close_stream_in_background = False
+            raw_usage_options: dict[str, Any] = (
+                {"preserve_raw_usage": True} if model_settings.preserve_raw_usage is True else {}
+            )
             try:
                 async for chunk in ChatCmplStreamHandler.handle_stream(
                     response,
-                    cast(Any, self._normalize_chat_stream(stream)),
+                    cast(
+                        Any,
+                        self._normalize_chat_stream(
+                            stream,
+                            preserve_raw_usage=model_settings.preserve_raw_usage is True,
+                        ),
+                    ),
                     model=self.model,
+                    **raw_usage_options,
                 ):
                     # Record terminal state and populate the span before yielding so a consumer
                     # that stops at the completed event still leaves a fully recorded span.
@@ -899,7 +936,18 @@ class AnyLLMModel(Model):
         )
 
         if not stream:
-            return self._normalize_chat_completion_response(ret)
+            raw_usage = (
+                _raw_usage_snapshot(_usage_payload(ret))
+                if model_settings.preserve_raw_usage is True
+                else None
+            )
+            normalized_response = self._normalize_chat_completion_response(ret)
+            if model_settings.preserve_raw_usage is True:
+                _attach_raw_usage_snapshot(
+                    normalized_response,
+                    raw_usage,
+                )
+            return normalized_response
 
         responses_tool_choice = OpenAIResponsesConverter.convert_tool_choice(
             model_settings.tool_choice
@@ -1051,7 +1099,18 @@ class AnyLLMModel(Model):
         if stream:
             return cast(AsyncIterator[ResponseStreamEvent], response)
 
-        return self._normalize_response(response)
+        raw_usage = (
+            _raw_usage_snapshot(_usage_payload(response))
+            if model_settings.preserve_raw_usage is True
+            else None
+        )
+        normalized_response = self._normalize_response(response)
+        if model_settings.preserve_raw_usage is True:
+            _attach_raw_usage_snapshot(
+                normalized_response,
+                raw_usage,
+            )
+        return normalized_response
 
     @staticmethod
     def _split_model_name(model: str) -> tuple[str, str]:
@@ -1183,10 +1242,20 @@ class AnyLLMModel(Model):
         return ChatCompletion.model_validate(response)
 
     async def _normalize_chat_stream(
-        self, stream: AsyncIterator[ChatCompletionChunk]
+        self,
+        stream: AsyncIterator[ChatCompletionChunk],
+        *,
+        preserve_raw_usage: bool = False,
     ) -> AsyncIterator[ChatCompletionChunk]:
         async for chunk in stream:
-            yield self._normalize_chat_chunk(chunk)
+            raw_usage = _raw_usage_snapshot(_usage_payload(chunk)) if preserve_raw_usage else None
+            normalized_chunk = self._normalize_chat_chunk(chunk)
+            if preserve_raw_usage:
+                _attach_raw_usage_snapshot(
+                    normalized_chunk,
+                    raw_usage,
+                )
+            yield normalized_chunk
 
     def _normalize_chat_chunk(self, chunk: Any) -> ChatCompletionChunk:
         normalized_chunk = chunk

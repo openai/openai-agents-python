@@ -678,6 +678,15 @@ class ModelResponse:
     request_id: str | None = None
     """The transport request ID for this model call, if provided by the model SDK."""
 
+    raw_usage: dict[str, Any] | None = None
+    """A JSON-compatible snapshot of the provider usage payload, when preservation is enabled.
+
+    The snapshot is captured only while the unnormalized provider payload is available, before the
+    Agents SDK normalizes missing usage fields. It is ``None`` when preservation is disabled, no
+    usage payload reaches the model adapter, or upstream normalization has already discarded
+    field-presence information.
+    """
+
     def to_input_items(self) -> list[TResponseInputItem]:
         """Convert the output into a list of input items suitable for passing to the model."""
         # Most output items can be replayed via a direct model_dump. Tool-search items carry

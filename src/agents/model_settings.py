@@ -201,6 +201,16 @@ class ModelSettings:
     control which prompt prefixes are eligible for caching.
     """
 
+    preserve_raw_usage: bool | None = None
+    """Whether to preserve the provider usage payload on completed model responses.
+
+    When enabled and the model adapter still has the unnormalized provider payload,
+    ``ModelResponse.raw_usage`` contains a JSON-compatible snapshot captured before the Agents
+    SDK normalizes missing usage fields. It remains ``None`` when usage is absent or upstream
+    normalization has already discarded field-presence information. This setting does not request
+    usage from the provider; use ``include_usage`` separately when a streaming provider requires it.
+    """
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -228,6 +238,7 @@ class ModelSettings:
             retry: ModelRetrySettings | dict[str, Any] | None = None,
             context_management: list[ContextManagement] | None = None,
             prompt_cache_options: PromptCacheOptions | None = None,
+            preserve_raw_usage: bool | None = None,
         ) -> None: ...
 
     def resolve(self, override: ModelSettings | dict[str, Any] | None) -> ModelSettings:

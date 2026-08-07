@@ -98,7 +98,7 @@ from ..tracing import Span, SpanError, agent_span, get_current_trace, task_span,
 from ..tracing.config import include_task_and_turn_spans
 from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData, TaskSpanData
-from ..usage import Usage, _response_usage_to_usage
+from ..usage import Usage, _extract_raw_usage_snapshot, _response_usage_to_usage
 from ..util import _coro, _error_tracing
 from ..util._asyncio_tasks import gather_with_cancel
 from .agent_bindings import AgentBindings, bind_public_agent
@@ -1774,6 +1774,11 @@ async def run_single_turn_streamed(
                 usage=usage,
                 response_id=terminal_response.id,
                 request_id=getattr(terminal_response, "_request_id", None),
+                raw_usage=(
+                    _extract_raw_usage_snapshot(terminal_response)
+                    if model_settings.preserve_raw_usage is True
+                    else None
+                ),
             )
 
         if isinstance(event, ResponseOutputItemDoneEvent):

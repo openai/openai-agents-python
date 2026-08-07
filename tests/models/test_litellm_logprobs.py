@@ -94,7 +94,7 @@ async def test_get_response_preserves_returned_logprobs_in_output(monkeypatch):
     response = await LitellmModel(model="test-model").get_response(
         system_instructions=None,
         input=[],
-        model_settings=ModelSettings(top_logprobs=2),
+        model_settings=ModelSettings(top_logprobs=2, preserve_raw_usage=True),
         tools=[],
         output_schema=None,
         handoffs=[],
@@ -116,3 +116,6 @@ async def test_get_response_preserves_returned_logprobs_in_output(monkeypatch):
     assert output_logprobs[0].token == "Hello"
     assert output_logprobs[0].logprob == -0.25
     assert [tlp.token for tlp in output_logprobs[0].top_logprobs] == ["Hello", "Hi"]
+    # LiteLLM has already normalized usage before the Agents adapter receives this response, so
+    # omitted-versus-null provenance is unavailable.
+    assert response.raw_usage is None

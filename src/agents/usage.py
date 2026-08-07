@@ -1,13 +1,69 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import field
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from openai.types.completion_usage import CompletionTokensDetails, PromptTokensDetails
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
-from pydantic import BeforeValidator, TypeAdapter, ValidationError
+from pydantic import BeforeValidator, JsonValue, TypeAdapter, ValidationError
 from pydantic.dataclasses import dataclass
+
+_RAW_USAGE_ATTRIBUTE = "_agents_sdk_raw_usage"
+_RAW_USAGE_ADAPTER = TypeAdapter(dict[str, JsonValue])
+_RAW_USAGE_MISSING = object()
+
+
+def _raw_usage_snapshot(raw_usage: Any | None) -> dict[str, Any] | None:
+    """Return a detached JSON-compatible usage object without adding omitted fields."""
+    if raw_usage is None:
+        return None
+
+    try:
+        if isinstance(raw_usage, Mapping):
+            candidate = dict(raw_usage)
+        else:
+            model_dump = getattr(raw_usage, "model_dump", None)
+            if not callable(model_dump):
+                return None
+            candidate = model_dump(mode="json", by_alias=True, exclude_unset=True)
+
+        if not isinstance(candidate, dict) or not all(isinstance(key, str) for key in candidate):
+            return None
+
+        validated = _RAW_USAGE_ADAPTER.validate_python(candidate)
+        return cast(
+            dict[str, Any],
+            json.loads(json.dumps(validated, allow_nan=False)),
+        )
+    except Exception:
+        # Usage preservation is diagnostic metadata. An adapter-specific value that cannot be
+        # represented as JSON must not turn an otherwise successful model call into a failure.
+        return None
+
+
+def _attach_raw_usage_snapshot(target: Any, raw_usage: Any | None) -> None:
+    """Attach a pre-normalization usage snapshot to an internal response object."""
+    snapshot = _raw_usage_snapshot(raw_usage)
+    try:
+        object.__setattr__(target, _RAW_USAGE_ATTRIBUTE, snapshot)
+    except Exception:
+        # Some custom response objects reject private attributes. Their completed response can
+        # still be processed normally, but no raw usage snapshot is available downstream.
+        return
+
+
+def _extract_raw_usage_snapshot(
+    target: Any,
+    *,
+    fallback: Any | None = None,
+) -> dict[str, Any] | None:
+    """Read an attached snapshot, or capture the provided unnormalized fallback."""
+    snapshot = getattr(target, _RAW_USAGE_ATTRIBUTE, _RAW_USAGE_MISSING)
+    if snapshot is not _RAW_USAGE_MISSING:
+        return snapshot if isinstance(snapshot, dict) else None
+    return _raw_usage_snapshot(fallback)
 
 
 def _make_input_tokens_details(

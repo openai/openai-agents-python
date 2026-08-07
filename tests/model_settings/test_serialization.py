@@ -126,6 +126,7 @@ def test_all_fields_serialization() -> None:
         ),
         context_management=[{"type": "compaction", "compact_threshold": 200000}],
         prompt_cache_options={"mode": "explicit", "ttl": "30m"},
+        preserve_raw_usage=True,
     )
 
     # Verify that every single field is set to a non-None value
@@ -154,10 +155,14 @@ def test_gpt_5_6_reasoning_and_prompt_cache_serialization() -> None:
     }
 
 
-def test_prompt_cache_options_is_appended_to_public_field_order() -> None:
+def test_usage_preservation_is_appended_to_public_field_order() -> None:
     field_names = [field.name for field in fields(ModelSettings)]
 
-    assert field_names[-2:] == ["context_management", "prompt_cache_options"]
+    assert field_names[-3:] == [
+        "context_management",
+        "prompt_cache_options",
+        "preserve_raw_usage",
+    ]
 
 
 def test_extra_args_serialization() -> None:
@@ -185,6 +190,7 @@ def test_traceable_serialization_omits_request_extras() -> None:
         extra_query={"api-key": "query-token"},
         extra_body={"secret": "body-token"},
         extra_args={"api_key": "arg-token"},
+        preserve_raw_usage=True,
     )
 
     json_dict = model_settings.to_json_dict()
@@ -199,6 +205,7 @@ def test_traceable_serialization_omits_request_extras() -> None:
     assert "extra_query" not in traceable
     assert "extra_body" not in traceable
     assert "extra_args" not in traceable
+    assert "preserve_raw_usage" not in traceable
 
 
 def test_extra_args_resolve() -> None:

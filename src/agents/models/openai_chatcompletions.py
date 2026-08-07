@@ -31,7 +31,7 @@ from ..tool import Tool
 from ..tracing import generation_span
 from ..tracing.span_data import GenerationSpanData
 from ..tracing.spans import Span
-from ..usage import Usage
+from ..usage import Usage, _raw_usage_snapshot
 from ..util._error_tracing import model_span_errors
 from ..util._json import _to_dump_compatible
 from ._openai_retry import get_openai_retry_advice
@@ -351,6 +351,11 @@ class OpenAIChatCompletionsModel(Model):
                 # The OpenAI SDK records the `x-request-id` header on every parsed response,
                 # so callers can inspect the same debugging handle as on the Responses path.
                 request_id=getattr(response, "_request_id", None),
+                raw_usage=(
+                    _raw_usage_snapshot(response.usage)
+                    if model_settings.preserve_raw_usage is True
+                    else None
+                ),
             )
 
     @staticmethod
@@ -444,6 +449,9 @@ class OpenAIChatCompletionsModel(Model):
             else:
                 stream_for_handler = stream
 
+            raw_usage_options: dict[str, Any] = (
+                {"preserve_raw_usage": True} if model_settings.preserve_raw_usage is True else {}
+            )
             close_stream_in_background = False
             yielded_terminal_event = False
             try:
@@ -452,6 +460,7 @@ class OpenAIChatCompletionsModel(Model):
                     cast(AsyncStream[ChatCompletionChunk], stream_for_handler),
                     model=self.model,
                     strict_feature_validation=self._strict_feature_validation,
+                    **raw_usage_options,
                 ):
                     if chunk.type == "response.completed":
                         final_response = chunk.response

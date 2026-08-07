@@ -173,6 +173,87 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
     assert getattr(resp.usage.input_tokens_details, "cache_write_tokens", None) == 4
     assert resp.usage.output_tokens_details.reasoning_tokens == 0
     assert resp.response_id is None
+    assert resp.raw_usage is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prompt_tokens_details", "expected_details"),
+    [({}, {}), ({"cached_tokens": 0}, {"cached_tokens": 0})],
+    ids=["omitted-cached-tokens", "explicit-zero-cached-tokens"],
+)
+async def test_get_response_preserves_raw_usage_field_presence(
+    monkeypatch: pytest.MonkeyPatch,
+    prompt_tokens_details: dict[str, int],
+    expected_details: dict[str, int],
+) -> None:
+    chat = _minimal_chat_completion()
+    chat.usage = CompletionUsage.model_validate(
+        {
+            "completion_tokens": 5,
+            "prompt_tokens": 7,
+            "total_tokens": 12,
+            "prompt_tokens_details": prompt_tokens_details,
+        }
+    )
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return chat
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    response = await model.get_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(preserve_raw_usage=True),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    assert response.raw_usage == {
+        "completion_tokens": 5,
+        "prompt_tokens": 7,
+        "total_tokens": 12,
+        "prompt_tokens_details": expected_details,
+    }
+    assert response.usage.input_tokens_details.cached_tokens == 0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_raw_usage_is_none_when_provider_omits_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chat = _minimal_chat_completion()
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return chat
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    response = await model.get_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(preserve_raw_usage=True),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    assert response.raw_usage is None
+    assert response.usage.total_tokens == 0
 
 
 async def _get_response_for_choice(

@@ -421,7 +421,7 @@ async def test_any_llm_chat_path_is_used_when_responses_are_unsupported(monkeypa
     response = await model.get_response(
         system_instructions="You are terse.",
         input="hi",
-        model_settings=ModelSettings(),
+        model_settings=ModelSettings(preserve_raw_usage=True),
         tools=[],
         output_schema=None,
         handoffs=[],
@@ -445,6 +445,11 @@ async def test_any_llm_chat_path_is_used_when_responses_are_unsupported(monkeypa
     assert response.output[0].content[0].text == "Hello"
     assert response.usage.input_tokens_details.cached_tokens == 2
     assert getattr(response.usage.input_tokens_details, "cache_write_tokens", None) == 4
+    assert response.raw_usage is not None
+    assert response.raw_usage["prompt_tokens_details"] == {
+        "cached_tokens": 2,
+        "cache_write_tokens": 4,
+    }
 
 
 def _content_filtered_chat_completion(content: str) -> ChatCompletion:
@@ -655,7 +660,7 @@ async def test_any_llm_responses_path_defaults_missing_cache_write_tokens(
     normalized = await model.get_response(
         system_instructions=None,
         input="hi",
-        model_settings=ModelSettings(),
+        model_settings=ModelSettings(preserve_raw_usage=True),
         tools=[],
         output_schema=None,
         handoffs=[],
@@ -668,6 +673,8 @@ async def test_any_llm_responses_path_defaults_missing_cache_write_tokens(
     assert normalized.output[0].content[0].text == "Hello"
     assert normalized.usage.input_tokens_details.cache_write_tokens == 0
     assert "cache_write_tokens" not in response_payload["usage"]["input_tokens_details"]
+    assert normalized.raw_usage is not None
+    assert "cache_write_tokens" not in normalized.raw_usage["input_tokens_details"]
 
 
 @pytest.mark.allow_call_model_methods

@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
-from openai.types.completion_usage import CompletionTokensDetails, PromptTokensDetails
+from openai.types.completion_usage import (
+    CompletionTokensDetails,
+    CompletionUsage,
+    PromptTokensDetails,
+)
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from agents import Agent, Runner
@@ -9,6 +15,7 @@ from agents.run_internal.agent_runner_helpers import snapshot_usage, usage_delta
 from agents.usage import (
     RequestUsage,
     Usage,
+    _raw_usage_snapshot,
     deserialize_usage,
     model_usage_to_span_usage,
     serialize_usage,
@@ -22,6 +29,45 @@ def test_usage_defaults_cache_write_tokens_to_zero() -> None:
 
     assert usage.input_tokens_details.cached_tokens == 0
     assert getattr(usage.input_tokens_details, "cache_write_tokens", None) == 0
+
+
+def test_raw_usage_snapshot_preserves_presence_and_is_detached() -> None:
+    raw_usage: dict[str, Any] = {
+        "input_tokens": 3,
+        "input_tokens_details": {"cached_tokens": 0},
+        "provider_metric": None,
+    }
+
+    snapshot = _raw_usage_snapshot(raw_usage)
+    raw_usage["input_tokens_details"]["cached_tokens"] = 9
+
+    assert snapshot == {
+        "input_tokens": 3,
+        "input_tokens_details": {"cached_tokens": 0},
+        "provider_metric": None,
+    }
+
+
+def test_raw_usage_snapshot_does_not_add_unset_pydantic_fields() -> None:
+    usage = CompletionUsage.model_validate(
+        {
+            "completion_tokens": 2,
+            "prompt_tokens": 3,
+            "total_tokens": 5,
+            "prompt_tokens_details": {},
+        }
+    )
+
+    assert _raw_usage_snapshot(usage) == {
+        "completion_tokens": 2,
+        "prompt_tokens": 3,
+        "total_tokens": 5,
+        "prompt_tokens_details": {},
+    }
+
+
+def test_raw_usage_snapshot_rejects_non_json_values() -> None:
+    assert _raw_usage_snapshot({"provider_metric": object()}) is None
 
 
 @pytest.mark.asyncio

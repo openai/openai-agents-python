@@ -252,7 +252,7 @@ async def test_get_response_exposes_request_id():
     response = await model.get_response(
         system_instructions=None,
         input="hi",
-        model_settings=ModelSettings(),
+        model_settings=ModelSettings(preserve_raw_usage=True),
         tools=[],
         output_schema=None,
         handoffs=[],
@@ -261,6 +261,8 @@ async def test_get_response_exposes_request_id():
 
     assert response.response_id == "resp-request-id"
     assert response.request_id == "req_nonstream_123"
+    assert response.raw_usage is not None
+    assert response.raw_usage["input_tokens_details"]["cached_tokens"] == 0
 
 
 @pytest.mark.allow_call_model_methods

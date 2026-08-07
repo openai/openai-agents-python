@@ -2668,16 +2668,20 @@ class TestDeserializeHelpers:
             ],
             response_id="resp123",
             request_id="req123",
+            raw_usage={"input_tokens": 10, "provider_metric": 0},
         )
         state._model_responses.append(response)
 
         # Round trip
+        serialized = state.to_json()
+        assert "raw_usage" not in serialized["model_responses"][0]
         json_str = state.to_string()
         restored = await RunState.from_string(agent, json_str)
 
         assert len(restored._model_responses) == 1
         assert restored._model_responses[0].response_id == "resp123"
         assert restored._model_responses[0].request_id == "req123"
+        assert restored._model_responses[0].raw_usage is None
         assert restored._model_responses[0].usage.requests == 1
         assert restored._model_responses[0].usage.input_tokens == 10
 

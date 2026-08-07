@@ -59,7 +59,7 @@ from agents.run_internal.run_loop import QueueCompleteSentinel
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent, StreamEvent
 from agents.tool import FunctionTool, Tool
 from agents.tool_guardrails import tool_input_guardrail, tool_output_guardrail
-from agents.usage import Usage
+from agents.usage import Usage, _attach_raw_usage_snapshot
 
 from .fake_model import FakeModel, get_response_obj
 from .test_responses import (
@@ -317,7 +317,10 @@ async def test_streamed_run_rejects_response_error_terminal_event() -> None:
 
 
 @pytest.mark.asyncio
-async def test_streamed_run_exposes_request_id_on_raw_responses() -> None:
+@pytest.mark.parametrize("preserve_raw_usage", [None, False, True])
+async def test_streamed_run_exposes_request_id_on_raw_responses(
+    preserve_raw_usage: bool | None,
+) -> None:
     class RequestIdTerminalFakeModel(FakeModel):
         async def stream_response(
             self,
@@ -337,6 +340,10 @@ async def test_streamed_run_exposes_request_id_on_raw_responses() -> None:
                 [get_text_message("partial final")], response_id="resp-partial"
             )
             response._request_id = "req_streamed_result_123"
+            _attach_raw_usage_snapshot(
+                response,
+                {"input_tokens": 3, "input_tokens_details": {"cached_tokens": 0}},
+            )
             yield ResponseCompletedEvent(
                 type="response.completed",
                 response=response,
@@ -344,7 +351,11 @@ async def test_streamed_run_exposes_request_id_on_raw_responses() -> None:
             )
 
     model = RequestIdTerminalFakeModel()
-    agent = Agent(name="test", model=model)
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=ModelSettings(preserve_raw_usage=preserve_raw_usage),
+    )
 
     result = Runner.run_streamed(agent, input="test")
     async for _ in result.stream_events():
@@ -352,6 +363,14 @@ async def test_streamed_run_exposes_request_id_on_raw_responses() -> None:
 
     assert len(result.raw_responses) == 1
     assert result.raw_responses[0].request_id == "req_streamed_result_123"
+    assert result.raw_responses[0].raw_usage == (
+        {
+            "input_tokens": 3,
+            "input_tokens_details": {"cached_tokens": 0},
+        }
+        if preserve_raw_usage is True
+        else None
+    )
 
 
 @pytest.mark.asyncio

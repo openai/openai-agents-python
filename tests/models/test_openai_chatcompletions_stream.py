@@ -568,7 +568,14 @@ async def test_stream_handler_keeps_empty_choice_usage_chunks() -> None:
         model="fake",
         object="chat.completion.chunk",
         choices=[],
-        usage=CompletionUsage(completion_tokens=1, prompt_tokens=2, total_tokens=3),
+        usage=CompletionUsage.model_validate(
+            {
+                "completion_tokens": 1,
+                "prompt_tokens": 2,
+                "total_tokens": 3,
+                "prompt_tokens_details": {"cached_tokens": 0},
+            }
+        ),
     )
 
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
@@ -577,7 +584,7 @@ async def test_stream_handler_keeps_empty_choice_usage_chunks() -> None:
     events = [
         event
         async for event in ChatCmplStreamHandler.handle_stream(
-            _empty_response(), cast(Any, fake_stream())
+            _empty_response(), cast(Any, fake_stream()), preserve_raw_usage=True
         )
     ]
 
@@ -587,6 +594,12 @@ async def test_stream_handler_keeps_empty_choice_usage_chunks() -> None:
     assert completed_event.response.output == []
     assert completed_event.response.usage
     assert completed_event.response.usage.total_tokens == 3
+    assert cast(Any, completed_event.response)._agents_sdk_raw_usage == {
+        "completion_tokens": 1,
+        "prompt_tokens": 2,
+        "total_tokens": 3,
+        "prompt_tokens_details": {"cached_tokens": 0},
+    }
 
 
 @pytest.mark.asyncio

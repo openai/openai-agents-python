@@ -74,7 +74,13 @@ from ..tool import (
     validate_responses_tool_search_configuration,
 )
 from ..tracing import SpanError, response_span
-from ..usage import Usage, _response_usage_to_usage, model_usage_to_span_usage
+from ..usage import (
+    Usage,
+    _attach_raw_usage_snapshot,
+    _raw_usage_snapshot,
+    _response_usage_to_usage,
+    model_usage_to_span_usage,
+)
 from ..util._error_tracing import record_model_error_on_span
 from ..util._json import _to_dump_compatible
 from ..version import __version__
@@ -550,6 +556,11 @@ class OpenAIResponsesModel(Model):
             usage=usage,
             response_id=response.id,
             request_id=getattr(response, "_request_id", None),
+            raw_usage=(
+                _raw_usage_snapshot(response.usage)
+                if model_settings.preserve_raw_usage is True
+                else None
+            ),
         )
 
     async def stream_response(
@@ -592,6 +603,8 @@ class OpenAIResponsesModel(Model):
                         chunk_type = getattr(chunk, "type", None)
                         if isinstance(chunk, ResponseCompletedEvent):
                             final_response = chunk.response
+                            if model_settings.preserve_raw_usage is True:
+                                _attach_raw_usage_snapshot(chunk.response, chunk.response.usage)
                         elif chunk_type in {
                             "response.failed",
                             "response.incomplete",

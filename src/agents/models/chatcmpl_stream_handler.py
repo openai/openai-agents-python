@@ -51,7 +51,12 @@ from openai.types.responses.response_usage import OutputTokensDetails
 from ..exceptions import ModelBehaviorError, UserError
 from ..items import TResponseStreamEvent
 from ..logger import logger
-from ..usage import _cache_write_tokens, _make_input_tokens_details
+from ..usage import (
+    _attach_raw_usage_snapshot,
+    _cache_write_tokens,
+    _extract_raw_usage_snapshot,
+    _make_input_tokens_details,
+)
 from .chatcmpl_helpers import ChatCmplHelpers
 from .fake_id import FAKE_RESPONSES_ID
 
@@ -584,6 +589,7 @@ class ChatCmplStreamHandler:
         stream: AsyncStream[ChatCompletionChunk],
         model: str | None = None,
         strict_feature_validation: bool = False,
+        preserve_raw_usage: bool = False,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """
         Handle a streaming chat completion response and yield response events.
@@ -593,8 +599,11 @@ class ChatCmplStreamHandler:
             stream: The async stream of chat completion chunks from the model
             model: The source model that is generating this stream. Used to handle
                 provider-specific stream processing.
+            preserve_raw_usage: Whether to retain the last provider usage payload before
+                converting it to the Responses usage shape.
         """
         usage: CompletionUsage | None = None
+        raw_usage: dict[str, Any] | None = None
         state = StreamingState()
         output_layout = _StreamOutputLayout()
         sequence_number = SequenceNumber()
@@ -616,6 +625,8 @@ class ChatCmplStreamHandler:
             # Only update when chunk has usage data (not always in the last chunk)
             if hasattr(chunk, "usage") and chunk.usage is not None:
                 usage = chunk.usage
+                if preserve_raw_usage:
+                    raw_usage = _extract_raw_usage_snapshot(chunk, fallback=chunk.usage)
 
             if not chunk.choices:
                 continue
@@ -1272,6 +1283,8 @@ class ChatCmplStreamHandler:
             if usage
             else None
         )
+        if preserve_raw_usage:
+            _attach_raw_usage_snapshot(final_response, raw_usage)
 
         yield ResponseCompletedEvent(
             response=final_response,
