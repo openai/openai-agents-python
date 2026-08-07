@@ -283,6 +283,16 @@ def _extract_field_info_from_metadata(metadata: tuple[Any, ...]) -> FieldInfo | 
     return None
 
 
+def _is_run_context_annotation(annotation: Any) -> bool:
+    """Whether an annotation refers to RunContextWrapper or one of its subclasses.
+
+    ToolContext and AgentHookContext are SDK subclasses, and the docs tell callers the SDK may
+    hand them a specialized subclass, so subclasses have to count as context too.
+    """
+    origin = get_origin(annotation) or annotation
+    return isinstance(origin, type) and issubclass(origin, RunContextWrapper | ToolContext)
+
+
 def function_schema(
     func: Callable[..., Any],
     docstring_style: DocstringStyle | None = None,
@@ -356,8 +366,7 @@ def function_schema(
         # Prefer the evaluated type hint if available
         ann = type_hints.get(first_name, first_param.annotation)
         if ann is not inspect._empty:
-            origin = get_origin(ann) or ann
-            if origin is RunContextWrapper or origin is ToolContext:
+            if _is_run_context_annotation(ann):
                 takes_context = True  # Mark that the function takes context
             else:
                 filtered_params.append((first_name, first_param))
@@ -368,8 +377,7 @@ def function_schema(
     for name, param in params[1:]:
         ann = type_hints.get(name, param.annotation)
         if ann is not inspect._empty:
-            origin = get_origin(ann) or ann
-            if origin is RunContextWrapper or origin is ToolContext:
+            if _is_run_context_annotation(ann):
                 raise UserError(
                     f"RunContextWrapper/ToolContext param found at non-first position in function"
                     f" {func.__name__}"

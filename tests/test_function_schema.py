@@ -1137,3 +1137,32 @@ def test_default_equality_is_not_used_for_sentinel_comparison(
     parsed = fs.params_pydantic_model(x=1)
     args, kwargs = fs.to_call_args(parsed)
     assert isinstance((args + list(kwargs.values()))[-1], default_type)
+
+
+class _CustomContext(RunContextWrapper[str]):
+    """A caller-defined context, like the specialized subclasses the SDK itself passes."""
+
+
+def function_with_context_subclass(ctx: _CustomContext, a: int, b: int = 5):
+    return a + b
+
+
+def test_function_with_context_subclass() -> None:
+    func_schema = function_schema(function_with_context_subclass)
+
+    assert func_schema.takes_context
+    assert "ctx" not in func_schema.params_json_schema.get("properties", {})
+
+    context = _CustomContext(context="test")
+    parsed = func_schema.params_pydantic_model(**{"a": 1, "b": 2})
+    args, kwargs_dict = func_schema.to_call_args(parsed)
+    assert function_with_context_subclass(context, *args, **kwargs_dict) == 3
+
+
+def function_with_context_subclass_at_non_first_position(a: int, ctx: _CustomContext):
+    return a
+
+
+def test_context_subclass_at_non_first_position_raises() -> None:
+    with pytest.raises(UserError, match="param found at non-first position"):
+        function_schema(function_with_context_subclass_at_non_first_position)
