@@ -1027,6 +1027,7 @@ class AnyLLMModel(Model):
             "stream": stream,
             "truncation": model_settings.truncation,
             "store": model_settings.store,
+            "prompt_cache_retention": model_settings.prompt_cache_retention,
             "previous_response_id": previous_response_id,
             "conversation": conversation_id,
             "include": include,
