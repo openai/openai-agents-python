@@ -212,6 +212,21 @@ def should_skip_tar_member(
     return any(_is_within(rel, prefix) for rel in rel_variants for prefix in prefixes)
 
 
+def _restored_regular_file_mode(mode: int) -> int:
+    """Return the permission bits to restore for an extracted regular file.
+
+    This mirrors the mode policy of the standard library's ``tarfile`` ``data`` filter, which
+    this extractor replaces: setuid, setgid, sticky and group/other write bits are dropped,
+    execute bits are kept only when the owner had them, and the owner is always left able to
+    read and write the file.
+    """
+
+    restored = mode & 0o755
+    if not restored & 0o100:
+        restored &= ~0o111
+    return restored | 0o600
+
+
 def _ensure_no_symlink_parents(*, root: Path, dest: Path, check_leaf: bool = True) -> None:
     """
     Ensure that no existing parent directory in `dest` is a symlink.
@@ -409,6 +424,11 @@ def safe_extract_tarfile(
         fd = os.open(dest, flags, 0o600)
         try:
             with os.fdopen(fd, "wb") as out:
+                if hasattr(os, "fchmod"):
+                    # Restore the archived permissions on the open descriptor so a workspace
+                    # snapshot round-trip keeps executable scripts executable without
+                    # re-resolving the path.
+                    os.fchmod(out.fileno(), _restored_regular_file_mode(member.mode))
                 shutil.copyfileobj(fileobj, out)
         finally:
             try:

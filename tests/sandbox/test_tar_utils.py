@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import os
+import stat
+import sys
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,9 +42,11 @@ def _dir(name: str) -> _Member:
     return _Member(member)
 
 
-def _file(name: str, payload: bytes = b"payload") -> _Member:
+def _file(name: str, payload: bytes = b"payload", mode: int | None = None) -> _Member:
     member = tarfile.TarInfo(name)
     member.size = len(payload)
+    if mode is not None:
+        member.mode = mode
     return _Member(member, payload)
 
 
@@ -393,3 +397,60 @@ def test_validate_tar_bytes_ignores_skipped_unsafe_member() -> None:
         _tar_bytes(_symlink(".runtime/escape", "/tmp/outside")),
         skip_rel_paths=[Path(".runtime")],
     )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes are Unix-specific")
+@pytest.mark.parametrize(
+    ("archived_mode", "expected_mode"),
+    [
+        pytest.param(0o755, 0o755, id="executable-script"),
+        pytest.param(0o644, 0o644, id="plain-file"),
+        pytest.param(0o600, 0o600, id="owner-only-file"),
+        pytest.param(0o700, 0o700, id="owner-only-executable"),
+        pytest.param(0o444, 0o644, id="read-only-file-stays-owner-writable"),
+        pytest.param(0o000, 0o600, id="unreadable-file-stays-owner-readable"),
+        pytest.param(0o777, 0o755, id="group-and-other-write-dropped"),
+        pytest.param(0o655, 0o644, id="execute-without-owner-execute-dropped"),
+        pytest.param(0o4755, 0o755, id="setuid-dropped"),
+        pytest.param(0o2755, 0o755, id="setgid-dropped"),
+        pytest.param(0o1755, 0o755, id="sticky-dropped"),
+    ],
+)
+def test_safe_extract_tarfile_restores_regular_file_modes(
+    tmp_path: Path,
+    archived_mode: int,
+    expected_mode: int,
+) -> None:
+    raw = _tar_bytes(_file("run.sh", b"#!/bin/sh\n", mode=archived_mode))
+
+    _safe_extract(raw, tmp_path)
+
+    assert stat.S_IMODE((tmp_path / "run.sh").stat().st_mode) == expected_mode
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes are Unix-specific")
+def test_safe_extract_tarfile_keeps_workspace_scripts_executable(tmp_path: Path) -> None:
+    raw = _tar_bytes(
+        _dir("."),
+        _dir("./bin"),
+        _file("./bin/start", b"#!/bin/sh\necho hi\n", mode=0o755),
+        _file("./README.md", b"# readme\n", mode=0o644),
+    )
+
+    _safe_extract(raw, tmp_path)
+
+    assert os.access(tmp_path / "bin" / "start", os.X_OK)
+    assert not os.access(tmp_path / "README.md", os.X_OK)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes are Unix-specific")
+def test_safe_extract_tarfile_restores_mode_when_replacing_an_existing_file(
+    tmp_path: Path,
+) -> None:
+    _safe_extract(_tar_bytes(_file("run.sh", b"v1\n", mode=0o644)), tmp_path)
+    assert stat.S_IMODE((tmp_path / "run.sh").stat().st_mode) == 0o644
+
+    _safe_extract(_tar_bytes(_file("run.sh", b"v2\n", mode=0o755)), tmp_path)
+
+    assert (tmp_path / "run.sh").read_bytes() == b"v2\n"
+    assert stat.S_IMODE((tmp_path / "run.sh").stat().st_mode) == 0o755
