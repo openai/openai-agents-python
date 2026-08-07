@@ -118,6 +118,9 @@ class ModelRefusalError(AgentsException):
         self.refusal = refusal
         super().__init__(f"Model refused to produce output: {refusal}")
 
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (self.__class__, (self.refusal,), self.__dict__)
+
 
 class UserError(AgentsException):
     """Exception raised when the user makes an error using the SDK."""
@@ -150,6 +153,9 @@ class ToolTimeoutError(AgentsException):
         self.timeout_seconds = timeout_seconds
         super().__init__(f"Tool '{tool_name}' timed out after {timeout_seconds:g} seconds.")
 
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (self.__class__, (self.tool_name, self.timeout_seconds), self.__dict__)
+
 
 class InputGuardrailTripwireTriggered(AgentsException):
     """Exception raised when a guardrail tripwire is triggered."""
@@ -163,6 +169,9 @@ class InputGuardrailTripwireTriggered(AgentsException):
             f"Guardrail {guardrail_result.guardrail.__class__.__name__} triggered tripwire"
         )
 
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (self.__class__, (self.guardrail_result,), self.__dict__)
+
 
 class OutputGuardrailTripwireTriggered(AgentsException):
     """Exception raised when a guardrail tripwire is triggered."""
@@ -175,6 +184,9 @@ class OutputGuardrailTripwireTriggered(AgentsException):
         super().__init__(
             f"Guardrail {guardrail_result.guardrail.__class__.__name__} triggered tripwire"
         )
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (self.__class__, (self.guardrail_result,), self.__dict__)
 
 
 class ToolInputGuardrailTripwireTriggered(AgentsException):
@@ -191,6 +203,9 @@ class ToolInputGuardrailTripwireTriggered(AgentsException):
         self.output = output
         super().__init__(f"Tool input guardrail {guardrail.__class__.__name__} triggered tripwire")
 
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (self.__class__, (self.guardrail, self.output), self.__dict__)
+
 
 class ToolOutputGuardrailTripwireTriggered(AgentsException):
     """Exception raised when a tool output guardrail tripwire is triggered."""
@@ -205,3 +220,6 @@ class ToolOutputGuardrailTripwireTriggered(AgentsException):
         self.guardrail = guardrail
         self.output = output
         super().__init__(f"Tool output guardrail {guardrail.__class__.__name__} triggered tripwire")
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (self.__class__, (self.guardrail, self.output), self.__dict__)
