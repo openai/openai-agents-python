@@ -26,6 +26,7 @@ def test_wheel_excludes_integration_tests_and_contains_runtime_modules() -> None
     assert "agents/voice/pipeline.py" in members
     assert "agents/extensions/models/any_llm_model.py" in members
     assert "agents/extensions/models/litellm_model.py" in members
+    assert "agents/extensions/memory/cosmosdb_session.py" in members
     assert "agents/extensions/experimental/hosted_multi_agent/model.py" in members
 
 
@@ -51,6 +52,7 @@ def test_installed_distribution_advertises_expected_optional_extras() -> None:
 
     assert {
         "any-llm",
+        "cosmosdb",
         "encrypt",
         "litellm",
         "realtime",

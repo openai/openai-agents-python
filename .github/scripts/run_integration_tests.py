@@ -13,6 +13,7 @@ TESTS = ROOT / "integration_tests"
 EXTRAS = "any-llm,litellm,realtime,voice"
 OPTIONAL_EXTRAS = (
     "any-llm",
+    "cosmosdb",
     "litellm",
     "realtime",
     "voice",

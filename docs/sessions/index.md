@@ -207,6 +207,7 @@ Use this table to pick a starting point before reading the detailed examples bel
 | `RedisSession` | Shared memory across workers/services | Good for low-latency distributed deployments |
 | `SQLAlchemySession` | Production apps with existing databases | Works with SQLAlchemy-supported databases |
 | `MongoDBSession` | Apps already using MongoDB or needing multi-process storage | Async pymongo; atomic sequence counter for ordering |
+| `CosmosDBSession` | Azure deployments needing durable, multi-process storage | Partition-scoped atomic appends, TTL, and incarnation-fenced clears |
 | `DaprSession` | Cloud-native deployments with Dapr sidecars | Supports multiple state stores plus TTL and consistency controls |
 | `OpenAIConversationsSession` | Server-managed storage in OpenAI | OpenAI Conversations API-backed history |
 | `OpenAIResponsesCompactionSession` | Long conversations with automatic compaction | Wrapper around another session backend |
@@ -452,6 +453,33 @@ Notes:
 -   Connect to [MongoDB Atlas](https://www.mongodb.com/products/platform) by passing an `mongodb+srv://user:password@cluster.example.mongodb.net` URI to `from_uri(...)` with no other changes.
 -   Two collections are used and both names are configurable via `sessions_collection=` (default `agent_sessions`) and `messages_collection=` (default `agent_messages`). Indexes are created automatically on first use. Each non-empty `add_items()` call writes one logical-batch document whose monotonically increasing `seq` orders the batch by its final item; legacy per-item message documents remain readable. A logical batch must fit within MongoDB's single-document size limit; an oversized batch fails atomically without storing a partial batch.
 -   Use `await session.ping()` to verify connectivity before your first run.
+
+### Azure Cosmos DB sessions
+
+Use `CosmosDBSession` for durable, multi-process history in Azure Cosmos DB for NoSQL.
+
+```bash
+pip install openai-agents[cosmosdb]
+```
+
+```python
+from agents import Agent, Runner
+from agents.extensions.memory import CosmosDBSession
+
+agent = Agent(name="Assistant")
+session = await CosmosDBSession.from_connection_string(
+    "user-123",
+    connection_string,
+    database="agents",
+    container="agent_sessions",
+)
+try:
+    result = await Runner.run(agent, "Hello", session=session)
+finally:
+    await session.close()
+```
+
+The container must use `/sessionId` as its partition key and support the required indexed sequence queries. Factories create Session-consistent clients and validate the container by default. One `add_items()` call is atomic and may contain at most 100 items; separate calls are independent appends and are not idempotent. See [Azure Cosmos DB Sessions](cosmosdb_session.md) for provisioning, identity, TTL, ownership, retry, and cleanup details.
 
 ### Advanced SQLite sessions
 

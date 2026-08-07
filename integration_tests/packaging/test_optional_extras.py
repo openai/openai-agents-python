@@ -13,6 +13,7 @@ def test_requested_optional_extra_imports_from_its_standalone_environment() -> N
     optional_extra = os.environ["OPENAI_AGENTS_INTEGRATION_EXTRA"]
     module_names = {
         "any-llm": "agents.extensions.models.any_llm_model",
+        "cosmosdb": "agents.extensions.memory.cosmosdb_session",
         "encrypt": "agents.extensions.memory.encrypt_session",
         "litellm": "agents.extensions.models.litellm_model",
         "realtime": "agents.realtime",
@@ -31,6 +32,12 @@ def test_requested_optional_extra_imports_from_its_standalone_environment() -> N
 @pytest.mark.parametrize(
     ("optional_extra", "package_symbol", "module_name", "module_symbol"),
     [
+        (
+            "cosmosdb",
+            "CosmosDBSession",
+            "agents.extensions.memory.cosmosdb_session",
+            "CosmosDBSession",
+        ),
         (
             "encrypt",
             "EncryptedSession",

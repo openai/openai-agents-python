@@ -8,6 +8,13 @@ import pytest
 
 _PACKAGE_EXPORTS: tuple[tuple[str, str, str, str, str], ...] = (
     (
+        "CosmosDBSession",
+        "agents.extensions.memory.cosmosdb_session",
+        "azure.cosmos.aio",
+        "azure-cosmos",
+        "cosmosdb",
+    ),
+    (
         "EncryptedSession",
         "agents.extensions.memory.encrypt_session",
         "agents.extensions.memory.encrypt_session",
@@ -47,6 +54,12 @@ _PACKAGE_EXPORTS: tuple[tuple[str, str, str, str, str], ...] = (
 )
 
 _DIRECT_MODULE_IMPORTS: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "agents.extensions.memory.cosmosdb_session",
+        "azure.cosmos.aio",
+        "azure-cosmos",
+        "cosmosdb",
+    ),
     ("agents.extensions.memory.redis_session", "redis.asyncio", "redis", "redis"),
     ("agents.extensions.memory.dapr_session", "dapr.aio.clients", "dapr", "dapr"),
     (
