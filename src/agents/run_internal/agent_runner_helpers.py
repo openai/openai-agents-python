@@ -287,7 +287,7 @@ def resolve_resumed_context(
 
     When an override is supplied, the restored ``RunContextWrapper`` stays
     authoritative. Only its application ``context`` value is replaced so
-    run-owned wrapper state (approvals, usage, turn input, tool input, …)
+    run-owned wrapper state (approvals, usage, turn input, tool input, ...)
     survives the override instead of being dropped by a fresh wrapper.
     Nested ``Agent.as_tool()`` resumes should pass the parent application
     context into ``Runner.run`` / ``Runner.run_streamed`` so this same path
