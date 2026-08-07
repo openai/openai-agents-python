@@ -82,8 +82,8 @@ from ..tracing.span_data import AgentSpanData, TaskSpanData
 from ..usage import (
     Usage,
     _extract_raw_usage_snapshot,
+    _requests_for_response_without_usage,
     _response_usage_to_usage,
-    requests_for_response_without_usage,
 )
 from ..util import _coro, _error_tracing
 from ..util._asyncio_tasks import gather_with_cancel
@@ -1732,7 +1732,7 @@ async def run_single_turn_streamed(
                     if terminal_response.usage
                     # Defaults to zero requests, so adapters that fold several provider
                     # responses into one and report counts separately are not double-counted.
-                    else Usage(requests=requests_for_response_without_usage(terminal_response))
+                    else Usage(requests=_requests_for_response_without_usage(terminal_response))
                 ),
                 stream_failed_retry_attempts[0],
             )

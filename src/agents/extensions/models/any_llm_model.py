@@ -56,8 +56,10 @@ from ...usage import (
     Usage,
     _attach_raw_usage_snapshot,
     _extract_raw_usage_snapshot,
+    _mark_request_completed_without_usage,
     _raw_usage_snapshot,
-    mark_request_completed_without_usage,
+    _requests_for_response_without_usage,
+    _span_usage_without_provider_totals,
 )
 from ...util._error_tracing import model_span_errors, record_model_error_on_span
 from ...util._json import _to_dump_compatible
@@ -487,7 +489,7 @@ class AnyLLMModel(Model):
                             # Match the non-streaming path: the request happened even though
                             # the provider reported no usage. Recorded without synthesizing a
                             # usage payload, so tokens are not reported as real zeros.
-                            mark_request_completed_without_usage(final_response)
+                            _mark_request_completed_without_usage(final_response)
                     elif chunk_type in {"response.failed", "response.incomplete"}:
                         terminal_response = getattr(chunk, "response", None)
                         terminal_failure_error = response_terminal_failure_error(
@@ -791,6 +793,10 @@ class AnyLLMModel(Model):
                     else {"reasoning_tokens": 0}
                 ),
             }
+        elif _requests_for_response_without_usage(final_response):
+            # Keep streamed tracing aligned with the non-streaming path, which records the
+            # request even when the provider reports no usage.
+            span_generation.span_data.usage = _span_usage_without_provider_totals()
 
     @overload
     async def _fetch_chat_response(
