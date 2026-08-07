@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sqlite3
+import sys
 import tempfile
 from collections.abc import Sequence
 from datetime import datetime
@@ -20,6 +23,12 @@ from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 
 pytestmark = pytest.mark.asyncio
+
+
+def _assert_cancel_message(exc: asyncio.CancelledError, expected: str) -> None:
+    """Account for Python 3.10 dropping Task cancellation messages when re-awaited."""
+    expected_args = (expected,) if sys.version_info >= (3, 11) else ()
+    assert exc.args == expected_args
 
 
 @pytest.fixture
@@ -495,3 +504,622 @@ async def test_async_sqlite_session_close_is_idempotent():
 
         with pytest.raises(RuntimeError, match="AsyncSQLiteSession is closed"):
             await session.get_items()
+
+
+async def test_cancelled_close_finishes_cleanup_and_propagates_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Repeated cancellation must propagate after the owned connection closes."""
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+    session = AsyncSQLiteSession("cancelled_close")
+    conn: Any = None
+    real_close: Any = None
+    close_task: asyncio.Task[None] | None = None
+    try:
+        conn = await session._get_connection()
+        real_close = conn.close
+
+        async def controlled_close() -> None:
+            close_started.set()
+            await allow_close.wait()
+            await real_close()
+
+        monkeypatch.setattr(conn, "close", controlled_close)
+        close_task = asyncio.create_task(session.close())
+        try:
+            await close_started.wait()
+            close_task.cancel()
+            await asyncio.sleep(0)
+            close_task.cancel()
+            await asyncio.sleep(0)
+            allow_close.set()
+            with pytest.raises(asyncio.CancelledError):
+                await close_task
+        finally:
+            allow_close.set()
+            if not close_task.done():
+                close_task.cancel()
+                await asyncio.gather(close_task, return_exceptions=True)
+
+        assert session._closed is True
+        assert session._connection is None
+        assert session._quarantined_connections == set()
+        assert conn._running is False
+    finally:
+        allow_close.set()
+        if close_task is not None and not close_task.done():
+            close_task.cancel()
+            await asyncio.gather(close_task, return_exceptions=True)
+        if conn is not None and real_close is not None:
+            monkeypatch.setattr(conn, "close", real_close)
+        try:
+            await session.close()
+        finally:
+            if conn is not None and real_close is not None and conn._running:
+                await real_close()
+
+
+@pytest.mark.parametrize("operation", ["add", "pop", "clear"])
+async def test_post_commit_cancellation_propagates_after_known_mutation_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+):
+    """Cancellation after async commit must propagate without inviting a retry."""
+    db_path = tmp_path / f"async_post_commit_{operation}.db"
+    session = AsyncSQLiteSession(f"async_post_commit_{operation}", db_path)
+    item: TResponseInputItem = {"role": "user", "content": "once"}
+    try:
+        if operation != "add":
+            await session.add_items([item])
+
+        conn = await session._get_connection()
+        real_commit = conn.commit
+        commit_finished = asyncio.Event()
+        allow_return = asyncio.Event()
+        pause_commit = True
+
+        async def controlled_commit() -> None:
+            nonlocal pause_commit
+            await real_commit()
+            if pause_commit:
+                pause_commit = False
+                commit_finished.set()
+                await allow_return.wait()
+
+        monkeypatch.setattr(conn, "commit", controlled_commit)
+        if operation == "add":
+            mutation: asyncio.Task[Any] = asyncio.create_task(session.add_items([item]))
+        elif operation == "pop":
+            mutation = asyncio.create_task(session.pop_item())
+        else:
+            mutation = asyncio.create_task(session.clear_session())
+
+        try:
+            await commit_finished.wait()
+            mutation.cancel()
+            await asyncio.sleep(0)
+            mutation.cancel()
+            await asyncio.sleep(0)
+            allow_return.set()
+            with pytest.raises(asyncio.CancelledError):
+                await mutation
+        finally:
+            allow_return.set()
+            if not mutation.done():
+                mutation.cancel()
+                await asyncio.gather(mutation, return_exceptions=True)
+
+        if operation == "add":
+            assert await session.get_items() == [item]
+        elif operation == "pop":
+            assert await session.get_items() == []
+        else:
+            assert await session.get_items() == []
+        assert mutation.cancelled()
+    finally:
+        await session.close()
+
+
+def _drop_sqlite_table(db_path: Path, table: str) -> None:
+    """Drop a table from an independent connection to make a later statement fail."""
+    helper = sqlite3.connect(str(db_path))
+    try:
+        helper.execute(f"DROP TABLE {table}")
+        helper.commit()
+    finally:
+        helper.close()
+
+
+def _sqlite_write_lock_is_free(db_path: Path) -> bool:
+    """Return whether an independent writer can take the SQLite write lock."""
+    probe = sqlite3.connect(str(db_path), timeout=0)
+    try:
+        probe.execute("CREATE TABLE IF NOT EXISTS probe_lock (x INTEGER)")
+        probe.commit()
+        return True
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        probe.close()
+
+
+async def test_failed_add_items_rolls_back_and_reuses_connection():
+    """A failed add must roll back its partial write and leave the session reusable."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "add_rollback.db"
+        session = AsyncSQLiteSession("add_rollback", db_path)
+        unserializable = cast(TResponseInputItem, {"role": "user", "content": object()})
+        try:
+            with pytest.raises(TypeError):
+                await session.add_items([unserializable])
+
+            conn = await session._get_connection()
+            assert conn.in_transaction is False
+            assert _sqlite_write_lock_is_free(db_path)
+
+            await session.add_items([{"role": "user", "content": "after failure"}])
+            assert [item.get("content") for item in await session.get_items()] == ["after failure"]
+        finally:
+            await session.close()
+
+
+async def test_failed_clear_session_rolls_back():
+    """A failed clear must restore earlier statements and release the shared write lock."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "clear_rollback.db"
+        session = AsyncSQLiteSession("clear_rollback", db_path)
+        try:
+            await session.add_items([{"role": "user", "content": "kept"}])
+
+            _drop_sqlite_table(db_path, "agent_sessions")
+
+            with pytest.raises(sqlite3.OperationalError):
+                await session.clear_session()
+
+            conn = await session._get_connection()
+            assert conn.in_transaction is False
+            assert _sqlite_write_lock_is_free(db_path)
+        finally:
+            await session.close()
+
+
+async def test_failed_pop_item_releases_write_lock():
+    """A failed pop must not leave a write transaction on the shared connection."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "pop_rollback.db"
+        session = AsyncSQLiteSession("pop_rollback", db_path)
+        try:
+            await session.add_items([{"role": "user", "content": "kept"}])
+
+            _drop_sqlite_table(db_path, "agent_messages")
+
+            with pytest.raises(sqlite3.OperationalError):
+                await session.pop_item()
+
+            conn = await session._get_connection()
+            assert conn.in_transaction is False
+            assert _sqlite_write_lock_is_free(db_path)
+        finally:
+            await session.close()
+
+
+async def test_failed_initialization_closes_candidate_connection():
+    """A failed initialization must not retain a half-initialized connection."""
+
+    class FailingInitSession(AsyncSQLiteSession):
+        captured_connection: Any = None
+
+        async def _init_db_for_connection(self, conn: Any) -> None:
+            self.captured_connection = conn
+            raise RuntimeError("initialization failed")
+
+    session = FailingInitSession("failed_init")
+    try:
+        with pytest.raises(RuntimeError, match="initialization failed"):
+            await session.get_items()
+
+        assert session._connection is None
+        assert session.captured_connection._running is False
+    finally:
+        try:
+            await session.close()
+        finally:
+            if session.captured_connection is not None and session.captured_connection._running:
+                await session.captured_connection.close()
+
+
+async def test_cancelled_add_items_rolls_back_write_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Cancellation after the first write must release the transaction and database lock."""
+    db_path = tmp_path / "cancelled_add.db"
+    session = AsyncSQLiteSession("cancelled_add", db_path)
+    try:
+        await session.get_items()
+        conn = await session._get_connection()
+        real_execute = conn.execute
+        real_rollback = conn.rollback
+        first_write_started = asyncio.Event()
+        rollback_started = asyncio.Event()
+        allow_rollback = asyncio.Event()
+
+        async def pause_after_first_write(*args: Any, **kwargs: Any) -> Any:
+            cursor = await real_execute(*args, **kwargs)
+            first_write_started.set()
+            await asyncio.Event().wait()
+            return cursor
+
+        async def controlled_rollback() -> None:
+            rollback_started.set()
+            await allow_rollback.wait()
+            await real_rollback()
+
+        monkeypatch.setattr(conn, "execute", pause_after_first_write)
+        monkeypatch.setattr(conn, "rollback", controlled_rollback)
+        task = asyncio.create_task(session.add_items([{"role": "user", "content": "cancelled"}]))
+        try:
+            await first_write_started.wait()
+            task.cancel()
+            await rollback_started.wait()
+            task.cancel()
+            allow_rollback.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            allow_rollback.set()
+            monkeypatch.setattr(conn, "execute", real_execute)
+            monkeypatch.setattr(conn, "rollback", real_rollback)
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        assert conn.in_transaction is False
+        assert _sqlite_write_lock_is_free(db_path)
+        assert await session.get_items() == []
+    finally:
+        await session.close()
+
+
+async def test_operation_failure_then_cancellation_during_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Cancellation during rollback must supersede an earlier operation failure."""
+    db_path = tmp_path / "failure_then_cancelled_rollback.db"
+    session = AsyncSQLiteSession("failure_then_cancelled_rollback", db_path)
+    task: asyncio.Task[None] | None = None
+    try:
+        await session.get_items()
+        conn = await session._get_connection()
+        real_execute = conn.execute
+        real_rollback = conn.rollback
+        rollback_started = asyncio.Event()
+        allow_rollback = asyncio.Event()
+
+        async def fail_after_write(*args: Any, **kwargs: Any) -> Any:
+            await real_execute(*args, **kwargs)
+            raise RuntimeError("operation failed")
+
+        async def controlled_rollback() -> None:
+            rollback_started.set()
+            await allow_rollback.wait()
+            await real_rollback()
+
+        monkeypatch.setattr(conn, "execute", fail_after_write)
+        monkeypatch.setattr(conn, "rollback", controlled_rollback)
+        task = asyncio.create_task(session.add_items([{"role": "user", "content": "cancelled"}]))
+        try:
+            await rollback_started.wait()
+            task.cancel("first-caller-cancel")
+            await asyncio.sleep(0)
+            task.cancel("second-caller-cancel")
+            allow_rollback.set()
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await task
+        finally:
+            allow_rollback.set()
+            monkeypatch.setattr(conn, "execute", real_execute)
+            monkeypatch.setattr(conn, "rollback", real_rollback)
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        _assert_cancel_message(exc_info.value, "first-caller-cancel")
+        assert conn.in_transaction is False
+        assert _sqlite_write_lock_is_free(db_path)
+        assert await session.get_items() == []
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await session.close()
+
+
+async def test_rollback_failure_closes_and_evicts_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A connection that cannot roll back must not remain cached or retain its write lock."""
+    db_path = tmp_path / "rollback_failure.db"
+    session = AsyncSQLiteSession("rollback_failure", db_path)
+    try:
+        await session.get_items()
+        conn = await session._get_connection()
+
+        async def fail_rollback() -> None:
+            raise RuntimeError("rollback failed")
+
+        monkeypatch.setattr(conn, "rollback", fail_rollback)
+        unserializable = cast(TResponseInputItem, {"role": "user", "content": object()})
+
+        with pytest.raises(TypeError):
+            await session.add_items([unserializable])
+
+        assert session._connection is None
+        assert session._closed is False
+        assert _sqlite_write_lock_is_free(db_path)
+
+        await session.add_items([{"role": "user", "content": "after failure"}])
+        assert [item.get("content") for item in await session.get_items()] == ["after failure"]
+    finally:
+        await session.close()
+
+
+async def test_close_retries_connection_quarantined_after_rollback_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A failed invalidation close must remain owned until a later close succeeds."""
+    db_path = tmp_path / "close_retry.db"
+    session = AsyncSQLiteSession("close_retry", db_path)
+    conn: Any = None
+    real_close: Any = None
+    try:
+        await session.get_items()
+        conn = await session._get_connection()
+        real_close = conn.close
+
+        async def fail_rollback() -> None:
+            raise RuntimeError("rollback failed")
+
+        async def fail_close() -> None:
+            raise RuntimeError("close failed")
+
+        monkeypatch.setattr(conn, "rollback", fail_rollback)
+        monkeypatch.setattr(conn, "close", fail_close)
+        unserializable = cast(TResponseInputItem, {"role": "user", "content": object()})
+
+        with pytest.raises(TypeError):
+            await session.add_items([unserializable])
+
+        assert session._closed is True
+        assert session._connection is None
+        assert conn in session._quarantined_connections
+        assert conn._running is True
+        assert _sqlite_write_lock_is_free(db_path) is False
+
+        monkeypatch.setattr(conn, "close", real_close)
+        await session.close()
+
+        assert session._quarantined_connections == set()
+        assert conn._running is False
+        assert _sqlite_write_lock_is_free(db_path)
+    finally:
+        if conn is not None and real_close is not None:
+            monkeypatch.setattr(conn, "close", real_close)
+        try:
+            await session.close()
+        finally:
+            if conn is not None and real_close is not None and conn._running:
+                await real_close()
+
+
+async def test_close_retries_quarantined_failed_initialization_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A failed initialization candidate close must remain owned for close retry."""
+
+    class FailingInitSession(AsyncSQLiteSession):
+        captured_connection: Any = None
+        real_close: Any = None
+
+        async def _init_db_for_connection(self, conn: Any) -> None:
+            self.captured_connection = conn
+            self.real_close = conn.close
+
+            async def fail_close() -> None:
+                raise RuntimeError("close failed")
+
+            monkeypatch.setattr(conn, "close", fail_close)
+            raise RuntimeError("initialization failed")
+
+    session = FailingInitSession("failed_init_close_retry")
+    try:
+        with pytest.raises(RuntimeError, match="initialization failed"):
+            await session.get_items()
+
+        conn = session.captured_connection
+        assert session._closed is True
+        assert conn in session._quarantined_connections
+        assert conn._running is True
+
+        monkeypatch.setattr(conn, "close", session.real_close)
+        await session.close()
+
+        assert session._quarantined_connections == set()
+        assert conn._running is False
+    finally:
+        if session.captured_connection is not None and session.real_close is not None:
+            monkeypatch.setattr(session.captured_connection, "close", session.real_close)
+        try:
+            await session.close()
+        finally:
+            if (
+                session.captured_connection is not None
+                and session.real_close is not None
+                and session.captured_connection._running
+            ):
+                await session.real_close()
+
+
+async def test_cancelled_initialization_finishes_candidate_close(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Repeated cancellation must not release initialization ownership before close finishes."""
+    init_started = asyncio.Event()
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+
+    class CancelledInitSession(AsyncSQLiteSession):
+        captured_connection: Any = None
+        real_close: Any = None
+
+        async def _init_db_for_connection(self, conn: Any) -> None:
+            self.captured_connection = conn
+            self.real_close = conn.close
+
+            async def controlled_close() -> None:
+                close_started.set()
+                await allow_close.wait()
+                await self.real_close()
+
+            monkeypatch.setattr(conn, "close", controlled_close)
+            init_started.set()
+            await asyncio.Event().wait()
+
+    session = CancelledInitSession("cancelled_init")
+    task = asyncio.create_task(session.get_items())
+    try:
+        try:
+            await init_started.wait()
+            task.cancel()
+            await close_started.wait()
+            task.cancel()
+            allow_close.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            allow_close.set()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        assert session._connection is None
+        assert session.captured_connection._running is False
+    finally:
+        if session.captured_connection is not None and session.real_close is not None:
+            monkeypatch.setattr(session.captured_connection, "close", session.real_close)
+        try:
+            await session.close()
+        finally:
+            if (
+                session.captured_connection is not None
+                and session.real_close is not None
+                and session.captured_connection._running
+            ):
+                await session.real_close()
+
+
+async def test_initialization_failure_then_cancellation_during_candidate_close(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Cancellation during candidate close must supersede an initialization failure."""
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+
+    class FailingInitSession(AsyncSQLiteSession):
+        captured_connection: Any = None
+        real_close: Any = None
+
+        async def _init_db_for_connection(self, conn: Any) -> None:
+            self.captured_connection = conn
+            self.real_close = conn.close
+
+            async def controlled_close() -> None:
+                close_started.set()
+                await allow_close.wait()
+                await self.real_close()
+
+            monkeypatch.setattr(conn, "close", controlled_close)
+            raise RuntimeError("initialization failed")
+
+    session = FailingInitSession("failed_init_then_cancelled_close")
+    task = asyncio.create_task(session.get_items())
+    try:
+        try:
+            await close_started.wait()
+            task.cancel("first-caller-cancel")
+            await asyncio.sleep(0)
+            task.cancel("second-caller-cancel")
+            allow_close.set()
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await task
+        finally:
+            allow_close.set()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        _assert_cancel_message(exc_info.value, "first-caller-cancel")
+        assert session._connection is None
+        assert session.captured_connection._running is False
+    finally:
+        allow_close.set()
+        if session.captured_connection is not None and session.real_close is not None:
+            monkeypatch.setattr(session.captured_connection, "close", session.real_close)
+        try:
+            await session.close()
+        finally:
+            if (
+                session.captured_connection is not None
+                and session.real_close is not None
+                and session.captured_connection._running
+            ):
+                await session.real_close()
+
+
+async def test_cancelled_connect_closes_eventually_acquired_connection(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Cancellation during connect must wait for and close the eventual connection."""
+    import aiosqlite
+
+    real_connect = aiosqlite.connect
+    connect_started = asyncio.Event()
+    allow_connect = asyncio.Event()
+    created_connections: list[Any] = []
+
+    async def controlled_connect(database: str) -> Any:
+        connect_started.set()
+        await allow_connect.wait()
+        conn = await real_connect(database)
+        created_connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(aiosqlite, "connect", controlled_connect)
+    session = AsyncSQLiteSession("cancelled_connect")
+    task = asyncio.create_task(session.get_items())
+    try:
+        try:
+            await connect_started.wait()
+            task.cancel()
+            allow_connect.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            allow_connect.set()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        assert len(created_connections) == 1
+        assert created_connections[0]._running is False
+        assert session._connection is None
+    finally:
+        await session.close()
+        for conn in created_connections:
+            if conn._running:
+                await conn.close()
