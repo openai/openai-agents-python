@@ -454,3 +454,38 @@ def test_safe_extract_tarfile_restores_mode_when_replacing_an_existing_file(
 
     assert (tmp_path / "run.sh").read_bytes() == b"v2\n"
     assert stat.S_IMODE((tmp_path / "run.sh").stat().st_mode) == 0o755
+
+
+class _FailingPayload:
+    """A member payload that yields one chunk and then fails, like a truncated read."""
+
+    def __init__(self, chunk: bytes) -> None:
+        self._chunk: bytes | None = chunk
+
+    def read(self, size: int = -1) -> bytes:
+        if self._chunk is None:
+            raise OSError("payload stream failed")
+        chunk, self._chunk = self._chunk, None
+        return chunk
+
+    def close(self) -> None:
+        return None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes are Unix-specific")
+def test_safe_extract_tarfile_keeps_a_partially_written_file_private(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = _tar_bytes(_file("run.sh", b"#!/bin/sh\necho hi\n", mode=0o755))
+
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tar:
+        monkeypatch.setattr(tar, "extractfile", lambda member: _FailingPayload(b"#!/bin/sh\n"))
+
+        with pytest.raises(OSError, match="payload stream failed"):
+            safe_extract_tarfile(tar, root=tmp_path)
+
+    dest = tmp_path / "run.sh"
+    assert dest.read_bytes() == b"#!/bin/sh\n"
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o600
+    assert not os.access(dest, os.X_OK)

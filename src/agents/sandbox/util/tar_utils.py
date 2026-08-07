@@ -424,12 +424,15 @@ def safe_extract_tarfile(
         fd = os.open(dest, flags, 0o600)
         try:
             with os.fdopen(fd, "wb") as out:
-                if hasattr(os, "fchmod"):
-                    # Restore the archived permissions on the open descriptor so a workspace
-                    # snapshot round-trip keeps executable scripts executable without
-                    # re-resolving the path.
-                    os.fchmod(out.fileno(), _restored_regular_file_mode(member.mode))
                 shutil.copyfileobj(fileobj, out)
+                out.flush()
+                if hasattr(os, "fchmod"):
+                    # Restore the archived permissions so a workspace snapshot round-trip keeps
+                    # executable scripts executable. This runs on the still-open descriptor,
+                    # after the payload is written and flushed: the file keeps its private
+                    # creation mode while it holds partial data, and a failed copy leaves the
+                    # partial file at 0o600 instead of its final readable/executable mode.
+                    os.fchmod(out.fileno(), _restored_regular_file_mode(member.mode))
         finally:
             try:
                 fileobj.close()
