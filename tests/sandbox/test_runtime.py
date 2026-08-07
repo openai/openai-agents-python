@@ -13,7 +13,7 @@ import tempfile
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, ClassVar, Literal, TypedDict, cast
 
 import pytest
 from openai.types.responses.response_output_item import LocalShellCall, LocalShellCallAction
@@ -43,6 +43,7 @@ from agents.sandbox import (
     SandboxRunConfig,
     User,
 )
+from agents.sandbox._mount_security import REDACTED_MOUNT_AUTHORITY_KEY
 from agents.sandbox.capabilities import (
     Capability,
     Compaction,
@@ -53,25 +54,31 @@ from agents.sandbox.capabilities import (
 )
 from agents.sandbox.entries import (
     BaseEntry,
+    DockerVolumeMountStrategy,
     File,
     InContainerMountStrategy,
     MountpointMountPattern,
+    RcloneMountPattern,
     S3Mount,
 )
 from agents.sandbox.errors import (
     ExecNonZeroError,
     ExecTransportError,
     InvalidManifestPathError,
+    MountConfigError,
     WorkspaceArchiveWriteError,
 )
 from agents.sandbox.files import EntryKind, FileEntry
-from agents.sandbox.materialization import MaterializedFile
+from agents.sandbox.materialization import MaterializationResult, MaterializedFile
 from agents.sandbox.remote_mount_policy import (
     REMOTE_MOUNT_POLICY,
 )
 from agents.sandbox.runtime import SandboxRuntime
 from agents.sandbox.runtime_agent_preparation import get_default_sandbox_instructions
-from agents.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
+from agents.sandbox.runtime_session_manager import (
+    SandboxRuntimeSessionManager,
+    _SandboxSessionResources,
+)
 from agents.sandbox.sandboxes import unix_local as unix_local_module
 from agents.sandbox.sandboxes.unix_local import (
     UnixLocalSandboxClient,
@@ -101,6 +108,30 @@ from tests.utils.factories import TestSessionState
 from tests.utils.simple_session import SimpleListSession
 
 
+def test_process_manifest_rejects_custom_pattern_before_deepcopy() -> None:
+    class CustomRclonePattern(RcloneMountPattern):
+        deepcopy_called: ClassVar[bool] = False
+
+        def __deepcopy__(self, memo: dict[int, Any] | None = None) -> CustomRclonePattern:
+            _ = memo
+            type(self).deepcopy_called = True
+            raise AssertionError("custom pattern deepcopy must not run")
+
+    manifest = Manifest(
+        entries={
+            "data": S3Mount(
+                bucket="bucket",
+                mount_strategy=InContainerMountStrategy(pattern=CustomRclonePattern()),
+            )
+        }
+    )
+
+    with pytest.raises(MountConfigError, match="custom mount patterns"):
+        SandboxRuntimeSessionManager._process_manifest([], manifest)
+
+    assert CustomRclonePattern.deepcopy_called is False
+
+
 class _FakeSession(BaseSandboxSession):
     def __init__(
         self,
@@ -114,6 +145,7 @@ class _FakeSession(BaseSandboxSession):
         )
         self._start_gate = start_gate
         self._running = False
+        self.running_calls = 0
         self.start_calls = 0
         self.stop_calls = 0
         self.shutdown_calls = 0
@@ -143,6 +175,7 @@ class _FakeSession(BaseSandboxSession):
         self.shutdown_calls += 1
 
     async def running(self) -> bool:
+        self.running_calls += 1
         return self._running
 
     async def read(self, path: Path, *, user: object = None) -> io.BytesIO:
@@ -178,6 +211,86 @@ class _FailingStopSession(_FakeSession):
         raise RuntimeError("stop failed")
 
 
+def _external_mount_manifest(secret_access_key: str) -> Manifest:
+    return Manifest(
+        entries={
+            "data": S3Mount(
+                bucket="bucket",
+                access_key_id="access-key",
+                secret_access_key=secret_access_key,
+                mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+            )
+        }
+    )
+
+
+def _assert_mount_error_redacted(
+    error: BaseException,
+    *,
+    source_error: BaseException,
+    sentinel: str,
+) -> None:
+    assert sentinel not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert cast(Any, BaseException.args).__get__(source_error, type(source_error)) == ()
+    assert cast(Any, BaseException.__traceback__).__get__(source_error, type(source_error)) is None
+    traceback = error.__traceback__
+    while traceback is not None:
+        frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
+        if "/src/agents/" in frame_path:
+            assert sentinel not in repr(traceback.tb_frame.f_locals)
+        traceback = traceback.tb_next
+
+
+class _WorkspacePersistenceProbeSession(_FakeSession):
+    def __init__(self, manifest: Manifest) -> None:
+        super().__init__(manifest)
+        self.persist_calls = 0
+        self.hydrate_calls = 0
+
+    async def persist_workspace(self) -> io.IOBase:
+        self.persist_calls += 1
+        return io.BytesIO()
+
+    async def hydrate_workspace(self, data: io.IOBase) -> None:
+        _ = data
+        self.hydrate_calls += 1
+
+
+class _ManifestApplyProbeSession(_FakeSession):
+    def __init__(self, manifest: Manifest) -> None:
+        super().__init__(manifest)
+        self.materialize_calls = 0
+
+    async def _apply_manifest(
+        self,
+        *,
+        only_ephemeral: bool = False,
+        provision_accounts: bool = True,
+    ) -> MaterializationResult:
+        _ = (only_ephemeral, provision_accounts)
+        self.materialize_calls += 1
+        return MaterializationResult(files=[])
+
+
+class _FailingBackendStartSession(_ManifestApplyProbeSession):
+    async def _ensure_backend_started(self) -> None:
+        raise RuntimeError("backend failed with protected-start-secret")
+
+
+class _FailingSnapshotSession(_FakeSession):
+    def __init__(self, manifest: Manifest) -> None:
+        super().__init__(manifest)
+        self.persist_calls = 0
+
+    async def _persist_snapshot(self) -> None:
+        self.persist_calls += 1
+        mount = self.state.manifest.entries["data"]
+        assert isinstance(mount, S3Mount)
+        raise RuntimeError(f"snapshot failed with {mount.secret_access_key}")
+
+
 class _LiveSessionDeltaRecorder(_FakeSession):
     def __init__(self, manifest: Manifest, *, fail_entry_batch_times: int = 0) -> None:
         super().__init__(manifest)
@@ -207,8 +320,14 @@ class _LiveSessionDeltaRecorder(_FakeSession):
 
 
 class _RejectingLiveSessionDeltaRecorder(_LiveSessionDeltaRecorder):
-    async def _validate_manifest_application(self, *, only_ephemeral: bool = False) -> None:
-        _ = only_ephemeral
+    async def _validate_manifest_application(
+        self,
+        *,
+        only_ephemeral: bool = False,
+        manifest: Manifest | None = None,
+        session_running: bool | None = None,
+    ) -> None:
+        _ = (only_ephemeral, manifest, session_running)
         raise RuntimeError("live manifest update rejected")
 
 
@@ -384,8 +503,131 @@ async def test_sandbox_session_aclose_closes_dependencies_when_stop_fails() -> N
         await session.aclose()
 
     assert inner.stop_calls == 1
-    assert inner.shutdown_calls == 0
+    assert inner.shutdown_calls == 1
     assert inner.close_dependency_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_sandbox_session_aclose_redacts_pre_stop_hook_failure() -> None:
+    sentinel = "pre-stop-hook-secret"
+    source_error = RuntimeError(f"pre-stop hook failed with {sentinel}")
+    inner = _FakeSession(_external_mount_manifest(sentinel))
+    session = SandboxSession(inner)
+
+    async def failing_hook() -> None:
+        raise source_error
+
+    session.register_pre_stop_hook(failing_hook)
+
+    with pytest.raises(RuntimeError, match="protected mount configuration") as exc:
+        await session.aclose()
+
+    _assert_mount_error_redacted(exc.value, source_error=source_error, sentinel=sentinel)
+    assert inner.stop_calls == 1
+    assert inner.shutdown_calls == 1
+    assert inner.close_dependency_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_sandbox_session_aclose_redacts_dependency_close_failure() -> None:
+    sentinel = "dependency-close-secret"
+    source_error = RuntimeError(f"dependency close failed with {sentinel}")
+    inner = _FakeSession(_external_mount_manifest(sentinel))
+    session = SandboxSession(inner)
+
+    async def failing_dependency_close() -> None:
+        inner.close_dependency_calls += 1
+        raise source_error
+
+    inner._aclose_dependencies = failing_dependency_close  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="protected mount configuration") as exc:
+        await session.aclose()
+
+    _assert_mount_error_redacted(exc.value, source_error=source_error, sentinel=sentinel)
+    assert inner.stop_calls == 1
+    assert inner.shutdown_calls == 1
+    assert inner.close_dependency_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_owned_cleanup_redacts_pre_stop_hook_failure() -> None:
+    sentinel = "runner-pre-stop-hook-secret"
+    source_error = RuntimeError(f"pre-stop hook failed with {sentinel}")
+    session = _FakeSession(_external_mount_manifest(sentinel))
+    resources = _SandboxSessionResources(session=session, client=None, owns_session=True)
+
+    async def failing_hook() -> None:
+        raise source_error
+
+    session.register_pre_stop_hook(failing_hook)
+
+    with pytest.raises(RuntimeError, match="protected mount configuration") as exc:
+        await resources.cleanup()
+
+    _assert_mount_error_redacted(exc.value, source_error=source_error, sentinel=sentinel)
+    assert session.stop_calls == 1
+    assert session.shutdown_calls == 1
+    assert session.close_dependency_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_owned_cleanup_redacts_client_delete_failure() -> None:
+    sentinel = "client-delete-secret"
+    source_error = RuntimeError(f"delete failed with {sentinel}")
+    inner = _FakeSession(_external_mount_manifest(sentinel))
+
+    class FailingDeleteClient(_FakeClient):
+        async def delete(self, session: SandboxSession) -> SandboxSession:
+            self.delete_calls += 1
+            raise source_error
+
+    client = FailingDeleteClient(inner)
+    resources = _SandboxSessionResources(
+        session=client.session,
+        client=client,
+        owns_session=True,
+    )
+
+    with pytest.raises(RuntimeError, match="protected mount configuration") as exc:
+        await resources.cleanup()
+
+    _assert_mount_error_redacted(exc.value, source_error=source_error, sentinel=sentinel)
+    assert inner.stop_calls == 1
+    assert inner.shutdown_calls == 1
+    assert client.delete_calls == 1
+    assert inner.close_dependency_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["persist", "hydrate"])
+async def test_sandbox_session_rejects_unsafe_manifest_before_workspace_persistence(
+    operation: str,
+) -> None:
+    sentinel = "workspace-persistence-secret"
+    inner = _WorkspacePersistenceProbeSession(
+        Manifest(
+            entries={
+                "data": S3Mount(
+                    bucket="bucket",
+                    access_key_id="access-key",
+                    secret_access_key=sentinel,
+                    mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+                )
+            }
+        )
+    )
+    session = SandboxSession(inner)
+
+    with pytest.raises(MountConfigError, match="cloud credentials are not supported") as exc:
+        if operation == "persist":
+            await session.persist_workspace()
+        else:
+            await session.hydrate_workspace(io.BytesIO(b"archive"))
+
+    assert inner.persist_calls == 0
+    assert inner.hydrate_calls == 0
+    assert sentinel not in str(exc.value)
 
 
 @pytest.mark.asyncio
@@ -751,6 +993,54 @@ class _ManifestMutationCapability(Capability):
         self.process_calls += 1
         manifest.entries[self.rel_path] = File(content=self.content)
         return manifest
+
+
+class _CredentialedMountCapability(Capability):
+    type: str = "credentialed-mount"
+
+    def __init__(self) -> None:
+        super().__init__(type="credentialed-mount")
+
+    def process_manifest(self, manifest: Manifest) -> Manifest:
+        manifest.entries["remote"] = S3Mount(
+            bucket="example-bucket",
+            access_key_id="example-access-key",
+            secret_access_key="example-secret-key",
+            mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+        )
+        return manifest
+
+
+class _ManifestFailureCapability(Capability):
+    type: str = "manifest-failure"
+
+    def __init__(self) -> None:
+        super().__init__(type="manifest-failure")
+
+    def process_manifest(self, manifest: Manifest) -> Manifest:
+        mount = manifest.entries["data"]
+        assert isinstance(mount, S3Mount)
+        raise RuntimeError(f"capability failed with {mount.secret_access_key}")
+
+
+class _ManifestMutationFailureCapability(Capability):
+    type: str = "manifest-mutation-failure"
+    sentinel: str
+
+    def __init__(self, sentinel: str) -> None:
+        super().__init__(
+            type="manifest-mutation-failure",
+            **cast(Any, {"sentinel": sentinel}),
+        )
+
+    def process_manifest(self, manifest: Manifest) -> Manifest:
+        manifest.entries["data"] = S3Mount(
+            bucket="example-bucket",
+            access_key_id="example-access-key",
+            secret_access_key=self.sentinel,
+            mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+        )
+        raise RuntimeError("capability failed after manifest mutation")
 
 
 class _ManifestUsersCapability(Capability):
@@ -2277,11 +2567,12 @@ async def test_unix_local_client_delete_preserves_caller_owned_workspace_root() 
 @pytest.mark.asyncio
 async def test_unix_local_runner_cleanup_preserves_resumed_caller_owned_workspace_root() -> None:
     workspace_root = Path(tempfile.mkdtemp(prefix="resumed-owned-"))
-    state = UnixLocalSandboxSessionState(
-        session_id=uuid.uuid4(),
+    client = UnixLocalSandboxClient()
+    created = await client.create(
         manifest=_unix_local_manifest(root=str(workspace_root)),
-        snapshot=NoopSnapshot(id=str(uuid.uuid4())),
+        options=None,
     )
+    state = cast(UnixLocalSandboxSessionState, created.state)
     agent = SandboxAgent(
         name="sandbox",
         model=FakeModel(initial_output=[get_final_output_message("done")]),
@@ -3336,6 +3627,79 @@ async def test_session_manager_rebinds_persisted_path_grants_from_current_manife
 
 
 @pytest.mark.asyncio
+async def test_session_manager_rebinds_redacted_external_mount_authority() -> None:
+    trusted_manifest = Manifest(
+        entries={
+            "data": S3Mount(
+                bucket="example-bucket",
+                access_key_id="example-access-key",
+                secret_access_key="example-secret-key",
+                mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+            )
+        }
+    )
+    client = _FakeClient(_FakeSession(Manifest()))
+    client.backend_id = "docker"
+    agent = SandboxAgent(
+        name="worker",
+        model=FakeModel(),
+        instructions="Worker.",
+        default_manifest=trusted_manifest,
+    )
+    session_state = TestSessionState(
+        manifest=trusted_manifest,
+        snapshot=NoopSnapshot(id="resume"),
+    )
+    serialized_state = client.serialize_session_state(session_state)
+    assert serialized_state.pop(REDACTED_MOUNT_AUTHORITY_KEY) is True
+    run_state = cast(
+        RunState[Any, Agent[Any]],
+        RunState(
+            context=RunContextWrapper(context={}),
+            original_input="hello",
+            starting_agent=agent,
+        ),
+    )
+    run_state._current_agent = agent
+    run_state._sandbox = {
+        "backend_id": client.backend_id,
+        "current_agent_key": agent.name,
+        "current_agent_name": agent.name,
+        "session_state": serialized_state,
+        "sessions_by_agent": {
+            agent.name: {
+                "agent_name": agent.name,
+                "session_state": serialized_state,
+            }
+        },
+    }
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(client=client, options={"image": "sandbox"}),
+        run_state=run_state,
+    )
+
+    manager.acquire_agent(agent)
+    await manager.ensure_session(
+        agent=agent,
+        capabilities=[],
+        is_resumed_state=True,
+    )
+
+    assert client.resume_state is not None
+    rebound_mount = client.resume_state.manifest.entries["data"]
+    assert isinstance(rebound_mount, S3Mount)
+    assert rebound_mount.access_key_id == "example-access-key"
+    assert rebound_mount.secret_access_key == "example-secret-key"
+    assert client.resume_state.mount_authority_redacted is False
+    assert client.resume_state.mount_authority_rebound is True
+    persisted = manager.serialize_resume_state()
+    assert persisted is not None
+    assert "example-access-key" not in repr(persisted)
+    assert "example-secret-key" not in repr(persisted)
+
+
+@pytest.mark.asyncio
 async def test_session_manager_rebinds_capability_host_path_grant_once(
     tmp_path: Path,
 ) -> None:
@@ -3578,6 +3942,136 @@ async def test_session_manager_starts_stopped_injected_session_with_manifest_mut
     assert live_session.shutdown_calls == 0
     assert session.state.manifest.entries["cap.txt"] == File(content=b"capability")
     assert payload is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authority_source", ["current_manifest", "capability"])
+async def test_session_manager_rejects_unsafe_stopped_injected_session_manifest(
+    authority_source: str,
+) -> None:
+    unsafe_mount = S3Mount(
+        bucket="example-bucket",
+        access_key_id="example-access-key",
+        secret_access_key="example-secret-key",
+        mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+    )
+    initial_manifest = (
+        Manifest(entries={"remote": unsafe_mount})
+        if authority_source == "current_manifest"
+        else Manifest()
+    )
+    capabilities: list[Capability] = (
+        [_CredentialedMountCapability()] if authority_source == "capability" else []
+    )
+    live_session = _LiveSessionDeltaRecorder(initial_manifest)
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(session=live_session),
+        run_state=None,
+    )
+
+    manager.acquire_agent(agent)
+    with pytest.raises(MountConfigError, match="cloud credentials are not supported"):
+        await manager.ensure_session(
+            agent=agent,
+            capabilities=capabilities,
+            is_resumed_state=False,
+        )
+
+    assert live_session.start_calls == 0
+    assert live_session.running_calls == 0
+    assert live_session.applied_entry_batches == []
+    if authority_source == "current_manifest":
+        assert live_session.state.manifest.entries == {"remote": unsafe_mount}
+    else:
+        assert live_session.state.manifest.entries == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("manifest_source", ["run_config", "agent_default"])
+async def test_session_manager_redacts_capability_failure_with_external_mount_authority(
+    manifest_source: str,
+) -> None:
+    sentinel = "manager-capability-secret"
+    manifest = Manifest(
+        entries={
+            "data": S3Mount(
+                bucket="example-bucket",
+                access_key_id="example-access-key",
+                secret_access_key=sentinel,
+                mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+            )
+        }
+    )
+    client = _FakeClient(_FakeSession(Manifest()))
+    agent = SandboxAgent(
+        name="worker",
+        model=FakeModel(),
+        instructions="Worker.",
+        default_manifest=manifest if manifest_source == "agent_default" else None,
+    )
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(
+            client=client,
+            manifest=manifest if manifest_source == "run_config" else None,
+            options={"image": "sandbox"},
+        ),
+        run_state=None,
+    )
+
+    manager.acquire_agent(agent)
+    with pytest.raises(RuntimeError, match="protected mount configuration") as exc:
+        await manager.ensure_session(
+            agent=agent,
+            capabilities=[_ManifestFailureCapability()],
+            is_resumed_state=False,
+        )
+
+    assert client.create_kwargs is None
+    assert sentinel not in str(exc.value)
+    traceback = exc.value.__traceback__
+    while traceback is not None:
+        frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
+        if "/src/agents/" in frame_path:
+            assert sentinel not in repr(traceback.tb_frame.f_locals)
+        traceback = traceback.tb_next
+
+
+@pytest.mark.asyncio
+async def test_session_manager_redacts_authority_added_before_capability_failure() -> None:
+    sentinel = "capability-added-mount-secret"
+    client = _FakeClient(_FakeSession(Manifest()))
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(
+            client=client,
+            manifest=Manifest(),
+            options={"image": "sandbox"},
+        ),
+        run_state=None,
+    )
+
+    manager.acquire_agent(agent)
+    with pytest.raises(RuntimeError, match="protected mount configuration") as exc:
+        await manager.ensure_session(
+            agent=agent,
+            capabilities=[_ManifestMutationFailureCapability(sentinel)],
+            is_resumed_state=False,
+        )
+
+    assert client.create_kwargs is None
+    assert sentinel not in str(exc.value)
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None
+    traceback = exc.value.__traceback__
+    while traceback is not None:
+        frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
+        if "/src/agents/" in frame_path:
+            assert sentinel not in repr(traceback.tb_frame.f_locals)
+        traceback = traceback.tb_next
 
 
 @pytest.mark.asyncio
@@ -4684,6 +5178,135 @@ async def test_apply_manifest_raises_on_account_provisioning_failures() -> None:
     assert exc_info.value.context["stdout"] == "attempted useradd"
     assert exc_info.value.context["stderr"] == "missing useradd"
     assert exc_info.value.message == "stdout: attempted useradd\nstderr: missing useradd"
+
+
+@pytest.mark.asyncio
+async def test_apply_manifest_rejects_mount_authority_before_materialization() -> None:
+    sentinel = "live-apply-secret"
+    session = _ManifestApplyProbeSession(
+        Manifest(
+            entries={
+                "data": S3Mount(
+                    bucket="example-bucket",
+                    access_key_id="example-access-key",
+                    secret_access_key=sentinel,
+                    mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+                )
+            }
+        )
+    )
+
+    with pytest.raises(MountConfigError, match="cloud credentials are not supported") as exc:
+        await session.apply_manifest()
+
+    assert session.materialize_calls == 0
+    traceback = exc.value.__traceback__
+    while traceback is not None:
+        module_name = traceback.tb_frame.f_globals.get("__name__", "")
+        if isinstance(module_name, str) and module_name.startswith("agents."):
+            assert sentinel not in repr(traceback.tb_frame.f_locals)
+        traceback = traceback.tb_next
+
+
+@pytest.mark.asyncio
+async def test_start_workspace_rejects_mount_authority_before_materialization() -> None:
+    session = _ManifestApplyProbeSession(
+        Manifest(
+            entries={
+                "data": S3Mount(
+                    bucket="example-bucket",
+                    access_key_id="example-access-key",
+                    secret_access_key="start-workspace-secret",
+                    mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+                )
+            }
+        )
+    )
+
+    with pytest.raises(MountConfigError, match="cloud credentials are not supported"):
+        await BaseSandboxSession.start(session)
+
+    assert session.materialize_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_session_start_redacts_external_mount_operation_failure() -> None:
+    sentinel = "protected-start-secret"
+    session = _FailingBackendStartSession(
+        Manifest(
+            entries={
+                "data": S3Mount(
+                    bucket="example-bucket",
+                    access_key_id="example-access-key",
+                    secret_access_key=sentinel,
+                    mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+                )
+            }
+        )
+    )
+    cast(Any, session.state).type = "docker"
+
+    with pytest.raises(RuntimeError, match="protected mount configuration") as exc:
+        await BaseSandboxSession.start(session)
+
+    assert sentinel not in str(exc.value)
+    traceback = exc.value.__traceback__
+    while traceback is not None:
+        frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
+        if "/src/agents/" in frame_path:
+            assert sentinel not in repr(traceback.tb_frame.f_locals)
+        traceback = traceback.tb_next
+
+
+@pytest.mark.asyncio
+async def test_session_stop_redacts_external_mount_snapshot_failure() -> None:
+    sentinel = "protected-stop-secret"
+    session = _FailingSnapshotSession(
+        Manifest(
+            entries={
+                "data": S3Mount(
+                    bucket="example-bucket",
+                    access_key_id="example-access-key",
+                    secret_access_key=sentinel,
+                    mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+                )
+            }
+        )
+    )
+    cast(Any, session.state).type = "docker"
+
+    with pytest.raises(RuntimeError, match="protected mount configuration") as exc:
+        await BaseSandboxSession.stop(session)
+
+    assert session.persist_calls == 1
+    assert sentinel not in str(exc.value)
+    traceback = exc.value.__traceback__
+    while traceback is not None:
+        frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
+        if "/src/agents/" in frame_path:
+            assert sentinel not in repr(traceback.tb_frame.f_locals)
+        traceback = traceback.tb_next
+
+
+@pytest.mark.asyncio
+async def test_session_stop_rejects_mutated_unsafe_mount_before_snapshot_work() -> None:
+    session = _FailingSnapshotSession(
+        Manifest(
+            entries={
+                "data": S3Mount(
+                    bucket="example-bucket",
+                    access_key_id="example-access-key",
+                    secret_access_key="mutated-stop-secret",
+                    mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+                )
+            }
+        )
+    )
+
+    with pytest.raises(MountConfigError, match="cloud credentials are not supported"):
+        await BaseSandboxSession.stop(session)
+
+    assert session.persist_calls == 0
 
 
 @pytest.mark.asyncio

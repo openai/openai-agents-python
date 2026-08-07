@@ -365,6 +365,18 @@ def test_daytona_package_re_exports_backend_symbols(monkeypatch: pytest.MonkeyPa
     assert package_module.DaytonaSandboxClient is daytona_module.DaytonaSandboxClient
 
 
+@pytest.fixture(autouse=True)
+def _trust_recording_mounts_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agents.sandbox import _mount_security
+
+    original = _mount_security._mount_class_is_trusted
+    monkeypatch.setattr(
+        _mount_security,
+        "_mount_class_is_trusted",
+        lambda mount: isinstance(mount, _RecordingMount) or original(mount),
+    )
+
+
 class _RecordingMount(Mount):
     type: str = "daytona_recording_mount"
     mount_strategy: InContainerMountStrategy = Field(
@@ -1899,7 +1911,7 @@ async def test_ensure_rclone_installs_when_missing() -> None:
 @pytest.mark.asyncio
 async def test_activate_calls_preflights_and_delegates() -> None:
     strategy = DaytonaCloudBucketMountStrategy()
-    mount = MagicMock()
+    mount = S3Mount(bucket="public-bucket", mount_strategy=strategy)
     session = _FakePreflightSession()
     dest = Path("/workspace")
     base_dir = Path("/workspace")
@@ -1915,6 +1927,29 @@ async def test_activate_calls_preflights_and_delegates() -> None:
         fuse_mock.assert_awaited_once_with(session)
         rclone_mock.assert_awaited_once_with(session)
         delegate_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_activate_rejects_credentials_before_preflights() -> None:
+    strategy = DaytonaCloudBucketMountStrategy()
+    mount = S3Mount(
+        bucket="bucket",
+        access_key_id="access-key",
+        secret_access_key="secret-key",
+        mount_strategy=strategy,
+    )
+    session = _FakePreflightSession()
+
+    with (
+        patch.object(_daytona_mounts, "_ensure_fuse_support", new_callable=AsyncMock) as fuse_mock,
+        patch.object(_daytona_mounts, "_ensure_rclone", new_callable=AsyncMock) as rclone_mock,
+        pytest.raises(MountConfigError),
+    ):
+        await strategy.activate(mount, session, Path("/workspace"), Path("/workspace"))
+
+    fuse_mock.assert_not_awaited()
+    rclone_mock.assert_not_awaited()
+    assert session.exec_calls == []
 
 
 @pytest.mark.asyncio
@@ -1961,7 +1996,7 @@ async def test_teardown_delegates_without_preflights() -> None:
 @pytest.mark.asyncio
 async def test_restore_after_snapshot_reruns_preflights() -> None:
     strategy = DaytonaCloudBucketMountStrategy()
-    mount = MagicMock()
+    mount = S3Mount(bucket="public-bucket", mount_strategy=strategy)
     session = _FakePreflightSession()
     path = Path("/workspace/bucket")
 
@@ -1976,6 +2011,29 @@ async def test_restore_after_snapshot_reruns_preflights() -> None:
         fuse_mock.assert_awaited_once_with(session)
         rclone_mock.assert_awaited_once_with(session)
         delegate_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_restore_after_snapshot_rejects_credentials_before_preflights() -> None:
+    strategy = DaytonaCloudBucketMountStrategy()
+    mount = S3Mount(
+        bucket="bucket",
+        access_key_id="access-key",
+        secret_access_key="secret-key",
+        mount_strategy=strategy,
+    )
+    session = _FakePreflightSession()
+
+    with (
+        patch.object(_daytona_mounts, "_ensure_fuse_support", new_callable=AsyncMock) as fuse_mock,
+        patch.object(_daytona_mounts, "_ensure_rclone", new_callable=AsyncMock) as rclone_mock,
+        pytest.raises(MountConfigError),
+    ):
+        await strategy.restore_after_snapshot(mount, session, Path("/workspace/data"))
+
+    fuse_mock.assert_not_awaited()
+    rclone_mock.assert_not_awaited()
+    assert session.exec_calls == []
 
 
 def test_build_docker_volume_driver_config_returns_none() -> None:

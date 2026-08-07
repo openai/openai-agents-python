@@ -166,14 +166,9 @@ class GCSMount(_ConfiguredMount):
             lines.append(f"service_account_credentials = {self.service_account_credentials}")
         if self.access_token:
             lines.append(f"access_token = {self.access_token}")
-        if (
-            self.service_account_file is None
-            and self.service_account_credentials is None
-            and self.access_token is None
-        ):
-            lines.append("env_auth = true")
-        else:
-            lines.append("env_auth = false")
+        if not (self.service_account_file or self.service_account_credentials or self.access_token):
+            lines.append("anonymous = true")
+        lines.append("env_auth = false")
         return lines
 
     def _s3_compatible_rclone_required_lines(self, remote_name: str) -> list[str]:

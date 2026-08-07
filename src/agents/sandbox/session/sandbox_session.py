@@ -12,8 +12,13 @@ from typing import Any, TypeVar, cast
 
 from ...run_config import SandboxArchiveLimits, SandboxConcurrencyLimits
 from ...tracing import Span, custom_span, get_current_trace
+from .._mount_security import (
+    redact_mount_error_data,
+    validate_manifest_mount_credential_boundaries,
+)
 from ..errors import OpName, SandboxError
 from ..files import FileEntry
+from ..manifest import Manifest
 from ..materialization import MaterializationResult
 from ..types import ExecResult, ExposedPortEndpoint, User
 from .base_sandbox_session import BaseSandboxSession
@@ -255,6 +260,9 @@ class SandboxSession(BaseSandboxSession):
     @state.setter
     def state(self, value: SandboxSessionState) -> None:  # pragma: no cover
         self._inner.state = value
+
+    def _runtime_has_protected_mount_authority(self) -> bool:
+        return self._inner._runtime_has_protected_mount_authority()
 
     @property
     def dependencies(self) -> Dependencies:
@@ -520,15 +528,27 @@ class SandboxSession(BaseSandboxSession):
         await self._inner.start()
 
     @instrumented_op("stop")
+    @redact_mount_error_data
     async def stop(self) -> None:
         await self._inner.stop()
 
     @instrumented_op("shutdown")
+    @redact_mount_error_data
     async def shutdown(self) -> None:
         await self._inner.shutdown()
 
-    async def _validate_manifest_application(self, *, only_ephemeral: bool = False) -> None:
-        await self._inner._validate_manifest_application(only_ephemeral=only_ephemeral)
+    async def _validate_manifest_application(
+        self,
+        *,
+        only_ephemeral: bool = False,
+        manifest: Manifest | None = None,
+        session_running: bool | None = None,
+    ) -> None:
+        await self._inner._validate_manifest_application(
+            only_ephemeral=only_ephemeral,
+            manifest=manifest,
+            session_running=session_running,
+        )
 
     async def apply_manifest(self, *, only_ephemeral: bool = False) -> MaterializationResult:
         return await super().apply_manifest(only_ephemeral=only_ephemeral)
@@ -679,14 +699,24 @@ class SandboxSession(BaseSandboxSession):
         data=_persist_start_data,
         finish_data=_persist_finish_data,
     )
+    @redact_mount_error_data
     async def persist_workspace(self) -> io.IOBase:
+        validate_manifest_mount_credential_boundaries(
+            self._inner.state.manifest,
+            provider_backend_id=self._inner.state.type,
+        )
         return await self._inner.persist_workspace()
 
     @instrumented_op(
         "hydrate_workspace",
         data=_hydrate_start_data,
     )
+    @redact_mount_error_data
     async def hydrate_workspace(self, data: io.IOBase) -> None:
+        validate_manifest_mount_credential_boundaries(
+            self._inner.state.manifest,
+            provider_backend_id=self._inner.state.type,
+        )
         await self._inner.hydrate_workspace(data)
 
 

@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, Field
 
 from ....logger import log_tool_action_debug
+from ....sandbox._mount_security import redact_mount_error_data
 from ....sandbox.entries import Mount
 from ....sandbox.errors import (
     ExecTimeoutError,
@@ -1248,6 +1249,7 @@ class DaytonaSandboxClient(BaseSandboxClient[DaytonaSandboxClientOptions]):
             auto_stop_interval=auto_stop_interval,
         )
 
+    @redact_mount_error_data
     async def create(
         self,
         *,
@@ -1257,6 +1259,7 @@ class DaytonaSandboxClient(BaseSandboxClient[DaytonaSandboxClientOptions]):
     ) -> SandboxSession:
         if manifest is None:
             manifest = Manifest(root=DEFAULT_DAYTONA_WORKSPACE_ROOT)
+        self._validate_manifest_for_create(manifest)
 
         timeouts_in = options.timeouts
         if isinstance(timeouts_in, DaytonaSandboxTimeouts):
@@ -1299,6 +1302,7 @@ class DaytonaSandboxClient(BaseSandboxClient[DaytonaSandboxClientOptions]):
             exposed_ports=options.exposed_ports,
             exposed_port_url_ttl_s=options.exposed_port_url_ttl_s,
         )
+        state._mark_provider_identity_trusted()
         inner = DaytonaSandboxSession.from_state(state, sandbox=daytona_sandbox)
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
@@ -1322,6 +1326,7 @@ class DaytonaSandboxClient(BaseSandboxClient[DaytonaSandboxClientOptions]):
             pass
         return session
 
+    @redact_mount_error_data
     async def resume(
         self,
         state: SandboxSessionState,
@@ -1332,14 +1337,18 @@ class DaytonaSandboxClient(BaseSandboxClient[DaytonaSandboxClientOptions]):
 
         daytona_sandbox = None
         reconnected = False
-        try:
-            daytona_sandbox = await self._daytona.get(state.sandbox_id)
-            SandboxState = _import_sandbox_state()
-            if getattr(daytona_sandbox, "state", None) != SandboxState.STARTED:
-                await daytona_sandbox.start(timeout=state.start_timeout)
-            reconnected = True
-        except Exception as e:
-            log_tool_action_debug(logger, "Daytona sandbox lookup failed; recreating", e)
+        if state.provider_identity_trusted:
+            try:
+                daytona_sandbox = await self._daytona.get(state.sandbox_id)
+                SandboxState = _import_sandbox_state()
+                if getattr(daytona_sandbox, "state", None) != SandboxState.STARTED:
+                    await daytona_sandbox.start(timeout=state.start_timeout)
+                reconnected = True
+            except Exception as e:
+                log_tool_action_debug(logger, "Daytona sandbox lookup failed; recreating", e)
+        else:
+            state.session_id = uuid.uuid4()
+            state.workspace_root_ready = False
 
         if not reconnected or daytona_sandbox is None:
             params = await self._build_create_params(
@@ -1354,6 +1363,7 @@ class DaytonaSandboxClient(BaseSandboxClient[DaytonaSandboxClientOptions]):
             daytona_sandbox = await self._daytona.create(params, timeout=state.create_timeout)
             state.sandbox_id = daytona_sandbox.id
             state.workspace_root_ready = False
+            state._mark_provider_identity_trusted()
 
         inner = DaytonaSandboxSession.from_state(state, sandbox=daytona_sandbox)
         inner._set_start_state_preserved(reconnected, system=reconnected)

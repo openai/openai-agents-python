@@ -77,7 +77,6 @@ DEFAULT_AUTO_SKIP = {
     "examples/sandbox/misc/reference_policy_mcp_server.py",
     "examples/sandbox/docker/mounts/azure_mount_read_write.py",
     "examples/sandbox/docker/mounts/gcs_mount_read_write.py",
-    "examples/sandbox/docker/mounts/s3_files_mount_read_write.py",
     "examples/sandbox/docker/mounts/s3_mount_read_write.py",
     # Blaxel 0.3.2 still imports an MCP v1 module that was removed in MCP v2.
     "examples/sandbox/extensions/blaxel_runner.py",

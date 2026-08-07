@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterable
-from typing import Any, ClassVar, Literal, get_args, get_origin
+from collections.abc import Iterable, Mapping
+from typing import Any, ClassVar, Literal, cast, get_args, get_origin
 
 from pydantic import (
     BaseModel,
@@ -12,8 +12,10 @@ from pydantic import (
     SerializeAsAny,
     field_validator,
     model_serializer,
+    model_validator,
 )
 
+from .._mount_security import redact_mount_error_data_sync
 from ..manifest import Manifest
 from ..snapshot import SnapshotBase
 
@@ -34,10 +36,32 @@ class SandboxSessionState(BaseModel):
 
     _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}
     _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())
+    _mount_authority_redacted: bool = PrivateAttr(default=False)
+    _mount_authority_rebound: bool = PrivateAttr(default=False)
+    _provider_identity_trusted: bool = PrivateAttr(default=False)
 
     @property
     def path_grants_require_rebind(self) -> tuple[str, ...]:
         return self._path_grants_require_rebind
+
+    @property
+    def mount_authority_redacted(self) -> bool:
+        return self._mount_authority_redacted
+
+    @property
+    def mount_authority_rebound(self) -> bool:
+        """Whether persisted mount topology was rebound from current trusted configuration."""
+
+        return self._mount_authority_rebound
+
+    @property
+    def provider_identity_trusted(self) -> bool:
+        """Whether the SDK observed this provider resource in the current process."""
+
+        return self._provider_identity_trusted
+
+    def _mark_provider_identity_trusted(self) -> None:
+        self._provider_identity_trusted = True
 
     @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
@@ -76,19 +100,50 @@ class SandboxSessionState(BaseModel):
             payload = payload.model_dump()
 
         if isinstance(payload, dict):
-            state_type = payload.get("type")
-            if not isinstance(state_type, str):
-                raise ValueError("sandbox session state payload must include a string `type`")
-
-            subclass = SandboxSessionState._subclass_registry.get(state_type)
-            if subclass is None:
-                raise ValueError(f"unknown sandbox session state type `{state_type}`")
-
-            return cls._mark_persisted_path_grants(
-                subclass.model_validate(payload),
-                payload=payload,
+            from ...exceptions import _raise_data_redacted_error
+            from .._mount_security import (
+                _redact_mount_state_validation_error,
+                sanitize_raw_session_state_mount_authority,
             )
 
+            safe_error: ValueError | None = None
+            sanitized: object = None
+            state_type: object = None
+            subclass: SessionStateClass | None = None
+            try:
+                sanitized, _redacted = sanitize_raw_session_state_mount_authority(payload)
+                if not isinstance(sanitized, dict):
+                    raise ValueError("sandbox session state payload has an invalid shape")
+                payload = sanitized
+                state_type = payload.get("type")
+                if not isinstance(state_type, str):
+                    raise ValueError("sandbox session state payload must include a string `type`")
+
+                subclass = SandboxSessionState._subclass_registry.get(state_type)
+                if subclass is None:
+                    raise ValueError("unknown sandbox session state type")
+
+                return cls._mark_persisted_path_grants(
+                    subclass.model_validate(payload),
+                    payload=payload,
+                )
+            except Exception as error:
+                payload.clear()
+                if isinstance(sanitized, dict):
+                    sanitized.clear()
+                safe_error = _redact_mount_state_validation_error(
+                    error,
+                    message="sandbox session state payload is invalid",
+                )
+
+            payload = cast(Any, None)
+            sanitized = None
+            state_type = None
+            subclass = None
+            assert safe_error is not None
+            _raise_data_redacted_error(safe_error)
+
+        payload = cast(Any, None)
         raise TypeError("session state payload must be a SandboxSessionState or dict")
 
     @classmethod
@@ -98,6 +153,8 @@ class SandboxSessionState(BaseModel):
         *,
         payload: dict[str, object],
     ) -> SandboxSessionState:
+        from .._mount_security import REDACTED_MOUNT_AUTHORITY_KEY
+
         redacted_value = payload.get(REDACTED_HOST_PATH_GRANT_PATHS_KEY)
         marker_paths = (
             tuple(path for path in redacted_value if isinstance(path, str))
@@ -122,6 +179,9 @@ class SandboxSessionState(BaseModel):
                     *serialized_host_path_grant_paths,
                 )
             )
+        )
+        marked._mount_authority_redacted = bool(
+            state.mount_authority_redacted or payload.get(REDACTED_MOUNT_AUTHORITY_KEY) is True
         )
         return marked
 
@@ -166,7 +226,49 @@ class SandboxSessionState(BaseModel):
         rebound._path_grants_require_rebind = ()
         return rebound
 
+    @redact_mount_error_data_sync
+    def rebind_persisted_mount_authority(
+        self,
+        trusted_manifest: Manifest | None,
+        *,
+        provider_backend_id: str,
+    ) -> SandboxSessionState:
+        """Restore redacted mount authority from an exact current trusted manifest."""
+
+        if not self.mount_authority_redacted:
+            return self
+        if trusted_manifest is None:
+            raise ValueError(
+                "Sandbox session state contains redacted cloud mount credentials and requires "
+                "a current trusted manifest before resume"
+            )
+
+        from .._mount_security import rebind_manifest_mount_authority
+
+        rebound_manifest = rebind_manifest_mount_authority(
+            self.manifest,
+            trusted_manifest,
+            provider_backend_id=provider_backend_id,
+        )
+        rebound = self.model_copy(update={"manifest": rebound_manifest})
+        rebound._mount_authority_redacted = False
+        rebound._mount_authority_rebound = True
+        return rebound
+
+    @redact_mount_error_data_sync
     def assert_path_grants_rebound(self) -> None:
+        from .._mount_security import validate_manifest_mount_credential_boundaries
+
+        validate_manifest_mount_credential_boundaries(
+            self.manifest,
+            provider_backend_id=self.type,
+        )
+
+        if self.mount_authority_redacted:
+            raise ValueError(
+                "Sandbox session state with cloud mount credentials cannot be resumed; "
+                "resume through Runner with the current trusted manifest"
+            )
         if not self.path_grants_require_rebind:
             return
         raise ValueError(
@@ -176,12 +278,100 @@ class SandboxSessionState(BaseModel):
 
     @model_serializer(mode="wrap")
     def _serialize_always_include_defaults(self, handler: Any) -> dict[str, Any]:
-        data: dict[str, Any] = handler(self)
+        from ...exceptions import _raise_data_redacted_error
+        from .._mount_security import (
+            REDACTED_MOUNT_AUTHORITY_KEY,
+            _manifest_has_configured_mount_authority,
+            _manifest_mount_provenance_error,
+            _mark_mount_validation_error,
+            _raw_manifest_may_require_mount_authority_rebind,
+            _redact_mount_serialization_error,
+            sanitize_raw_manifest_mount_authority,
+        )
+
+        data: dict[str, Any] | None = None
+        safe_error: Exception | None = None
+        provenance_error = _manifest_mount_provenance_error(self.manifest)
+        if provenance_error is not None:
+            _mark_mount_validation_error(provenance_error)
+            safe_error = provenance_error
+        else:
+            try:
+                data = handler(self)
+                sanitized_manifest, mount_authority_redacted = (
+                    sanitize_raw_manifest_mount_authority(
+                        cast(dict[str, Any], data).get("manifest")
+                    )
+                )
+            except Exception as error:
+                if not _manifest_has_configured_mount_authority(self.manifest):
+                    raise
+                safe_error = _redact_mount_serialization_error(error)
+
+        if safe_error is not None:
+            data = None
+            self = cast(Any, None)
+            _raise_data_redacted_error(safe_error)
+
+        assert data is not None
+        if "manifest" in data:
+            data["manifest"] = sanitized_manifest
+        if (
+            mount_authority_redacted
+            or self.mount_authority_redacted
+            or _raw_manifest_may_require_mount_authority_rebind(sanitized_manifest)
+        ):
+            data[REDACTED_MOUNT_AUTHORITY_KEY] = True
         if self.type:
             data["type"] = self.type
         if self.session_id:
             data["session_id"] = self.session_id
         return data
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _restore_mount_authority_marker(cls, value: Any, handler: Any) -> SandboxSessionState:
+        from ...exceptions import _raise_data_redacted_error
+        from .._mount_security import (
+            REDACTED_MOUNT_AUTHORITY_KEY,
+            _redact_mount_state_validation_error,
+            sanitize_raw_session_state_mount_authority,
+        )
+
+        marker = isinstance(value, Mapping) and value.get(REDACTED_MOUNT_AUTHORITY_KEY) is True
+        state: SandboxSessionState | None = None
+        sanitized: object = None
+        safe_error: ValueError | None = None
+        if (
+            isinstance(value, Mapping)
+            and "manifest" in value
+            and not isinstance(value.get("manifest"), Manifest)
+        ):
+            try:
+                sanitized, redacted = sanitize_raw_session_state_mount_authority(value)
+                marker = marker or redacted
+                state = handler(sanitized)
+            except Exception as error:
+                if isinstance(value, dict):
+                    value.clear()
+                if isinstance(sanitized, dict):
+                    sanitized.clear()
+                safe_error = _redact_mount_state_validation_error(
+                    error,
+                    message="sandbox session state payload is invalid",
+                )
+        else:
+            state = handler(value)
+
+        if safe_error is not None:
+            value = cast(Any, None)
+            sanitized = None
+            _raise_data_redacted_error(safe_error)
+
+        assert state is not None
+        if marker:
+            state._mount_authority_redacted = True
+        return state
 
     @field_validator("snapshot", mode="before")
     @classmethod

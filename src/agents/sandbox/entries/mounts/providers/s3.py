@@ -129,5 +129,5 @@ class S3Mount(_ConfiguredMount):
             if self.session_token:
                 lines.append(f"session_token = {self.session_token}")
         else:
-            lines.append("env_auth = true")
+            lines.append("env_auth = false")
         return lines

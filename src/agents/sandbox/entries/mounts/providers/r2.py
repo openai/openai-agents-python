@@ -96,5 +96,5 @@ class R2Mount(_ConfiguredMount):
             lines.append(f"access_key_id = {self.access_key_id}")
             lines.append(f"secret_access_key = {self.secret_access_key}")
         else:
-            lines.append("env_auth = true")
+            lines.append("env_auth = false")
         return lines

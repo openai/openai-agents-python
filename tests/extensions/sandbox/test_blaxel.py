@@ -19,11 +19,13 @@ import agents._debug as _debug
 from agents.run_config import SandboxRunConfig
 from agents.sandbox import Manifest, SandboxPathGrant
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
+from agents.sandbox.entries import InContainerMountStrategy, RcloneMountPattern, S3Mount
 from agents.sandbox.errors import (
     ExecTimeoutError,
     ExecTransportError,
     ExposedPortUnavailableError,
     InvalidManifestPathError,
+    MountConfigError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
@@ -833,6 +835,7 @@ class TestBlaxelSandboxClient:
 
         client = mod.BlaxelSandboxClient(token="test-token")
         state = _make_state(sandbox_name="resume-sandbox", pause_on_exit=True)
+        state._mark_provider_identity_trusted()
         session = await client.resume(state)
         assert session is not None
 
@@ -844,6 +847,7 @@ class TestBlaxelSandboxClient:
 
         client = mod.BlaxelSandboxClient(token="test-token")
         state = _make_state(sandbox_name="new-sandbox", pause_on_exit=False)
+        state._mark_provider_identity_trusted()
         session = await client.resume(state)
         assert session is not None
 
@@ -1406,6 +1410,7 @@ class TestBlaxelSandboxClientExtra:
         # No instances exist, so get() will fail and fall back to create.
         client = mod.BlaxelSandboxClient(token="test-token")
         state = _make_state(sandbox_name="missing-sandbox", pause_on_exit=True)
+        state._mark_provider_identity_trusted()
         session = await client.resume(state)
         assert session is not None
 
@@ -1626,6 +1631,34 @@ class TestTarExcludeArgs:
 
 
 class TestStartLifecycle:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("skip_start", [False, True])
+    async def test_start_rejects_unsafe_mount_before_provider_work(
+        self,
+        fake_sandbox: _FakeSandboxInstance,
+        skip_start: bool,
+    ) -> None:
+        sentinel = "blaxel-start-secret"
+        state = _make_state()
+        state.manifest = Manifest(
+            entries={
+                "data": S3Mount(
+                    bucket="bucket",
+                    access_key_id="access-key",
+                    secret_access_key=sentinel,
+                    mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+                )
+            }
+        )
+        session = _make_session(fake_sandbox, state=state)
+        session._skip_start = skip_start
+
+        with pytest.raises(MountConfigError) as exc:
+            await session.start()
+
+        assert fake_sandbox.process.exec_calls == []
+        assert sentinel not in str(exc.value)
+
     @pytest.mark.asyncio
     async def test_start_mkdir_failure_suppressed(self, fake_sandbox: _FakeSandboxInstance) -> None:
         session = _make_session(fake_sandbox)
@@ -2521,6 +2554,7 @@ class TestClientBranchCoverage:
 
         client = mod.BlaxelSandboxClient(token="test-token")
         state = _make_state(sandbox_name="no-url-sandbox", pause_on_exit=True)
+        state._mark_provider_identity_trusted()
         session = await client.resume(state)
         assert session is not None
 

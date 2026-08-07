@@ -4,9 +4,10 @@ import abc
 import builtins
 import inspect
 import warnings
-from collections.abc import Mapping
+from collections.abc import Callable, Coroutine, Mapping
+from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, ParamSpec, TypeVar
 
 from pydantic import BaseModel, Field, SerializeAsAny, field_validator
 
@@ -19,6 +20,32 @@ from .patterns import MountPattern, MountPatternBase, MountPatternConfig
 
 if TYPE_CHECKING:
     from ...session.base_sandbox_session import BaseSandboxSession
+
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
+
+
+def _redact_mount_lifecycle_error(
+    function: Callable[_P, Coroutine[Any, Any, _T]],
+) -> Callable[_P, Coroutine[Any, Any, _T]]:
+    """Load the mount error boundary lazily to avoid an entries/security import cycle."""
+
+    protected: Callable[_P, Coroutine[Any, Any, _T]] | None = None
+
+    @wraps(function)
+    async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _T:
+        nonlocal protected
+        if protected is None:
+            from ..._mount_security import redact_mount_error_data
+
+            protected = redact_mount_error_data(function)
+        try:
+            return await protected(*args, **kwargs)
+        except BaseException:
+            del args, kwargs
+            raise
+
+    return wrapper
 
 
 class InContainerMountAdapter:
@@ -227,6 +254,7 @@ class InContainerMountStrategy(MountStrategyBase):
     def validate_mount(self, mount: Mount) -> None:
         mount.in_container_adapter().validate(self)
 
+    @_redact_mount_lifecycle_error
     async def activate(
         self,
         mount: Mount,
@@ -234,6 +262,9 @@ class InContainerMountStrategy(MountStrategyBase):
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
+        from ..._mount_security import validate_mount_activation_credential_boundary
+
+        validate_mount_activation_credential_boundary(mount, self)
         return await mount.in_container_adapter().activate(self, session, dest, base_dir)
 
     async def deactivate(
@@ -253,12 +284,16 @@ class InContainerMountStrategy(MountStrategyBase):
     ) -> None:
         await mount.in_container_adapter().teardown_for_snapshot(self, session, path)
 
+    @_redact_mount_lifecycle_error
     async def restore_after_snapshot(
         self,
         mount: Mount,
         session: BaseSandboxSession,
         path: Path,
     ) -> None:
+        from ..._mount_security import validate_mount_activation_credential_boundary
+
+        validate_mount_activation_credential_boundary(mount, self)
         await mount.in_container_adapter().restore_after_snapshot(self, session, path)
 
     def build_docker_volume_driver_config(
@@ -409,6 +444,7 @@ class Mount(BaseEntry):
 
         return DockerVolumeMountAdapter(self)
 
+    @_redact_mount_lifecycle_error
     async def apply(
         self,
         session: BaseSandboxSession,
@@ -421,6 +457,13 @@ class Mount(BaseEntry):
         intentionally no-ops because the backend attaches them before the session starts.
         """
 
+        from ..._mount_security import validate_mount_activation_credential_boundary
+
+        validate_mount_activation_credential_boundary(
+            self,
+            self.mount_strategy,
+            provider_backend_id=session.state.type,
+        )
         return await self.mount_strategy.activate(self, session, dest, base_dir)
 
     async def unmount(

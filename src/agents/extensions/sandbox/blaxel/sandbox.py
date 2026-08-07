@@ -30,11 +30,13 @@ from urllib.parse import quote, urlencode, urlsplit
 from pydantic import BaseModel, Field
 
 from ....logger import log_tool_action_debug, log_tool_action_warning
+from ....sandbox._mount_security import redact_mount_error_data
 from ....sandbox.entries import Mount
 from ....sandbox.errors import (
     ExecTimeoutError,
     ExecTransportError,
     ExposedPortUnavailableError,
+    MountConfigError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
@@ -433,7 +435,9 @@ class BlaxelSandboxSession(BaseSandboxSession):
 
     # -- lifecycle -----------------------------------------------------------
 
+    @redact_mount_error_data
     async def start(self) -> None:
+        await self._validate_manifest_application()
         # When resuming a paused sandbox, _skip_start is set by the client to
         # avoid reapplying the full manifest over files that may have changed
         # while the sandbox was paused.
@@ -1058,6 +1062,7 @@ class BlaxelSandboxClient(BaseSandboxClient["BlaxelSandboxClientOptions"]):
         self._dependencies = dependencies
         self._token = token or os.environ.get("BL_API_KEY")
 
+    @redact_mount_error_data
     async def create(
         self,
         *,
@@ -1067,6 +1072,7 @@ class BlaxelSandboxClient(BaseSandboxClient["BlaxelSandboxClientOptions"]):
     ) -> SandboxSession:
         if manifest is None:
             manifest = Manifest(root=DEFAULT_BLAXEL_WORKSPACE_ROOT)
+        self._validate_manifest_for_create(manifest)
 
         timeouts_in = options.timeouts
         if isinstance(timeouts_in, BlaxelTimeouts):
@@ -1112,6 +1118,7 @@ class BlaxelSandboxClient(BaseSandboxClient["BlaxelSandboxClientOptions"]):
             exposed_port_public=options.exposed_port_public,
             exposed_port_url_ttl_s=options.exposed_port_url_ttl_s,
         )
+        state._mark_provider_identity_trusted()
         inner = BlaxelSandboxSession.from_state(state, sandbox=blaxel_sandbox, token=self._token)
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
@@ -1134,6 +1141,7 @@ class BlaxelSandboxClient(BaseSandboxClient["BlaxelSandboxClientOptions"]):
             log_tool_action_warning(logger, "Shutdown failed during delete (non-fatal)", e)
         return session
 
+    @redact_mount_error_data
     async def resume(
         self,
         state: SandboxSessionState,
@@ -1148,6 +1156,14 @@ class BlaxelSandboxClient(BaseSandboxClient["BlaxelSandboxClientOptions"]):
         if not isinstance(state, BlaxelSandboxSessionState):
             raise TypeError("BlaxelSandboxClient.resume expects a BlaxelSandboxSessionState")
         state.assert_path_grants_rebound()
+        if not state.provider_identity_trusted:
+            raise MountConfigError(
+                message=(
+                    "persisted Blaxel sessions cannot reconnect an existing sandbox; "
+                    "create a new session from current trusted configuration"
+                ),
+                context={"backend": "blaxel"},
+            )
 
         SandboxInstance = _import_blaxel_sdk()
         blaxel_sandbox = None
