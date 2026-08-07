@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import warnings
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 
@@ -11,6 +12,11 @@ from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
     PendingSafetyCheck,
     ResponseComputerToolCall,
+)
+from openai.types.responses.response_function_web_search import (
+    ActionSearch,
+    ActionSearchSource,
+    ResponseFunctionWebSearch,
 )
 from openai.types.responses.response_output_item import McpApprovalRequest
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
@@ -33,7 +39,11 @@ from agents import (
     handoff,
     tool_output_guardrail,
 )
-from agents._tool_invocation import tool_invocation_identity, tool_invocation_identity_and_scope
+from agents._tool_invocation import (
+    tool_invocation_call_id,
+    tool_invocation_identity,
+    tool_invocation_identity_and_scope,
+)
 from agents.editor import ApplyPatchOperation, ApplyPatchResult
 from agents.exceptions import ModelBehaviorError, UserError
 from agents.items import ModelResponse, ToolApprovalItem
@@ -77,6 +87,59 @@ def test_canonical_shell_identity_ignores_stripped_provider_metadata() -> None:
     persisted_call.pop("created_by")
 
     assert tool_invocation_identity(provider_call) == tool_invocation_identity(persisted_call)
+
+
+def test_web_search_source_schema_drift_does_not_warn_during_invocation_lookup() -> None:
+    source = ActionSearchSource.model_construct(type="api", name="oai-calculator")
+    output_item = ResponseFunctionWebSearch(
+        id="ws_123",
+        action=ActionSearch(type="search", query="current market data", sources=[source]),
+        status="completed",
+        type="web_search_call",
+    )
+
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always", UserWarning)
+        call_id = tool_invocation_call_id(output_item)
+
+    serializer_warnings = [
+        warning
+        for warning in caught_warnings
+        if "Pydantic serializer warnings" in str(warning.message)
+    ]
+    assert call_id is None
+    assert not serializer_warnings
+
+
+def test_invocation_lookup_preserves_legacy_model_dump_signature() -> None:
+    class LegacyModel:
+        def model_dump(self, *, exclude_none: bool, exclude_unset: bool) -> dict[str, str]:
+            assert exclude_none is True
+            assert exclude_unset is True
+            return {"type": "function_call", "call_id": "call_legacy"}
+
+    assert tool_invocation_call_id(LegacyModel()) == ("function_call", "call_legacy")
+
+
+def test_invocation_lookup_propagates_internal_model_dump_type_error() -> None:
+    class FailingModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def model_dump(
+            self,
+            *,
+            exclude_none: bool,
+            exclude_unset: bool,
+            warnings: bool = True,
+        ) -> dict[str, str]:
+            self.calls += 1
+            raise TypeError("internal serialization failure")
+
+    model = FailingModel()
+    with pytest.raises(TypeError, match="internal serialization failure"):
+        tool_invocation_call_id(model)
+    assert model.calls == 1
 
 
 def test_canonical_shell_identity_treats_optional_nulls_as_omitted() -> None:

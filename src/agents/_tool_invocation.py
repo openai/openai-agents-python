@@ -5,6 +5,8 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any, TypeGuard
 
+from pydantic import BaseModel
+
 from ._tool_identity import (
     FunctionToolLookupKey,
     get_function_tool_lookup_key_for_call,
@@ -67,7 +69,10 @@ def _as_mapping(value: Any) -> Mapping[str, Any] | None:
         return value
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
-        dumped = model_dump(exclude_none=True, exclude_unset=True)
+        kwargs = {"exclude_none": True, "exclude_unset": True}
+        if isinstance(value, BaseModel):
+            kwargs["warnings"] = False
+        dumped = model_dump(**kwargs)
         return dumped if isinstance(dumped, Mapping) else None
     return None
 
