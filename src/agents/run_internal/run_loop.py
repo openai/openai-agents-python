@@ -532,7 +532,7 @@ async def _finalize_streamed_final_output(
             context_wrapper=context_wrapper,
             streamed_result=streamed_result,
         )
-    except Exception:
+    except OutputGuardrailTripwireTriggered:
         # The blocked output itself is not persisted, but a tool that already ran is: the next run
         # has to see that side effect rather than re-issue it. This turn reaches here with tool
         # items when `tool_use_behavior="stop_on_first_tool"` (or `stop_at_tool_names`, or a custom
@@ -541,6 +541,16 @@ async def _finalize_streamed_final_output(
             retained_items = _retained_items_for_blocked_output(items)
             if retained_items:
                 await save_items(retained_items, response_id, store_setting)
+        raise
+    except Exception:
+        # Only a tripwire means the output was judged undeliverable. A guardrail error leaves the
+        # verdict unknown, so the completed final turn is persisted whole and remains replayable.
+        # `asyncio.CancelledError` is deliberately not caught here: `cancel()` in its default
+        # immediate mode has to stay prompt, and awaiting a session write would block
+        # `stream_events()` on an arbitrary backend. `after_turn` is the mode that finishes the
+        # turn and saves.
+        if not persist_before_output_guardrails:
+            await save_items(items, response_id, store_setting)
         raise
 
     streamed_result.output_guardrail_results = output_guardrail_results

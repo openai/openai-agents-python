@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -2294,6 +2295,60 @@ async def test_mixed_final_turn_session_order_and_committed_items(
 
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_failing_output_guardrail_keeps_the_whole_final_turn(
+    mode: str,
+) -> None:
+    """A guardrail *error* is not a tripwire: the completed final turn stays replayable.
+
+    Only a tripwire means the output was judged undeliverable. An exception or a cancellation
+    leaves the verdict unknown, so the turn must be persisted whole, exactly as the non-streamed
+    path does.
+    """
+
+    @function_tool(name_override="commit_tool")
+    def commit_tool() -> str:
+        return "committed-result"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        raise RuntimeError("guardrail failed")
+
+    model = FakeModel()
+    model.set_next_output(
+        [
+            get_text_message("assistant-preamble"),
+            get_function_tool_call("commit_tool", "{}", call_id="call-mixed"),
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[commit_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = SimpleListSession()
+
+    async def run_once() -> None:
+        if mode == "non_streamed":
+            await Runner.run(agent, "Use commit_tool", session=session)
+        else:
+            result = Runner.run_streamed(agent, "Use commit_tool", session=session)
+            await consume_stream(result)
+
+    with pytest.raises(RuntimeError, match="guardrail failed"):
+        await run_once()
+
+    saved_items = await session.get_items()
+    saved = [item.get("type") or item.get("role") for item in saved_items if isinstance(item, dict)]
+    assert saved == ["user", "message", "function_call", "function_call_output"]
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
 @pytest.mark.parametrize("tripwire", [False, True], ids=["passes", "trips"])
 @pytest.mark.asyncio
 async def test_blocked_tool_final_keeps_reasoning_context_with_the_committed_call(
@@ -3087,3 +3142,81 @@ async def test_streamed_resume_handoff_turn_reports_tool_guardrail_results():
     assert len(streamed.tool_output_guardrail_results) == len(
         non_streamed.tool_output_guardrail_results
     )
+
+
+@pytest.mark.asyncio
+async def test_streamed_cancel_during_output_guardrail_writes_nothing_and_stays_prompt() -> None:
+    """Immediate cancel() must not start a final-turn session write.
+
+    `cancel()` in its default immediate mode cancels outstanding work; `after_turn` is the mode
+    that finishes the turn and saves. A cancellation raised inside an in-flight output guardrail
+    must therefore not be treated like a guardrail error, or `stream_events()` would stay blocked
+    on whatever the session backend does.
+    """
+    entered_guardrail = asyncio.Event()
+    never_set = asyncio.Event()
+    cancelled = False
+
+    async def parked_output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        entered_guardrail.set()
+        await never_set.wait()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    class BlockingAfterCancelSession(SimpleListSession):
+        """Writes before the cancel are the turn's own; any write after it would hang the stream."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.wrote_after_cancel = False
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            if cancelled:
+                self.wrote_after_cancel = True
+                await never_set.wait()
+            await super().add_items(items)
+
+    @function_tool(name_override="commit_tool")
+    def commit_tool() -> str:
+        return "committed-result"
+
+    model = FakeModel()
+    model.set_next_output(
+        [
+            get_text_message("assistant-preamble"),
+            get_function_tool_call("commit_tool", "{}", call_id="call-cancel"),
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[commit_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=parked_output_guardrail)],
+    )
+    session = BlockingAfterCancelSession()
+
+    result = Runner.run_streamed(agent, "Use commit_tool", session=session)
+
+    async def drain() -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            async for _event in result.stream_events():
+                pass
+
+    drain_task = asyncio.create_task(drain())
+    try:
+        await asyncio.wait_for(entered_guardrail.wait(), timeout=5)
+        cancelled = True
+        result.cancel()
+        # A final-turn write here would block on never_set and hang the stream.
+        await asyncio.wait_for(drain_task, timeout=5)
+    finally:
+        if not drain_task.done():
+            drain_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await drain_task
+
+    assert session.wrote_after_cancel is False
