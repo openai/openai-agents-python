@@ -253,7 +253,13 @@ class LocalDirLazySkillSource(LazySkillSource):
                 "path": str(metadata.path).replace("\\", "/"),
             }
 
-        await LocalDir(src=src_root / metadata.path.name).apply(
+        # Materialize through a copy of the configured source so the loaded skill keeps the
+        # entry metadata (permissions, group) that the eager `from_` path already applies.
+        skill_source = self.source.model_copy(
+            update={"src": src_root / metadata.path.name},
+            deep=True,
+        )
+        await skill_source.apply(
             session,
             skill_dest,
             base_dir=Path.cwd(),

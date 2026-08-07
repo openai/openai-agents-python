@@ -19,7 +19,7 @@ from agents.sandbox.files import EntryKind, FileEntry
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.session.sandbox_session import SandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
-from agents.sandbox.types import ExecResult, Permissions, User
+from agents.sandbox.types import ExecResult, FileMode, Group, Permissions, User
 from agents.sandbox.workspace_paths import coerce_posix_path
 from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
@@ -140,6 +140,20 @@ class _WorkspaceNotFoundSkillsSession(_SkillsSession):
             return await super().read(path, user=user)
         except FileNotFoundError as exc:
             raise WorkspaceReadNotFoundError(path=path, cause=exc) from exc
+
+
+class _ExecRecordingSkillsSession(_SkillsSession):
+    def __init__(self, manifest: Manifest) -> None:
+        super().__init__(manifest)
+        self.commands: list[tuple[str, ...]] = []
+
+    async def _exec_internal(
+        self,
+        *command: str | Path,
+        timeout: float | None = None,
+    ) -> ExecResult:
+        self.commands.append(tuple(str(part) for part in command))
+        return await super()._exec_internal(*command, timeout=timeout)
 
 
 class _ArchiveReadErrorSkillsSession(_SkillsSession):
@@ -541,6 +555,69 @@ class TestSkillsInstructions:
         }
         loaded_skill = workspace_root / ".agents" / "dynamic-skill" / "SKILL.md"
         assert loaded_skill.read_text(encoding="utf-8") == "# dynamic skill\n"
+
+    @pytest.mark.asyncio
+    async def test_lazy_local_dir_load_skill_applies_source_metadata(self, tmp_path: Path) -> None:
+        workspace_root = tmp_path / "workspace"
+        workspace_root.mkdir()
+        src_root = tmp_path / "skills"
+        skill_dir = src_root / "dynamic-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# dynamic skill\n", encoding="utf-8")
+
+        source = LocalDir(
+            src=src_root,
+            permissions=Permissions(owner=FileMode.ALL, group=0, other=0),
+            group=Group(name="staff", users=[]),
+        )
+        capability = Skills(lazy_from=LocalDirLazySkillSource(source=source))
+        manifest = capability.process_manifest(
+            _source_granted_manifest(workspace_root, source=src_root)
+        )
+        session = _ExecRecordingSkillsSession(manifest)
+        capability.bind(session)
+        tool = cast(FunctionTool, capability.tools()[0])
+
+        await tool.on_invoke_tool(
+            cast(ToolContext[object], None),
+            '{"skill_name":"dynamic-skill"}',
+        )
+
+        skill_dest = str(workspace_root / ".agents" / "dynamic-skill")
+        assert ("chmod", "0700", skill_dest) in session.commands
+        assert ("chgrp", "staff", skill_dest) in session.commands
+        # The configured source entry must not be repointed at the loaded skill.
+        assert source.src == src_root
+
+    @pytest.mark.asyncio
+    async def test_lazy_local_dir_load_skill_keeps_default_permissions(
+        self, tmp_path: Path
+    ) -> None:
+        workspace_root = tmp_path / "workspace"
+        workspace_root.mkdir()
+        src_root = tmp_path / "skills"
+        skill_dir = src_root / "dynamic-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# dynamic skill\n", encoding="utf-8")
+
+        capability = Skills(
+            lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)),
+        )
+        manifest = capability.process_manifest(
+            _source_granted_manifest(workspace_root, source=src_root)
+        )
+        session = _ExecRecordingSkillsSession(manifest)
+        capability.bind(session)
+        tool = cast(FunctionTool, capability.tools()[0])
+
+        await tool.on_invoke_tool(
+            cast(ToolContext[object], None),
+            '{"skill_name":"dynamic-skill"}',
+        )
+
+        skill_dest = str(workspace_root / ".agents" / "dynamic-skill")
+        assert ("chmod", "0755", skill_dest) in session.commands
+        assert not any(command[:1] == ("chgrp",) for command in session.commands)
 
 
 class TestSkillsLazyLoading:
