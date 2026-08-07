@@ -19,7 +19,6 @@ from openai.types.responses.response_input_item_param import (
     ComputerCallOutputAcknowledgedSafetyCheck,
 )
 from openai.types.responses.response_input_param import McpApprovalResponse
-from openai.types.responses.response_output_item import McpApprovalRequest
 
 from .. import _debug
 from .._tool_identity import (
@@ -29,6 +28,8 @@ from .._tool_identity import (
     get_function_tool_lookup_key,
     get_function_tool_lookup_key_for_call,
     get_function_tool_trace_name,
+    get_hosted_mcp_approval_request_identity,
+    get_tool_approval_item_call_id,
     get_tool_call_namespace,
     get_tool_call_trace_name,
     is_deferred_top_level_function_tool,
@@ -102,7 +103,6 @@ from .agent_bindings import AgentBindings, bind_public_agent
 from .approvals import append_approval_error_output
 from .items import (
     REJECTION_MESSAGE,
-    extract_mcp_request_id,
     extract_mcp_request_id_from_run,
     function_rejection_item,
     function_tool_error_output,
@@ -144,10 +144,8 @@ __all__ = [
     "get_trace_tool_error",
     "with_tool_function_span",
     "build_litellm_json_tool_call",
-    "process_hosted_mcp_approvals",
     "collect_manual_mcp_approvals",
     "index_approval_items_by_call_id",
-    "should_keep_hosted_mcp_item",
     "resolve_approval_status",
     "resolve_approval_interruption",
     "resolve_approval_rejection_message",
@@ -1280,68 +1278,46 @@ async def function_needs_approval(
     return bool(needs_approval)
 
 
-def process_hosted_mcp_approvals(
-    *,
-    original_pre_step_items: Sequence[RunItem],
-    mcp_approval_requests: Sequence[Any],
-    context_wrapper: RunContextWrapper[Any],
-    agent: Agent[Any],
-    append_item: Callable[[RunItem], None],
-) -> tuple[list[ToolApprovalItem], set[str]]:
-    """Filter hosted MCP outputs and merge manual approvals so only coherent items remain."""
-    hosted_mcp_approvals_by_id: dict[str, ToolApprovalItem] = {}
-    for item in original_pre_step_items:
-        if not isinstance(item, ToolApprovalItem):
-            continue
-        raw = item.raw_item
-        if not _is_hosted_mcp_approval_request(raw):
-            continue
-        request_id = extract_mcp_request_id(raw)
-        if request_id:
-            hosted_mcp_approvals_by_id[request_id] = item
-
-    pending_hosted_mcp_approvals: list[ToolApprovalItem] = []
-    pending_hosted_mcp_approval_ids: set[str] = set()
-
-    for mcp_run in mcp_approval_requests:
-        request_id = extract_mcp_request_id_from_run(mcp_run)
-        # MCP approval requests are documented to include an id used as approval_request_id.
-        # See https://platform.openai.com/docs/guides/tools-connectors-mcp#approvals
-        approval_item = hosted_mcp_approvals_by_id.get(request_id) if request_id else None
-        if not approval_item or not request_id:
-            continue
-
-        tool_name = RunContextWrapper._resolve_tool_name(approval_item)
-        approved = context_wrapper.get_approval_status(
-            tool_name=tool_name,
-            call_id=request_id,
-            existing_pending=approval_item,
-        )
-
-        if approved is not None:
-            raw_item: McpApprovalResponse = {
-                "type": "mcp_approval_response",
-                "approval_request_id": request_id,
-                "approve": approved,
-            }
-            rejection_message = context_wrapper.get_rejection_message(
-                tool_name=tool_name,
-                call_id=request_id,
-                existing_pending=approval_item,
-            )
-            if approved is False and rejection_message is not None:
-                raw_item["reason"] = rejection_message
-            ItemHelpers.copy_tool_call_caller(mcp_run.request_item, raw_item)
-            response_item = MCPApprovalResponseItem(raw_item=raw_item, agent=agent)
-            append_item(response_item)
-            continue
-
-        if approval_item not in pending_hosted_mcp_approvals:
-            pending_hosted_mcp_approvals.append(approval_item)
-        pending_hosted_mcp_approval_ids.add(request_id)
-        append_item(approval_item)
-
-    return pending_hosted_mcp_approvals, pending_hosted_mcp_approval_ids
+def _classify_hosted_mcp_pending_request(
+    pending: ToolApprovalItem,
+    current_request: Any,
+) -> Literal["reuse_pending", "use_current", "use_current_with_pending_exact", "conflict"]:
+    """Choose the safe identity source when reconciling pending and current requests."""
+    pending_identity = get_hosted_mcp_approval_request_identity(pending)
+    current_identity = get_hosted_mcp_approval_request_identity(current_request)
+    if pending_identity is None or current_identity is None:
+        return "conflict"
+    if pending_identity.request_id is None or current_identity.request_id is None:
+        return "conflict"
+    if pending_identity.request_id != current_identity.request_id:
+        return "conflict"
+    if (
+        pending_identity.server_label is not None
+        and current_identity.server_label is not None
+        and pending_identity.server_label != current_identity.server_label
+    ):
+        return "conflict"
+    pending_tool_name = RunContextWrapper._resolve_hosted_mcp_tool_name(
+        pending,
+        pending_identity,
+    )
+    if (
+        pending_tool_name is not None
+        and current_identity.tool_name is not None
+        and pending_tool_name != current_identity.tool_name
+    ):
+        return "conflict"
+    if (
+        current_identity.approval_identity is None
+        and pending_identity.approval_identity is not None
+    ):
+        return "use_current"
+    if (
+        current_identity.approval_identity is not None
+        and pending_identity.approval_identity is None
+    ):
+        return "use_current_with_pending_exact"
+    return "reuse_pending"
 
 
 def collect_manual_mcp_approvals(
@@ -1370,10 +1346,49 @@ def collect_manual_mcp_approvals(
         tool_name = RunContextWrapper._to_str_or_none(getattr(request_item, "name", None))
         tool_name = tool_name or get_mapping_or_attr(request, "mcp_tool").name
 
-        existing_pending = pending_lookup.get(request_id or "")
-        approval_status = context_wrapper.get_approval_status(
-            tool_name, request_id or "", existing_pending=existing_pending
+        current_approval_item = ToolApprovalItem(
+            agent=agent,
+            raw_item=request_item,
+            tool_name=tool_name,
         )
+        existing_pending = pending_lookup.get(request_id or "")
+        pending_resolution = (
+            _classify_hosted_mcp_pending_request(existing_pending, request_item)
+            if existing_pending is not None
+            else "use_current"
+        )
+        identity_mismatch = pending_resolution == "conflict"
+        if existing_pending is not None and pending_resolution == "reuse_pending":
+            approval_item = existing_pending
+        else:
+            approval_item = current_approval_item
+        allow_primary_legacy = (
+            existing_pending is not None
+            and not identity_mismatch
+            and pending_resolution != "use_current_with_pending_exact"
+        )
+        approval_status, rejection_message = context_wrapper._resolve_hosted_mcp_approval_decision(
+            approval_item,
+            allow_legacy_exact=allow_primary_legacy,
+        )
+        if (
+            approval_status is None
+            and existing_pending is not None
+            and pending_resolution == "use_current_with_pending_exact"
+        ):
+            approval_status, rejection_message = (
+                context_wrapper._resolve_hosted_mcp_approval_decision(
+                    existing_pending,
+                    allow_legacy_exact=True,
+                )
+            )
+        if approval_status is None and pending_resolution == "use_current_with_pending_exact":
+            approval_status, rejection_message = (
+                context_wrapper._resolve_hosted_mcp_approval_decision(
+                    current_approval_item,
+                    allow_legacy_exact=True,
+                )
+            )
 
         if approval_status is not None and request_id:
             approval_response_raw: McpApprovalResponse = {
@@ -1381,11 +1396,6 @@ def collect_manual_mcp_approvals(
                 "approval_request_id": request_id,
                 "approve": approval_status,
             }
-            rejection_message = context_wrapper.get_rejection_message(
-                tool_name,
-                request_id,
-                existing_pending=existing_pending,
-            )
             if approval_status is False and rejection_message is not None:
                 approval_response_raw["reason"] = rejection_message
             ItemHelpers.copy_tool_call_caller(request_item, approval_response_raw)
@@ -1395,14 +1405,7 @@ def collect_manual_mcp_approvals(
         if approval_status is not None:
             continue
 
-        pending.append(
-            existing_pending
-            or ToolApprovalItem(
-                agent=agent,
-                raw_item=request_item,
-                tool_name=tool_name,
-            )
-        )
+        pending.append(approval_item)
 
     return approved, pending
 
@@ -1413,27 +1416,10 @@ def index_approval_items_by_call_id(items: Sequence[RunItem]) -> dict[str, ToolA
     for item in items:
         if not isinstance(item, ToolApprovalItem):
             continue
-        call_id = extract_tool_call_id(item.raw_item)
+        call_id = get_tool_approval_item_call_id(item)
         if call_id:
             approvals[call_id] = item
     return approvals
-
-
-def should_keep_hosted_mcp_item(
-    item: RunItem,
-    *,
-    pending_hosted_mcp_approvals: Sequence[ToolApprovalItem],
-    pending_hosted_mcp_approval_ids: set[str],
-) -> bool:
-    """Keep only hosted MCP approvals that match pending requests from the provider."""
-    if not isinstance(item, ToolApprovalItem):
-        return True
-    if not _is_hosted_mcp_approval_request(item.raw_item):
-        return False
-    request_id = extract_mcp_request_id(item.raw_item)
-    return item in pending_hosted_mcp_approvals or (
-        request_id is not None and request_id in pending_hosted_mcp_approval_ids
-    )
 
 
 def _uses_programmatic_output_schema(
@@ -2603,16 +2589,3 @@ def _normalize_exit_code(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _is_hosted_mcp_approval_request(raw_item: Any) -> bool:
-    """Detect hosted MCP approval request payloads emitted by the provider."""
-    if isinstance(raw_item, McpApprovalRequest):
-        return True
-    if not isinstance(raw_item, dict):
-        return False
-    provider_data = raw_item.get("provider_data", {})
-    return (
-        raw_item.get("type") == "hosted_tool_call"
-        and provider_data.get("type") == "mcp_approval_request"
-    )

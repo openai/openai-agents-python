@@ -14,8 +14,10 @@ import httpx
 import pytest
 from openai import APIConnectionError, BadRequestError
 from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses.response_output_item import McpApprovalRequest
 from openai.types.responses.response_output_text import AnnotationFileCitation, ResponseOutputText
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
+from openai.types.responses.tool_param import Mcp
 from typing_extensions import TypedDict
 
 import agents._debug as _debug
@@ -88,7 +90,7 @@ from agents.run_internal.session_persistence import (
 from agents.run_internal.tool_execution import execute_approved_tools
 from agents.run_internal.tool_use_tracker import AgentToolUseTracker
 from agents.run_state import RunState
-from agents.tool import ComputerTool, FunctionToolResult, ShellTool, function_tool
+from agents.tool import ComputerTool, FunctionToolResult, HostedMCPTool, ShellTool, function_tool
 from agents.tool_context import ToolContext
 from agents.usage import Usage
 
@@ -159,7 +161,7 @@ async def run_execute_approved_tools(
 async def _run_agent_with_optional_streaming(
     agent: Agent[Any],
     *,
-    input: str | list[TResponseInputItem],
+    input: str | list[TResponseInputItem] | RunState[Any, Agent[Any]],
     streamed: bool,
     **kwargs: Any,
 ):
@@ -169,6 +171,66 @@ async def _run_agent_with_optional_streaming(
             pass
         return result
     return await Runner.run(agent, input=input, **kwargs)
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_persistent_hosted_mcp_approval_does_not_cross_servers(streamed: bool) -> None:
+    model = FakeModel()
+    server_a = HostedMCPTool(
+        tool_config=Mcp(
+            type="mcp",
+            server_label="server-a",
+            server_url="https://server-a.example/mcp",
+        )
+    )
+    server_b = HostedMCPTool(
+        tool_config=Mcp(
+            type="mcp",
+            server_label="server-b",
+            server_url="https://server-b.example/mcp",
+        )
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [
+                McpApprovalRequest(
+                    id="request-a",
+                    type="mcp_approval_request",
+                    arguments="{}",
+                    name="lookup_account",
+                    server_label="server-a",
+                )
+            ],
+            [
+                McpApprovalRequest(
+                    id="request-b",
+                    type="mcp_approval_request",
+                    arguments="{}",
+                    name="lookup_account",
+                    server_label="server-b",
+                )
+            ],
+        ]
+    )
+    agent = Agent(name="test", model=model, tools=[server_a, server_b])
+
+    first = await _run_agent_with_optional_streaming(agent, input="hello", streamed=streamed)
+    assert len(first.interruptions) == 1
+    assert first.interruptions[0].raw_item.server_label == "server-a"
+
+    state = first.to_state()
+    state.approve(first.interruptions[0], always_approve=True)
+    restored_state = await RunState.from_json(agent, state.to_json())
+
+    resumed = await _run_agent_with_optional_streaming(
+        agent,
+        input=restored_state,
+        streamed=streamed,
+    )
+
+    assert len(resumed.interruptions) == 1
+    assert resumed.interruptions[0].raw_item.server_label == "server-b"
 
 
 @pytest.mark.parametrize("surface", ["agent_tool", "handoff", "mixed"])

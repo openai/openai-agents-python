@@ -39,6 +39,7 @@ from .._tool_identity import (
     get_function_tool_lookup_key,
     get_function_tool_lookup_key_for_call,
     get_function_tool_lookup_key_for_tool,
+    get_tool_approval_item_call_id,
     get_tool_call_namespace,
     get_tool_call_qualified_name,
     get_tool_call_trace_name,
@@ -128,6 +129,7 @@ from .items import (
     REJECTION_MESSAGE,
     NestedHistoryOwnedItem,
     apply_patch_rejection_item,
+    extract_mcp_request_id_from_run,
     function_rejection_item,
     shell_rejection_item,
 )
@@ -165,9 +167,7 @@ from .tool_execution import (
     is_apply_patch_name,
     parse_apply_patch_custom_input,
     parse_apply_patch_function_args,
-    process_hosted_mcp_approvals,
     resolve_approval_rejection_message,
-    should_keep_hosted_mcp_item,
 )
 from .tool_planning import (
     _append_mcp_callback_results,
@@ -1321,7 +1321,7 @@ async def resolve_interrupted_turn(
     ) -> Literal["approved", "pending", "rejected"]:
         has_pending = False
         for interruption in interruptions:
-            call_id = extract_tool_call_id(interruption.raw_item)
+            call_id = get_tool_approval_item_call_id(interruption)
             if not call_id:
                 has_pending = True
                 continue
@@ -1371,7 +1371,7 @@ async def resolve_interrupted_turn(
             source_item.tool_lookup_key = item.tool_lookup_key
             source_item._allow_bare_name_alias = item._allow_bare_name_alias
             item = source_item
-        call_id = extract_tool_call_id(item.raw_item)
+        call_id = get_tool_approval_item_call_id(item)
         key = call_id or f"raw:{id(item.raw_item)}"
         if key in pending_interruption_keys:
             return
@@ -1521,7 +1521,7 @@ async def resolve_interrupted_turn(
     }
 
     def _is_function_approval(approval: ToolApprovalItem) -> bool:
-        call_id = extract_tool_call_id(approval.raw_item)
+        call_id = get_tool_approval_item_call_id(approval)
         if call_id in non_function_owned_call_ids and call_id not in queued_function_call_ids:
             return False
         if get_mapping_or_attr(approval.raw_item, "type") == "function_call":
@@ -1911,12 +1911,13 @@ async def resolve_interrupted_turn(
         *(_shell_call_id_from_run(run) for run in processed_response.shell_calls),
         *(_apply_patch_call_id_from_run(run) for run in processed_response.apply_patch_calls),
         *(_custom_call_id_from_run(run) for run in processed_response.custom_tool_calls),
+        *(extract_mcp_request_id_from_run(run) for run in processed_response.mcp_approval_requests),
     }
     for original_approval in pending_approval_items:
         approval_snapshot = validated_function_approval_items.get(original_approval)
         if approval_snapshot is None:
             approval = original_approval
-            approval_call_id = extract_tool_call_id(approval.raw_item)
+            approval_call_id = get_tool_approval_item_call_id(approval)
             if approval_call_id in collector_owned_call_ids:
                 continue
             if (
@@ -2167,25 +2168,8 @@ async def resolve_interrupted_turn(
         append_item=append_if_new,
     )
 
-    (
-        pending_hosted_mcp_approvals,
-        pending_hosted_mcp_approval_ids,
-    ) = process_hosted_mcp_approvals(
-        original_pre_step_items=original_pre_step_items,
-        mcp_approval_requests=processed_response.mcp_approval_requests,
-        context_wrapper=context_wrapper,
-        agent=public_agent,
-        append_item=append_if_new,
-    )
-
-    pre_step_items = [
-        item
-        for item in original_pre_step_items
-        if should_keep_hosted_mcp_item(
-            item,
-            pending_hosted_mcp_approvals=pending_hosted_mcp_approvals,
-            pending_hosted_mcp_approval_ids=pending_hosted_mcp_approval_ids,
-        )
+    pre_step_items: list[RunItem] = [
+        item for item in original_pre_step_items if not isinstance(item, ToolApprovalItem)
     ]
 
     if rejected_function_call_ids:

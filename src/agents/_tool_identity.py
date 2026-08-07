@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 from typing_extensions import Required, TypedDict
@@ -17,7 +18,29 @@ FunctionToolLookupKey = (
     | NamespacedFunctionToolLookupKey
     | DeferredTopLevelFunctionToolLookupKey
 )
+HostedMCPApprovalIdentity = tuple[Literal["hosted_mcp"], str, str]
+HostedMCPApprovalCallIdentity = tuple[Literal["hosted_mcp_call"], str]
+HostedMCPApprovalQueryIdentity = tuple[Literal["hosted_mcp_query"], str, str]
+HostedMCPApprovalKey = (
+    HostedMCPApprovalIdentity | HostedMCPApprovalCallIdentity | HostedMCPApprovalQueryIdentity
+)
 NamedToolLookupKey = FunctionToolLookupKey | str
+
+
+@dataclass(frozen=True)
+class HostedMCPApprovalRequestIdentity:
+    """Validated identity fields from a hosted MCP approval request."""
+
+    request_id: str | None
+    server_label: str | None
+    tool_name: str | None
+
+    @property
+    def approval_identity(self) -> HostedMCPApprovalIdentity | None:
+        """Return the persistent identity when all required fields are available."""
+        if self.server_label is None or self.tool_name is None:
+            return None
+        return ("hosted_mcp", self.server_label, self.tool_name)
 
 
 def validate_function_tool_fallback_name(name: str) -> str:
@@ -46,6 +69,61 @@ def get_mapping_or_attr(value: Any, key: str) -> Any:
     if isinstance(value, dict):
         return value.get(key)
     return getattr(value, key, None)
+
+
+def _non_empty_string(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def get_hosted_mcp_approval_request_identity(
+    value: Any,
+) -> HostedMCPApprovalRequestIdentity | None:
+    """Return strictly validated identity fields for a hosted MCP approval request."""
+    raw_item = get_mapping_or_attr(value, "raw_item")
+    if raw_item is None:
+        raw_item = value
+
+    raw_type = get_mapping_or_attr(raw_item, "type")
+    if raw_type == "mcp_approval_request":
+        request = raw_item
+        request_id = _non_empty_string(get_mapping_or_attr(request, "id"))
+        tool_name = _non_empty_string(get_mapping_or_attr(request, "name"))
+    elif raw_type == "hosted_tool_call":
+        request = get_mapping_or_attr(raw_item, "provider_data")
+        if get_mapping_or_attr(request, "type") != "mcp_approval_request":
+            return None
+
+        provider_request_id = get_mapping_or_attr(request, "id")
+        if provider_request_id is None:
+            request_id = _non_empty_string(get_mapping_or_attr(raw_item, "call_id"))
+            if request_id is None:
+                request_id = _non_empty_string(get_mapping_or_attr(raw_item, "id"))
+        else:
+            request_id = _non_empty_string(provider_request_id)
+        tool_name = _non_empty_string(get_mapping_or_attr(request, "name"))
+        if tool_name is None:
+            tool_name = _non_empty_string(get_mapping_or_attr(raw_item, "name"))
+    else:
+        return None
+
+    return HostedMCPApprovalRequestIdentity(
+        request_id=request_id,
+        server_label=_non_empty_string(get_mapping_or_attr(request, "server_label")),
+        tool_name=tool_name,
+    )
+
+
+def get_tool_approval_item_call_id(value: Any) -> str | None:
+    """Return the canonical call ID for a tool approval item."""
+    hosted_request = get_hosted_mcp_approval_request_identity(value)
+    if hosted_request is not None:
+        return hosted_request.request_id
+
+    raw_item = get_mapping_or_attr(value, "raw_item")
+    if raw_item is None:
+        raw_item = value
+    call_id = get_mapping_or_attr(raw_item, "call_id") or get_mapping_or_attr(raw_item, "id")
+    return _non_empty_string(call_id)
 
 
 def tool_qualified_name(name: str | None, namespace: str | None = None) -> str | None:

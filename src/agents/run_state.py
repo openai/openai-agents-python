@@ -150,7 +150,9 @@ ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.13"
+CURRENT_SCHEMA_VERSION = "1.14"
+_PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
+_HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
 SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
@@ -173,6 +175,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Persists programmatic tool calling and nested handoff history ownership across resume "
         "flows."
     ),
+    "1.14": "Scopes hosted MCP approvals and restored requests by server label.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -395,6 +398,8 @@ class RunState(Generic[TContext, TAgent]):
             return {}
         approvals_dict: dict[str, dict[str, Any]] = {}
         for tool_name, record in self._context._approvals.items():
+            if not isinstance(tool_name, str):
+                continue
             approvals_dict[tool_name] = {
                 "approved": record.approved
                 if isinstance(record.approved, bool)
@@ -410,6 +415,49 @@ class RunState(Generic[TContext, TAgent]):
                     record.sticky_rejection_message
                 )
         return approvals_dict
+
+    def _serialize_hosted_mcp_approvals(self) -> list[dict[str, Any]]:
+        """Serialize hosted MCP approvals with explicit typed identities."""
+        if self._context is None:
+            return []
+        serialized: list[dict[str, Any]] = []
+        hosted_records = (
+            (identity, record)
+            for identity, record in self._context._approvals.items()
+            if isinstance(identity, tuple)
+        )
+        for identity, record in sorted(hosted_records):
+            if identity[0] == "hosted_mcp":
+                identity_data = {
+                    "type": "server_tool",
+                    "server_label": identity[1],
+                    "tool_name": identity[2],
+                }
+            elif identity[0] == "hosted_mcp_call":
+                identity_data = {
+                    "type": "request",
+                    "request_id": identity[1],
+                }
+            else:
+                identity_data = {
+                    "type": "query",
+                    "tool_name": identity[1],
+                    "request_id": identity[2],
+                }
+            decision: dict[str, Any] = {
+                "approved": record.approved
+                if isinstance(record.approved, bool)
+                else list(record.approved),
+                "rejected": record.rejected
+                if isinstance(record.rejected, bool)
+                else list(record.rejected),
+            }
+            if record.rejection_messages:
+                decision["rejection_messages"] = dict(record.rejection_messages)
+            if record.sticky_rejection_message is not None:
+                decision["sticky_rejection_message"] = record.sticky_rejection_message
+            serialized.append({"identity": identity_data, "decision": decision})
+        return serialized
 
     def _serialize_model_responses(self) -> list[dict[str, Any]]:
         """Serialize model responses."""
@@ -754,6 +802,7 @@ class RunState(Generic[TContext, TAgent]):
             raise UserError("Cannot serialize RunState: No context")
 
         approvals_dict = self._serialize_approvals()
+        hosted_mcp_approvals = self._serialize_hosted_mcp_approvals()
         model_responses = self._serialize_model_responses()
         original_input_serialized = self._serialize_original_input()
         context_payload, context_meta = self._serialize_context_payload(
@@ -771,6 +820,8 @@ class RunState(Generic[TContext, TAgent]):
         tool_input = self._serialize_tool_input(self._context.tool_input)
         if tool_input is not None:
             context_entry["tool_input"] = tool_input
+        if hosted_mcp_approvals:
+            context_entry["hosted_mcp_approvals"] = hosted_mcp_approvals
 
         agent_identity_keys_by_id = (
             _build_agent_identity_keys_by_id(cast(Agent[Any], self._starting_agent))
@@ -1721,6 +1772,18 @@ def _build_named_tool_map(
     return tool_map
 
 
+def _build_hosted_mcp_tool_map(tools: Sequence[Any]) -> dict[str, HostedMCPTool]:
+    """Build a server-label-indexed map for hosted MCP tools."""
+    tool_map: dict[str, HostedMCPTool] = {}
+    for tool in tools:
+        if not isinstance(tool, HostedMCPTool):
+            continue
+        server_label = tool.tool_config.get("server_label")
+        if isinstance(server_label, str) and server_label:
+            tool_map[server_label] = tool
+    return tool_map
+
+
 def _build_handoffs_map(current_agent: Agent[Any]) -> dict[str, Handoff[Any, Agent[Any]]]:
     """Map handoff tool names to their definitions for quick lookup."""
     handoffs_map: dict[str, Handoff[Any, Agent[Any]]] = {}
@@ -1830,7 +1893,7 @@ async def _deserialize_processed_response(
     local_shell_tools_map = _build_named_tool_map(all_tools, LocalShellTool)
     shell_tools_map = _build_named_tool_map(all_tools, ShellTool)
     apply_patch_tools_map = _build_named_tool_map(all_tools, ApplyPatchTool)
-    mcp_tools_map = _build_named_tool_map(all_tools, HostedMCPTool)
+    mcp_tools_map = _build_hosted_mcp_tool_map(all_tools)
     handoffs_map = _build_handoffs_map(current_agent)
     programmatic_tool_present = any(
         isinstance(tool, ProgrammaticToolCallingTool) for tool in all_tools
@@ -2133,8 +2196,7 @@ async def _deserialize_processed_response(
         if not mcp_tool_data:
             continue
 
-        mcp_tool_name = mcp_tool_data.get("name")
-        mcp_tool = mcp_tools_map.get(mcp_tool_name) if mcp_tool_name else None
+        mcp_tool = mcp_tools_map.get(request_item.server_label)
 
         if mcp_tool:
             _ensure_restored_tool_call_allowed(
@@ -2701,13 +2763,18 @@ async def _build_run_state_from_json(
             f"Supported versions are: {supported_versions}. "
             f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
         )
-    if schema_version != CURRENT_SCHEMA_VERSION and _run_state_uses_programmatic_tool_calling(
-        state_json
-    ):
+    schema_major, schema_minor = (int(part) for part in schema_version.split(".", maxsplit=1))
+    programmatic_major, programmatic_minor = (
+        int(part) for part in _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
+    )
+    if (schema_major, schema_minor) < (
+        programmatic_major,
+        programmatic_minor,
+    ) and _run_state_uses_programmatic_tool_calling(state_json):
         raise UserError(
             "Run state contains Programmatic Tool Calling data but uses schema version "
             f"{schema_version}. Programmatic Tool Calling requires schema version "
-            f"{CURRENT_SCHEMA_VERSION}."
+            f"{_PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION} or later."
         )
 
     agent_identity_map = _build_agent_identity_map(initial_agent)
@@ -2771,6 +2838,11 @@ async def _build_run_state_from_json(
         raise UserError("Serialized run state context must be a mapping. Please provide one.")
     context.usage = usage
     context._rebuild_approvals(context_data.get("approvals", {}))
+    hosted_mcp_major, hosted_mcp_minor = (
+        int(part) for part in _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
+    )
+    if (schema_major, schema_minor) >= (hosted_mcp_major, hosted_mcp_minor):
+        context._rebuild_hosted_mcp_approvals(context_data.get("hosted_mcp_approvals", []))
     serialized_tool_input = context_data.get("tool_input")
     if (
         context_override is None

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from openai.types.responses import ResponseFunctionToolCall
 
-from ._tool_identity import get_tool_call_namespace, tool_trace_name
+from ._tool_identity import HostedMCPApprovalKey, get_tool_call_namespace, tool_trace_name
 from .agent_tool_state import get_agent_tool_state_scope, set_agent_tool_state_scope
 from .run_context import RunContextWrapper, TContext
 from .usage import Usage
@@ -70,7 +70,7 @@ class ToolContext(RunContextWrapper[TContext]):
         agent: AgentBase[Any] | None = None,
         run_config: RunConfig | dict[str, Any] | None = None,
         turn_input: list[TResponseInputItem] | None = None,
-        _approvals: dict[str, _ApprovalRecord] | None = None,
+        _approvals: dict[str | HostedMCPApprovalKey, _ApprovalRecord] | None = None,
         tool_input: Any | None = None,
     ) -> None:
         """Preserve the v0.7 positional constructor while accepting new context fields."""

@@ -14,7 +14,11 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 from typing_extensions import NotRequired, TypedDict
 
 from . import _debug
-from ._tool_identity import get_function_tool_approval_keys
+from ._tool_identity import (
+    get_function_tool_approval_keys,
+    get_hosted_mcp_approval_request_identity,
+    get_tool_approval_item_call_id,
+)
 from .agent_output import AgentOutputSchemaBase
 from .agent_tool_input import (
     AgentAsToolInput,
@@ -748,7 +752,7 @@ class Agent(AgentBase, Generic[TContext]):
                 has_pending = False
                 has_decision = False
                 for interruption in interruptions:
-                    call_id = interruption.call_id
+                    call_id = get_tool_approval_item_call_id(interruption)
                     if not call_id:
                         has_pending = True
                         continue
@@ -781,6 +785,15 @@ class Agent(AgentBase, Generic[TContext]):
                     *,
                     approved: bool,
                 ) -> Any | None:
+                    hosted_request = get_hosted_mcp_approval_request_identity(interruption)
+                    if hosted_request is not None and hosted_request.request_id is not None:
+                        hosted_key = hosted_request.approval_identity or (
+                            "hosted_mcp_call",
+                            hosted_request.request_id,
+                        )
+                        hosted_record = parent_context._approvals.get(hosted_key)
+                        if hosted_record is not None:
+                            return hosted_record
                     candidate_keys = list(RunContextWrapper._resolve_approval_keys(interruption))
                     for candidate_key in get_function_tool_approval_keys(
                         tool_name=RunContextWrapper._resolve_tool_name(interruption),
@@ -804,7 +817,7 @@ class Agent(AgentBase, Generic[TContext]):
                     return fallback
 
                 for interruption in interruptions:
-                    call_id = interruption.call_id
+                    call_id = get_tool_approval_item_call_id(interruption)
                     if not call_id:
                         continue
                     tool_name = RunContextWrapper._resolve_tool_name(interruption)
@@ -818,12 +831,19 @@ class Agent(AgentBase, Generic[TContext]):
                     )
                     if status is None:
                         continue
-                    approval_record = parent_context._approvals.get(approval_key)
-                    if approval_record is None:
+                    hosted_request = get_hosted_mcp_approval_request_identity(interruption)
+                    if hosted_request is not None:
                         approval_record = _find_mirrored_approval_record(
                             interruption,
                             approved=status,
                         )
+                    else:
+                        approval_record = parent_context._approvals.get(approval_key)
+                        if approval_record is None:
+                            approval_record = _find_mirrored_approval_record(
+                                interruption,
+                                approved=status,
+                            )
                     if status is True:
                         always_approve = bool(approval_record and approval_record.approved is True)
                         nested_context.approve_tool(
@@ -832,9 +852,20 @@ class Agent(AgentBase, Generic[TContext]):
                         )
                     else:
                         always_reject = bool(approval_record and approval_record.rejected is True)
+                        rejection_message = (
+                            parent_context.get_rejection_message(
+                                tool_name,
+                                call_id,
+                                tool_namespace=tool_namespace,
+                                existing_pending=interruption,
+                            )
+                            if hosted_request is not None
+                            else None
+                        )
                         nested_context.reject_tool(
                             interruption,
                             always_reject=always_reject,
+                            rejection_message=rejection_message,
                         )
 
             if isinstance(context, ToolContext) and context.tool_call is not None:

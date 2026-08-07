@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
+from openai.types.responses.response_output_item import McpApprovalRequest
 from pydantic import BaseModel, Field
 
 import agents._debug as _debug
@@ -1539,6 +1540,86 @@ async def test_agent_as_tool_rejected_nested_approval_resumes_run(
 
 
 @pytest.mark.asyncio
+async def test_agent_as_tool_wrapped_hosted_mcp_exact_decision_resumes_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="outer")
+    tool_call = make_function_tool_call(
+        "outer_tool",
+        call_id="outer-1",
+        arguments='{"input": "hello"}',
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="outer_tool",
+        tool_call_id="outer-1",
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+    approval_item = ToolApprovalItem(
+        agent=agent,
+        raw_item={
+            "type": "hosted_tool_call",
+            "provider_data": {
+                "type": "mcp_approval_request",
+                "id": "inner-1",
+                "name": "lookup_account",
+            },
+        },
+        tool_name="lookup_account",
+    )
+
+    class DummyState:
+        def __init__(self, nested_context: ToolContext) -> None:
+            self._context = nested_context
+
+    class DummyPendingResult:
+        def __init__(self) -> None:
+            self.interruptions = [approval_item]
+            self.final_output = None
+
+        def to_state(self) -> DummyState:
+            return resume_state
+
+    class DummyResumedResult:
+        def __init__(self) -> None:
+            self.interruptions: list[ToolApprovalItem] = []
+            self.final_output = "rejected"
+
+    nested_context = ToolContext(
+        context=None,
+        tool_name=tool_call.name,
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+    resume_state = DummyState(nested_context)
+    pending_result = DummyPendingResult()
+    record_agent_tool_run_result(tool_call, cast(Any, pending_result))
+    tool_context.reject_tool(approval_item, rejection_message="exact denial")
+
+    resumed_result = DummyResumedResult()
+
+    async def run_resume(cls, /, starting_agent, input, **kwargs) -> DummyResumedResult:
+        assert input is resume_state
+        assert input._context is not None
+        assert input._context.is_tool_approved("lookup_account", "inner-1") is False
+        assert input._context.get_rejection_message("lookup_account", "inner-1") == "exact denial"
+        return resumed_result
+
+    monkeypatch.setattr(Runner, "run", classmethod(run_resume))
+    tool = agent.as_tool(
+        tool_name="outer_tool",
+        tool_description="Outer agent tool",
+        is_enabled=True,
+    )
+
+    output = await tool.on_invoke_tool(tool_context, tool_call.arguments)
+
+    assert output == "rejected"
+
+
+@pytest.mark.asyncio
 async def test_agent_as_tool_namespaced_nested_always_approve_stays_permanent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1622,6 +1703,156 @@ async def test_agent_as_tool_namespaced_nested_always_approve_stays_permanent(
 
     assert output == "approved"
     assert run_inputs == [resume_state]
+
+
+@pytest.mark.parametrize(
+    ("approve", "sticky", "legacy_sticky", "expected_followup"),
+    [
+        (True, True, False, True),
+        (False, True, False, False),
+        (True, False, True, None),
+        (False, False, True, None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_agent_as_tool_hosted_mcp_nested_sticky_decision_stays_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+    approve: bool,
+    sticky: bool,
+    legacy_sticky: bool,
+    expected_followup: bool | None,
+) -> None:
+    agent = Agent(name="outer")
+    tool_call = make_function_tool_call(
+        "outer_tool",
+        call_id="outer-1",
+        arguments='{"input": "hello"}',
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="outer_tool",
+        tool_call_id="outer-1",
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+    approval_item = ToolApprovalItem(
+        agent=agent,
+        raw_item=McpApprovalRequest(
+            id="inner-1",
+            type="mcp_approval_request",
+            server_label="server-a",
+            arguments="{}",
+            name="lookup_account",
+        ),
+    )
+
+    class DummyState:
+        def __init__(self, nested_context: ToolContext) -> None:
+            self._context = nested_context
+
+    class DummyPendingResult:
+        def __init__(self) -> None:
+            self.interruptions = [approval_item]
+            self.final_output = None
+
+        def to_state(self) -> DummyState:
+            return resume_state
+
+    class DummyResumedResult:
+        def __init__(self) -> None:
+            self.interruptions: list[ToolApprovalItem] = []
+            self.final_output = "resumed"
+
+    nested_context = ToolContext(
+        context=None,
+        tool_name=tool_call.name,
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+    resume_state = DummyState(nested_context)
+    pending_result = DummyPendingResult()
+    record_agent_tool_run_result(tool_call, cast(Any, pending_result))
+    if legacy_sticky:
+        tool_context._rebuild_approvals(  # noqa: SLF001
+            {
+                "lookup_account": {
+                    "approved": approve,
+                    "rejected": [] if approve else True,
+                    "sticky_rejection_message": None if approve else "legacy denial",
+                }
+            }
+        )
+    if approve:
+        tool_context.approve_tool(approval_item, always_approve=sticky)
+    else:
+        tool_context.reject_tool(
+            approval_item,
+            always_reject=sticky,
+            rejection_message="server-a denied",
+        )
+
+    resumed_result = DummyResumedResult()
+
+    async def run_resume(cls, /, starting_agent, input, **kwargs) -> DummyResumedResult:
+        assert input is resume_state
+        assert input._context is not None
+        assert (
+            input._context.get_approval_status(
+                "lookup_account",
+                "inner-1",
+                existing_pending=approval_item,
+            )
+            is approve
+        )
+        original_message = None if approve else "server-a denied"
+        assert (
+            input._context.get_rejection_message(
+                "lookup_account",
+                "inner-1",
+                existing_pending=approval_item,
+            )
+            == original_message
+        )
+        followup = ToolApprovalItem(
+            agent=agent,
+            raw_item=McpApprovalRequest(
+                id="inner-2",
+                type="mcp_approval_request",
+                server_label="server-a",
+                arguments="{}",
+                name="lookup_account",
+            ),
+        )
+        assert (
+            input._context.get_approval_status(
+                "lookup_account",
+                "inner-2",
+                existing_pending=followup,
+            )
+            is expected_followup
+        )
+        expected_message = "server-a denied" if expected_followup is False else None
+        assert (
+            input._context.get_rejection_message(
+                "lookup_account",
+                "inner-2",
+                existing_pending=followup,
+            )
+            == expected_message
+        )
+        return resumed_result
+
+    monkeypatch.setattr(Runner, "run", classmethod(run_resume))
+    tool = agent.as_tool(
+        tool_name="outer_tool",
+        tool_description="Outer agent tool",
+        is_enabled=True,
+    )
+
+    output = await tool.on_invoke_tool(tool_context, tool_call.arguments)
+
+    assert output == "resumed"
 
 
 @pytest.mark.asyncio

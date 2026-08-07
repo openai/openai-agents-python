@@ -8,11 +8,15 @@ from typing_extensions import TypeVar
 
 from ._tool_identity import (
     FunctionToolLookupKey,
+    HostedMCPApprovalKey,
+    HostedMCPApprovalRequestIdentity,
     get_function_tool_approval_keys,
     get_function_tool_lookup_key,
+    get_hosted_mcp_approval_request_identity,
     is_reserved_synthetic_tool_namespace,
     tool_qualified_name,
 )
+from .exceptions import UserError
 from .usage import Usage
 
 if TYPE_CHECKING:
@@ -58,7 +62,7 @@ class RunContextWrapper(Generic[TContext]):
     """
 
     turn_input: list[TResponseInputItem] = field(default_factory=list)
-    _approvals: dict[str, _ApprovalRecord] = field(default_factory=dict)
+    _approvals: dict[str | HostedMCPApprovalKey, _ApprovalRecord] = field(default_factory=dict)
     tool_input: Any | None = None
     """Structured input for the current agent tool run, when available."""
 
@@ -168,21 +172,39 @@ class RunContextWrapper(Generic[TContext]):
             candidate = getattr(raw, "call_id", None) or getattr(raw, "id", None)
         return RunContextWrapper._to_str_or_none(candidate)
 
-    def _get_or_create_approval_entry(self, tool_name: str) -> _ApprovalRecord:
-        approval_entry = self._approvals.get(tool_name)
+    def _get_or_create_approval_entry(
+        self,
+        approval_key: str | HostedMCPApprovalKey,
+    ) -> _ApprovalRecord:
+        approval_entry = self._approvals.get(approval_key)
         if approval_entry is None:
             approval_entry = _ApprovalRecord()
-            self._approvals[tool_name] = approval_entry
+            self._approvals[approval_key] = approval_entry
         return approval_entry
 
     def is_tool_approved(self, tool_name: str, call_id: str) -> bool | None:
         """Return True/False/None for the given tool call."""
+        hosted_query_record = self._approvals.get(("hosted_mcp_query", tool_name, call_id))
+        hosted_query_status = self._get_per_call_approval_status_for_record(
+            hosted_query_record,
+            call_id,
+        )
+        if hosted_query_status is not None:
+            return hosted_query_status
         return self._get_approval_status_for_key(tool_name, call_id)
 
     def _get_approval_status_for_key(self, approval_key: str, call_id: str) -> bool | None:
         """Return True/False/None for a concrete approval key and tool call."""
         approval_entry = self._approvals.get(approval_key)
-        if not approval_entry:
+        return self._get_approval_status_for_record(approval_entry, call_id)
+
+    @staticmethod
+    def _get_approval_status_for_record(
+        approval_entry: _ApprovalRecord | None,
+        call_id: str,
+    ) -> bool | None:
+        """Return True/False/None for an approval record and tool call."""
+        if approval_entry is None:
             return None
 
         # Check for permanent approval/rejection
@@ -210,6 +232,29 @@ class RunContextWrapper(Generic[TContext]):
         # Per-call approvals are scoped to the exact call ID, so other calls require a new decision.
         return None
 
+    def _get_per_call_approval_status_for_key(
+        self,
+        approval_key: str,
+        call_id: str,
+    ) -> bool | None:
+        """Return only exact-call decisions, ignoring sticky values on the same key."""
+        approval_entry = self._approvals.get(approval_key)
+        return self._get_per_call_approval_status_for_record(approval_entry, call_id)
+
+    @staticmethod
+    def _get_per_call_approval_status_for_record(
+        approval_entry: _ApprovalRecord | None,
+        call_id: str,
+    ) -> bool | None:
+        """Return only an exact-call decision from an approval record."""
+        if approval_entry is None:
+            return None
+        if isinstance(approval_entry.approved, list) and call_id in approval_entry.approved:
+            return True
+        if isinstance(approval_entry.rejected, list) and call_id in approval_entry.rejected:
+            return False
+        return None
+
     @staticmethod
     def _clear_rejection_message(record: _ApprovalRecord, call_id: str | None) -> None:
         if call_id is None:
@@ -234,6 +279,79 @@ class RunContextWrapper(Generic[TContext]):
             return [item for item in value if isinstance(item, str)]
         return []
 
+    @staticmethod
+    def _resolve_hosted_mcp_tool_name(
+        approval_item: ToolApprovalItem,
+        hosted_request: HostedMCPApprovalRequestIdentity,
+    ) -> str | None:
+        """Resolve a hosted MCP tool name, including persisted legacy item metadata."""
+        if hosted_request.tool_name is not None:
+            return hosted_request.tool_name
+        persisted_tool_name = getattr(approval_item, "tool_name", None)
+        if isinstance(persisted_tool_name, str) and persisted_tool_name:
+            return persisted_tool_name
+        return None
+
+    def _resolve_hosted_mcp_approval_record(
+        self,
+        approval_item: ToolApprovalItem,
+        *,
+        allow_legacy_exact: bool,
+    ) -> tuple[_ApprovalRecord | None, str | None, bool]:
+        """Resolve the authoritative hosted MCP record and whether it is exact-call-only."""
+        hosted_request = get_hosted_mcp_approval_request_identity(approval_item)
+        if hosted_request is None or hosted_request.request_id is None:
+            return None, None, True
+
+        request_id = hosted_request.request_id
+        hosted_identity = hosted_request.approval_identity
+        if hosted_identity is not None:
+            current_record = self._approvals.get(hosted_identity)
+            current_status = self._get_approval_status_for_record(current_record, request_id)
+            if current_status is not None:
+                return current_record, request_id, False
+        else:
+            current_record = self._approvals.get(("hosted_mcp_call", request_id))
+            current_status = self._get_per_call_approval_status_for_record(
+                current_record,
+                request_id,
+            )
+            if current_status is not None:
+                return current_record, request_id, True
+
+        if not allow_legacy_exact:
+            return None, request_id, True
+
+        legacy_key = self._resolve_hosted_mcp_tool_name(approval_item, hosted_request)
+        if legacy_key is None:
+            return None, request_id, True
+
+        legacy_record = self._approvals.get(legacy_key)
+        legacy_status = self._get_per_call_approval_status_for_record(legacy_record, request_id)
+        if legacy_status is None:
+            return None, request_id, True
+        return legacy_record, request_id, True
+
+    def _resolve_hosted_mcp_approval_decision(
+        self,
+        approval_item: ToolApprovalItem,
+        *,
+        allow_legacy_exact: bool = True,
+    ) -> tuple[bool | None, str | None]:
+        """Return a hosted MCP decision and its rejection message from one record."""
+        approval_record, request_id, exact_call_only = self._resolve_hosted_mcp_approval_record(
+            approval_item,
+            allow_legacy_exact=allow_legacy_exact,
+        )
+        if approval_record is None or request_id is None:
+            return None, None
+
+        if exact_call_only:
+            status = self._get_per_call_approval_status_for_record(approval_record, request_id)
+        else:
+            status = self._get_approval_status_for_record(approval_record, request_id)
+        return status, self._get_rejection_message_for_key(approval_record, request_id)
+
     def get_rejection_message(
         self,
         tool_name: str,
@@ -244,6 +362,21 @@ class RunContextWrapper(Generic[TContext]):
         tool_lookup_key: FunctionToolLookupKey | None = None,
     ) -> str | None:
         """Return a stored rejection message for a tool call if one exists."""
+        if existing_pending is not None:
+            hosted_request = get_hosted_mcp_approval_request_identity(existing_pending)
+            if hosted_request is not None:
+                _, rejection_message = self._resolve_hosted_mcp_approval_decision(existing_pending)
+                return rejection_message
+
+        hosted_query_record = self._approvals.get(("hosted_mcp_query", tool_name, call_id))
+        hosted_query_status = self._get_per_call_approval_status_for_record(
+            hosted_query_record,
+            call_id,
+        )
+        if hosted_query_status is not None:
+            assert hosted_query_record is not None
+            return self._get_rejection_message_for_key(hosted_query_record, call_id)
+
         candidates: list[str] = []
         explicit_namespace = (
             tool_namespace if isinstance(tool_namespace, str) and tool_namespace else None
@@ -315,14 +448,55 @@ class RunContextWrapper(Generic[TContext]):
         rejection_message: str | None = None,
     ) -> None:
         """Record an approval or rejection decision."""
-        approval_keys = self._resolve_approval_keys(approval_item) or ("unknown_tool",)
-        exact_approval_key = self._resolve_approval_key(approval_item)
-        call_id = self._resolve_call_id(approval_item)
-        decision_keys = (exact_approval_key,) if always or call_id is None else approval_keys
+        hosted_request = get_hosted_mcp_approval_request_identity(approval_item)
+        if hosted_request is not None:
+            call_id = hosted_request.request_id
+            if call_id is None:
+                raise UserError("Hosted MCP approval decisions require a non-empty request id.")
+            hosted_identity = hosted_request.approval_identity
+            if always and hosted_identity is None:
+                raise UserError(
+                    "Persistent hosted MCP approval decisions require a non-empty server_label "
+                    "and tool name."
+                )
+        else:
+            call_id = self._resolve_call_id(approval_item)
+            hosted_identity = None
 
-        for approval_key in decision_keys:
-            approval_entry = self._get_or_create_approval_entry(approval_key)
-            if always or call_id is None:
+        approval_entries: tuple[tuple[_ApprovalRecord, bool], ...]
+        if hosted_request is not None:
+            assert call_id is not None
+            hosted_key: HostedMCPApprovalKey
+            if hosted_identity is None:
+                hosted_key = ("hosted_mcp_call", call_id)
+            else:
+                hosted_key = hosted_identity
+            approval_entries = ((self._get_or_create_approval_entry(hosted_key), always),)
+            hosted_tool_name = self._resolve_hosted_mcp_tool_name(
+                approval_item,
+                hosted_request,
+            )
+            if hosted_tool_name is not None:
+                # Preserve exact name-based lookup without adding an authorization source.
+                approval_entries += (
+                    (
+                        self._get_or_create_approval_entry(
+                            ("hosted_mcp_query", hosted_tool_name, call_id)
+                        ),
+                        False,
+                    ),
+                )
+        else:
+            approval_keys = self._resolve_approval_keys(approval_item) or ("unknown_tool",)
+            exact_approval_key = self._resolve_approval_key(approval_item)
+            decision_keys = (exact_approval_key,) if always or call_id is None else approval_keys
+            approval_entries = tuple(
+                (self._get_or_create_approval_entry(approval_key), always)
+                for approval_key in decision_keys
+            )
+
+        for approval_entry, entry_is_sticky in approval_entries:
+            if entry_is_sticky or call_id is None:
                 approval_entry.approved = approve
                 approval_entry.rejected = [] if approve else True
                 if not approve:
@@ -384,6 +558,12 @@ class RunContextWrapper(Generic[TContext]):
         tool_lookup_key: FunctionToolLookupKey | None = None,
     ) -> bool | None:
         """Return approval status, retrying with pending item's tool name if necessary."""
+        if existing_pending is not None:
+            hosted_request = get_hosted_mcp_approval_request_identity(existing_pending)
+            if hosted_request is not None:
+                hosted_status, _ = self._resolve_hosted_mcp_approval_decision(existing_pending)
+                return hosted_status
+
         candidates: list[str] = []
         explicit_namespace = (
             tool_namespace if isinstance(tool_namespace, str) and tool_namespace else None
@@ -452,20 +632,61 @@ class RunContextWrapper(Generic[TContext]):
         for tool_name, record_dict in approvals.items():
             if not isinstance(tool_name, str) or not isinstance(record_dict, dict):
                 continue
-            record = _ApprovalRecord()
-            record.approved = self._restore_approval_value(record_dict.get("approved", []))
-            record.rejected = self._restore_approval_value(record_dict.get("rejected", []))
-            rejection_messages = record_dict.get("rejection_messages", {})
-            if isinstance(rejection_messages, dict):
-                record.rejection_messages = {
-                    str(call_id): message
-                    for call_id, message in rejection_messages.items()
-                    if isinstance(message, str)
-                }
-            sticky_rejection_message = record_dict.get("sticky_rejection_message")
-            if isinstance(sticky_rejection_message, str):
-                record.sticky_rejection_message = sticky_rejection_message
-            self._approvals[tool_name] = record
+            self._approvals[tool_name] = self._restore_approval_record(record_dict)
+
+    @classmethod
+    def _restore_approval_record(cls, record_dict: Mapping[str, Any]) -> _ApprovalRecord:
+        record = _ApprovalRecord()
+        record.approved = cls._restore_approval_value(record_dict.get("approved", []))
+        record.rejected = cls._restore_approval_value(record_dict.get("rejected", []))
+        rejection_messages = record_dict.get("rejection_messages", {})
+        if isinstance(rejection_messages, dict):
+            record.rejection_messages = {
+                str(call_id): message
+                for call_id, message in rejection_messages.items()
+                if isinstance(message, str)
+            }
+        sticky_rejection_message = record_dict.get("sticky_rejection_message")
+        if isinstance(sticky_rejection_message, str):
+            record.sticky_rejection_message = sticky_rejection_message
+        return record
+
+    def _rebuild_hosted_mcp_approvals(self, approvals: Any) -> None:
+        """Restore typed hosted MCP approval records from serialized state."""
+        if not isinstance(approvals, list):
+            return
+        for entry in approvals:
+            if not isinstance(entry, Mapping):
+                continue
+            identity = entry.get("identity")
+            decision = entry.get("decision")
+            if not isinstance(identity, Mapping) or not isinstance(decision, Mapping):
+                continue
+            identity_type = identity.get("type")
+            if identity_type == "server_tool":
+                server_label = identity.get("server_label")
+                tool_name = identity.get("tool_name")
+                if not isinstance(server_label, str) or not server_label:
+                    continue
+                if not isinstance(tool_name, str) or not tool_name:
+                    continue
+                key: HostedMCPApprovalKey = ("hosted_mcp", server_label, tool_name)
+            elif identity_type == "request":
+                request_id = identity.get("request_id")
+                if not isinstance(request_id, str) or not request_id:
+                    continue
+                key = ("hosted_mcp_call", request_id)
+            elif identity_type == "query":
+                tool_name = identity.get("tool_name")
+                request_id = identity.get("request_id")
+                if not isinstance(tool_name, str) or not tool_name:
+                    continue
+                if not isinstance(request_id, str) or not request_id:
+                    continue
+                key = ("hosted_mcp_query", tool_name, request_id)
+            else:
+                continue
+            self._approvals[key] = self._restore_approval_record(decision)
 
     def _fork_with_tool_input(self, tool_input: Any) -> RunContextWrapper[TContext]:
         """Create a child context that shares approvals and usage with tool input set."""
