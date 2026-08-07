@@ -572,3 +572,84 @@ def test_bounded_object_with_empty_properties_is_not_closed(bound):
 
     with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
         ensure_strict_json_schema({"type": "object", "properties": {"f": field}})
+
+
+def test_allof_branch_with_a_bare_ref_to_a_free_form_definition_is_rejected():
+    # The branch is converted on its own, so the tracked definitions must be visible there
+    # too; otherwise the closed definition silently rejects keys the intersection accepted.
+    with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
+        ensure_strict_json_schema(
+            {
+                "$defs": {"Base": {"type": "object"}},
+                "type": "object",
+                "properties": {
+                    "f": {
+                        "type": "object",
+                        "properties": {"a": {"type": "string"}},
+                        "allOf": [
+                            {"$ref": "#/$defs/Base"},
+                            {"properties": {"b": {"type": "string"}}},
+                        ],
+                    }
+                },
+            }
+        )
+
+
+def test_bare_ref_to_a_nested_free_form_definition_is_rejected():
+    # Identity-based tracking needs no path bookkeeping, so nesting must make no difference.
+    with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
+        ensure_strict_json_schema(
+            {
+                "$defs": {
+                    "Outer": {
+                        "$defs": {"Inner": {"type": "object"}},
+                        "type": "object",
+                        "properties": {"x": {"type": "string"}},
+                    }
+                },
+                "type": "object",
+                "properties": {"f": {"$ref": "#/$defs/Outer/$defs/Inner"}},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "siblings, expected",
+    [
+        ({"properties": {}}, "rejected"),
+        ({"description": "d"}, "rejected"),
+        ({"properties": {"a": {"type": "string"}}}, "converted"),
+    ],
+    ids=["empty-properties", "annotation-only", "real-properties"],
+)
+def test_ref_to_a_free_form_definition_requires_siblings_that_supply_the_shape(siblings, expected):
+    # The merged result inherits the close the definition walk added, so the final decision
+    # cannot catch this; the merge site has to judge whether the siblings shape the object.
+    schema = {
+        "$defs": {"Base": {"type": "object"}},
+        "type": "object",
+        "properties": {"f": {"$ref": "#/$defs/Base", **siblings}},
+    }
+
+    if expected == "rejected":
+        with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
+            ensure_strict_json_schema(schema)
+    else:
+        result = ensure_strict_json_schema(schema)
+        assert result["properties"]["f"]["required"] == ["a"]
+
+
+@pytest.mark.parametrize(
+    "literal",
+    [{"properties": {}, "const": {}}, {"enum": [{}]}],
+    ids=["const-empty", "enum-empty"],
+)
+def test_empty_object_literals_are_closed_rather_than_rejected(literal):
+    # These already constrain the value to the empty object, so closing preserves meaning
+    # exactly, like maxProperties: 0.
+    result = ensure_strict_json_schema(
+        {"type": "object", "properties": {"f": {"type": "object", **literal}}}
+    )
+
+    assert result["properties"]["f"]["additionalProperties"] is False

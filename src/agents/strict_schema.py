@@ -37,10 +37,17 @@ _FREE_FORM_OBJECT_ERROR = (
 
 
 class _NodeBudget:
-    """Tracks the remaining schema-node expansion budget across the recursion."""
+    """Carries per-conversion state: the node budget and the free-form definition registry.
+
+    Riding on this object rather than a separate parameter guarantees every recursive call
+    sees the same registry, since the budget must already reach every call for the DoS bound.
+    """
 
     def __init__(self, limit: int) -> None:
         self.remaining = limit
+        # Definitions that were free-form before the definition walk closed them, recorded by
+        # object identity so nested `$defs` need no path bookkeeping.
+        self.free_form_definition_ids: set[int] = set()
 
     def spend(self) -> None:
         self.remaining -= 1
@@ -127,7 +134,33 @@ def _shapes_contents_without_properties(json_schema: dict[str, object]) -> bool:
 
 def _allows_only_the_empty_object(json_schema: dict[str, object]) -> bool:
     """Whether the schema already forbids every key, so closing it changes nothing."""
-    return json_schema.get("maxProperties") == 0
+    if json_schema.get("maxProperties") == 0:
+        return True
+    if json_schema.get("const") == {}:
+        return True
+    enum = json_schema.get("enum")
+    return is_list(enum) and bool(enum) and all(entry == {} for entry in enum)
+
+
+def _siblings_supply_the_shape(siblings: dict[str, object]) -> bool:
+    """Whether the keys alongside a `$ref` to a free-form definition close or shape it."""
+    declared = siblings.get("properties")
+    if is_dict(declared) and declared:
+        return True
+    if "additionalProperties" in siblings:
+        return True
+    return _allows_only_the_empty_object(siblings)
+
+
+def _resolves_to_free_form_definition(
+    ref: str, *, root: dict[str, object], budget: _NodeBudget
+) -> bool:
+    try:
+        resolved = resolve_ref(root=root, ref=ref)
+    except Exception:
+        # Unresolvable refs keep their historical handling; they are not this check's concern.
+        return False
+    return id(resolved) in budget.free_form_definition_ids
 
 
 def _ensure_strict_json_schema(
@@ -137,7 +170,6 @@ def _ensure_strict_json_schema(
     root: dict[str, object],
     budget: _NodeBudget | None = None,
     in_definitions: bool = False,
-    free_form_refs: set[str] | None = None,
 ) -> dict[str, Any]:
     if not is_dict(json_schema):
         raise TypeError(f"Expected {json_schema} to be a dictionary; path={path}")
@@ -146,17 +178,15 @@ def _ensure_strict_json_schema(
     # exponentially and exhaust CPU and memory.
     if budget is None:
         budget = _NodeBudget(_MAX_SCHEMA_NODES)
-    if free_form_refs is None:
-        free_form_refs = set()
     budget.spend()
 
     defs = json_schema.get("$defs")
     if is_dict(defs):
         for def_name, def_schema in defs.items():
             if is_dict(def_schema) and _is_unclosable_object(def_schema):
-                # Remember it before the walk below closes it, so a bare `$ref` that points
-                # here can be rejected rather than silently narrowed to the empty object.
-                free_form_refs.add(f"#/$defs/{def_name}")
+                # Remember it before the walk below closes it, so a `$ref` that points here
+                # can be handled rather than silently narrowed to the empty object.
+                budget.free_form_definition_ids.add(id(def_schema))
             _ensure_strict_json_schema(
                 def_schema,
                 path=(*path, "$defs", def_name),
@@ -169,9 +199,9 @@ def _ensure_strict_json_schema(
     if is_dict(definitions):
         for definition_name, definition_schema in definitions.items():
             if is_dict(definition_schema) and _is_unclosable_object(definition_schema):
-                # Remember it before the walk below closes it, so a bare `$ref` that points
-                # here can be rejected rather than silently narrowed to the empty object.
-                free_form_refs.add(f"#/definitions/{definition_name}")
+                # Remember it before the walk below closes it, so a `$ref` that points here
+                # can be handled rather than silently narrowed to the empty object.
+                budget.free_form_definition_ids.add(id(definition_schema))
             _ensure_strict_json_schema(
                 definition_schema,
                 path=(*path, "definitions", definition_name),
@@ -208,7 +238,6 @@ def _ensure_strict_json_schema(
                 root=root,
                 budget=budget,
                 in_definitions=in_definitions,
-                free_form_refs=free_form_refs,
             )
             for key, prop_schema in properties.items()
         }
@@ -223,7 +252,6 @@ def _ensure_strict_json_schema(
             root=root,
             budget=budget,
             in_definitions=in_definitions,
-            free_form_refs=free_form_refs,
         )
 
     # unions
@@ -236,7 +264,6 @@ def _ensure_strict_json_schema(
                 root=root,
                 budget=budget,
                 in_definitions=in_definitions,
-                free_form_refs=free_form_refs,
             )
             for i, variant in enumerate(any_of)
         ]
@@ -256,7 +283,6 @@ def _ensure_strict_json_schema(
                 root=root,
                 budget=budget,
                 in_definitions=in_definitions,
-                free_form_refs=free_form_refs,
             )
             for i, variant in enumerate(one_of)
         ]
@@ -283,7 +309,6 @@ def _ensure_strict_json_schema(
                 root=root,
                 budget=budget,
                 in_definitions=in_definitions,
-                free_form_refs=free_form_refs,
             )
         else:
             json_schema["allOf"] = [
@@ -309,10 +334,11 @@ def _ensure_strict_json_schema(
     # so we unravel the ref
     # `{"type": "string", "description": "my description"}`
     ref = json_schema.get("$ref")
-    if isinstance(ref, str) and ref in free_form_refs and not has_more_than_n_keys(json_schema, 1):
-        # A bare `$ref` is never inlined, so the strict schema would keep pointing at a
-        # definition that has since been closed into the empty object.
-        raise UserError(_FREE_FORM_OBJECT_ERROR)
+    if isinstance(ref, str) and not has_more_than_n_keys(json_schema, 1):
+        if _resolves_to_free_form_definition(ref, root=root, budget=budget):
+            # A bare `$ref` is never inlined, so the strict schema would keep pointing at a
+            # definition that the walk above has since closed into the empty object.
+            raise UserError(_FREE_FORM_OBJECT_ERROR)
     if ref and has_more_than_n_keys(json_schema, 1):
         assert isinstance(ref, str), f"Received non-string $ref - {ref}"
 
@@ -326,6 +352,14 @@ def _ensure_strict_json_schema(
         # (chained refs), we preserve it for the recursive expansion below instead of
         # silently dropping it.
         json_schema.pop("$ref")
+        if id(resolved) in budget.free_form_definition_ids and not _siblings_supply_the_shape(
+            json_schema
+        ):
+            # The definition was free-form, so the keys alongside the `$ref` must supply the
+            # shape. An empty `properties` map or a bare annotation does not, and the merged
+            # result would inherit the `additionalProperties: false` the walk added and be
+            # silently narrowed to the empty object.
+            raise UserError(_FREE_FORM_OBJECT_ERROR)
         # properties from the json schema take priority over the ones on the `$ref`
         json_schema.update({**resolved, **json_schema})
         # Since the schema expanded from `$ref` might not have `additionalProperties: false` applied
@@ -336,7 +370,6 @@ def _ensure_strict_json_schema(
             root=root,
             budget=budget,
             in_definitions=in_definitions,
-            free_form_refs=free_form_refs,
         )
 
     # Decide whether this object can be closed only once the normalizations above have run, so
