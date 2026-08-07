@@ -202,7 +202,6 @@ if _missing_schema_version_summaries:
 
 _FUNCTION_OUTPUT_ADAPTER: TypeAdapter[FunctionCallOutput] = TypeAdapter(FunctionCallOutput)
 _COMPUTER_OUTPUT_ADAPTER: TypeAdapter[ComputerCallOutput] = TypeAdapter(ComputerCallOutput)
-_LOCAL_SHELL_OUTPUT_ADAPTER: TypeAdapter[LocalShellCallOutput] = TypeAdapter(LocalShellCallOutput)
 _TOOL_CALL_OUTPUT_UNION_ADAPTER: TypeAdapter[
     FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput
 ] = TypeAdapter(FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput)
@@ -2634,14 +2633,20 @@ def _deserialize_tool_call_output_raw_item(
         return _FUNCTION_OUTPUT_ADAPTER.validate_python(normalized_raw_item)
     if output_type == "computer_call_output":
         return _COMPUTER_OUTPUT_ADAPTER.validate_python(normalized_raw_item)
-    if output_type == "local_shell_call_output":
-        return _LOCAL_SHELL_OUTPUT_ADAPTER.validate_python(normalized_raw_item)
     if output_type == "program_output":
         try:
             return ProgramOutput(**normalized_raw_item)
         except Exception:
             return normalized_raw_item
-    if output_type in {"shell_call_output", "apply_patch_call_output", "custom_tool_call_output"}:
+    if output_type in {
+        "shell_call_output",
+        "apply_patch_call_output",
+        "custom_tool_call_output",
+        # LocalShellAction writes ``call_id`` (the key the runner pairs calls and outputs on) and
+        # no ``id``, so validating against the Responses ``LocalShellCallOutput`` shape both
+        # rejects SDK-produced items and strips ``call_id`` from API-shaped ones.
+        "local_shell_call_output",
+    }:
         return normalized_raw_item
 
     try:
