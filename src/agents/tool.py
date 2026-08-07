@@ -3,7 +3,6 @@ from __future__ import annotations
 import ast
 import asyncio
 import copy
-import dataclasses
 import functools
 import inspect
 import json
@@ -600,15 +599,18 @@ class FunctionTool:
         _validate_function_tool_timeout_config(self)
 
     def __copy__(self) -> FunctionTool:
-        copied_tool = dataclasses.replace(self)
-        dataclass_field_names = {tool_field.name for tool_field in dataclasses.fields(FunctionTool)}
-        for tool_field in dataclasses.fields(FunctionTool):
-            if tool_field.init:
-                continue
-            setattr(copied_tool, tool_field.name, getattr(self, tool_field.name))
-        for attr_name, attr_value in self.__dict__.items():
-            if attr_name not in dataclass_field_names:
-                setattr(copied_tool, attr_name, attr_value)
+        # Rebuild the instance state directly instead of re-running the constructor, so
+        # FunctionTool subclasses that define their own __init__ signature stay copyable.
+        copied_tool = object.__new__(type(self))
+        copied_tool.__dict__.update(self.__dict__)
+        # A subclass may pass one of its own bound methods as the invoker, e.g.
+        # on_invoke_tool=self._invoke. Copying the __dict__ carries that binding over
+        # unchanged, so the copy would run against the original instance's state.
+        invoker = copied_tool.__dict__.get("on_invoke_tool")
+        invoker_func = getattr(invoker, "__func__", None)
+        if invoker_func is not None and getattr(invoker, "__self__", None) is self:
+            copied_tool.on_invoke_tool = invoker_func.__get__(copied_tool, type(copied_tool))
+        copied_tool.__post_init__()
         return copied_tool
 
 
