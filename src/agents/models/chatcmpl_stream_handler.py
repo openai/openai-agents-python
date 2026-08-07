@@ -814,23 +814,26 @@ class ChatCmplStreamHandler:
                             logprobs=[],
                         ),
                     )
-                    # Start a new assistant message stream
-                    assistant_item = ResponseOutputMessage(
-                        id=FAKE_RESPONSES_ID,
-                        content=[],
-                        role="assistant",
-                        type="message",
-                        status="in_progress",
-                    )
-                    if state.provider_data:
-                        assistant_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
-                    # Notify consumers of the start of a new output message + first content part
-                    yield ResponseOutputItemAddedEvent(
-                        item=assistant_item,
-                        output_index=output_layout.assistant_message_output_index(state),
-                        type="response.output_item.added",
-                        sequence_number=sequence_number.get_and_increment(),
-                    )
+                    # Start a new assistant message stream. A refusal part may have already
+                    # announced it; text and refusal share one ResponseOutputMessage, which
+                    # gets a single output_item.done, so it must only be added once.
+                    if not state.refusal_content_index_and_output:
+                        assistant_item = ResponseOutputMessage(
+                            id=FAKE_RESPONSES_ID,
+                            content=[],
+                            role="assistant",
+                            type="message",
+                            status="in_progress",
+                        )
+                        if state.provider_data:
+                            assistant_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+                        # Notify consumers of the start of a new output message
+                        yield ResponseOutputItemAddedEvent(
+                            item=assistant_item,
+                            output_index=output_layout.assistant_message_output_index(state),
+                            type="response.output_item.added",
+                            sequence_number=sequence_number.get_and_increment(),
+                        )
                     yield ResponseContentPartAddedEvent(
                         content_index=state.text_content_index_and_output[0],
                         item_id=FAKE_RESPONSES_ID,
@@ -893,23 +896,26 @@ class ChatCmplStreamHandler:
                         refusal_index,
                         ResponseOutputRefusal(refusal="", type="refusal"),
                     )
-                    # Start a new assistant message if one doesn't exist yet (in-progress)
-                    assistant_item = ResponseOutputMessage(
-                        id=FAKE_RESPONSES_ID,
-                        content=[],
-                        role="assistant",
-                        type="message",
-                        status="in_progress",
-                    )
-                    if state.provider_data:
-                        assistant_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
-                    # Notify downstream that assistant message + first content part are starting
-                    yield ResponseOutputItemAddedEvent(
-                        item=assistant_item,
-                        output_index=output_layout.assistant_message_output_index(state),
-                        type="response.output_item.added",
-                        sequence_number=sequence_number.get_and_increment(),
-                    )
+                    # Start a new assistant message if one doesn't exist yet (in-progress).
+                    # A text part may have already announced it; both parts belong to the same
+                    # ResponseOutputMessage, so it must only be added once.
+                    if not state.text_content_index_and_output:
+                        assistant_item = ResponseOutputMessage(
+                            id=FAKE_RESPONSES_ID,
+                            content=[],
+                            role="assistant",
+                            type="message",
+                            status="in_progress",
+                        )
+                        if state.provider_data:
+                            assistant_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+                        # Notify downstream that the assistant message is starting
+                        yield ResponseOutputItemAddedEvent(
+                            item=assistant_item,
+                            output_index=output_layout.assistant_message_output_index(state),
+                            type="response.output_item.added",
+                            sequence_number=sequence_number.get_and_increment(),
+                        )
                     yield ResponseContentPartAddedEvent(
                         content_index=state.refusal_content_index_and_output[0],
                         item_id=FAKE_RESPONSES_ID,

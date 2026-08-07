@@ -589,6 +589,37 @@ async def test_stream_handler_keeps_empty_choice_usage_chunks() -> None:
     assert completed_event.response.usage.total_tokens == 3
 
 
+@pytest.mark.parametrize("refusal_first", [False, True])
+@pytest.mark.asyncio
+async def test_stream_handler_adds_the_assistant_message_once_for_text_and_refusal(
+    refusal_first: bool,
+) -> None:
+    """Text and a refusal share one ResponseOutputMessage, so it gets one added event."""
+    text_chunk = _chunk_with([Choice(index=0, delta=ChoiceDelta(content="hi"))])
+    refusal_chunk = _chunk_with([Choice(index=0, delta=ChoiceDelta(refusal="nope"))])
+    chunks = (refusal_chunk, text_chunk) if refusal_first else (text_chunk, refusal_chunk)
+
+    events = await _collect_handler_events(*chunks)
+
+    message_added = [
+        event
+        for event in events
+        if event.type == "response.output_item.added"
+        and isinstance(event.item, ResponseOutputMessage)
+    ]
+    message_done = [
+        event
+        for event in events
+        if event.type == "response.output_item.done"
+        and isinstance(event.item, ResponseOutputMessage)
+    ]
+    assert len(message_added) == len(message_done) == 1
+
+    completed = events[-1]
+    assert isinstance(completed, ResponseCompletedEvent)
+    assert len(completed.response.output) == 1
+
+
 @pytest.mark.asyncio
 async def test_stream_handler_rejects_multiple_choices_in_strict_mode() -> None:
     chunk = ChatCompletionChunk(
