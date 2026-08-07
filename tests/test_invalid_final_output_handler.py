@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 from openai.types.responses import ResponseOutputMessage
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from pydantic import BaseModel
 
 import agents._debug as _debug
@@ -16,6 +17,7 @@ from agents import (
     MessageOutputItem,
     ModelBehaviorError,
     OutputGuardrail,
+    RunConfig,
     RunContextWrapper,
     RunErrorHandlerInput,
     RunErrorHandlerResult,
@@ -374,3 +376,57 @@ async def test_invalid_final_output_fallback_does_not_retry_or_replay_tools(
     assert final_output == FinalOutput(summary="safe fallback")
     assert side_effects == ["once"]
     assert len(model.turn_outputs) == 2
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_error_handler_run_data_honors_reasoning_item_id_policy(streamed: bool) -> None:
+    """`omit` must strip reasoning ids from the run data every handler kind receives."""
+    captured: dict[str, list[TResponseInputItem]] = {}
+
+    def handler(data: RunErrorHandlerInput[None]) -> FinalOutput:
+        captured["history"] = list(data.run_data.history)
+        return FinalOutput(summary="safe fallback")
+
+    model = FakeModel(
+        initial_output=[
+            ResponseReasoningItem(
+                id="rs_invalid_final_output",
+                type="reasoning",
+                summary=[Summary(text="Thinking...", type="summary_text")],
+            ),
+            get_text_message("not valid json"),
+        ]
+    )
+    agent = Agent(name="test", model=model, output_type=FinalOutput)
+    error_handlers: RunErrorHandlers[None] = {"invalid_final_output": handler}
+    run_config = RunConfig(reasoning_item_id_policy="omit")
+
+    if streamed:
+        streamed_result = Runner.run_streamed(
+            agent,
+            input="user_message",
+            error_handlers=error_handlers,
+            run_config=run_config,
+        )
+        async for _ in streamed_result.stream_events():
+            pass
+        final_output = streamed_result.final_output
+    else:
+        final_output = (
+            await Runner.run(
+                agent,
+                input="user_message",
+                error_handlers=error_handlers,
+                run_config=run_config,
+            )
+        ).final_output
+
+    assert final_output == FinalOutput(summary="safe fallback")
+    reasoning_items = [
+        item
+        for item in captured["history"]
+        if isinstance(item, dict) and item.get("type") == "reasoning"
+    ]
+    assert reasoning_items
+    assert all("id" not in item for item in reasoning_items)

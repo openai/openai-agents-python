@@ -1914,6 +1914,7 @@ async def run_single_turn_streamed(
         server_manages_conversation=server_conversation_tracker is not None,
         event_queue=streamed_result._event_queue,
         before_side_effects=raise_if_input_guardrail_tripwire_known,
+        reasoning_item_id_policy=reasoning_item_id_policy,
     )
 
     items_to_filter = session_items_for_turn(single_step_result)
@@ -2060,6 +2061,7 @@ async def run_single_turn(
         error_handlers=error_handlers,
         tool_use_tracker=tool_use_tracker,
         server_manages_conversation=server_conversation_tracker is not None,
+        reasoning_item_id_policy=reasoning_item_id_policy,
     )
 
 

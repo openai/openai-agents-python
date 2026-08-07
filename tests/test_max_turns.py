@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
@@ -12,6 +13,7 @@ from agents import (
     MaxTurnsExceeded,
     MessageOutputItem,
     ModelRefusalError,
+    RunConfig,
     RunErrorHandlerResult,
     Runner,
     SQLiteSession,
@@ -210,6 +212,43 @@ async def test_non_streamed_refusal_handler_can_skip_history():
 
     assert result.final_output == "safe fallback"
     assert ItemHelpers.text_message_outputs(result.new_items) == ""
+
+
+@pytest.mark.asyncio
+async def test_non_streamed_refusal_handler_run_data_honors_reasoning_item_id_policy():
+    """`omit` must strip reasoning ids from the run data the refusal handler receives."""
+    model = FakeModel(
+        initial_output=[
+            ResponseReasoningItem(
+                id="rs_refusal",
+                type="reasoning",
+                summary=[Summary(text="Thinking...", type="summary_text")],
+            ),
+            get_refusal_message("I cannot help with that request."),
+        ]
+    )
+    agent = Agent(name="test_1", model=model)
+    captured: dict[str, list] = {}
+
+    def handler(data):
+        captured["history"] = list(data.run_data.history)
+        return "safe fallback"
+
+    result = await Runner.run(
+        agent,
+        input="user_message",
+        error_handlers={"model_refusal": handler},
+        run_config=RunConfig(reasoning_item_id_policy="omit"),
+    )
+
+    assert result.final_output == "safe fallback"
+    reasoning_items = [
+        item
+        for item in captured["history"]
+        if isinstance(item, dict) and item.get("type") == "reasoning"
+    ]
+    assert reasoning_items
+    assert all("id" not in item for item in reasoning_items)
 
 
 @pytest.mark.asyncio

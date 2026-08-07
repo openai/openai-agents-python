@@ -128,6 +128,7 @@ from .error_handlers import (
 from .items import (
     REJECTION_MESSAGE,
     NestedHistoryOwnedItem,
+    ReasoningItemIdPolicy,
     apply_patch_rejection_item,
     extract_mcp_request_id_from_run,
     function_rejection_item,
@@ -422,6 +423,7 @@ async def _resolve_invalid_final_output(
     new_response: ModelResponse,
     new_items: list[RunItem],
     context_wrapper: RunContextWrapper[TContext],
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
 ) -> tuple[Any, MessageOutputItem | None] | None:
     redacted = _is_error_data_redacted(error) or _debug.DONT_LOG_MODEL_DATA
     run_error_data = build_run_error_data(
@@ -429,6 +431,7 @@ async def _resolve_invalid_final_output(
         new_items=new_items,
         raw_responses=[new_response],
         last_agent=public_agent,
+        reasoning_item_id_policy=reasoning_item_id_policy,
     )
     _detach_data_redacted_error_traceback(error)
     safe_error: UserError | None = None
@@ -771,6 +774,7 @@ async def execute_tools_and_side_effects(
     run_config: RunConfig,
     error_handlers: RunErrorHandlers[TContext] | None = None,
     server_manages_conversation: bool = False,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
 ) -> SingleStepResult:
     """Run one turn of the loop, coordinating tools, approvals, guardrails, and handoffs."""
     public_agent = bindings.public_agent
@@ -910,6 +914,7 @@ async def execute_tools_and_side_effects(
                     new_items=pre_step_items + new_step_items,
                     raw_responses=[new_response],
                     last_agent=public_agent,
+                    reasoning_item_id_policy=reasoning_item_id_policy,
                 )
                 handler_result = await resolve_run_error_handler_result(
                     error_handlers=error_handlers,
@@ -956,6 +961,7 @@ async def execute_tools_and_side_effects(
                                 new_response=new_response,
                                 new_items=pre_step_items + new_step_items,
                                 context_wrapper=context_wrapper,
+                                reasoning_item_id_policy=reasoning_item_id_policy,
                             )
                             if resolved_handler_output is None:
                                 raise
@@ -972,6 +978,7 @@ async def execute_tools_and_side_effects(
                             new_response=new_response,
                             new_items=pre_step_items + new_step_items,
                             context_wrapper=context_wrapper,
+                            reasoning_item_id_policy=reasoning_item_id_policy,
                         )
                         if resolved_handler_output is None:
                             raise validation_error
@@ -989,6 +996,7 @@ async def execute_tools_and_side_effects(
                         new_response=new_response,
                         new_items=pre_step_items + new_step_items,
                         context_wrapper=context_wrapper,
+                        reasoning_item_id_policy=reasoning_item_id_policy,
                     )
                     if resolved_handler_output is None:
                         return SingleStepResult(
@@ -2991,6 +2999,7 @@ async def get_single_step_result_from_response(
     server_manages_conversation: bool = False,
     event_queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] | None = None,
     before_side_effects: Callable[[], Awaitable[None]] | None = None,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
 ) -> SingleStepResult:
     item_agent = bindings.public_agent
     processed_response = process_model_response(
@@ -3033,4 +3042,5 @@ async def get_single_step_result_from_response(
         run_config=run_config,
         error_handlers=error_handlers,
         server_manages_conversation=server_manages_conversation,
+        reasoning_item_id_policy=reasoning_item_id_policy,
     )
