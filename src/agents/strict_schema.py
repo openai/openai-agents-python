@@ -46,8 +46,15 @@ class _NodeBudget:
     def __init__(self, limit: int) -> None:
         self.remaining = limit
         # Definitions that were free-form before the definition walk closed them, recorded by
-        # object identity so nested `$defs` need no path bookkeeping.
+        # object identity so nested `$defs` need no path bookkeeping. A `$ref` to one of these
+        # is salvageable when its siblings supply the shape.
         self.free_form_definition_ids: set[int] = set()
+        # Definitions whose interior holds a free-form node at a value position. No sibling
+        # merge can reach inside the referenced subtree, so a `$ref` to one of these is never
+        # salvageable.
+        self.tainted_definition_ids: set[int] = set()
+        # Identity of the definition currently being walked, innermost last.
+        self.definition_stack: list[int] = []
 
     def spend(self) -> None:
         self.remaining -= 1
@@ -98,6 +105,8 @@ _CONTENT_SHAPING_KEYWORDS = frozenset(
         "allOf",
         "anyOf",
         "const",
+        "dependencies",
+        "dependentRequired",
         "dependentSchemas",
         "else",
         "enum",
@@ -152,15 +161,37 @@ def _siblings_supply_the_shape(siblings: dict[str, object]) -> bool:
     return _allows_only_the_empty_object(siblings)
 
 
+def _resolve_ref_chain(ref: str, *, root: dict[str, object]) -> object | None:
+    """Resolve a ref, following alias definitions that are themselves a lone `$ref`."""
+    seen: set[str] = set()
+    current = ref
+    while current not in seen:
+        seen.add(current)
+        try:
+            resolved = resolve_ref(root=root, ref=current)
+        except Exception:
+            # Unresolvable refs keep their historical handling; they are not this check's concern.
+            return None
+        if not is_dict(resolved):
+            return None
+        next_ref = resolved.get("$ref")
+        if isinstance(next_ref, str) and not has_more_than_n_keys(resolved, 1):
+            current = next_ref
+            continue
+        return resolved
+    return None
+
+
 def _resolves_to_free_form_definition(
     ref: str, *, root: dict[str, object], budget: _NodeBudget
 ) -> bool:
-    try:
-        resolved = resolve_ref(root=root, ref=ref)
-    except Exception:
-        # Unresolvable refs keep their historical handling; they are not this check's concern.
+    resolved = _resolve_ref_chain(ref, root=root)
+    if resolved is None:
         return False
-    return id(resolved) in budget.free_form_definition_ids
+    return (
+        id(resolved) in budget.free_form_definition_ids
+        or id(resolved) in budget.tainted_definition_ids
+    )
 
 
 def _ensure_strict_json_schema(
@@ -187,13 +218,17 @@ def _ensure_strict_json_schema(
                 # Remember it before the walk below closes it, so a `$ref` that points here
                 # can be handled rather than silently narrowed to the empty object.
                 budget.free_form_definition_ids.add(id(def_schema))
-            _ensure_strict_json_schema(
-                def_schema,
-                path=(*path, "$defs", def_name),
-                root=root,
-                budget=budget,
-                in_definitions=True,
-            )
+            budget.definition_stack.append(id(def_schema))
+            try:
+                _ensure_strict_json_schema(
+                    def_schema,
+                    path=(*path, "$defs", def_name),
+                    root=root,
+                    budget=budget,
+                    in_definitions=True,
+                )
+            finally:
+                budget.definition_stack.pop()
 
     definitions = json_schema.get("definitions")
     if is_dict(definitions):
@@ -202,13 +237,17 @@ def _ensure_strict_json_schema(
                 # Remember it before the walk below closes it, so a `$ref` that points here
                 # can be handled rather than silently narrowed to the empty object.
                 budget.free_form_definition_ids.add(id(definition_schema))
-            _ensure_strict_json_schema(
-                definition_schema,
-                path=(*path, "definitions", definition_name),
-                root=root,
-                budget=budget,
-                in_definitions=True,
-            )
+            budget.definition_stack.append(id(definition_schema))
+            try:
+                _ensure_strict_json_schema(
+                    definition_schema,
+                    path=(*path, "definitions", definition_name),
+                    root=root,
+                    budget=budget,
+                    in_definitions=True,
+                )
+            finally:
+                budget.definition_stack.pop()
 
     typ = json_schema.get("type")
     properties = json_schema.get("properties")
@@ -230,6 +269,20 @@ def _ensure_strict_json_schema(
     # object types
     # { 'type': 'object', 'properties': { 'a':  {...} } }
     if is_dict(properties):
+        declared_required = json_schema.get("required")
+        if (
+            "$ref" not in json_schema
+            and is_list(declared_required)
+            and any(name not in properties for name in declared_required)
+        ):
+            # The object requires keys it never declares, so their values are unconstrained.
+            # Strict mode needs required to be a subset of properties with everything else
+            # forbidden, so conversion would silently drop the requirement and forbid the key.
+            if in_definitions:
+                if budget.definition_stack:
+                    budget.tainted_definition_ids.add(budget.definition_stack[-1])
+            else:
+                raise UserError(_FREE_FORM_OBJECT_ERROR)
         json_schema["required"] = list(properties.keys())
         json_schema["properties"] = {
             key: _ensure_strict_json_schema(
@@ -352,6 +405,10 @@ def _ensure_strict_json_schema(
         # (chained refs), we preserve it for the recursive expansion below instead of
         # silently dropping it.
         json_schema.pop("$ref")
+        if id(resolved) in budget.tainted_definition_ids:
+            # The free-form node is inside the referenced subtree, out of reach of any
+            # sibling merge, so this reference can never be made strict.
+            raise UserError(_FREE_FORM_OBJECT_ERROR)
         if id(resolved) in budget.free_form_definition_ids and not _siblings_supply_the_shape(
             json_schema
         ):
@@ -376,6 +433,20 @@ def _ensure_strict_json_schema(
     # that a `$ref` or a single-entry `allOf` has already had the chance to lift `properties` up
     # to this level. Both of those paths re-enter this function and are handled by the return
     # statements above rather than reaching here.
+    if is_object and "additionalProperties" not in json_schema and in_definitions:
+        is_definition_root = bool(
+            budget.definition_stack and budget.definition_stack[-1] == id(json_schema)
+        )
+        if (
+            not is_definition_root
+            and _is_unclosable_object(json_schema)
+            and budget.definition_stack
+        ):
+            # A free-form node at a value position inside a definition can never be salvaged:
+            # a sibling merge at the `$ref` site only reshapes the top level, not the interior.
+            # Record the enclosing definition so any reference to it falls back.
+            budget.tainted_definition_ids.add(budget.definition_stack[-1])
+
     if is_object and "additionalProperties" not in json_schema and not in_definitions:
         # A definition is a template rather than a value position: a broad base is routinely
         # narrowed by the keys a `$ref` site supplies, and an unreferenced one has no effect at

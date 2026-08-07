@@ -653,3 +653,86 @@ def test_empty_object_literals_are_closed_rather_than_rejected(literal):
     )
 
     assert result["properties"]["f"]["additionalProperties"] is False
+
+
+def test_free_form_field_inside_a_referenced_definition_taints_the_reference():
+    # A sibling merge at the `$ref` site only reshapes the top level, so a free-form node
+    # inside the referenced subtree can never be salvaged, with or without siblings.
+    def fresh_schema(ref_site: dict[str, object]) -> dict[str, object]:
+        # Conversion mutates in place, so each call needs its own copy of the definition.
+        return {
+            "$defs": {"M": {"type": "object", "properties": {"x": {"type": "object"}}}},
+            "type": "object",
+            "properties": {"f": ref_site},
+        }
+
+    with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
+        ensure_strict_json_schema(fresh_schema({"$ref": "#/$defs/M"}))
+    with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
+        ensure_strict_json_schema(
+            fresh_schema({"$ref": "#/$defs/M", "properties": {"y": {"type": "string"}}})
+        )
+
+
+def test_unreferenced_definition_with_a_free_form_field_stays_harmless():
+    # The taint only matters when something references the definition.
+    result = ensure_strict_json_schema(
+        {
+            "$defs": {"M": {"type": "object", "properties": {"x": {"type": "object"}}}},
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+        }
+    )
+
+    assert result["properties"] == {"a": {"type": "string"}}
+
+
+def test_alias_definition_chains_are_followed_to_their_target():
+    # `$defs.Outer` is just a `$ref` to `Inner`, so a reference to `Outer` must be judged by
+    # what `Inner` is.
+    with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
+        ensure_strict_json_schema(
+            {
+                "$defs": {"Outer": {"$ref": "#/$defs/Inner"}, "Inner": {"type": "object"}},
+                "type": "object",
+                "properties": {"f": {"$ref": "#/$defs/Outer"}},
+            }
+        )
+
+    result = ensure_strict_json_schema(
+        {
+            "$defs": {
+                "Outer": {"$ref": "#/$defs/Inner"},
+                "Inner": {"type": "object", "properties": {"a": {"type": "string"}}},
+            },
+            "type": "object",
+            "properties": {"f": {"$ref": "#/$defs/Outer"}},
+        }
+    )
+    assert result["$defs"]["Inner"]["additionalProperties"] is False
+
+
+def test_required_names_outside_declared_properties_are_rejected():
+    # Strict mode needs `required` to be a subset of `properties`; conversion would otherwise
+    # silently drop the requirement and forbid the key it referred to.
+    with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
+        ensure_strict_json_schema(
+            {
+                "type": "object",
+                "properties": {"f": {"type": "object", "properties": {}, "required": ["a"]}},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "dependency_keyword",
+    [{"dependentRequired": {"a": ["b"]}}, {"dependencies": {"a": ["b"]}}],
+    ids=["dependentRequired", "draft-07-dependencies"],
+)
+def test_dependency_keywords_keep_an_empty_properties_object_open(dependency_keyword):
+    # Dependencies only fire when keys are present, so the object still accepts keys and an
+    # empty `properties` map is not a declaration that it is empty.
+    field = {"type": "object", "properties": {}, **dependency_keyword}
+
+    with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
+        ensure_strict_json_schema({"type": "object", "properties": {"f": field}})
