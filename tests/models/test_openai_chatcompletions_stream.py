@@ -34,7 +34,7 @@ from openai.types.responses import (
     ResponseReasoningItem,
 )
 
-from agents import Agent, Runner, function_tool
+from agents import Agent, Runner, function_tool, trace
 from agents.exceptions import ModelBehaviorError, UserError
 from agents.model_settings import ModelSettings
 from agents.models.chatcmpl_converter import Converter
@@ -50,6 +50,7 @@ from agents.models.chatcmpl_stream_handler import (
 from agents.models.interface import ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_provider import OpenAIProvider
+from tests.testing_processor import fetch_ordered_spans
 from tests.utils.simple_session import SimpleListSession
 
 
@@ -3995,3 +3996,40 @@ async def test_streamed_run_does_not_double_count_when_usage_is_present(monkeypa
 
     assert result.context_wrapper.usage.requests == 1
     assert result.context_wrapper.usage.total_tokens == 12
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_streamed_span_records_the_request_when_provider_omits_usage(monkeypatch) -> None:
+    """Streamed tracing must record the request the same way the non-streaming path does.
+
+    Non-streaming writes a span usage object with `requests: 1` when the provider reports no
+    usage. Streaming used to omit span usage entirely, so the run reported one request while
+    the model span showed none.
+    """
+    monkeypatch.setattr(
+        OpenAIChatCompletionsModel, "_fetch_response", _usageless_stream_patch(usage=None)
+    )
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    with trace(workflow_name="test"):
+        async for _ in model.stream_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.ENABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            pass
+
+    spans = fetch_ordered_spans()
+    generation = next(s for s in spans if s.span_data.type == "generation")
+    assert generation.span_data.usage is not None
+    assert generation.span_data.usage["requests"] == 1
+    # The provider reported no tokens, so every total stays at zero.
+    assert generation.span_data.usage["total_tokens"] == 0

@@ -1957,13 +1957,13 @@ async def test_any_llm_responses_stream_counts_request_when_usage_is_absent(monk
         )
     ]
 
-    from agents.usage import requests_for_response_without_usage
+    from agents.usage import _requests_for_response_without_usage
 
     terminal = events[-1]
     assert isinstance(terminal, ResponseCompletedEvent)
     # No usage payload is synthesized, so token counts are not reported as real zeros.
     assert terminal.response.usage is None
-    assert requests_for_response_without_usage(terminal.response) == 1
+    assert _requests_for_response_without_usage(terminal.response) == 1
 
 
 @pytest.mark.allow_call_model_methods
@@ -1995,9 +1995,9 @@ async def test_any_llm_responses_stream_with_usage_is_not_marked(monkeypatch) ->
         )
     ]
 
-    from agents.usage import requests_for_response_without_usage
+    from agents.usage import _requests_for_response_without_usage
 
     terminal = events[-1]
     assert isinstance(terminal, ResponseCompletedEvent)
     assert terminal.response.usage is not None
-    assert requests_for_response_without_usage(terminal.response) == 0
+    assert _requests_for_response_without_usage(terminal.response) == 0
