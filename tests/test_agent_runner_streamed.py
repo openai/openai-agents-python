@@ -8,7 +8,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
-from openai import APIConnectionError, BadRequestError
+from openai import APIConnectionError, BadRequestError, NotFoundError
 from openai.types.responses import (
     ResponseCompletedEvent,
     ResponseErrorEvent,
@@ -36,6 +36,7 @@ from agents import (
     OutputGuardrailTripwireTriggered,
     RunContextWrapper,
     Runner,
+    SQLiteSession,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
     ToolOutputGuardrailData,
@@ -828,6 +829,90 @@ async def test_streamed_reasoning_item_id_policy_omits_follow_up_reasoning_ids()
     history_reasoning = _find_reasoning_input_item(result.to_input_list())
     assert history_reasoning is not None
     assert "id" not in history_reasoning
+
+
+class _StreamedRevokedReasoningIdModel(FakeModel):
+    """FakeModel that 404s like the Responses API when a revoked reasoning ID is replayed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.revoked_reasoning_ids: set[str] = set()
+
+    def stream_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        *args: Any,
+        **kwargs: Any,
+    ) -> AsyncIterator[TResponseStreamEvent]:
+        if isinstance(input, list):
+            for item in input:
+                if not isinstance(item, dict) or item.get("type") != "reasoning":
+                    continue
+                item_id = item.get("id")
+                if item_id in self.revoked_reasoning_ids:
+                    message = f"Item with id '{item_id}' not found."
+                    body = {"error": {"message": message, "type": "invalid_request_error"}}
+                    raise NotFoundError(
+                        message,
+                        response=httpx.Response(
+                            404,
+                            request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+                            json=body,
+                        ),
+                        body=body,
+                    )
+        return super().stream_response(system_instructions, input, *args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_streamed_omit_policy_strips_reasoning_ids_already_stored_in_the_session() -> None:
+    """Adopting `omit` must also cover reasoning IDs a session recorded before it was set.
+
+    Streaming counterpart of the non-streamed regression test for
+    https://github.com/openai/openai-agents-python/issues/2020.
+    """
+    model = _StreamedRevokedReasoningIdModel()
+    specialist = Agent(name="specialist", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[specialist])
+    session = SQLiteSession("issue-2020-streamed")
+
+    # Turn 1 predates the mitigation, so the session records the reasoning ID.
+    model.add_multiple_turn_outputs(
+        [
+            [
+                ResponseReasoningItem(id="rs_triage", type="reasoning", summary=[]),
+                get_handoff_tool_call(specialist),
+            ],
+            [get_text_message("handled")],
+        ]
+    )
+    first = Runner.run_streamed(triage, input="hello", session=session)
+    async for _ in first.stream_events():
+        pass
+    assert first.final_output == "handled"
+    stored_reasoning = _find_reasoning_input_item(await session.get_items())
+    assert stored_reasoning is not None
+    assert stored_reasoning.get("id") == "rs_triage"
+
+    # The server no longer resolves that reasoning item.
+    model.revoked_reasoning_ids.add("rs_triage")
+
+    # Turn 2 opts into the documented mitigation for this failure.
+    model.add_multiple_turn_outputs([[get_text_message("done")]])
+    second = Runner.run_streamed(
+        triage,
+        input="anything else?",
+        session=session,
+        run_config=RunConfig(reasoning_item_id_policy="omit"),
+    )
+    async for _ in second.stream_events():
+        pass
+
+    assert second.final_output == "done"
+    replayed_reasoning = _find_reasoning_input_item(model.last_turn_args.get("input"))
+    assert replayed_reasoning is not None
+    assert "id" not in replayed_reasoning
 
 
 @pytest.mark.asyncio

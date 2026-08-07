@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from openai import APIConnectionError, BadRequestError
+from openai import APIConnectionError, BadRequestError, NotFoundError
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_output_item import McpApprovalRequest
 from openai.types.responses.response_output_text import AnnotationFileCitation, ResponseOutputText
@@ -1229,6 +1229,89 @@ async def test_call_model_input_filter_can_reintroduce_reasoning_ids() -> None:
     history_reasoning = _find_reasoning_input_item(result.to_input_list())
     assert history_reasoning is not None
     assert "id" not in history_reasoning
+
+
+class _RevokedReasoningIdModel(FakeModel):
+    """FakeModel that 404s like the Responses API when a revoked reasoning ID is replayed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.revoked_reasoning_ids: set[str] = set()
+
+    async def get_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        *args: Any,
+        **kwargs: Any,
+    ) -> ModelResponse:
+        if isinstance(input, list):
+            for item in input:
+                if not isinstance(item, dict) or item.get("type") != "reasoning":
+                    continue
+                item_id = item.get("id")
+                if item_id in self.revoked_reasoning_ids:
+                    message = f"Item with id '{item_id}' not found."
+                    body = {"error": {"message": message, "type": "invalid_request_error"}}
+                    raise NotFoundError(
+                        message,
+                        response=httpx.Response(
+                            404,
+                            request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+                            json=body,
+                        ),
+                        body=body,
+                    )
+        return await super().get_response(system_instructions, input, *args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_omit_policy_strips_reasoning_ids_already_stored_in_the_session() -> None:
+    """Adopting `omit` must also cover reasoning IDs a session recorded before it was set.
+
+    Reproduces https://github.com/openai/openai-agents-python/issues/2020: a triage agent hands
+    off, its empty-summary reasoning item is persisted to the session, the server later drops the
+    item, and every later turn of that conversation fails with
+    `404 Item with id 'rs_...' not found`.
+    """
+    model = _RevokedReasoningIdModel()
+    specialist = Agent(name="specialist", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[specialist])
+
+    session = SQLiteSession("issue-2020")
+
+    # Turn 1 predates the mitigation, so the session records the reasoning ID.
+    model.add_multiple_turn_outputs(
+        [
+            [
+                ResponseReasoningItem(id="rs_triage", type="reasoning", summary=[]),
+                get_handoff_tool_call(specialist),
+            ],
+            [get_text_message("handled")],
+        ]
+    )
+    first = await Runner.run(triage, input="hello", session=session)
+    assert first.final_output == "handled"
+    stored_reasoning = _find_reasoning_input_item(await session.get_items())
+    assert stored_reasoning is not None
+    assert stored_reasoning.get("id") == "rs_triage"
+
+    # The server no longer resolves that reasoning item.
+    model.revoked_reasoning_ids.add("rs_triage")
+
+    # Turn 2 opts into the documented mitigation for this failure.
+    model.add_multiple_turn_outputs([[get_text_message("done")]])
+    second = await Runner.run(
+        triage,
+        input="anything else?",
+        session=session,
+        run_config=RunConfig(reasoning_item_id_policy="omit"),
+    )
+
+    assert second.final_output == "done"
+    replayed_reasoning = _find_reasoning_input_item(model.last_turn_args.get("input"))
+    assert replayed_reasoning is not None
+    assert "id" not in replayed_reasoning
 
 
 @pytest.mark.asyncio

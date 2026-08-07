@@ -523,7 +523,16 @@ class AgentRunner:
         run_config = RunConfig() if run_config is None else _coerce_run_config(run_config)
 
         is_resumed_state = isinstance(input, RunState)
-        run_state: RunState[TContext] | None = None
+        run_state: RunState[TContext] | None = (
+            cast(RunState[TContext], input) if is_resumed_state else None
+        )
+        resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
+            run_config.reasoning_item_id_policy
+            if run_config.reasoning_item_id_policy is not None
+            else (run_state._reasoning_item_id_policy if run_state is not None else None)
+        )
+        if run_state is not None:
+            run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
         starting_input = input if not is_resumed_state else None
         original_user_input: str | list[TResponseInputItem] | None = None
         session_input_items_for_persistence: list[TResponseInputItem] | None = (
@@ -533,8 +542,7 @@ class AgentRunner:
         # exactly those items (and not the full history).
         last_saved_input_snapshot_for_rewind: list[TResponseInputItem] | None = None
 
-        if is_resumed_state:
-            run_state = cast(RunState[TContext], input)
+        if is_resumed_state and run_state is not None:
             (
                 conversation_id,
                 previous_response_id,
@@ -590,6 +598,7 @@ class AgentRunner:
                     run_config.session_settings,
                     include_history_in_prepared_input=False,
                     preserve_dropped_new_items=True,
+                    reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                     wrapper=context_wrapper,
                 )
                 original_input_for_state = raw_input
@@ -603,17 +612,10 @@ class AgentRunner:
                     session,
                     run_config.session_input_callback,
                     run_config.session_settings,
+                    reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                     wrapper=context_wrapper,
                 )
                 original_input_for_state = prepared_input
-
-        resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
-            run_config.reasoning_item_id_policy
-            if run_config.reasoning_item_id_policy is not None
-            else (run_state._reasoning_item_id_policy if run_state is not None else None)
-        )
-        if run_state is not None:
-            run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
 
         # Check whether to enable OpenAI server-managed conversation
         if (

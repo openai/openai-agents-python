@@ -36,6 +36,7 @@ from .items import (
     NestedHistoryOwnedItem,
     NestedHistoryOwnedItemRef,
     ReasoningItemIdPolicy,
+    apply_reasoning_item_id_policy,
     copy_input_items,
     deduplicate_input_items_preferring_latest,
     digest_input_item,
@@ -206,6 +207,7 @@ async def prepare_input_with_session(
     *,
     include_history_in_prepared_input: bool = True,
     preserve_dropped_new_items: bool = False,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> tuple[str | list[TResponseInputItem], list[TResponseInputItem]]:
     """Prepare model input from session history plus the new turn input.
@@ -242,6 +244,13 @@ async def prepare_input_with_session(
     converted_history = [
         strip_internal_input_item_metadata(ensure_input_item_format(item)) for item in history
     ]
+    if not is_openai_conversation_session:
+        # History written before the caller opted into "omit" still carries server-assigned
+        # reasoning IDs. Apply the policy on read too, the same way `save_result_to_session`
+        # applies it on write, so replaying that history cannot 404 on a stale `rs_...` ID.
+        converted_history = apply_reasoning_item_id_policy(
+            converted_history, reasoning_item_id_policy
+        )
 
     new_input_list = [
         ensure_input_item_format(item) for item in ItemHelpers.input_to_new_input_list(input)

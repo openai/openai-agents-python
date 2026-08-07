@@ -779,6 +779,7 @@ async def start_streaming(
                 run_config.session_settings,
                 include_history_in_prepared_input=not server_manages_conversation,
                 preserve_dropped_new_items=True,
+                reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                 wrapper=context_wrapper,
             )
             streamed_result.input = prepared_input

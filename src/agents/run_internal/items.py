@@ -60,6 +60,7 @@ __all__ = [
     "REJECTION_MESSAGE",
     "TOOL_CALL_SESSION_DESCRIPTION_KEY",
     "TOOL_CALL_SESSION_TITLE_KEY",
+    "apply_reasoning_item_id_policy",
     "copy_input_items",
     "drop_orphan_function_calls",
     "ensure_input_item_format",
@@ -695,6 +696,16 @@ def strip_internal_input_item_metadata(item: TResponseInputItem) -> TResponseInp
     cleaned.pop(TOOL_CALL_SESSION_DESCRIPTION_KEY, None)
     cleaned.pop(TOOL_CALL_SESSION_TITLE_KEY, None)
     return cast(TResponseInputItem, cleaned)
+
+
+def apply_reasoning_item_id_policy(
+    items: list[TResponseInputItem],
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None,
+) -> list[TResponseInputItem]:
+    """Apply the reasoning item ID policy to already-converted input items."""
+    if not _should_omit_reasoning_item_ids(reasoning_item_id_policy):
+        return items
+    return [_without_reasoning_item_id(item) for item in items]
 
 
 def _should_omit_reasoning_item_ids(reasoning_item_id_policy: ReasoningItemIdPolicy | None) -> bool:
