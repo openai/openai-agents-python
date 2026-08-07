@@ -8,7 +8,9 @@ Before running any tests, make sure you have `uv` installed (and ideally run `ma
 make tests
 ```
 
-`make tests` runs the shard-safe suite first, then runs the tests marked `serial` after all xdist workers have exited. The serial runner limits collection to test files containing the literal `pytest.mark.serial`, so keep that literal marker in every file containing serial tests. For indirect or custom serial marker spellings, use `uv run pytest -m serial` to perform generic pytest collection.
+`make tests` runs the shard-safe suite first with pytest-xdist using up to nine workers, then runs the tests marked `serial` after all xdist workers have exited. Set `PYTEST_XDIST_AUTO_NUM_WORKERS` to a positive integer to override the automatic worker count and cap. The serial runner limits collection to test files containing the literal `pytest.mark.serial`, so keep that literal marker in every file containing serial tests. For indirect or custom serial marker spellings, use `uv run pytest -m serial` to perform generic pytest collection.
+
+`make typecheck` runs mypy and pyright concurrently. Pyright uses four analysis threads by default; set `PYRIGHT_THREADS` to a positive integer to override the local thread count. The speedup does not remove either analyzer or narrow its selected project or source scope.
 
 ## Performance and determinism
 
@@ -30,7 +32,7 @@ Measure performance changes with both focused and broad runs:
 
 ```bash
 uv run pytest tests/path/to/test_file.py --durations=10
-uv run pytest -n auto --dist worksteal -m "not serial" --durations=20
+make tests-parallel
 ```
 
 Compare test counts, skips, warnings, assertions, and lifecycle coverage as well as elapsed time. Full-suite wall-clock results depend on host load and worker scheduling, so treat repeated focused measurements as the stronger evidence for an individual optimization. Run the repository's required verification stack after the final test changes.

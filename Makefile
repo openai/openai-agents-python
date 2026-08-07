@@ -25,7 +25,7 @@ mypy:
 
 .PHONY: pyright
 pyright:
-	uv run pyright --project pyrightconfig.json $(if $(TYPECHECK_SRC_ONLY),src,)
+	uv run pyright --project pyrightconfig.json --threads "$${PYRIGHT_THREADS:-4}" $(if $(TYPECHECK_SRC_ONLY),src,)
 
 .PHONY: typecheck
 typecheck:
@@ -54,7 +54,7 @@ tests-asyncio-stability:
 
 .PHONY: tests-parallel
 tests-parallel:
-	uv run pytest -n auto --dist worksteal -m "not serial"
+	uv run pytest -n "$${PYTEST_XDIST_AUTO_NUM_WORKERS:-auto}" $(if $(PYTEST_XDIST_AUTO_NUM_WORKERS),,--maxprocesses=9) --dist worksteal -m "not serial"
 
 .PHONY: tests-serial
 tests-serial:

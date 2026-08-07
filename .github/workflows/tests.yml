@@ -57,6 +57,14 @@ jobs:
           version: "0.11.14"
           enable-cache: true
           prune-cache: true
+      - name: Restore mypy cache
+        if: steps.changes.outputs.run == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml', 'Makefile') }}-${{ github.sha }}
+          restore-keys: |
+            mypy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml', 'Makefile') }}-
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
