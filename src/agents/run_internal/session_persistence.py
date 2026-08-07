@@ -56,6 +56,7 @@ from .run_steps import SingleStepResult
 
 __all__ = [
     "prepare_input_with_session",
+    "prepare_input_with_session_and_metadata",
     "persist_session_items_for_guardrail_trip",
     "reconcile_nested_history_owned_session_item_refs",
     "resolve_nested_history_owned_session_item_refs",
@@ -70,6 +71,17 @@ __all__ = [
 
 
 _SESSION_LIMIT_UNSET = object()
+
+
+def resolve_session_history_limit(
+    session: Session,
+    session_settings: SessionSettings | None,
+) -> int | None:
+    """Return the effective history-window limit used to prepare a turn's input."""
+    resolved_settings = getattr(session, "session_settings", None) or SessionSettings()
+    if session_settings is not None:
+        resolved_settings = resolved_settings.resolve(session_settings)
+    return resolved_settings.limit
 
 
 async def _session_get_items(
@@ -225,22 +237,55 @@ async def prepare_input_with_session(
     content frequency, so retries and custom merge strategies do not accidentally re-persist
     old history as fresh input.
     """
+    prepared_input, session_input_items, _ = await prepare_input_with_session_and_metadata(
+        input,
+        session,
+        session_input_callback,
+        session_settings,
+        include_history_in_prepared_input=include_history_in_prepared_input,
+        preserve_dropped_new_items=preserve_dropped_new_items,
+        reasoning_item_id_policy=reasoning_item_id_policy,
+        wrapper=wrapper,
+    )
+    return prepared_input, session_input_items
+
+
+async def prepare_input_with_session_and_metadata(
+    input: str | list[TResponseInputItem],
+    session: Session | None,
+    session_input_callback: SessionInputCallback | None,
+    session_settings: SessionSettings | None = None,
+    *,
+    include_history_in_prepared_input: bool = True,
+    preserve_dropped_new_items: bool = False,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+    wrapper: RunContextWrapper[Any] | None = None,
+) -> tuple[str | list[TResponseInputItem], list[TResponseInputItem], bool | None]:
+    """Prepare model input and report whether it proves full session-history coverage."""
 
     if session is None:
-        return input, []
+        return input, [], None
 
-    resolved_settings = getattr(session, "session_settings", None) or SessionSettings()
-    if session_settings is not None:
-        resolved_settings = resolved_settings.resolve(session_settings)
-
-    if resolved_settings.limit is not None:
+    input_history_limit = resolve_session_history_limit(session, session_settings)
+    if input_history_limit is not None:
         history = await _session_get_items(
             session,
-            limit=resolved_settings.limit,
+            limit=input_history_limit,
             wrapper=wrapper,
         )
     else:
         history = await _session_get_items(session, wrapper=wrapper)
+    if not include_history_in_prepared_input:
+        input_covered_full_history = False
+    elif session_input_callback is not None:
+        input_covered_full_history = False
+    elif input_history_limit is None:
+        input_covered_full_history = True
+    else:
+        # A read that exactly fills the window cannot prove nothing older exists, so it counts
+        # as not covered. Compaction then rebuilds from the full history instead of guessing.
+        input_covered_full_history = len(history) < input_history_limit
+
     is_openai_conversation_session = isinstance(session, OpenAIConversationsSession)
     converted_history = [
         strip_internal_input_item_metadata(ensure_input_item_format(item)) for item in history
@@ -356,7 +401,11 @@ async def prepare_input_with_session(
     deduplicated = deduplicate_input_items_preferring_latest(normalized)
 
     appended_as_inputs = [ensure_input_item_format(item) for item in appended_items]
-    return deduplicated, normalize_input_items_for_api(appended_as_inputs)
+    return (
+        deduplicated,
+        normalize_input_items_for_api(appended_as_inputs),
+        input_covered_full_history,
+    )
 
 
 async def persist_session_items_for_guardrail_trip(
@@ -433,6 +482,7 @@ async def save_result_to_session(
     response_id: str | None = None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
+    input_covered_full_history: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> int:
     """
@@ -545,6 +595,7 @@ async def save_result_to_session(
                     defer_compaction,
                     response_id,
                     store=store,
+                    input_covered_full_history=input_covered_full_history,
                     wrapper=wrapper,
                 )
             logger.debug(
@@ -568,6 +619,9 @@ async def save_result_to_session(
             "response_id": response_id,
             "force": force_compaction,
         }
+        if getattr(session, "_supports_compaction_metadata", False):
+            compaction_args["input_covered_full_history"] = input_covered_full_history
+            compaction_args["reasoning_item_id_policy"] = resolved_reasoning_item_id_policy
         if store is not None:
             compaction_args["store"] = store
         await _call_session_method(
@@ -587,6 +641,7 @@ async def save_resumed_turn_items(
     response_id: str | None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
+    input_covered_full_history: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> int:
     """Persist resumed turn items and return the updated persisted count."""
@@ -600,6 +655,7 @@ async def save_resumed_turn_items(
         response_id=response_id,
         reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
+        input_covered_full_history=input_covered_full_history,
         wrapper=wrapper,
     )
     return persisted_count + saved_count

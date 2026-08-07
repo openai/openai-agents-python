@@ -276,7 +276,7 @@ print(result.final_output)
 
 By default, compaction runs after each turn once the candidate threshold is reached.
 
-`compaction_mode="previous_response_id"` works best when you are already chaining turns with Responses API response IDs. `compaction_mode="input"` rebuilds the compaction request from the current session items instead, which is useful when the response chain is unavailable or you want the session contents to be the source of truth. The default `"auto"` chooses the safest available option.
+`compaction_mode="previous_response_id"` works best when you are already chaining turns with Responses API response IDs. `compaction_mode="input"` rebuilds the compaction request from the current session items instead, which is useful when the response chain is unavailable or you want the session contents to be the source of truth. The default `"auto"` uses `previous_response_id` only when the response is usable and its model input is known to cover the full stored session history. When a session limit, session input callback, model input filter, handoff, or resumed run makes full coverage uncertain, `"auto"` sends the full locally stored history as sanitized input instead. Explicit `"input"` and `"previous_response_id"` modes are unchanged.
 
 If your agent runs with `ModelSettings(store=False)`, the Responses API does not retain the last response for later lookup. In that stateless setup, the default `"auto"` mode falls back to input-based compaction instead of relying on `previous_response_id`. See [`examples/memory/compaction_session_stateless_example.py`](https://github.com/openai/openai-agents-python/tree/main/examples/memory/compaction_session_stateless_example.py) for a complete example.
 

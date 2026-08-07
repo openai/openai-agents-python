@@ -64,6 +64,7 @@ __all__ = [
     "apply_reasoning_item_id_policy",
     "copy_input_items",
     "drop_orphan_function_calls",
+    "has_pending_tool_calls",
     "ensure_input_item_format",
     "prepare_model_input_items",
     "run_item_to_input_item",
@@ -283,6 +284,26 @@ def _drop_reasoning_items_preceding_dropped_calls(
             break
     excluded = dropped_indexes | drop_reasoning
     return [entry for idx, entry in enumerate(items) if idx not in excluded]
+
+
+def has_pending_tool_calls(items: list[TResponseInputItem]) -> bool:
+    """Return whether stored history contains a tool call without its matching output."""
+    completed_call_ids = _completed_call_ids_by_type(items)
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        call_id = item.get("call_id")
+        if (
+            not isinstance(item_type, str)
+            or item_type not in _TOOL_CALL_TO_OUTPUT_TYPE
+            or not isinstance(call_id, str)
+        ):
+            continue
+        output_type = _TOOL_CALL_TO_OUTPUT_TYPE[item_type]
+        if call_id not in completed_call_ids[output_type]:
+            return True
+    return False
 
 
 def ensure_input_item_format(item: TResponseInputItem) -> TResponseInputItem:
@@ -779,6 +800,18 @@ def deduplicate_input_items_preferring_latest(
         elif anchor_index_by_key[dedupe_key] == index:
             deduplicated.append(latest_by_key[dedupe_key])
     return deduplicated
+
+
+def sanitize_replayed_input_items(
+    items: list[TResponseInputItem],
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+) -> list[TResponseInputItem]:
+    """Prepare stored history for replay to the API, the way a model request does."""
+    converted = [ensure_input_item_format(item) for item in items]
+    converted = apply_reasoning_item_id_policy(converted, reasoning_item_id_policy)
+    return deduplicate_input_items_preferring_latest(
+        normalize_input_items_for_api(drop_orphan_function_calls(converted))
+    )
 
 
 def function_tool_error_output(

@@ -4,7 +4,9 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -53,6 +55,7 @@ from agents.items import (
     TResponseStreamEvent,
 )
 from agents.memory.openai_conversations_session import OpenAIConversationsSession
+from agents.memory.openai_responses_compaction_session import OpenAIResponsesCompactionSession
 from agents.models.interface import Model, ModelTracing
 from agents.run import RunConfig
 from agents.run_internal import run_loop
@@ -2703,6 +2706,54 @@ async def test_streaming_resume_persists_tool_outputs_on_run_again():
 
 
 @pytest.mark.asyncio
+async def test_streaming_resume_compaction_falls_back_to_input():
+    """Resumed streaming runs should not infer full-history coverage from the session."""
+
+    async def test_tool() -> str:
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
+    model, agent = make_model_and_agent(name="test", tools=[tool])
+    underlying = SimpleListSession(
+        history=[
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": f"m{i}"})
+            for i in range(5)
+        ]
+    )
+    compacted = SimpleNamespace(output=[{"type": "compaction", "encrypted_content": "enc"}])
+    mock_client = MagicMock()
+    mock_client.responses.compact = AsyncMock(return_value=compacted)
+    session = OpenAIResponsesCompactionSession(
+        session_id="demo",
+        underlying_session=underlying,
+        client=mock_client,
+        should_trigger_compaction=lambda _ctx: True,
+    )
+
+    queue_function_call_and_text(
+        model,
+        get_function_tool_call("test_tool", json.dumps({}), call_id="call-resume"),
+        followup=[get_text_message("done")],
+    )
+
+    first = Runner.run_streamed(agent, input="Use test_tool", session=session)
+    await consume_stream(first)
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    resumed = Runner.run_streamed(agent, state, session=session)
+    await consume_stream(resumed)
+
+    assert resumed.final_output == "done"
+    assert mock_client.responses.compact.call_count >= 1
+    compact_kwargs = mock_client.responses.compact.call_args.kwargs
+    assert "previous_response_id" not in compact_kwargs
+    assert "input" in compact_kwargs
+
+
+@pytest.mark.asyncio
 async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure resumed streaming preserves the persisted count for session saves."""
 
@@ -2741,6 +2792,7 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
         response_id: str | None,
         reasoning_item_id_policy: str | None = None,
         store: bool | None = None,
+        input_covered_full_history: bool | None = None,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> int:
         observed_counts.append(persisted_count)
@@ -2751,6 +2803,7 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
             response_id=response_id,
             reasoning_item_id_policy=reasoning_item_id_policy,
             store=store,
+            input_covered_full_history=input_covered_full_history,
             wrapper=wrapper,
         )
         return int(result)

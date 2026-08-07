@@ -115,7 +115,7 @@ class OpenAIResponsesCompactionArgs(TypedDict, total=False):
     compaction_mode: Literal["previous_response_id", "input", "auto"]
     """How to provide history for compaction.
 
-    - "auto": Use input when the last response was not stored or no response ID is available.
+    - "auto": Use a response ID only when it is usable and its input covered stored history.
     - "previous_response_id": Use server-managed response history.
     - "input": Send locally stored session items as input.
     """
@@ -128,6 +128,20 @@ class OpenAIResponsesCompactionArgs(TypedDict, total=False):
 
     force: bool
     """Whether to force compaction even if the threshold is not met."""
+
+    input_covered_full_history: bool | None
+    """Whether this response's input window held the full stored history.
+
+    Auto mode infers the value from the session when omitted. A later manual call that reuses the
+    same processed response ID also reuses the resolved value unless this key overrides it.
+    """
+
+    reasoning_item_id_policy: Literal["preserve", "omit"] | None
+    """How the run rewrites reasoning item IDs when replaying stored history.
+
+    A later manual call that reuses the same processed response ID also reuses this policy unless
+    this key overrides it.
+    """
 
 
 @runtime_checkable
