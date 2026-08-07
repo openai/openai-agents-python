@@ -38,6 +38,8 @@ _INCLUDED_MEMORY_ITEM_TYPES = frozenset(
         "mcp_approval_request",
         "mcp_approval_response",
         "mcp_call",
+        "program",
+        "program_output",
         "shell_call",
         "shell_call_output",
         "tool_search_call",
