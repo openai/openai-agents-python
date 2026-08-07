@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
@@ -27,7 +27,13 @@ try:
         VoiceStreamEventLifecycle,
     )
 
-    from .fake_models import FakeStreamedAudioInput, FakeSTT, FakeTTS, FakeWorkflow
+    from .fake_models import (
+        FakeSession,
+        FakeStreamedAudioInput,
+        FakeSTT,
+        FakeTTS,
+        FakeWorkflow,
+    )
     from .helpers import extract_events
 except ImportError:
     pass
@@ -784,6 +790,332 @@ async def test_voicepipeline_streamed_audio_input() -> None:
     assert len(audio_chunks) == 2
     await fake_tts.verify_audio("out_1", audio_chunks[0])
     await fake_tts.verify_audio("out_2", audio_chunks[1])
+
+
+def _never_complete(text: str) -> tuple[str, str]:
+    """A splitter that never returns a complete sentence, so everything stays buffered."""
+    return "", text
+
+
+class _RecordingTTS(FakeTTS):
+    """Records every text handed to TTS so a test can assert no work was started."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.texts: list[str] = []
+
+    async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
+        self.texts.append(text)
+        yield np.zeros(2, dtype=np.int16).tobytes()
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_streamed_audio_input_without_turns() -> None:
+    # Zero turns. The session still has to end, otherwise `stream()` waits on the queue forever.
+
+    fake_stt = FakeSTT([])
+    workflow = FakeWorkflow()
+    fake_tts = FakeTTS()
+    pipeline = VoicePipeline(workflow=workflow, stt_model=fake_stt, tts_model=fake_tts)
+
+    streamed_audio_input = await FakeStreamedAudioInput.get(count=0)
+
+    result = await pipeline.run(streamed_audio_input)
+    # The timeout bounds the failure mode under test, which is a stream that never terminates.
+    events, audio_chunks = await asyncio.wait_for(extract_events(result), timeout=5)
+    assert events == ["session_ended"]
+    assert audio_chunks == []
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_delivers_on_start_output_during_startup() -> None:
+    # A greeting belongs to startup, so it must reach the consumer while the transcription
+    # session is still open rather than being held until the session ends.
+
+    intro_delivered = asyncio.Event()
+
+    class GatedSession(FakeSession):
+        async def transcribe_turns(self) -> AsyncIterator[str]:
+            # Released only once the greeting has been fully delivered. If the intro turn were
+            # left open until session end, this would never be released and the test times out.
+            await intro_delivered.wait()
+            for t in self.outputs:
+                yield t
+
+    class GatedSTT(FakeSTT):
+        async def create_session(self, *args: Any, **kwargs: Any) -> GatedSession:
+            session = GatedSession()
+            session.outputs = self.outputs
+            return session
+
+    class GreetingWorkflow(FakeWorkflow):
+        async def on_start(self) -> AsyncIterator[str]:
+            yield "Hello there"
+
+    config = VoicePipelineConfig(
+        tts_settings=TTSModelSettings(buffer_size=1, text_splitter=_never_complete)
+    )
+    pipeline = VoicePipeline(
+        workflow=GreetingWorkflow(),
+        stt_model=GatedSTT([]),
+        tts_model=_RecordingTTS(),
+        config=config,
+    )
+    result = await pipeline.run(await FakeStreamedAudioInput.get(count=0))
+
+    events: list[str] = []
+
+    async def consume() -> None:
+        async for event in result.stream():
+            if event.type == "voice_stream_event_lifecycle":
+                events.append(event.event)
+                if event.event == "turn_ended":
+                    intro_delivered.set()
+            elif event.type == "voice_stream_event_audio":
+                events.append("audio")
+
+    await asyncio.wait_for(consume(), timeout=5)
+
+    assert events == ["turn_started", "audio", "turn_ended", "session_ended"]
+    assert cast(_RecordingTTS, pipeline.tts_model).texts == ["Hello there"]
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_on_start_output_is_its_own_turn() -> None:
+    # The same guarantee as the test above, but with a transcription session that produces a turn
+    # immediately rather than waiting for the greeting to be delivered. Nothing serializes the two,
+    # so this pins that the greeting is finalized as its own turn and the first user response still
+    # gets its own turn_started rather than being folded into an intro that is still open.
+
+    class ImmediateSession(FakeSession):
+        async def transcribe_turns(self) -> AsyncIterator[str]:
+            yield "hello"
+
+    class ImmediateSTT(FakeSTT):
+        async def create_session(self, *args: Any, **kwargs: Any) -> ImmediateSession:
+            return ImmediateSession()
+
+    class GreetingWorkflow(FakeWorkflow):
+        async def on_start(self) -> AsyncIterator[str]:
+            yield "Hello there"
+
+        async def run(self, _: str) -> AsyncIterator[str]:
+            yield "the reply"
+
+    recording_tts = _RecordingTTS()
+    config = VoicePipelineConfig(
+        tts_settings=TTSModelSettings(buffer_size=1, text_splitter=_never_complete)
+    )
+    pipeline = VoicePipeline(
+        workflow=GreetingWorkflow(),
+        stt_model=ImmediateSTT([]),
+        tts_model=recording_tts,
+        config=config,
+    )
+    result = await pipeline.run(await FakeStreamedAudioInput.get(count=1))
+
+    events, _ = await asyncio.wait_for(extract_events(result), timeout=5)
+
+    assert events == [
+        "turn_started",
+        "audio",
+        "turn_ended",
+        "turn_started",
+        "audio",
+        "turn_ended",
+        "session_ended",
+    ]
+    assert recording_tts.texts == ["Hello there", "the reply"]
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_failed_turn_closes_the_session_without_further_tts() -> None:
+    # A failing turn must still close the transcription session, and must not send the text it
+    # had buffered to TTS. The consumer stops at the error, so that audio is unobservable.
+
+    closed = asyncio.Event()
+
+    class ClosingSession(FakeSession):
+        async def close(self) -> None:
+            closed.set()
+
+    class ClosingSTT(FakeSTT):
+        async def create_session(self, *args: Any, **kwargs: Any) -> ClosingSession:
+            session = ClosingSession()
+            session.outputs = self.outputs
+            return session
+
+    error = RuntimeError("workflow blew up")
+
+    class FailingWorkflow(FakeWorkflow):
+        async def run(self, _: str) -> AsyncIterator[str]:
+            yield "partial"
+            raise error
+
+    recording_tts = _RecordingTTS()
+    config = VoicePipelineConfig(
+        tts_settings=TTSModelSettings(buffer_size=1, text_splitter=_never_complete)
+    )
+    pipeline = VoicePipeline(
+        workflow=FailingWorkflow(),
+        stt_model=ClosingSTT(["hello"]),
+        tts_model=recording_tts,
+        config=config,
+    )
+    result = await pipeline.run(await FakeStreamedAudioInput.get(count=1))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await asyncio.wait_for(extract_events(result), timeout=5)
+
+    assert exc_info.value is error
+    assert closed.is_set()
+    assert recording_tts.texts == []
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_error_waits_for_the_session_close_before_cleanup() -> None:
+    # An error is a terminal event, but the producer still has to close the transcription session
+    # after reporting it. `stream()` has to wait for that instead of cancelling the producer, or
+    # the session is torn down mid-close.
+
+    turn_error = RuntimeError("workflow blew up")
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    close_finished = asyncio.Event()
+
+    class BlockingCloseSession(FakeSession):
+        async def close(self) -> None:
+            close_started.set()
+            await release_close.wait()
+            close_finished.set()
+
+    class BlockingCloseSTT(FakeSTT):
+        async def create_session(self, *args: Any, **kwargs: Any) -> BlockingCloseSession:
+            session = BlockingCloseSession()
+            session.outputs = self.outputs
+            return session
+
+    class FailingWorkflow(FakeWorkflow):
+        async def run(self, _: str) -> AsyncIterator[str]:
+            yield "partial"
+            raise turn_error
+
+    recording_tts = _RecordingTTS()
+    config = VoicePipelineConfig(
+        tts_settings=TTSModelSettings(buffer_size=1, text_splitter=_never_complete)
+    )
+    pipeline = VoicePipeline(
+        workflow=FailingWorkflow(),
+        stt_model=BlockingCloseSTT(["hello"]),
+        tts_model=recording_tts,
+        config=config,
+    )
+    result = await pipeline.run(await FakeStreamedAudioInput.get(count=1))
+
+    consumer = asyncio.create_task(extract_events(result))
+    await asyncio.wait_for(close_started.wait(), timeout=5)
+
+    # The consumer has the error and is inside its finally. It must be parked on the producer
+    # rather than cancelling it, so the close is still running and neither side has finished.
+    await asyncio.sleep(0)
+    producer = result.text_generation_task
+    assert producer is not None
+    assert not producer.cancelled()
+    assert not producer.done()
+    assert not consumer.done()
+
+    release_close.set()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await asyncio.wait_for(consumer, timeout=5)
+
+    assert exc_info.value is turn_error
+    assert close_finished.is_set()
+    assert recording_tts.texts == []
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_failing_close_does_not_replace_the_turn_error() -> None:
+    # When a turn fails and closing the transcription session fails too, the consumer must still
+    # see the error that actually broke the run, not the cleanup error that followed it.
+
+    turn_error = RuntimeError("workflow blew up")
+    close_error = RuntimeError("close blew up")
+
+    class FailingCloseSession(FakeSession):
+        async def close(self) -> None:
+            raise close_error
+
+    class FailingCloseSTT(FakeSTT):
+        async def create_session(self, *args: Any, **kwargs: Any) -> FailingCloseSession:
+            session = FailingCloseSession()
+            session.outputs = self.outputs
+            return session
+
+    class FailingWorkflow(FakeWorkflow):
+        async def run(self, _: str) -> AsyncIterator[str]:
+            raise turn_error
+            yield ""
+
+    pipeline = VoicePipeline(
+        workflow=FailingWorkflow(),
+        stt_model=FailingCloseSTT(["hello"]),
+        tts_model=FakeTTS(),
+    )
+    result = await pipeline.run(await FakeStreamedAudioInput.get(count=1))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await asyncio.wait_for(extract_events(result), timeout=5)
+
+    assert exc_info.value is turn_error
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_cancelled_consumer_closes_the_session_without_further_tts() -> None:
+    # Cancelling the consumer tears down the producer. The transcription session still has to be
+    # closed, and the turn the producer had open must not be sent to TTS on the way out.
+
+    closed = asyncio.Event()
+    buffered = asyncio.Event()
+
+    class ClosingSession(FakeSession):
+        async def transcribe_turns(self) -> AsyncIterator[str]:
+            yield "hello"
+            await asyncio.Event().wait()
+
+        async def close(self) -> None:
+            closed.set()
+
+    class ClosingSTT(FakeSTT):
+        async def create_session(self, *args: Any, **kwargs: Any) -> ClosingSession:
+            return ClosingSession()
+
+    class BufferingWorkflow(FakeWorkflow):
+        async def run(self, _: str) -> AsyncIterator[str]:
+            yield "partial"
+            buffered.set()
+            await asyncio.Event().wait()
+
+    recording_tts = _RecordingTTS()
+    config = VoicePipelineConfig(
+        tts_settings=TTSModelSettings(buffer_size=1, text_splitter=_never_complete)
+    )
+    pipeline = VoicePipeline(
+        workflow=BufferingWorkflow(),
+        stt_model=ClosingSTT([]),
+        tts_model=recording_tts,
+        config=config,
+    )
+    result = await pipeline.run(await FakeStreamedAudioInput.get(count=1))
+
+    consumer = asyncio.create_task(extract_events(result))
+    await asyncio.wait_for(buffered.wait(), timeout=5)
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    assert closed.is_set()
+    assert recording_tts.texts == []
 
 
 @pytest.mark.asyncio
