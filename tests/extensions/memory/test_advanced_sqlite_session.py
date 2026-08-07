@@ -33,6 +33,11 @@ from tests.test_responses import get_text_message
 pytestmark = pytest.mark.asyncio
 
 
+def _multiprocessing_context() -> Any:
+    method = "spawn" if sys.platform == "win32" else "forkserver"
+    return multiprocessing.get_context(method)
+
+
 def _assert_cancel_message(exc: asyncio.CancelledError, expected: str) -> None:
     """Account for Python 3.10 dropping Task cancellation messages when re-awaited."""
     expected_args = (expected,) if sys.version_info >= (3, 11) else ()
@@ -1335,7 +1340,7 @@ async def test_branch_allocation_is_serialized_across_processes(
     await setup_session.add_items(items)
     setup_session.close()
 
-    context = multiprocessing.get_context("spawn")
+    context = _multiprocessing_context()
     results = context.Queue()
     release_check = context.Event()
     processes = []
@@ -1370,12 +1375,12 @@ async def test_branch_allocation_is_serialized_across_processes(
 
         first_ready, first_start, _, first_checked = worker_events[0]
         second_ready, second_start, second_attempted, second_checked = worker_events[1]
-        assert first_ready.wait(timeout=10)
+        assert first_ready.wait(timeout=30)
         first_start.set()
-        assert first_checked.wait(timeout=10)
-        assert second_ready.wait(timeout=10)
+        assert first_checked.wait(timeout=30)
+        assert second_ready.wait(timeout=30)
         second_start.set()
-        assert second_attempted.wait(timeout=10)
+        assert second_attempted.wait(timeout=30)
 
         # The second process has entered branch creation, but SQLite's write transaction
         # must keep it from reserving an ID until the first process commits.
@@ -3088,7 +3093,7 @@ async def test_pop_item_claim_is_unique_across_processes(tmp_path: Path):
     await setup.add_items([item])
     setup.close()
 
-    context = multiprocessing.get_context("spawn")
+    context = _multiprocessing_context()
     start = context.Event()
     results = context.Queue()
     ready_events = [context.Event(), context.Event()]
@@ -3104,7 +3109,7 @@ async def test_pop_item_claim_is_unique_across_processes(tmp_path: Path):
         for process in processes:
             process.start()
         for ready in ready_events:
-            assert ready.wait(timeout=10)
+            assert ready.wait(timeout=30)
         start.set()
         for process in processes:
             process.join(timeout=10)

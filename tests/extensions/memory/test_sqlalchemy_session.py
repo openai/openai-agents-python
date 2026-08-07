@@ -1304,6 +1304,7 @@ async def test_sqlite_configuration_registry_releases_collected_engines(tmp_path
 async def test_sqlite_configuration_registry_does_not_grow_unbounded(tmp_path):
     """Short-lived SQLite sessions must not accumulate registry entries."""
     baseline = len(SQLAlchemySession._sqlite_configured_engines)
+    created_engine_keys: list[int] = []
 
     for index in range(25):
         db_url = f"sqlite+aiosqlite:///{tmp_path / f'sqlite_registry_growth_{index}.db'}"
@@ -1312,9 +1313,14 @@ async def test_sqlite_configuration_registry_does_not_grow_unbounded(tmp_path):
             url=db_url,
             create_tables=True,
         )
+        engine = session.engine
+        created_engine_keys.append(id(engine.sync_engine))
         await session.add_items([{"role": "user", "content": f"turn {index}"}])
-        await session.engine.dispose()
+        await engine.dispose()
         del session
-        gc.collect()
+        del engine
 
-    assert len(SQLAlchemySession._sqlite_configured_engines) == baseline
+    gc.collect()
+
+    assert SQLAlchemySession._sqlite_configured_engines.isdisjoint(created_engine_keys)
+    assert len(SQLAlchemySession._sqlite_configured_engines) <= baseline

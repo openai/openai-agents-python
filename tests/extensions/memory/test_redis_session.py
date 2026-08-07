@@ -753,9 +753,11 @@ async def test_get_next_id_method():
         await session.close()
 
 
-async def test_add_items_preserves_created_at_metadata():
+async def test_add_items_preserves_created_at_metadata(monkeypatch: pytest.MonkeyPatch):
     """`created_at` must be set once and not overwritten by subsequent add_items calls."""
     session = await _create_test_session("created_at_test")
+    current_time = 1_000
+    monkeypatch.setattr("agents.extensions.memory.redis_session.time.time", lambda: current_time)
 
     try:
         await session.clear_session()
@@ -764,10 +766,8 @@ async def test_add_items_preserves_created_at_metadata():
         first_created = first_meta.get(b"created_at") or first_meta.get("created_at")
         assert first_created is not None
 
-        # Force a clock advance so a regression would surface as a different value.
-        import time
-
-        time.sleep(1.1)
+        # Advance the controlled clock so a regression would surface as a different value.
+        current_time += 1
 
         await session.add_items([{"role": "user", "content": "second"}])
         second_meta = await session._redis.hgetall(session._session_key)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context

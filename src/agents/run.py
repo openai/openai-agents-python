@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import warnings
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from typing_extensions import Unpack
 
@@ -851,6 +851,12 @@ class AgentRunner:
 
             try:
                 while True:
+                    if TYPE_CHECKING:
+                        # Keep loop-carried types explicit to bound Pyright's flow analysis.
+                        original_input = cast(  # type: ignore[redundant-cast]
+                            str | list[TResponseInputItem], original_input
+                        )
+                        run_state = cast(RunState[TContext] | None, run_state)
                     resuming_turn = is_resumed_state
                     all_input_guardrails = (
                         starting_agent.input_guardrails + (run_config.input_guardrails or [])
