@@ -5,6 +5,9 @@ from typing import Any, ClassVar, Generic, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, model_serializer
 
+from ...exceptions import _raise_data_redacted_error
+from .._mount_security import redact_mount_error_data_sync
+from ..errors import MountConfigError
 from ..manifest import Manifest
 from ..snapshot import SnapshotBase, SnapshotSpec
 from .base_sandbox_session import BaseSandboxSession
@@ -126,6 +129,23 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
             dependencies=self._resolve_dependencies(),
         )
 
+    def _validate_manifest_for_create(
+        self,
+        manifest: Manifest,
+        *,
+        allowed_in_container_credential_strategy_types: frozenset[str] = frozenset(),
+    ) -> Manifest:
+        from .._mount_security import validate_manifest_mount_credential_boundaries
+
+        validate_manifest_mount_credential_boundaries(
+            manifest,
+            allowed_in_container_credential_strategy_types=(
+                allowed_in_container_credential_strategy_types
+            ),
+            provider_backend_id=self.backend_id,
+        )
+        return manifest
+
     @abc.abstractmethod
     async def create(
         self,
@@ -173,8 +193,33 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
         `session=` when you want to reuse an already-running sandbox session.
         """
 
+    @redact_mount_error_data_sync
     def serialize_session_state(self, state: SandboxSessionState) -> dict[str, object]:
         """Serialize backend-specific sandbox state into a JSON-compatible payload."""
+        from ...exceptions import _raise_data_redacted_error
+        from .._mount_security import (
+            _manifest_has_configured_mount_authority,
+            _manifest_mount_provenance_error,
+            _mark_mount_validation_error,
+            _redact_mount_serialization_error,
+        )
+
+        provenance_error = _manifest_mount_provenance_error(state.manifest)
+        if provenance_error is not None:
+            _mark_mount_validation_error(provenance_error)
+            state = cast(Any, None)
+            _raise_data_redacted_error(provenance_error)
+
+        try:
+            return self._serialize_session_state(state)
+        except MountConfigError:
+            raise
+        except Exception as error:
+            if not _manifest_has_configured_mount_authority(state.manifest):
+                raise
+            raise _redact_mount_serialization_error(error) from None
+
+    def _serialize_session_state(self, state: SandboxSessionState) -> dict[str, object]:
         redacted_paths = set(state.path_grants_require_rebind)
         persistent_grants = []
         for grant in state.manifest.extra_path_grants:
@@ -197,7 +242,29 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
         payload: dict[str, object],
         state_class: type[SandboxSessionState],
     ) -> SandboxSessionState:
-        state = state_class.model_validate(payload)
+        from .._mount_security import (
+            _redact_mount_state_validation_error,
+            sanitize_raw_session_state_mount_authority,
+        )
+
+        safe_error: ValueError | None = None
+        try:
+            sanitized, _redacted = sanitize_raw_session_state_mount_authority(payload)
+            if isinstance(sanitized, dict):
+                payload.clear()
+                payload.update(sanitized)
+            state = state_class.model_validate(payload)
+        except Exception as error:
+            safe_error = _redact_mount_state_validation_error(
+                error,
+                message="sandbox session state payload is invalid",
+            )
+
+        if safe_error is not None:
+            payload.clear()
+            sanitized = cast(Any, None)
+            state_class = cast(Any, None)
+            _raise_data_redacted_error(safe_error)
         return SandboxSessionState._mark_persisted_path_grants(state, payload=payload)
 
     @abc.abstractmethod

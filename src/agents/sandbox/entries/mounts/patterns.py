@@ -455,6 +455,8 @@ class MountpointMountPattern(MountPatternBase):
         await session.mkdir(path, parents=True)
 
         cmd: list[str] = ["mount-s3"]
+        if not (mountpoint_config.access_key_id and mountpoint_config.secret_access_key):
+            cmd.append("--no-sign-request")
         if mountpoint_config.read_only:
             cmd.append("--read-only")
         elif mountpoint_config.mount_type in {"s3_mount", "gcs_mount"}:

@@ -469,6 +469,73 @@ async def test_s3_mountpoint_writable_mode_enables_overwrite_and_delete() -> Non
 
 
 @pytest.mark.asyncio
+async def test_mountpoint_credentialless_mode_disables_request_signing() -> None:
+    session = _MountpointApplySession()
+    pattern = MountpointMountPattern()
+
+    await pattern.apply(
+        session,
+        Path("/workspace/remote"),
+        MountpointMountConfig(
+            bucket="public-bucket",
+            access_key_id=None,
+            secret_access_key=None,
+            session_token=None,
+            prefix=None,
+            region="us-east-1",
+            endpoint_url=None,
+            mount_type="s3_mount",
+        ),
+    )
+
+    assert "--no-sign-request" in session.exec_calls[-1][2]
+    assert session.write_calls == []
+
+
+@pytest.mark.asyncio
+async def test_mount_apply_rejects_credentials_before_side_effects() -> None:
+    sentinel = "direct-mount-apply-secret"
+    session = _MountpointApplySession()
+    mount = S3Mount(
+        bucket="bucket",
+        access_key_id="access-key",
+        secret_access_key=sentinel,
+        mount_strategy=InContainerMountStrategy(pattern=MountpointMountPattern()),
+    )
+
+    with pytest.raises(MountConfigError) as exc:
+        await mount.apply(session, Path("/workspace/data"), Path("/workspace"))
+
+    assert session.write_calls == []
+    assert session.exec_calls == []
+    assert sentinel not in str(exc.value)
+    traceback = exc.value.__traceback__
+    while traceback is not None:
+        frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
+        if "/src/agents/" in frame_path:
+            assert sentinel not in repr(traceback.tb_frame.f_locals)
+        traceback = traceback.tb_next
+
+
+@pytest.mark.asyncio
+async def test_mount_restore_rejects_credentials_before_side_effects() -> None:
+    session = _MountpointApplySession()
+    strategy = InContainerMountStrategy(pattern=MountpointMountPattern())
+    mount = S3Mount(
+        bucket="bucket",
+        access_key_id="access-key",
+        secret_access_key="secret-key",
+        mount_strategy=strategy,
+    )
+
+    with pytest.raises(MountConfigError):
+        await strategy.restore_after_snapshot(mount, session, Path("/workspace/data"))
+
+    assert session.write_calls == []
+    assert session.exec_calls == []
+
+
+@pytest.mark.asyncio
 async def test_gcs_mountpoint_writable_mode_enables_overwrite_and_delete() -> None:
     session = _MountpointApplySession()
     pattern = MountpointMountPattern()
@@ -629,6 +696,32 @@ async def test_s3_files_pattern_mounts_with_helper_options() -> None:
         "fs-1234567890abcdef0:/datasets",
         "/workspace/remote",
     ]
+
+
+@pytest.mark.asyncio
+async def test_gcs_mount_builds_anonymous_native_rclone_config_without_credentials() -> None:
+    session_id = uuid.uuid4()
+    pattern = RcloneMountPattern()
+    remote_name = pattern.resolve_remote_name(
+        session_id=session_id.hex,
+        remote_kind="gcs",
+        mount_type="gcs_mount",
+    )
+    mount = GCSMount(
+        bucket="public-bucket",
+        mount_strategy=InContainerMountStrategy(pattern=pattern),
+    )
+
+    config = await mount.build_in_container_mount_config(
+        _MountConfigSession(session_id=session_id),
+        pattern,
+        include_config_text=True,
+    )
+
+    assert isinstance(config, RcloneMountConfig)
+    assert config.config_text == (
+        f"[{remote_name}]\ntype = google cloud storage\nanonymous = true\nenv_auth = false\n"
+    )
 
 
 @pytest.mark.asyncio
@@ -976,7 +1069,7 @@ async def test_r2_mount_builds_env_auth_config_with_custom_domain() -> None:
         "provider = Cloudflare\n"
         "endpoint = https://eu.r2.cloudflarestorage.com\n"
         "acl = private\n"
-        "env_auth = true\n"
+        "env_auth = false\n"
     )
 
 

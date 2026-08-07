@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import importlib
 import io
 import json
 import logging
@@ -106,6 +107,7 @@ from agents.run_state import (
 )
 from agents.sandbox import Manifest
 from agents.sandbox.capabilities.capability import Capability
+from agents.sandbox.entries import BaseEntry, Mount, MountStrategyBase
 from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient, UnixLocalSandboxSessionState
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.snapshot import LocalSnapshot, NoopSnapshot
@@ -878,7 +880,7 @@ class TestRunState:
         with pytest.raises(
             Exception,
             match=(
-                f"Run state schema version 0.1 is not supported. "
+                "Run state schema version is not supported. "
                 f"Supported versions are: {supported_versions}. "
                 f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
             ),
@@ -4463,9 +4465,18 @@ class TestDeserializeHelpers:
     async def test_json_decode_error_handling(self):
         """Test that invalid JSON raises appropriate error."""
         agent = Agent(name="TestAgent")
+        sentinel = "malformed-json-secret"
 
-        with pytest.raises(Exception, match="Failed to parse run state JSON"):
-            await RunState.from_string(agent, "{ invalid json }")
+        with pytest.raises(UserError, match="Failed to parse run state JSON") as exc:
+            await RunState.from_string(agent, f'{{ "sandbox": "{sentinel}" ')
+
+        assert sentinel not in str(exc.value)
+        traceback = exc.value.__traceback__
+        while traceback is not None:
+            module_name = traceback.tb_frame.f_globals.get("__name__", "")
+            if isinstance(module_name, str) and module_name.startswith("agents."):
+                assert sentinel not in repr(traceback.tb_frame.f_locals)
+            traceback = traceback.tb_next
 
     async def test_missing_agent_in_map_error(self):
         """Test error when agent not found in agent map."""
@@ -6447,10 +6458,61 @@ class TestRunStateSerializationEdgeCases:
             "generated_items": [],
         }
 
-        with pytest.raises(
-            UserError, match=f"Run state schema version {schema_version} is not supported"
-        ):
+        with pytest.raises(UserError, match="Run state schema version is not supported"):
             await RunState.from_json(agent, state_json)
+
+    @pytest.mark.asyncio
+    async def test_from_json_checks_schema_before_sandbox_envelope(self):
+        agent = Agent(name="TestAgent")
+        state_json: dict[str, Any] = {
+            "$schemaVersion": "9.9",
+            "sandbox": ["future-sandbox-value"],
+        }
+        original = deepcopy(state_json)
+
+        with pytest.raises(UserError, match="Run state schema version is not supported"):
+            await RunState.from_json(agent, state_json)
+
+        assert state_json == original
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation", ["from_json", "from_string"])
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            ([{"secret_access_key": "malformed-schema-secret"}], "must be an object"),
+            (
+                {"$schemaVersion": {"value": "malformed-schema-secret"}},
+                "schema version has an invalid type",
+            ),
+            (
+                {"$schemaVersion": "malformed-schema-secret"},
+                "schema version is not supported",
+            ),
+        ],
+    )
+    async def test_malformed_schema_shape_redacts_public_errors(
+        self,
+        operation: str,
+        payload: object,
+        message: str,
+    ) -> None:
+        agent = Agent(name="TestAgent")
+        sentinel = "malformed-schema-secret"
+
+        with pytest.raises(UserError, match=message) as exc:
+            if operation == "from_json":
+                await RunState.from_json(agent, cast(Any, deepcopy(payload)))
+            else:
+                await RunState.from_string(agent, json.dumps(payload))
+
+        assert sentinel not in str(exc.value)
+        traceback = exc.value.__traceback__
+        while traceback is not None:
+            frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
+            if "/src/agents/" in frame_path:
+                assert sentinel not in repr(traceback.tb_frame.f_locals)
+            traceback = traceback.tb_next
 
     @pytest.mark.asyncio
     async def test_from_json_accepts_previous_schema_version(self):
@@ -7408,6 +7470,568 @@ class TestRunStateSerializationEdgeCases:
         assert isinstance(restored_session_state, UnixLocalSandboxSessionState)
         assert isinstance(restored_session_state.snapshot, LocalSnapshot)
         assert restored_session_state.snapshot.base_path == Path("/tmp/snapshots")
+
+    @pytest.mark.asyncio
+    async def test_run_state_sanitizes_raw_mount_credentials_without_provider_imports(self):
+        agent = Agent(name="TestAgent")
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        state: RunState[Any, Agent[Any]] = make_state(agent, context=context, original_input="test")
+        raw_session_state = {
+            "type": "unimported-provider",
+            "manifest": {
+                "version": 1,
+                "root": "/workspace",
+                "entries": {
+                    "malformed-parent": {
+                        "type": "unknown-parent",
+                        "children": {
+                            "data": {
+                                "type": "s3_mount",
+                                "access_key_id": "raw-access-key",
+                                "secret_access_key": "raw-secret-key",
+                                "mount_strategy": {
+                                    "type": {"invalid": "raw-strategy-discriminator-secret"},
+                                    "driver": "rclone",
+                                    "driver_options": {
+                                        "vfs-cache-mode": "off",
+                                        "s3-secret-access-key": "raw-driver-secret",
+                                    },
+                                    "pattern": {
+                                        "type": {"invalid": "pattern-discriminator"},
+                                        "config_file_path": "/workspace/raw-pattern-secret",
+                                        "extra_args": [
+                                            "--header",
+                                            "Authorization: raw-header-secret",
+                                        ],
+                                        "options": {
+                                            "endpoint_url": {"credential": "raw-endpoint-secret"},
+                                            "extra_options": {"password": "raw-option-secret"},
+                                        },
+                                    },
+                                },
+                            }
+                        },
+                    },
+                },
+                "environment": {"value": {}},
+            },
+        }
+        state._sandbox = {
+            "backend_id": "unimported-provider",
+            "session_state": raw_session_state,
+            "sessions_by_agent": {
+                agent.name: {
+                    "agent_name": agent.name,
+                    "session_state": raw_session_state,
+                }
+            },
+        }
+
+        serialized = state.to_json()
+        serialized_text = json.dumps(serialized)
+
+        assert "raw-access-key" not in serialized_text
+        assert "raw-secret-key" not in serialized_text
+        assert "raw-driver-secret" not in serialized_text
+        assert "raw-pattern-secret" not in serialized_text
+        assert "raw-header-secret" not in serialized_text
+        assert "raw-endpoint-secret" not in serialized_text
+        assert "raw-option-secret" not in serialized_text
+        assert "raw-strategy-discriminator-secret" not in serialized_text
+        assert "vfs-cache-mode" not in serialized_text
+        serialized_session = serialized["sandbox"]["session_state"]
+        assert serialized_session["__openai_agents_redacted_mount_authority"] is True
+
+        serialized["sandbox"]["session_state"] = raw_session_state
+        restored = await RunState.from_json(agent, serialized)
+
+        assert restored._sandbox is not None
+        assert "raw-secret-key" not in repr(restored._sandbox)
+        assert "raw-strategy-discriminator-secret" not in repr(restored._sandbox)
+        assert "raw-secret-key" not in repr(serialized)
+        assert "raw-strategy-discriminator-secret" not in repr(serialized)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation", ["to_json", "from_json"])
+    async def test_run_state_rejects_non_string_mount_entry_type_without_values(
+        self,
+        operation: str,
+    ) -> None:
+        agent = Agent(name="TestAgent")
+        state: RunState[Any, Agent[Any]] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        sentinel = "malformed-mount-entry-type-secret"
+        sandbox = {
+            "backend_id": "unimported-provider",
+            "session_state": {
+                "type": "unimported-provider",
+                "manifest": {
+                    "version": 1,
+                    "root": "/workspace",
+                    "entries": {
+                        "data": {
+                            "type": {"invalid": "discriminator"},
+                            "secret_access_key": sentinel,
+                            "mount_strategy": {"type": "in_container"},
+                        }
+                    },
+                    "environment": {"value": {}},
+                },
+            },
+        }
+        if operation == "to_json":
+            state._sandbox = sandbox
+            serialized = None
+        else:
+            serialized = state.to_json()
+            serialized["sandbox"] = sandbox
+
+        with pytest.raises(ValueError, match="invalid manifest") as exc_info:
+            if operation == "to_json":
+                state.to_json()
+            else:
+                assert serialized is not None
+                await RunState.from_json(agent, serialized)
+
+        assert sandbox == {}
+        assert sentinel not in str(exc_info.value)
+        assert sentinel not in repr(exc_info.value)
+        traceback = exc_info.value.__traceback__
+        while traceback is not None:
+            module_name = traceback.tb_frame.f_globals.get("__name__", "")
+            if isinstance(module_name, str) and module_name.startswith("agents."):
+                assert sentinel not in repr(traceback.tb_frame.f_locals)
+            traceback = traceback.tb_next
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("collision_kind", ["strategy", "extension_entry"])
+    async def test_run_state_rejects_reserved_mount_registration_collision_without_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        collision_kind: str,
+    ) -> None:
+        sentinel = f"reserved-{collision_kind}-collision-secret"
+        agent = Agent(name="TestAgent")
+        state: RunState[Any, Agent[Any]] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        entries: dict[str, Any]
+        if collision_kind == "strategy":
+            entries = {
+                "data": {
+                    "type": "s3_mount",
+                    "bucket": "bucket",
+                    "access_key_id": "access-key",
+                    "secret_access_key": sentinel,
+                    "mount_strategy": {"type": "cloudflare_bucket_mount"},
+                }
+            }
+        else:
+            entries = {
+                "drive": {
+                    "type": "blaxel_drive_mount",
+                    "drive_name": "drive",
+                    "drive_mount_path": "/data",
+                    "drive_path": "/",
+                    "drive_read_only": True,
+                    "mount_strategy": {"type": "blaxel_drive"},
+                },
+                "data": {
+                    "type": "s3_mount",
+                    "bucket": "bucket",
+                    "access_key_id": "access-key",
+                    "secret_access_key": sentinel,
+                    "mount_strategy": {"type": "docker_volume", "driver": "rclone"},
+                },
+            }
+        state_json = state.to_json()
+        state_json["sandbox"] = {
+            "backend_id": "cloudflare",
+            "session_state": {
+                "type": "cloudflare",
+                "manifest": {
+                    "version": 1,
+                    "root": "/workspace",
+                    "entries": entries,
+                    "environment": {"value": {}},
+                },
+            },
+        }
+        original_import_module = importlib.import_module
+
+        def import_module_with_registration_collision(name: str, package: str | None = None) -> Any:
+            if (
+                collision_kind == "strategy"
+                and name == "agents.extensions.sandbox.cloudflare.mounts"
+            ):
+                raise TypeError("mount strategy type is already registered")
+            if (
+                collision_kind == "extension_entry"
+                and name == "agents.extensions.sandbox.blaxel.mounts"
+            ):
+                raise ValueError("artifact type is already registered")
+            return original_import_module(name, package)
+
+        if collision_kind == "strategy":
+            monkeypatch.setitem(
+                MountStrategyBase._subclass_registry,
+                "cloudflare_bucket_mount",
+                cast(Any, object()),
+            )
+        else:
+            monkeypatch.setitem(
+                BaseEntry._subclass_registry,
+                "blaxel_drive_mount",
+                Mount,
+            )
+        monkeypatch.setattr(
+            importlib,
+            "import_module",
+            import_module_with_registration_collision,
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            await RunState.from_json(agent, state_json)
+
+        assert sentinel not in str(exc_info.value)
+        assert sentinel not in repr(exc_info.value)
+        traceback = exc_info.value.__traceback__
+        while traceback is not None:
+            frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
+            if "/src/agents/" in frame_path:
+                assert sentinel not in repr(traceback.tb_frame.f_locals)
+            traceback = traceback.tb_next
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider_entry_registered", [False, True])
+    async def test_run_state_preserves_blaxel_drive_mount(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        provider_entry_registered: bool,
+    ) -> None:
+        if provider_entry_registered:
+            from agents.extensions.sandbox.blaxel.mounts import BlaxelDriveMount
+
+            monkeypatch.setitem(
+                BaseEntry._subclass_registry,
+                "blaxel_drive_mount",
+                BlaxelDriveMount,
+            )
+        else:
+            monkeypatch.delitem(BaseEntry._subclass_registry, "blaxel_drive_mount", raising=False)
+        agent = Agent(name="TestAgent")
+        state: RunState[Any, Agent[Any]] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        raw_session_state = {
+            "type": "blaxel",
+            "manifest": {
+                "version": 1,
+                "root": "/workspace",
+                "entries": {
+                    "drive": {
+                        "type": "blaxel_drive_mount",
+                        "drive_name": "shared-drive",
+                        "drive_mount_path": "/data",
+                        "drive_path": "/",
+                        "drive_read_only": True,
+                        "mount_strategy": {"type": "blaxel_drive"},
+                    }
+                },
+                "environment": {"value": {}},
+            },
+        }
+        state._sandbox = {
+            "backend_id": "blaxel",
+            "session_state": raw_session_state,
+        }
+
+        serialized = state.to_json()
+        restored = await RunState.from_json(agent, serialized)
+
+        assert restored._sandbox is not None
+        restored_session = cast(dict[str, object], restored._sandbox["session_state"])
+        restored_manifest = cast(dict[str, object], restored_session["manifest"])
+        restored_entries = cast(dict[str, object], restored_manifest["entries"])
+        expected_manifest = cast(dict[str, object], raw_session_state["manifest"])
+        expected_entries = cast(dict[str, object], expected_manifest["entries"])
+        assert restored_entries["drive"] == expected_entries["drive"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation", ["to_json", "from_json"])
+    async def test_run_state_rejects_malformed_manifest_entry_containers_without_values(
+        self,
+        operation: str,
+    ) -> None:
+        agent = Agent(name="TestAgent")
+        state: RunState[Any, Agent[Any]] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        sentinel = "malformed-entry-container-secret"
+        sandbox = {
+            "backend_id": "unimported-provider",
+            "session_state": {
+                "type": "unimported-provider",
+                "manifest": {
+                    "version": 1,
+                    "root": "/workspace",
+                    "entries": [sentinel],
+                    "environment": {"value": {}},
+                },
+            },
+        }
+        if operation == "to_json":
+            state._sandbox = sandbox
+            serialized = None
+        else:
+            serialized = state.to_json()
+            serialized["sandbox"] = sandbox
+
+        with pytest.raises(ValueError, match="invalid manifest") as exc:
+            if operation == "to_json":
+                state.to_json()
+            else:
+                assert serialized is not None
+                await RunState.from_json(agent, serialized)
+
+        assert sandbox == {}
+        assert sentinel not in str(exc.value)
+        traceback = exc.value.__traceback__
+        while traceback is not None:
+            module_name = traceback.tb_frame.f_globals.get("__name__", "")
+            if isinstance(module_name, str) and module_name.startswith("agents."):
+                assert sentinel not in repr(traceback.tb_frame.f_locals)
+            traceback = traceback.tb_next
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation", ["to_json", "from_json"])
+    async def test_run_state_rejects_non_mapping_session_manifest(
+        self,
+        operation: str,
+    ) -> None:
+        agent = Agent(name="TestAgent")
+        state: RunState[Any, Agent[Any]] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        sentinel = "non-mapping-manifest-secret"
+        sandbox = {
+            "backend_id": "unimported-provider",
+            "session_state": {
+                "type": "unimported-provider",
+                "manifest": [{"secret_access_key": sentinel}],
+            },
+        }
+        if operation == "to_json":
+            state._sandbox = sandbox
+            serialized = None
+        else:
+            serialized = state.to_json()
+            serialized["sandbox"] = sandbox
+
+        with pytest.raises(ValueError, match="invalid manifest") as exc:
+            if operation == "to_json":
+                state.to_json()
+            else:
+                assert serialized is not None
+                await RunState.from_json(agent, serialized)
+
+        assert sandbox == {}
+        assert sentinel not in str(exc.value)
+        traceback = exc.value.__traceback__
+        while traceback is not None:
+            frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
+            if "/src/agents/" in frame_path:
+                assert sentinel not in repr(traceback.tb_frame.f_locals)
+            traceback = traceback.tb_next
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation", ["to_json", "from_json"])
+    @pytest.mark.parametrize("location", ["strategy", "pattern"])
+    async def test_run_state_rejects_unknown_mount_discriminators_without_values(
+        self,
+        operation: str,
+        location: str,
+    ) -> None:
+        agent = Agent(name="TestAgent")
+        state: RunState[Any, Agent[Any]] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        sentinel = f"unknown-{location}-discriminator-secret"
+        raw_session_state: dict[str, Any] = {
+            "type": "unimported-provider",
+            "manifest": {
+                "version": 1,
+                "root": "/workspace",
+                "entries": {
+                    "data": {
+                        "type": "s3_mount",
+                        "bucket": "bucket",
+                        "mount_strategy": {
+                            "type": "in_container",
+                            "pattern": {
+                                "type": "rclone",
+                            },
+                        },
+                    },
+                },
+                "environment": {"value": {}},
+            },
+        }
+        strategy = cast(
+            dict[str, Any],
+            raw_session_state["manifest"]["entries"]["data"]["mount_strategy"],
+        )
+        if location == "strategy":
+            strategy["type"] = sentinel
+        else:
+            cast(dict[str, Any], strategy["pattern"])["type"] = sentinel
+        sandbox = {
+            "backend_id": "unimported-provider",
+            "session_state": raw_session_state,
+        }
+
+        if operation == "to_json":
+            state._sandbox = sandbox
+            serialized = None
+        else:
+            serialized = state.to_json()
+            serialized["sandbox"] = sandbox
+
+        with pytest.raises(ValueError, match="invalid manifest") as exc_info:
+            if operation == "to_json":
+                state.to_json()
+            else:
+                assert serialized is not None
+                await RunState.from_json(agent, serialized)
+
+        assert sandbox == {}
+        assert sentinel not in str(exc_info.value)
+        assert sentinel not in repr(exc_info.value)
+        traceback = exc_info.value.__traceback__
+        while traceback is not None:
+            module_name = traceback.tb_frame.f_globals.get("__name__", "")
+            if isinstance(module_name, str) and module_name.startswith("agents."):
+                assert sentinel not in repr(traceback.tb_frame.f_locals)
+            traceback = traceback.tb_next
+
+    def test_run_state_redacts_unknown_mount_strategy_configuration(self) -> None:
+        agent = Agent(name="TestAgent")
+        state: RunState[Any, Agent[Any]] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        state._sandbox = {
+            "backend_id": "unimported-provider",
+            "session_state": {
+                "type": "unimported-provider",
+                "manifest": {
+                    "version": 1,
+                    "root": "/workspace",
+                    "entries": {
+                        "data": {
+                            "type": "s3_mount",
+                            "bucket": "bucket",
+                            "mount_strategy": {
+                                "type": "in_container",
+                                "api_token": "custom-strategy-secret",
+                                "pattern": {
+                                    "type": "rclone",
+                                    "api_token": "nested-pattern-secret",
+                                    "options": {
+                                        "authorization": "nested-options-secret",
+                                    },
+                                },
+                            },
+                        }
+                    },
+                    "environment": {"value": {}},
+                },
+            },
+        }
+
+        serialized = state.to_json()
+
+        strategy = serialized["sandbox"]["session_state"]["manifest"]["entries"]["data"][
+            "mount_strategy"
+        ]
+        assert strategy["type"] == "in_container"
+        assert strategy["pattern"]["type"] == "rclone"
+        assert "api_token" not in strategy
+        assert "api_token" not in strategy["pattern"]
+        assert "options" not in strategy["pattern"]
+        assert "custom-strategy-secret" not in repr(serialized)
+        assert "nested-pattern-secret" not in repr(serialized)
+        assert "nested-options-secret" not in repr(serialized)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation", ["to_json", "from_json"])
+    @pytest.mark.parametrize("location", ["top_level", "current", "sessions_by_agent"])
+    async def test_run_state_rejects_malformed_sandbox_session_envelopes_without_values(
+        self,
+        operation: str,
+        location: str,
+    ) -> None:
+        agent = Agent(name="TestAgent")
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        state: RunState[Any, Agent[Any]] = make_state(agent, context=context, original_input="test")
+        sentinel = "malformed-sandbox-secret"
+        if location == "top_level":
+            malformed: object = sentinel
+        elif location == "current":
+            malformed = {"session_state": [sentinel]}
+        else:
+            malformed = {
+                "sessions_by_agent": {
+                    agent.name: {
+                        "agent_name": agent.name,
+                        "session_state": [sentinel],
+                    }
+                }
+            }
+
+        if operation == "to_json":
+            state._sandbox = cast(Any, malformed)
+            serialized = None
+        else:
+            serialized = state.to_json()
+            serialized["sandbox"] = malformed
+
+        with pytest.raises(ValueError, match="invalid envelope") as exc:
+            if operation == "to_json":
+                state.to_json()
+            else:
+                assert serialized is not None
+                await RunState.from_json(agent, serialized)
+
+        if isinstance(malformed, dict):
+            assert malformed == {}
+        elif operation == "to_json":
+            assert state._sandbox is None
+        else:
+            assert serialized is not None
+            assert serialized["sandbox"] == {}
+        assert sentinel not in str(exc.value)
+        assert sentinel not in repr(exc.value)
+        traceback = exc.value.__traceback__
+        while traceback is not None:
+            module_name = traceback.tb_frame.f_globals.get("__name__", "")
+            if isinstance(module_name, str) and module_name.startswith("agents."):
+                assert sentinel not in repr(traceback.tb_frame.f_locals)
+            traceback = traceback.tb_next
 
     @pytest.mark.asyncio
     async def test_from_json_agent_not_found(self):

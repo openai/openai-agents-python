@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 from ...logger import log_tool_action_warning
+from .._mount_security import redact_mount_error_data
 from ..errors import (
     ExecNonZeroError,
     ExecTimeoutError,
@@ -151,6 +152,21 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     def from_state(cls, state: UnixLocalSandboxSessionState) -> "UnixLocalSandboxSession":
         return cls(state=state)
 
+    async def _validate_manifest_application(
+        self,
+        *,
+        only_ephemeral: bool = False,
+        manifest: Manifest | None = None,
+        session_running: bool | None = None,
+    ) -> None:
+        _ = (only_ephemeral, session_running)
+        from .._mount_security import validate_manifest_mount_credential_boundaries
+
+        validate_manifest_mount_credential_boundaries(
+            manifest or self.state.manifest,
+            provider_backend_id="unix_local",
+        )
+
     async def _prepare_backend_workspace(self) -> None:
         workspace = Path(self.state.manifest.root)
         try:
@@ -186,12 +202,6 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         return await super()._apply_manifest(
             only_ephemeral=only_ephemeral,
             provision_accounts=provision_accounts,
-        )
-
-    async def apply_manifest(self, *, only_ephemeral: bool = False) -> MaterializationResult:
-        return await self._apply_manifest(
-            only_ephemeral=only_ephemeral,
-            provision_accounts=not only_ephemeral,
         )
 
     async def provision_manifest_accounts(self) -> None:
@@ -1095,6 +1105,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         )
         self._dependencies = dependencies
 
+    @redact_mount_error_data
     async def create(
         self,
         *,
@@ -1103,18 +1114,16 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         options: UnixLocalSandboxClientOptions | None = None,
     ) -> SandboxSession:
         resolved_options = options if options is not None else UnixLocalSandboxClientOptions()
-        if manifest is not None:
-            _assert_unix_local_host_path_grants_unsupported(manifest)
+        manifest = manifest if manifest is not None else Manifest()
+        _assert_unix_local_host_path_grants_unsupported(manifest)
+        self._validate_manifest_for_create(manifest)
         # For local execution, runner-created sessions should always get an isolated temp root
         # unless the caller explicitly chose a custom host path.
         workspace_root_owned = False
-        if manifest is None or manifest.root == _DEFAULT_MANIFEST_ROOT:
+        if manifest.root == _DEFAULT_MANIFEST_ROOT:
             workspace_dir = tempfile.mkdtemp(prefix=_DEFAULT_WORKSPACE_PREFIX)
             workspace_root_owned = True
-            if manifest is None:
-                manifest = Manifest(root=workspace_dir)
-            else:
-                manifest = manifest.model_copy(update={"root": workspace_dir}, deep=True)
+            manifest = manifest.model_copy(update={"root": workspace_dir}, deep=True)
 
         session_id = uuid.uuid4()
         snapshot_id = str(session_id)
@@ -1158,6 +1167,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
             pass
         return session
 
+    @redact_mount_error_data
     async def resume(
         self,
         state: SandboxSessionState,

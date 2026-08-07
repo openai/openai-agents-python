@@ -7,6 +7,8 @@ import shlex
 from pathlib import Path
 from typing import Literal, NoReturn
 
+from ....exceptions import _mark_error_data_redacted
+from ....sandbox._mount_security import discard_mount_source_exception, redact_mount_error_data
 from ....sandbox.entries import Mount, S3Mount
 from ....sandbox.entries.mounts.base import MountStrategyBase
 from ....sandbox.errors import MountCommandError, MountConfigError
@@ -23,6 +25,7 @@ _MOUNTPOINT_SOURCE = "mountpoint-s3"
 _MOUNTPOINT_MINIMUM_VERSION = (1, 21, 0)
 _MOUNTPOINT_INSTALL_TIMEOUT_S = 300.0
 _MOUNTPOINT_COMMAND_TIMEOUT_S = 120.0
+_CREDENTIALED_MOUNT_FAILURE_MESSAGE = "sandbox provider command failed"
 
 
 def _require_vercel_session(session: BaseSandboxSession) -> VercelSandboxSession:
@@ -37,13 +40,6 @@ def _require_vercel_session(session: BaseSandboxSession) -> VercelSandboxSession
     return session
 
 
-def _redact_sensitive_values(text: str, values: tuple[str, ...]) -> str:
-    redacted = text
-    for value in sorted({value for value in values if value}, key=len, reverse=True):
-        redacted = redacted.replace(value, "REDACTED")
-    return redacted
-
-
 async def _run_vercel_command(
     session: VercelSandboxSession,
     command: str,
@@ -53,6 +49,8 @@ async def _run_vercel_command(
     timeout: float = _MOUNTPOINT_COMMAND_TIMEOUT_S,
 ) -> ExecResult:
     command_text = shlex.join([command, *args])
+    sensitive_values = session._runtime_s3_mount_sensitive_values()
+    protected_error: MountCommandError | None = None
     try:
         sandbox = await session._ensure_sandbox()
 
@@ -68,12 +66,29 @@ async def _run_vercel_command(
 
         return await asyncio.wait_for(run_and_collect_output(), timeout=timeout)
     except Exception as exc:
-        raise MountCommandError(
+        if not sensitive_values:
+            raise MountCommandError(
+                command=command_text,
+                stderr=f"{type(exc).__name__}: {exc}",
+                context={"backend": "vercel"},
+                retryable=session._runtime_provider_retryability(exc),
+            ) from None
+        try:
+            retryable = session._runtime_provider_retryability(exc)
+        except BaseException:
+            retryable = None
+        protected_error = MountCommandError(
             command=command_text,
-            stderr=f"{type(exc).__name__}: {exc}",
+            stderr=_CREDENTIALED_MOUNT_FAILURE_MESSAGE,
             context={"backend": "vercel"},
-            retryable=session._runtime_provider_retryability(exc),
-        ) from None
+            retryable=retryable,
+        )
+        _mark_error_data_redacted(protected_error)
+        discard_mount_source_exception(exc)
+
+    del sensitive_values
+    assert protected_error is not None
+    raise protected_error from None
 
 
 def _raise_command_failure(
@@ -123,20 +138,23 @@ async def _run_credentialed_mount_command(
     context: dict[str, object],
 ) -> ExecResult | MountCommandError | asyncio.CancelledError:
     env = session._runtime_s3_mount_environment(mount_path)
-    sensitive_values = tuple(env.values())
     command_text = shlex.join([_MOUNTPOINT_BINARY, *args])
     try:
         sandbox = await session._ensure_sandbox()
 
         async def run_and_collect_output() -> ExecResult:
-            finished = await sandbox.run_command(
-                _MOUNTPOINT_BINARY,
-                args,
-                env=env,
-                sudo=True,
-            )
-            stdout = (await finished.stdout()).encode("utf-8")
-            stderr = (await finished.stderr()).encode("utf-8")
+            try:
+                finished = await sandbox.run_command(
+                    _MOUNTPOINT_BINARY,
+                    args,
+                    env=env,
+                    sudo=True,
+                )
+                stdout = (await finished.stdout()).encode("utf-8")
+                stderr = (await finished.stderr()).encode("utf-8")
+            except asyncio.CancelledError as error:
+                discard_mount_source_exception(error)
+                raise asyncio.CancelledError() from None
             return ExecResult(stdout=stdout, stderr=stderr, exit_code=finished.exit_code)
 
         result = await asyncio.wait_for(
@@ -145,39 +163,36 @@ async def _run_credentialed_mount_command(
         )
     except (Exception, asyncio.CancelledError) as exc:
         cancelled = isinstance(exc, asyncio.CancelledError)
-        retryable = session._runtime_provider_retryability(exc)
-        failure_message = _redact_sensitive_values(
-            f"{type(exc).__name__}: {exc}",
-            sensitive_values,
-        )
-        exc.__traceback__ = None
-        exc.__context__ = None
-        exc.__cause__ = None
+        try:
+            retryable = session._runtime_provider_retryability(exc)
+        except BaseException:
+            retryable = None
+        discard_mount_source_exception(exc)
         if cancelled:
             return asyncio.CancelledError()
-        return MountCommandError(
+        protected_error = MountCommandError(
             command=command_text,
-            stderr=failure_message,
+            stderr=_CREDENTIALED_MOUNT_FAILURE_MESSAGE,
             context={"backend": "vercel", **context},
             retryable=retryable,
         )
+        _mark_error_data_redacted(protected_error)
+        return protected_error
 
     if result.ok():
         return result
 
-    failure_message = _redact_sensitive_values(
-        result.stderr.decode("utf-8", errors="replace"),
-        sensitive_values,
-    )
-    return MountCommandError(
+    protected_error = MountCommandError(
         command=command_text,
-        stderr=failure_message,
+        stderr=_CREDENTIALED_MOUNT_FAILURE_MESSAGE,
         context={
             "backend": "vercel",
             "exit_code": result.exit_code,
             **context,
         },
     )
+    _mark_error_data_redacted(protected_error)
+    return protected_error
 
 
 def _parse_mountpoint_version(raw: str) -> tuple[int, int, int] | None:
@@ -486,6 +501,7 @@ class VercelCloudBucketMountStrategy(MountStrategyBase):
         _ = mount
         return False
 
+    @redact_mount_error_data
     async def activate(
         self,
         mount: Mount,
@@ -515,6 +531,7 @@ class VercelCloudBucketMountStrategy(MountStrategyBase):
             vercel_session._runtime_record_s3_mount_active(mount_path)
             return []
 
+    @redact_mount_error_data
     async def deactivate(
         self,
         mount: Mount,
@@ -535,6 +552,7 @@ class VercelCloudBucketMountStrategy(MountStrategyBase):
             raise
         vercel_session._runtime_record_s3_mount_inactive(mount_path)
 
+    @redact_mount_error_data
     async def teardown_for_snapshot(
         self,
         mount: Mount,
@@ -552,6 +570,7 @@ class VercelCloudBucketMountStrategy(MountStrategyBase):
             raise
         vercel_session._runtime_record_s3_mount_detached(path)
 
+    @redact_mount_error_data
     async def restore_after_snapshot(
         self,
         mount: Mount,

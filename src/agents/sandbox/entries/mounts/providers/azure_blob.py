@@ -97,7 +97,7 @@ class AzureBlobMount(_ConfiguredMount):
         if self.account_key:
             lines.append(f"key = {self.account_key}")
         else:
-            lines.append("use_msi = true")
+            lines.append("use_msi = false")
             if self.identity_client_id:
                 lines.append(f"msi_client_id = {self.identity_client_id}")
         return lines
