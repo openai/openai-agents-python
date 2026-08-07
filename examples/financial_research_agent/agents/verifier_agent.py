@@ -12,9 +12,12 @@ VERIFIER_PROMPT = (
     "URLs. Judge the report only against that supplied evidence; do not reject or approve claims "
     "based on your own memory. Check that material numeric and time-sensitive claims are supported "
     "by the evidence, that citations use supplied URLs, that the report is internally consistent, "
-    "and that uncertainty is appropriately caveated. Treat information published on or before the "
-    "research cutoff as potentially available. Mark unsupported claims separately from claims that "
-    "the evidence directly contradicts."
+    "and that uncertainty is appropriately caveated. The payload includes allowed_source_urls; "
+    "compare citation URL strings exactly against that list. If a citation exactly matches an "
+    "allowed URL, accept the URL even when it contains a tracking parameter or another allowed "
+    "variant exists. Treat information published on or before the research cutoff as potentially "
+    "available. Mark unsupported claims separately from claims that the evidence directly "
+    "contradicts."
 )
 
 

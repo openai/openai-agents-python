@@ -279,6 +279,30 @@ def test_financial_report_input_includes_cutoff_and_evidence() -> None:
     }
 
 
+def test_financial_verification_input_lists_exact_allowed_source_urls() -> None:
+    manager = object.__new__(FinancialResearchManager)
+    manager.research_cutoff = "2026-07-11"
+    source_url = "https://example.com/report?utm_source=openai"
+    evidence = FinancialSearchEvidence(
+        query="company annual report",
+        reason="Ground annual metrics",
+        summary="Revenue increased.",
+        sources=[FinancialSource(title="Annual report", url=source_url)],
+        retrieved_at="2026-07-11",
+    )
+    report = FinancialReportData(
+        short_summary="Summary",
+        markdown_report=f"Revenue increased ([source]({source_url})).",
+        follow_up_questions=[],
+    )
+
+    payload = json.loads(manager._verification_input("Analyze the company", report, [evidence]))
+
+    assert payload["allowed_source_urls"] == [source_url]
+    assert payload["report"] == report.model_dump(mode="json")
+    assert payload["evidence"] == [evidence.model_dump(mode="json")]
+
+
 def test_sandbox_basic_direct_run_imports_external_docker_sdk(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

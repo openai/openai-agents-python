@@ -72,15 +72,16 @@ def _as_mapping(value: Any) -> Mapping[str, Any] | None:
     return None
 
 
-def _normalize_value(value: Any) -> Any:
+def _normalize_value(value: Any, *, exclude_none: bool = False) -> Any:
     mapping = _as_mapping(value)
     if mapping is not None:
         return {
-            str(key): _normalize_value(item)
+            str(key): _normalize_value(item, exclude_none=exclude_none)
             for key, item in sorted(mapping.items(), key=lambda pair: str(pair[0]))
+            if not (exclude_none and item is None)
         }
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        return [_normalize_value(item) for item in value]
+        return [_normalize_value(item, exclude_none=exclude_none) for item in value]
     if value is None or isinstance(value, str | int | float | bool):
         return value
     return str(value)
@@ -197,8 +198,12 @@ def tool_invocation_identity_and_scope(
         if field_name not in mapping:
             continue
         value = mapping[field_name]
+        if value is None:
+            continue
         semantic_payload[field_name] = (
-            _normalize_arguments(value) if field_name == "arguments" else _normalize_value(value)
+            _normalize_arguments(value)
+            if field_name == "arguments"
+            else _normalize_value(value, exclude_none=True)
         )
 
     return (

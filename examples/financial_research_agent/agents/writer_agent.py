@@ -17,7 +17,9 @@ WRITER_PROMPT = (
 REVISION_PROMPT = (
     f"{WRITER_PROMPT} You are revising an existing report after evidence verification. Address "
     "every verification issue, remove claims that cannot be supported, preserve valid analysis, "
-    "and return a complete replacement report rather than a patch or commentary."
+    "and return a complete replacement report rather than a patch or commentary. Copy replacement "
+    "citation URLs verbatim from each verification issue's source_urls; do not change path casing, "
+    "language segments, or query parameters."
 )
 
 

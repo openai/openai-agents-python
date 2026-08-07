@@ -79,6 +79,41 @@ def test_canonical_shell_identity_ignores_stripped_provider_metadata() -> None:
     assert tool_invocation_identity(provider_call) == tool_invocation_identity(persisted_call)
 
 
+def test_canonical_shell_identity_treats_optional_nulls_as_omitted() -> None:
+    provider_call = {
+        "type": "shell_call",
+        "call_id": "shell_0",
+        "action": {
+            "commands": ["echo safe"],
+            "max_output_length": None,
+            "timeout_ms": None,
+        },
+        "environment": None,
+    }
+    normalized_call = dict(provider_call)
+    normalized_call["action"] = {"commands": ["echo safe"]}
+    normalized_call.pop("environment")
+
+    assert tool_invocation_identity(provider_call) == tool_invocation_identity(normalized_call)
+
+
+def test_canonical_function_identity_preserves_null_argument_values() -> None:
+    call_with_null = {
+        "type": "function_call",
+        "call_id": "call_0",
+        "name": "lookup",
+        "arguments": '{"value": null}',
+    }
+    call_without_value = {
+        "type": "function_call",
+        "call_id": "call_0",
+        "name": "lookup",
+        "arguments": "{}",
+    }
+
+    assert tool_invocation_identity(call_with_null) != tool_invocation_identity(call_without_value)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fallback_type", ["custom", "function"])
 async def test_completed_apply_patch_fallback_run_state_round_trip(fallback_type: str) -> None:

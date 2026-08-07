@@ -237,18 +237,31 @@ class FinancialResearchManager:
         search_results: Sequence[FinancialSearchEvidence],
     ) -> VerificationResult:
         self.printer.update_item("verifying", "Verifying report...")
-        input_data = json.dumps(
+        result = await Runner.run(
+            verifier_agent,
+            self._verification_input(query, report, search_results),
+        )
+        self.printer.mark_item_done("verifying")
+        return result.final_output_as(VerificationResult)
+
+    def _verification_input(
+        self,
+        query: str,
+        report: FinancialReportData,
+        search_results: Sequence[FinancialSearchEvidence],
+    ) -> str:
+        return json.dumps(
             {
                 "original_query": query,
                 "research_cutoff": self.research_cutoff,
                 "report": report.model_dump(mode="json"),
                 "evidence": [item.model_dump(mode="json") for item in search_results],
+                "allowed_source_urls": sorted(
+                    {source.url for item in search_results for source in item.sources}
+                ),
             },
             ensure_ascii=False,
         )
-        result = await Runner.run(verifier_agent, input_data)
-        self.printer.mark_item_done("verifying")
-        return result.final_output_as(VerificationResult)
 
     def _report_input(
         self,
