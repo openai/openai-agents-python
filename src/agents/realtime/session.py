@@ -1259,7 +1259,12 @@ class RealtimeSession(RealtimeModelListener):
         )
         if existing_index is not None:
             new_history = old_history.copy()
-            if event.type == "message" and event.content is not None and len(event.content) > 0:
+            if event.type != "message":
+                # Tool calls reuse a single item for the call and its output, so the transport
+                # re-sends the same item_id with status "completed" once the output is known.
+                # Only message items carry content worth merging, so replace anything else.
+                new_history[existing_index] = event
+            elif event.content is not None and len(event.content) > 0:
                 existing_item = old_history[existing_index]
                 if existing_item.type == "message":
                     # Merge content preserving existing transcript/text when incoming entry is empty

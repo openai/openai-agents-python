@@ -41,6 +41,7 @@ from agents.realtime.items import (
     InputAudio,
     InputText,
     RealtimeItem,
+    RealtimeToolCallItem,
     UserMessageItem,
 )
 from agents.realtime.model import RealtimeModel, RealtimeModelConfig
@@ -1638,6 +1639,46 @@ class TestEventHandling:
         assert isinstance(history_event, RealtimeHistoryUpdated)
 
     @pytest.mark.asyncio
+    async def test_item_updated_event_completes_tool_call(self, mock_model, mock_agent):
+        """The transport reuses one item for a tool call and its output, so the second
+        item_updated must land in history."""
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={"async_tool_calls": False},
+        )
+
+        in_progress = RealtimeToolCallItem(
+            item_id="fc_1",
+            previous_item_id=None,
+            call_id="call_1",
+            type="function_call",
+            status="in_progress",
+            arguments='{"city": "Oakland"}',
+            name="get_weather",
+            output=None,
+        )
+        await session.on_event(RealtimeModelItemUpdatedEvent(item=in_progress))
+
+        completed = in_progress.model_copy(update={"status": "completed", "output": "sunny"})
+        await session.on_event(RealtimeModelItemUpdatedEvent(item=completed))
+
+        assert len(session._history) == 1
+        stored = cast(RealtimeToolCallItem, session._history[0])
+        assert stored.status == "completed"
+        assert stored.output == "sunny"
+
+        # raw + history added, then raw + history updated.
+        assert session._event_queue.qsize() == 4
+        await session._event_queue.get()  # raw event
+        assert isinstance(await session._event_queue.get(), RealtimeHistoryAdded)
+        await session._event_queue.get()  # raw event
+        history_event = await session._event_queue.get()
+        assert isinstance(history_event, RealtimeHistoryUpdated)
+        assert cast(RealtimeToolCallItem, history_event.history[0]).output == "sunny"
+
+    @pytest.mark.asyncio
     async def test_item_deleted_event_removes_item(self, mock_model, mock_agent):
         """Test that item_deleted events remove items from history"""
         session = RealtimeSession(mock_model, mock_agent, None)
@@ -2018,6 +2059,65 @@ class TestHistoryManagement:
         assert len(new_history) == 2
         assert new_history[0].item_id == "item_1"
         assert new_history[1].item_id == "item_2"
+
+    def test_tool_call_item_update_replaces_existing_entry(self):
+        """A completed tool call replaces the in-progress entry it shares an item_id with."""
+        in_progress = RealtimeToolCallItem(
+            item_id="item_1",
+            previous_item_id=None,
+            call_id="call_1",
+            type="function_call",
+            status="in_progress",
+            arguments='{"city": "Oakland"}',
+            name="get_weather",
+            output=None,
+        )
+        completed = RealtimeToolCallItem(
+            item_id="item_1",
+            previous_item_id=None,
+            call_id="call_1",
+            type="function_call",
+            status="completed",
+            arguments='{"city": "Oakland"}',
+            name="get_weather",
+            output="sunny",
+        )
+
+        history = RealtimeSession._get_new_history([], in_progress)
+        history = RealtimeSession._get_new_history(history, completed)
+
+        assert len(history) == 1
+        updated = cast(RealtimeToolCallItem, history[0])
+        assert updated.status == "completed"
+        assert updated.output == "sunny"
+
+    def test_tool_call_item_update_preserves_other_items(self):
+        """Replacing a tool call entry leaves the surrounding history untouched."""
+        before = UserMessageItem(
+            item_id="item_0", role="user", content=[InputText(text="what's the weather?")]
+        )
+        after = AssistantMessageItem(
+            item_id="item_2", role="assistant", content=[AssistantText(text="It is sunny.")]
+        )
+        in_progress = RealtimeToolCallItem(
+            item_id="item_1",
+            previous_item_id=None,
+            call_id="call_1",
+            type="function_call",
+            status="in_progress",
+            arguments="{}",
+            name="get_weather",
+            output=None,
+        )
+        old_history = cast(list[RealtimeItem], [before, in_progress, after])
+
+        completed = in_progress.model_copy(update={"status": "completed", "output": "sunny"})
+        new_history = RealtimeSession._get_new_history(old_history, completed)
+
+        assert [item.item_id for item in new_history] == ["item_0", "item_1", "item_2"]
+        assert new_history[0] == before
+        assert new_history[2] == after
+        assert cast(RealtimeToolCallItem, new_history[1]).output == "sunny"
 
     def test_add_first_item_to_empty_history(self):
         """Test adding first item to empty history"""
