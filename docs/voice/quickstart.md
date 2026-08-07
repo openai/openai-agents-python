@@ -8,6 +8,12 @@ Make sure you've followed the base [quickstart instructions](../quickstart.md) f
 pip install 'openai-agents[voice]'
 ```
 
+The demo code below also uses [`sounddevice`](https://pypi.org/project/sounddevice/) for microphone and speaker I/O, which is not part of the `voice` extra:
+
+```bash
+pip install sounddevice
+```
+
 ## Concepts
 
 The main concept to know about is a [`VoicePipeline`][agents.voice.pipeline.VoicePipeline], which is a 3 step process:

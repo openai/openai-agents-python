@@ -67,6 +67,7 @@ from agents.items import (
     TResponseStreamEvent,
 )
 from agents.run_context import RunContextWrapper
+from agents.run_error_handlers import RunErrorHandlerResult, RunErrorHandlers
 from agents.run_internal.agent_runner_helpers import (
     resolve_resumed_context,
     resolve_trace_settings,
@@ -3200,6 +3201,97 @@ class TestRunStateResumption:
         assert len(result2.raw_responses) == 2
         assert len(result1.raw_responses) == 1
         assert result1.raw_responses is not result2.raw_responses
+
+    @pytest.mark.asyncio
+    async def test_resume_does_not_append_to_the_state_it_resumed_from(self):
+        """A resumed run must not accumulate its responses into the caller's checkpoint."""
+        model = FakeModel()
+        agent = Agent(name="TestAgent", model=model)
+
+        model.set_next_output([get_text_message("First response")])
+        result1 = await Runner.run(agent, "First input")
+        state = result1.to_state()
+        serialized_before = state.to_json()["model_responses"]
+
+        model.set_next_output([get_text_message("Second response")])
+        result2 = await Runner.run(agent, state)
+        assert len(result2.raw_responses) == 2
+
+        # The state is a snapshot of the first turn, so the second run's response must
+        # not land in it, neither in memory nor in the serialized snapshot.
+        assert len(state._model_responses) == 1
+        assert state.to_json()["model_responses"] == serialized_before
+
+        # Re-running the same checkpoint therefore replays only its own history.
+        model.set_next_output([get_text_message("Third response")])
+        result3 = await Runner.run(agent, state)
+        assert len(result3.raw_responses) == 2
+
+    @pytest.mark.asyncio
+    async def test_streamed_resume_does_not_append_to_the_state_it_resumed_from(self):
+        """A streamed resume must not accumulate its items into the caller's checkpoint."""
+        model = FakeModel()
+        agent = Agent(name="TestAgent", model=model)
+
+        model.set_next_output([get_text_message("First response")])
+        result1 = await Runner.run(agent, "First input")
+        state = result1.to_state()
+        serialized_before = state.to_json()["session_items"]
+
+        model.set_next_output([get_text_message("Second response")])
+        result2 = Runner.run_streamed(agent, state)
+        async for _ in result2.stream_events():
+            pass
+        assert len(result2.new_items) == 2
+
+        assert len(state._session_items) == 1
+        assert state.to_json()["session_items"] == serialized_before
+
+        # Without this, the abandoned attempt's message leaks into the replayed history.
+        model.set_next_output([get_text_message("Third response")])
+        result3 = Runner.run_streamed(agent, state)
+        async for _ in result3.stream_events():
+            pass
+        assert len(result3.new_items) == 2
+        assert len(result3.to_input_list()) == 3
+
+    @pytest.mark.asyncio
+    async def test_resumed_max_turns_handler_does_not_append_to_state_items(self):
+        """A resumed run that trips max turns must not append to the state's items."""
+        model = FakeModel()
+        agent = Agent(name="TestAgent", model=model)
+
+        model.set_next_output([get_text_message("First response")])
+        result1 = await Runner.run(agent, "First input", max_turns=1)
+        state = result1.to_state()
+        serialized_before = state.to_json()["generated_items"]
+
+        handlers: RunErrorHandlers[Any] = {
+            "max_turns": lambda _input: RunErrorHandlerResult(final_output="fallback")
+        }
+        result2 = await Runner.run(agent, state, error_handlers=handlers)
+        assert result2.final_output == "fallback"
+
+        assert len(state._generated_items) == 1
+        assert state.to_json()["generated_items"] == serialized_before
+
+    @pytest.mark.asyncio
+    async def test_fresh_runs_still_report_their_own_history(self):
+        """Boundary: a run that starts without a state is unaffected by the copies."""
+        model = FakeModel()
+        agent = Agent(name="TestAgent", model=model)
+
+        model.set_next_output([get_text_message("First response")])
+        result1 = await Runner.run(agent, "First input")
+        assert len(result1.raw_responses) == 1
+        assert len(result1.new_items) == 1
+
+        model.set_next_output([get_text_message("Streamed response")])
+        result2 = Runner.run_streamed(agent, "Second input")
+        async for _ in result2.stream_events():
+            pass
+        assert len(result2.raw_responses) == 1
+        assert len(result2.new_items) == 1
 
     @pytest.mark.asyncio
     async def test_resume_from_run_state_with_context(self):
