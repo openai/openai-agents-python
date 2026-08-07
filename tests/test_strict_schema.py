@@ -362,3 +362,67 @@ def test_ref_expansion_bomb_is_rejected():
     }
     with pytest.raises(UserError):
         ensure_strict_json_schema(schema)
+
+
+def test_free_form_object_property_is_rejected_instead_of_silently_emptied():
+    # A property declared only as `{"type": "object"}` accepts arbitrary keys. Defaulting it to
+    # `additionalProperties: false` would narrow it to "the empty object is the only valid
+    # value", so the model could never send any content for it.
+    schema = {
+        "type": "object",
+        "properties": {
+            "target": {"type": "string"},
+            "keysAndValues": {"type": "object", "description": "key/value pairs"},
+        },
+    }
+
+    with pytest.raises(UserError, match="free-form object"):
+        ensure_strict_json_schema(schema)
+
+
+def test_free_form_object_root_is_rejected():
+    with pytest.raises(UserError, match="free-form object"):
+        ensure_strict_json_schema({"type": "object"})
+
+
+def test_object_with_empty_properties_stays_strict():
+    # A tool that takes no arguments is not free-form: it declares that it has no properties.
+    result = ensure_strict_json_schema({"type": "object", "properties": {}})
+
+    assert result == {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    }
+
+
+def test_explicit_additional_properties_false_object_is_preserved():
+    # An explicit `additionalProperties: false` is the caller stating the empty object really is
+    # the only valid value, so it must keep working.
+    result = ensure_strict_json_schema(
+        {
+            "type": "object",
+            "properties": {"a": {"type": "object", "additionalProperties": False}},
+        }
+    )
+
+    assert result["properties"]["a"] == {"type": "object", "additionalProperties": False}
+
+
+@pytest.mark.parametrize(
+    "shaped",
+    [
+        {"type": "object", "allOf": [{"properties": {"a": {"type": "string"}}}]},
+        {"type": "object", "anyOf": [{"properties": {"a": {"type": "string"}}}]},
+        {"type": "object", "patternProperties": {"^x": {"type": "string"}}},
+        {"type": "object", "enum": [{"a": 1}]},
+    ],
+    ids=["allOf", "anyOf", "patternProperties", "enum"],
+)
+def test_object_shaped_by_other_keywords_is_not_treated_as_free_form(shaped):
+    # These constrain the object without using `properties`, so they are not free-form and must
+    # still convert rather than raise.
+    result = ensure_strict_json_schema({"type": "object", "properties": {"a": shaped}})
+
+    assert result["properties"]["a"]["additionalProperties"] is False

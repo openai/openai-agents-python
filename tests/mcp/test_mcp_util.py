@@ -2287,3 +2287,57 @@ def test_to_function_tool_description_falls_back_to_mcp_title():
 
     assert function_tool.description == "Search Docs"
     assert function_tool._mcp_title == "Search Docs"
+
+
+@pytest.mark.asyncio
+async def test_free_form_object_arg_falls_back_to_non_strict_schema():
+    """A free-form object arg must stay usable rather than becoming "empty object only".
+
+    Strict conversion cannot express `{"type": "object"}` with no properties. Forcing
+    `additionalProperties: false` onto it would leave the model able to send only `{}`, so the
+    tool silently loses the ability to carry any data. Conversion must fail and the server must
+    fall back to the original schema.
+    """
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="set_properties",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string"},
+                "keys_and_values": {"type": "object", "description": "key/value pairs"},
+            },
+            "required": ["target", "keys_and_values"],
+        },
+    )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    keys_and_values = function_tool.params_json_schema["properties"]["keys_and_values"]
+    # The free-form object is served as-is, so arbitrary keys remain valid.
+    assert "additionalProperties" not in keys_and_values
+
+
+@pytest.mark.asyncio
+async def test_fully_specified_object_args_still_convert_to_strict():
+    """The fallback above must not stop ordinary schemas from becoming strict."""
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="set_properties",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string"},
+                "options": {"type": "object", "properties": {"visible": {"type": "boolean"}}},
+            },
+            "required": ["target", "options"],
+        },
+    )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is True
+    assert (
+        function_tool.params_json_schema["properties"]["options"]["additionalProperties"] is False
+    )

@@ -27,6 +27,41 @@ _ADDITIONAL_PROPERTIES_ERROR = (
     "to not use a strict schema."
 )
 
+_FREE_FORM_OBJECT_ERROR = (
+    "Strict JSON schemas cannot express a free-form object. An object that declares no "
+    "properties and no additionalProperties accepts arbitrary keys, which strict mode does "
+    "not support. Describe the expected properties, or update the function or output tool to "
+    "not use a strict schema."
+)
+
+# Keywords that constrain what an object may contain. An object schema carrying none of these
+# places no restriction on its keys, so it is free-form. ``additionalProperties`` is handled by
+# the caller, which only consults this helper when the keyword is absent.
+_OBJECT_SHAPE_KEYWORDS = frozenset(
+    {
+        "$ref",
+        "allOf",
+        "anyOf",
+        "const",
+        "dependentSchemas",
+        "else",
+        "enum",
+        "if",
+        "not",
+        "oneOf",
+        "patternProperties",
+        "properties",
+        "propertyNames",
+        "then",
+        "unevaluatedProperties",
+    }
+)
+
+
+def _is_free_form_object(json_schema: dict[str, object]) -> bool:
+    """Whether an object schema places no restriction at all on its keys."""
+    return not any(keyword in json_schema for keyword in _OBJECT_SHAPE_KEYWORDS)
+
 
 class _NodeBudget:
     """Tracks the remaining schema-node expansion budget across the recursion."""
@@ -117,6 +152,14 @@ def _ensure_strict_json_schema(
         raise UserError(_ADDITIONAL_PROPERTIES_ERROR)
     is_object = typ == "object" or (is_list(typ) and "object" in typ)
     if is_object and "additionalProperties" not in json_schema:
+        # An object that constrains nothing is a free-form object: any keys are allowed.
+        # Strict mode cannot express that, and defaulting to ``additionalProperties: false``
+        # here would silently narrow it to "the empty object is the only valid value", so the
+        # model could never send any content. Fail the same way an explicit
+        # ``additionalProperties: true`` does, which lets callers that can degrade (such as
+        # MCP tool conversion) fall back to serving the schema as non-strict.
+        if _is_free_form_object(json_schema):
+            raise UserError(_FREE_FORM_OBJECT_ERROR)
         json_schema["additionalProperties"] = False
     elif (
         is_object
