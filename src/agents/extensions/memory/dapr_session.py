@@ -93,12 +93,7 @@ class DaprSession(SessionABC):
                 the underlying state store implementation. Defaults to None.
             consistency (ConsistencyLevel, optional): Consistency level for state operations.
                 Use DAPR_CONSISTENCY_EVENTUAL or DAPR_CONSISTENCY_STRONG constants.
-                Defaults to DAPR_CONSISTENCY_EVENTUAL. Reads under the eventual level may
-                not observe a write this session just made, so an append that closely
-                follows another one can read back a stale conversation or a stale
-                `created_at`. Use DAPR_CONSISTENCY_STRONG when a session is appended to from
-                more than one place, or in quick succession, and the stored history and
-                timestamps have to be exact.
+                Defaults to DAPR_CONSISTENCY_EVENTUAL.
             session_settings (SessionSettings | None): Session configuration settings including
                 default limit for retrieving items. If None, uses default SessionSettings().
         """

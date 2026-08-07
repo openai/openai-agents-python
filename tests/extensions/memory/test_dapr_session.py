@@ -1502,3 +1502,89 @@ async def test_add_items_survives_metadata_write_giving_up(
             assert "etag mismatch" not in record.getMessage()
     finally:
         await session.close()
+
+
+@pytest.mark.parametrize(
+    ("dont_log_model_data", "dont_log_tool_data", "redacted"),
+    [
+        (True, False, True),
+        (False, True, True),
+        (False, False, False),
+    ],
+    ids=["model-redacted", "tool-redacted", "fully-diagnostic"],
+)
+async def test_metadata_write_warning_respects_data_policies(
+    fake_dapr_client: FakeDaprClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: Any,
+    dont_log_model_data: bool,
+    dont_log_tool_data: bool,
+    redacted: bool,
+):
+    """The give-up warning must obey both data policies, and never lose the committed items.
+
+    `log_model_and_tool_action_warning` redacts when either policy is on, so only the mode with
+    both off may carry the session id or the provider error. This inspects the whole LogRecord
+    rather than just the rendered message, because the session id travels in `extra` and the
+    exception travels in `exc_info`, neither of which shows up in `getMessage()`.
+    """
+    import logging
+
+    import agents._debug as _debug
+
+    session_id = f"metadata_policy_{dont_log_model_data}_{dont_log_tool_data}"
+    session = await _create_test_session(fake_dapr_client, session_id)
+
+    try:
+        monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", dont_log_model_data)
+        monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", dont_log_tool_data)
+
+        real_save = fake_dapr_client.save_state
+        error_text = "etag mismatch"
+
+        async def fail_only_metadata_saves(
+            store_name: str,
+            key: str,
+            value: str | bytes,
+            **kwargs: Any,
+        ) -> None:
+            if key == session._metadata_key:
+                raise RuntimeError(error_text)
+            await real_save(store_name, key, value, **kwargs)
+
+        monkeypatch.setattr(fake_dapr_client, "save_state", fail_only_metadata_saves)
+        monkeypatch.setattr(session, "_calculate_retry_delay", lambda attempt: 0.0)
+
+        with caplog.at_level(logging.WARNING):
+            await session.add_items([{"role": "user", "content": "kept"}])
+
+        # The append landed regardless of how the failure was logged.
+        items = await session.get_items()
+        assert [item.get("content") for item in items] == ["kept"]
+
+        records = [record for record in caplog.records if "could not update" in record.getMessage()]
+        assert len(records) == 1
+        record = records[0]
+        rendered = logging.Formatter().format(record)
+
+        if redacted:
+            # Redacted form is the bare message with no exception and no diagnostic context.
+            assert record.msg == "%s"
+            assert record.exc_info is None
+            assert record.exc_text is None
+            assert not hasattr(record, "openai_agents_diagnostic_context")
+            assert session_id not in rendered
+            assert error_text not in rendered
+            assert all(
+                session_id not in str(value) and error_text not in str(value)
+                for value in record.__dict__.values()
+            )
+        else:
+            # Diagnostic form carries the exception and the session id, by design.
+            assert record.msg == "%s: %s"
+            assert record.exc_info is not None
+            assert isinstance(record.exc_info[1], RuntimeError)
+            assert error_text in rendered
+            assert record.openai_agents_diagnostic_context == {"session_id": session_id}
+    finally:
+        await session.close()
