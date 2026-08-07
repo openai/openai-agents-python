@@ -19,6 +19,15 @@ We will increment `Z` for non-breaking changes:
 
 ## Breaking change changelog
 
+### 0.20.0
+
+This minor release does **not** introduce a breaking change. It updates the SDK default model used when an agent or run does not explicitly select one.
+
+Highlights:
+
+-   The SDK default model is now `gpt-5.6-luna` instead of `gpt-5.4-mini`. The default `reasoning.effort="none"` and `verbosity="low"` settings are unchanged.
+-   Explicit agent models, run-level model overrides, and the `OPENAI_DEFAULT_MODEL` environment variable continue to take precedence over the SDK default.
+
 ### 0.19.0
 
 This minor release does **not** introduce a breaking change. The minor version bump reflects a significant new OpenAI Responses feature area: Programmatic Tool Calling.
