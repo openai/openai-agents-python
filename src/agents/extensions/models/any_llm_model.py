@@ -57,6 +57,7 @@ from ...usage import (
     _attach_raw_usage_snapshot,
     _extract_raw_usage_snapshot,
     _raw_usage_snapshot,
+    mark_request_completed_without_usage,
 )
 from ...util._error_tracing import model_span_errors, record_model_error_on_span
 from ...util._json import _to_dump_compatible
@@ -482,6 +483,11 @@ class AnyLLMModel(Model):
                         final_response = chunk.response
                         if model_settings.preserve_raw_usage is True:
                             _attach_raw_usage_snapshot(chunk.response, chunk.response.usage)
+                        if final_response.usage is None:
+                            # Match the non-streaming path: the request happened even though
+                            # the provider reported no usage. Recorded without synthesizing a
+                            # usage payload, so tokens are not reported as real zeros.
+                            mark_request_completed_without_usage(final_response)
                     elif chunk_type in {"response.failed", "response.incomplete"}:
                         terminal_response = getattr(chunk, "response", None)
                         terminal_failure_error = response_terminal_failure_error(

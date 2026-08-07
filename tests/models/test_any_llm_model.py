@@ -1919,3 +1919,85 @@ async def test_any_llm_responses_stream_lets_in_flight_close_finish_after_cancel
     finally:
         release.set()
         task.cancel()
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_stream_counts_request_when_usage_is_absent(monkeypatch) -> None:
+    """The AnyLLM Responses stream must count its request like the non-streaming path.
+
+    `get_response` already reports one request when the provider omits usage. The streaming
+    path went through the run loop's usage-less fallback and reported zero, so the same call
+    was counted differently depending only on whether it was streamed.
+    """
+    completed = _response("Hello")
+    completed.usage = None
+
+    async def response_stream() -> AsyncIterator[ResponseCompletedEvent]:
+        yield ResponseCompletedEvent(
+            type="response.completed", response=completed, sequence_number=1
+        )
+
+    provider = FakeAnyLLMProvider(supports_responses=True, responses_response=response_stream())
+    module, _ = _import_any_llm_module(monkeypatch, provider)
+
+    events = [
+        event
+        async for event in module.AnyLLMModel(model="openai/gpt-5.4-mini").stream_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+    ]
+
+    from agents.usage import requests_for_response_without_usage
+
+    terminal = events[-1]
+    assert isinstance(terminal, ResponseCompletedEvent)
+    # No usage payload is synthesized, so token counts are not reported as real zeros.
+    assert terminal.response.usage is None
+    assert requests_for_response_without_usage(terminal.response) == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_stream_with_usage_is_not_marked(monkeypatch) -> None:
+    """A response that did report usage must not also be counted by the usage-less path."""
+
+    async def response_stream() -> AsyncIterator[ResponseCompletedEvent]:
+        yield ResponseCompletedEvent(
+            type="response.completed", response=_response("Hello"), sequence_number=1
+        )
+
+    provider = FakeAnyLLMProvider(supports_responses=True, responses_response=response_stream())
+    module, _ = _import_any_llm_module(monkeypatch, provider)
+
+    events = [
+        event
+        async for event in module.AnyLLMModel(model="openai/gpt-5.4-mini").stream_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+    ]
+
+    from agents.usage import requests_for_response_without_usage
+
+    terminal = events[-1]
+    assert isinstance(terminal, ResponseCompletedEvent)
+    assert terminal.response.usage is not None
+    assert requests_for_response_without_usage(terminal.response) == 0

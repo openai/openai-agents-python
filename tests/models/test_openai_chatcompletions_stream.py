@@ -3916,3 +3916,82 @@ async def test_stream_handler_drops_citations_reported_before_any_text() -> None
     message = cast(ResponseOutputMessage, completed.response.output[0])
     assert len(message.content) == 1
     assert cast(ResponseOutputText, message.content[0]).text == "It will rain tomorrow."
+
+
+def _usageless_stream_patch(usage: CompletionUsage | None = None):
+    """Patch `_fetch_response` with a stream whose only chunk carries `usage`."""
+    chunk = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(content="Hello"))],
+        usage=usage,
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        yield chunk
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    return patched_fetch_response
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_streamed_run_counts_request_when_provider_omits_usage(monkeypatch) -> None:
+    """A stream that never carries a usage chunk still made a request.
+
+    Providers without `stream_options.include_usage` finish the stream with no usage payload.
+    The run must still report the request, while token counts stay at zero because the
+    provider genuinely did not report them.
+    """
+    monkeypatch.setattr(
+        OpenAIChatCompletionsModel, "_fetch_response", _usageless_stream_patch(usage=None)
+    )
+    agent = Agent(name="test", model=OpenAIProvider(use_responses=False).get_model("gpt-4"))
+
+    result = Runner.run_streamed(agent, "hi")
+    completed: ResponseCompletedEvent | None = None
+    async for event in result.stream_events():
+        raw = getattr(event, "data", None)
+        if isinstance(raw, ResponseCompletedEvent):
+            completed = raw
+
+    assert result.context_wrapper.usage.requests == 1
+    assert result.context_wrapper.usage.total_tokens == 0
+    # No usage payload is synthesized, so nothing reports token counts that never arrived.
+    assert completed is not None
+    assert completed.response.usage is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_streamed_run_does_not_double_count_when_usage_is_present(monkeypatch) -> None:
+    """The usage-less path must not add a second request when usage did arrive."""
+    monkeypatch.setattr(
+        OpenAIChatCompletionsModel,
+        "_fetch_response",
+        _usageless_stream_patch(
+            usage=CompletionUsage(completion_tokens=5, prompt_tokens=7, total_tokens=12)
+        ),
+    )
+    agent = Agent(name="test", model=OpenAIProvider(use_responses=False).get_model("gpt-4"))
+
+    result = Runner.run_streamed(agent, "hi")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.context_wrapper.usage.requests == 1
+    assert result.context_wrapper.usage.total_tokens == 12

@@ -79,7 +79,12 @@ from ..tracing import Span, SpanError, agent_span, get_current_trace, task_span,
 from ..tracing.config import include_task_and_turn_spans
 from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData, TaskSpanData
-from ..usage import Usage, _extract_raw_usage_snapshot, _response_usage_to_usage
+from ..usage import (
+    Usage,
+    _extract_raw_usage_snapshot,
+    _response_usage_to_usage,
+    requests_for_response_without_usage,
+)
 from ..util import _coro, _error_tracing
 from ..util._asyncio_tasks import gather_with_cancel
 from .agent_bindings import AgentBindings, bind_public_agent
@@ -1725,7 +1730,9 @@ async def run_single_turn_streamed(
                 (
                     _response_usage_to_usage(terminal_response.usage)
                     if terminal_response.usage
-                    else Usage()
+                    # Defaults to zero requests, so adapters that fold several provider
+                    # responses into one and report counts separately are not double-counted.
+                    else Usage(requests=requests_for_response_without_usage(terminal_response))
                 ),
                 stream_failed_retry_attempts[0],
             )
