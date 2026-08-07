@@ -488,11 +488,20 @@ class Converter:
                 out.append(cast(ChatCompletionContentPartInputAudioParam, audio_part))
             elif isinstance(c, dict) and c.get("type") == "input_file":
                 casted_file_param = cast(ResponseInputFileParam, c)
-                if "file_data" not in casted_file_param or not casted_file_param["file_data"]:
+                # The Chat Completions file content part accepts either inline file_data or a
+                # reference to an uploaded file_id. Prefer inline data when present, otherwise
+                # fall back to the file id (the SDK's own ToolOutputFileContent emits file-id
+                # only input_file items). A file_url is not representable here.
+                file_data = casted_file_param.get("file_data")
+                file_id = casted_file_param.get("file_id")
+                if file_data:
+                    filedata = FileFile(file_data=file_data)
+                elif file_id:
+                    filedata = FileFile(file_id=file_id)
+                else:
                     raise UserError(
-                        f"Only file_data is supported for input_file {casted_file_param}"
+                        f"Only file_data or file_id is supported for input_file {casted_file_param}"
                     )
-                filedata = FileFile(file_data=casted_file_param["file_data"])
 
                 if "filename" in casted_file_param and casted_file_param["filename"]:
                     filedata["filename"] = casted_file_param["filename"]

@@ -691,6 +691,56 @@ def test_extract_all_content_rejects_invalid_input_audio():
         Converter.extract_all_content([audio_missing_data])
 
 
+def test_extract_all_content_supports_input_file_file_id():
+    """
+    An input_file that references an uploaded file by id is representable by the
+    Chat Completions ``file`` content part, so it must convert rather than raise.
+    """
+    content: list[dict[str, Any]] = [
+        {
+            "type": "input_file",
+            "file_id": "file-abc123",
+            "filename": "hello.txt",
+        }
+    ]
+
+    parts = Converter.extract_all_content(content)
+
+    assert parts == [
+        {
+            "type": "file",
+            "file": {"file_id": "file-abc123", "filename": "hello.txt"},
+        }
+    ]
+
+
+def test_extract_all_content_prefers_input_file_data_over_file_id():
+    """When both file_data and file_id are present, file_data is used (prior behavior)."""
+    content: list[dict[str, Any]] = [
+        {
+            "type": "input_file",
+            "file_data": "data:text/plain;base64,SGVsbG8=",
+            "file_id": "file-abc123",
+        }
+    ]
+
+    parts = Converter.extract_all_content(content)
+
+    assert parts == [
+        {
+            "type": "file",
+            "file": {"file_data": "data:text/plain;base64,SGVsbG8="},
+        }
+    ]
+
+
+def test_extract_all_content_rejects_input_file_without_data_or_id():
+    """An input_file that carries neither file_data nor file_id cannot be represented."""
+    content: list[dict[str, Any]] = [{"type": "input_file", "filename": "hello.txt"}]
+    with pytest.raises(UserError):
+        Converter.extract_all_content(content)
+
+
 def test_items_to_messages_handles_system_and_developer_roles():
     """
     Roles other than `user` (e.g. `system` and `developer`) need to be
