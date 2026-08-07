@@ -338,7 +338,7 @@ class Agent(AgentBase, Generic[TContext]):
     """The model implementation to use when invoking the LLM.
 
     By default, if not set, the agent will use the default model configured in
-    `agents.models.get_default_model()` (currently "gpt-5.4-mini").
+    `agents.models.get_default_model()` (currently "gpt-5.6-luna").
     """
 
     model_settings: ModelSettings = field(default_factory=get_default_model_settings)

@@ -23,8 +23,8 @@ def _gpt_5_default_settings(
     return ModelSettings(reasoning=Reasoning(effort=reasoning_effort), verbosity="low")
 
 
-def test_default_model_is_gpt_5_4_mini():
-    assert get_default_model() == "gpt-5.4-mini"
+def test_default_model_is_gpt_5_6_luna():
+    assert get_default_model() == "gpt-5.6-luna"
     assert is_gpt_5_default() is True
     assert gpt_5_reasoning_settings_required(get_default_model()) is True
     assert get_default_model_settings() == _gpt_5_default_settings("none")
