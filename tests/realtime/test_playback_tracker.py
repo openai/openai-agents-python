@@ -1,6 +1,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from openai.types.realtime.realtime_audio_formats import AudioPCM, AudioPCMA, AudioPCMU
 
 from agents.realtime._default_tracker import ModelAudioTracker
 from agents.realtime.model import RealtimePlaybackTracker
@@ -259,3 +260,48 @@ class TestPlaybackTracker:
         # Test None format (defaults to PCM)
         none_length = calculate_audio_length_ms(None, pcm_bytes)
         assert none_length == pytest.approx(expected_pcm, rel=0, abs=1e-6)
+
+    @pytest.mark.parametrize(
+        "audio_format",
+        [
+            AudioPCMU(type="audio/pcmu"),
+            AudioPCMA(type="audio/pcma"),
+            {"type": "audio/pcmu"},
+            {"type": "audio/pcma"},
+            "audio/pcmu",
+            "audio/pcma",
+        ],
+        ids=["typed-ulaw", "typed-alaw", "mapping-ulaw", "mapping-alaw", "str-ulaw", "str-alaw"],
+    )
+    def test_g711_length_is_correct_for_every_format_spelling(self, audio_format):
+        """G.711 is one byte per sample at 8 kHz regardless of how the format is spelled.
+
+        Only the legacy `"g711_*"` strings were recognized, so the GA wire-format mapping and
+        the typed objects fell through to PCM16 math: 2 bytes per sample at 24 kHz, a 6x
+        shorter duration. That skews playback and interruption tracking for telephony
+        sessions, which are exactly the sessions that use G.711.
+        """
+        from agents.realtime._util import calculate_audio_length_ms
+
+        # 8000 bytes of G.711 is exactly one second of audio.
+        assert calculate_audio_length_ms(audio_format, b"\x00" * 8000) == 1000.0
+
+    @pytest.mark.parametrize(
+        "audio_format",
+        [AudioPCM(type="audio/pcm", rate=24000), {"type": "audio/pcm"}, "audio/pcm"],
+        ids=["typed", "mapping", "str"],
+    )
+    def test_pcm_spellings_keep_pcm16_math(self, audio_format):
+        from agents.realtime._util import calculate_audio_length_ms
+
+        # 48000 bytes of PCM16 at 24 kHz is exactly one second of audio.
+        assert calculate_audio_length_ms(audio_format, b"\x00" * 48000) == 1000.0
+
+    def test_playback_tracker_measures_g711_with_a_typed_format(self):
+        """End to end: a tracker configured with the GA typed format reports 8 kHz progress."""
+        playback_tracker = RealtimePlaybackTracker()
+        playback_tracker.set_audio_format(AudioPCMU(type="audio/pcmu"))
+
+        playback_tracker.on_play_bytes("item_1", 0, b"\x00" * 4000)
+
+        assert playback_tracker.get_state()["elapsed_ms"] == 500.0
