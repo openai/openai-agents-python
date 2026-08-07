@@ -549,3 +549,26 @@ def test_empty_properties_map_beside_a_shaping_keyword_is_not_closed(keyword_sch
 
     with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
         ensure_strict_json_schema({"type": "object", "properties": {"f": field}})
+
+
+def test_bare_ref_to_a_free_form_definition_is_rejected():
+    # A bare `$ref` is never inlined, so closing the definition would leave the strict schema
+    # pointing at an object that now accepts only `{}`.
+    with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
+        ensure_strict_json_schema(
+            {
+                "$defs": {"Base": {"type": "object"}},
+                "type": "object",
+                "properties": {"f": {"$ref": "#/$defs/Base"}},
+            }
+        )
+
+
+@pytest.mark.parametrize("bound", [{"maxProperties": 1}, {"minProperties": 1}], ids=["max", "min"])
+def test_bounded_object_with_empty_properties_is_not_closed(bound):
+    # A bound on the number of keys says arbitrary keys are expected, so an empty `properties`
+    # map is not a declaration that the object is empty.
+    field = {"type": "object", "properties": {}, **bound}
+
+    with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
+        ensure_strict_json_schema({"type": "object", "properties": {"f": field}})

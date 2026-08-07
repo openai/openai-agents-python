@@ -2464,3 +2464,17 @@ async def test_composed_root_without_a_declared_type_falls_back(input_schema):
 
     assert function_tool.strict_json_schema is False
     assert function_tool.params_json_schema["allOf"] == input_schema["allOf"]
+
+
+@pytest.mark.asyncio
+async def test_typeless_but_closed_root_is_normalized_to_a_strict_envelope():
+    """A root that is already closed describes an object even without declaring `type`."""
+    server = FakeMCPServer()
+    tool = MCPTool(name="t", inputSchema={"additionalProperties": False})
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is True
+    assert function_tool.params_json_schema["type"] == "object"
+    assert function_tool.params_json_schema["properties"] == {}
+    assert function_tool.params_json_schema["additionalProperties"] is False

@@ -238,12 +238,20 @@ def create_static_tool_filter(
 
 
 def _is_strict_object_root(schema: dict[str, Any]) -> bool:
-    """Whether a converted schema is the closed object envelope a strict tool needs."""
+    """Whether a converted schema is the closed object envelope a strict tool needs.
+
+    A root that never declared its type but is already closed still describes an object, so it
+    is normalized here rather than rejected.
+    """
+    if schema.get("additionalProperties") is not False:
+        return False
     declared_type = schema.get("type")
-    is_object = declared_type == "object" or (
+    if declared_type is None:
+        schema["type"] = "object"
+        return True
+    return declared_type == "object" or (
         isinstance(declared_type, list) and "object" in declared_type
     )
-    return is_object and schema.get("additionalProperties") is False
 
 
 class MCPUtil:
