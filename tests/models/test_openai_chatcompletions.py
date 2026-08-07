@@ -7,6 +7,7 @@ from typing import Any, cast
 import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, omit
+from openai._models import add_request_id
 from openai.types.chat.chat_completion import ChatCompletion, Choice, ChoiceLogprobs
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
@@ -1363,3 +1364,62 @@ async def test_user_agent_header_chat_completions(override_ua):
     assert ChatCmplHelpers.get_store_param(client, model_settings) is True, (
         "Should respect explicitly set store=True"
     )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_propagates_request_id(monkeypatch) -> None:
+    """The OpenAI request ID must reach `ModelResponse.request_id` on the non-streamed path.
+
+    The OpenAI SDK records the `x-request-id` header on every parsed response object, so
+    Chat Completions runs can expose the same debugging handle as Responses runs.
+    """
+    chat = _minimal_chat_completion()
+    add_request_id(chat, "req_nonstreamed_123")
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return chat
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    resp: ModelResponse = await model.get_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    assert resp.request_id == "req_nonstreamed_123"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_request_id_is_none_when_absent(monkeypatch) -> None:
+    """Clients and test doubles that never set `_request_id` keep returning `None`."""
+    chat = _minimal_chat_completion()
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return chat
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    resp: ModelResponse = await model.get_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    assert resp.request_id is None

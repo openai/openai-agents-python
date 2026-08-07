@@ -262,3 +262,57 @@ async def test_apply_patch_supports_non_default_root() -> None:
     )
 
     assert session.files[Path("/custom-workspace/new.txt")] == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_mapping_operation_moves_file() -> None:
+    session = ApplyPatchSession()
+    session.files[Path("/workspace/old.txt")] = b"alpha\n"
+
+    result = await session.apply_patch(
+        {
+            "type": "update_file",
+            "path": "old.txt",
+            "diff": "@@\n-alpha\n+beta\n",
+            "move_to": "renamed/new.txt",
+        }
+    )
+
+    assert result == "Done!"
+    assert session.files[Path("/workspace/renamed/new.txt")] == b"beta\n"
+    assert Path("/workspace/old.txt") not in session.files
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_mapping_operation_without_move_to_updates_in_place() -> None:
+    session = ApplyPatchSession()
+    session.files[Path("/workspace/keep.txt")] = b"alpha\n"
+
+    await session.apply_patch(
+        {
+            "type": "update_file",
+            "path": "keep.txt",
+            "diff": "@@\n-alpha\n+beta\n",
+        }
+    )
+
+    assert session.files[Path("/workspace/keep.txt")] == b"beta\n"
+    assert session.rm_calls == []
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_mapping_operation_rejects_non_string_move_to() -> None:
+    session = ApplyPatchSession()
+    session.files[Path("/workspace/old.txt")] = b"alpha\n"
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            {
+                "type": "update_file",
+                "path": "old.txt",
+                "diff": "@@\n-alpha\n+beta\n",
+                "move_to": 5,
+            }
+        )
+
+    assert session.files[Path("/workspace/old.txt")] == b"alpha\n"

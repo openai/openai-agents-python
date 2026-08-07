@@ -208,6 +208,7 @@ def _coerce_operation_mapping(operation: dict[str, object]) -> ApplyPatchOperati
     raw_path = operation.get("path")
     raw_diff = operation.get("diff")
     raw_ctx_wrapper = operation.get("ctx_wrapper")
+    raw_move_to = operation.get("move_to")
 
     if raw_type not in {"create_file", "update_file", "delete_file"}:
         raise ApplyPatchDiffError(
@@ -221,11 +222,16 @@ def _coerce_operation_mapping(operation: dict[str, object]) -> ApplyPatchOperati
         raise ApplyPatchDiffError(
             message=f"Invalid apply_patch diff type: {type(raw_diff).__name__}"
         )
+    if raw_move_to is not None and not isinstance(raw_move_to, str):
+        raise ApplyPatchDiffError(
+            message=f"Invalid apply_patch move_to type: {type(raw_move_to).__name__}"
+        )
     return ApplyPatchOperation(
         type=cast(ApplyPatchOperationType, raw_type),
         path=raw_path,
         diff=raw_diff,
         ctx_wrapper=cast(Any, raw_ctx_wrapper),
+        move_to=raw_move_to,
     )
 
 

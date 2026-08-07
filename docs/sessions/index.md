@@ -450,7 +450,7 @@ Notes:
 
 -   `from_uri(...)` creates and owns the `AsyncMongoClient` and closes it on `session.close()`. An owned-client session is terminal after `close()`, and subsequent session operations raise `RuntimeError`. If your application already manages a client, construct `MongoDBSession(...)` directly with `client=...`; in that case `session.close()` is a no-op, and lifecycle plus session usability stay with the caller.
 -   Connect to [MongoDB Atlas](https://www.mongodb.com/products/platform) by passing an `mongodb+srv://user:password@cluster.example.mongodb.net` URI to `from_uri(...)` with no other changes.
--   Two collections are used and both names are configurable via `sessions_collection=` (default `agent_sessions`) and `messages_collection=` (default `agent_messages`). Indexes are created automatically on first use. Each message document carries a monotonically increasing `seq` counter that preserves ordering across concurrent writers and processes.
+-   Two collections are used and both names are configurable via `sessions_collection=` (default `agent_sessions`) and `messages_collection=` (default `agent_messages`). Indexes are created automatically on first use. Each non-empty `add_items()` call writes one logical-batch document whose monotonically increasing `seq` orders the batch by its final item; legacy per-item message documents remain readable. A logical batch must fit within MongoDB's single-document size limit; an oversized batch fails atomically without storing a partial batch.
 -   Use `await session.ping()` to verify connectivity before your first run.
 
 ### Advanced SQLite sessions
