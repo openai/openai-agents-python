@@ -1396,6 +1396,70 @@ async def test_stream_handler_places_text_after_existing_refusal_part() -> None:
     assert assistant_item.content[1].text == "partial"
 
 
+@pytest.mark.parametrize(
+    "deltas",
+    [
+        pytest.param(
+            [
+                ChoiceDelta.model_construct(refusal="blocked"),
+                ChoiceDelta.model_construct(content="partial"),
+            ],
+            id="refusal_then_text",
+        ),
+        pytest.param(
+            [
+                ChoiceDelta.model_construct(content="partial"),
+                ChoiceDelta.model_construct(refusal="blocked"),
+            ],
+            id="text_then_refusal",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_stream_handler_announces_assistant_message_once_for_text_and_refusal(
+    deltas: list[ChoiceDelta],
+) -> None:
+    """A message holding both a text and a refusal part is announced by a single added event."""
+    chunks = [
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=delta)],
+        )
+        for delta in deltas
+    ]
+
+    events = await _collect_handler_events(*chunks)
+
+    message_added = [
+        event
+        for event in events
+        if event.type == "response.output_item.added"
+        and isinstance(event.item, ResponseOutputMessage)
+    ]
+    message_done = [
+        event
+        for event in events
+        if event.type == "response.output_item.done"
+        and isinstance(event.item, ResponseOutputMessage)
+    ]
+    assert len(message_added) == 1
+    assert len(message_done) == 1
+    assert message_added[0].output_index == message_done[0].output_index
+
+    # The single added event still opens the message before its first content part.
+    event_types = [event.type for event in events]
+    assert event_types.index("response.output_item.added") < event_types.index(
+        "response.content_part.added"
+    )
+    # Both content parts are still announced, one each.
+    part_added = [event for event in events if event.type == "response.content_part.added"]
+    assert sorted(event.content_index for event in part_added) == [0, 1]
+    assert {event.part.type for event in part_added} == {"output_text", "refusal"}
+
+
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 async def test_stream_response_passes_strict_validation_to_stream_handler(monkeypatch) -> None:

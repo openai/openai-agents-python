@@ -814,23 +814,28 @@ class ChatCmplStreamHandler:
                             logprobs=[],
                         ),
                     )
-                    # Start a new assistant message stream
-                    assistant_item = ResponseOutputMessage(
-                        id=FAKE_RESPONSES_ID,
-                        content=[],
-                        role="assistant",
-                        type="message",
-                        status="in_progress",
-                    )
-                    if state.provider_data:
-                        assistant_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
-                    # Notify consumers of the start of a new output message + first content part
-                    yield ResponseOutputItemAddedEvent(
-                        item=assistant_item,
-                        output_index=output_layout.assistant_message_output_index(state),
-                        type="response.output_item.added",
-                        sequence_number=sequence_number.get_and_increment(),
-                    )
+                    # A refusal part already opened this assistant message, so only the new
+                    # content part is announced here. Re-announcing the message would emit a
+                    # second response.output_item.added for an item that is already open and
+                    # is closed by a single response.output_item.done.
+                    if content_index == 0:
+                        # Start a new assistant message stream
+                        assistant_item = ResponseOutputMessage(
+                            id=FAKE_RESPONSES_ID,
+                            content=[],
+                            role="assistant",
+                            type="message",
+                            status="in_progress",
+                        )
+                        if state.provider_data:
+                            assistant_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+                        # Notify consumers of the start of a new output message
+                        yield ResponseOutputItemAddedEvent(
+                            item=assistant_item,
+                            output_index=output_layout.assistant_message_output_index(state),
+                            type="response.output_item.added",
+                            sequence_number=sequence_number.get_and_increment(),
+                        )
                     yield ResponseContentPartAddedEvent(
                         content_index=state.text_content_index_and_output[0],
                         item_id=FAKE_RESPONSES_ID,
@@ -893,23 +898,28 @@ class ChatCmplStreamHandler:
                         refusal_index,
                         ResponseOutputRefusal(refusal="", type="refusal"),
                     )
-                    # Start a new assistant message if one doesn't exist yet (in-progress)
-                    assistant_item = ResponseOutputMessage(
-                        id=FAKE_RESPONSES_ID,
-                        content=[],
-                        role="assistant",
-                        type="message",
-                        status="in_progress",
-                    )
-                    if state.provider_data:
-                        assistant_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
-                    # Notify downstream that assistant message + first content part are starting
-                    yield ResponseOutputItemAddedEvent(
-                        item=assistant_item,
-                        output_index=output_layout.assistant_message_output_index(state),
-                        type="response.output_item.added",
-                        sequence_number=sequence_number.get_and_increment(),
-                    )
+                    # A text part already opened this assistant message, so only the new
+                    # content part is announced here. Re-announcing the message would emit a
+                    # second response.output_item.added for an item that is already open and
+                    # is closed by a single response.output_item.done.
+                    if refusal_index == 0:
+                        # Start a new assistant message if one doesn't exist yet (in-progress)
+                        assistant_item = ResponseOutputMessage(
+                            id=FAKE_RESPONSES_ID,
+                            content=[],
+                            role="assistant",
+                            type="message",
+                            status="in_progress",
+                        )
+                        if state.provider_data:
+                            assistant_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+                        # Notify downstream that the assistant message is starting
+                        yield ResponseOutputItemAddedEvent(
+                            item=assistant_item,
+                            output_index=output_layout.assistant_message_output_index(state),
+                            type="response.output_item.added",
+                            sequence_number=sequence_number.get_and_increment(),
+                        )
                     yield ResponseContentPartAddedEvent(
                         content_index=state.refusal_content_index_and_output[0],
                         item_id=FAKE_RESPONSES_ID,
