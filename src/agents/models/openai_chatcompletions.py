@@ -291,7 +291,8 @@ class OpenAIChatCompletionsModel(Model):
                     output_tokens_details=response.usage.completion_tokens_details,  # type: ignore[arg-type]
                 )
                 if response.usage
-                else Usage()
+                # The request completed, so it counts even when the provider omits usage.
+                else Usage(requests=1)
             )
 
             # Some providers signal a filtered non-streaming completion only through

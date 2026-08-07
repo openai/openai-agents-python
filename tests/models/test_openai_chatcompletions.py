@@ -760,8 +760,9 @@ async def test_get_response_with_refusal(monkeypatch) -> None:
     refusal_part = resp.output[0].content[0]
     assert isinstance(refusal_part, ResponseOutputRefusal)
     assert refusal_part.refusal == "No thanks"
-    # With no usage from the completion, usage defaults to zeros.
-    assert resp.usage.requests == 0
+    # With no usage from the completion, token counts default to zeros, but the request itself
+    # still happened and is counted.
+    assert resp.usage.requests == 1
     assert resp.usage.input_tokens == 0
     assert resp.usage.output_tokens == 0
     assert resp.usage.input_tokens_details.cached_tokens == 0
@@ -1504,3 +1505,48 @@ async def test_get_response_request_id_is_none_when_absent(monkeypatch) -> None:
     )
 
     assert resp.request_id is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_request_is_counted_when_provider_omits_usage(monkeypatch) -> None:
+    """A completed call counts as one request even when the provider reports no usage.
+
+    Some OpenAI-compatible providers and gateways return no `usage` block. Counting those as
+    zero requests understates `Usage.requests`, which is documented as the number of requests
+    made to the LLM API, and is inconsistent with the retry path, which already forces the
+    successful attempt to count via `max(usage.requests, 1)`.
+    """
+    msg = ChatCompletionMessage(role="assistant", content="hello")
+    chat = ChatCompletion(
+        id="resp-id",
+        created=0,
+        model="fake",
+        object="chat.completion",
+        choices=[Choice(index=0, finish_reason="stop", message=msg)],
+        usage=None,
+    )
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return chat
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    resp: ModelResponse = await model.get_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    assert resp.usage.requests == 1
+    # Token counts stay at zero, since the provider genuinely did not report them.
+    assert resp.usage.input_tokens == 0
+    assert resp.usage.output_tokens == 0
+    assert resp.usage.total_tokens == 0
