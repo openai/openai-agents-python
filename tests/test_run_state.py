@@ -2737,6 +2737,27 @@ class TestDeserializeHelpers:
         assert interruptions[0].agent.name == "InnerAgent"
         assert interruptions[0].raw_item.name == "sensitive_tool"  # type: ignore[union-attr]
 
+    async def test_current_step_interruption_survives_unresolvable_agent_name(self):
+        """current_step interruptions must restore like their last_processed_response twins."""
+        agent = Agent(name="MainAgent")
+        # The approval was raised by an agent the restored graph no longer exposes by name,
+        # for example because the application renamed it between snapshots.
+        approval_item = ToolApprovalItem(
+            agent=Agent(name="RenamedAgent"),
+            raw_item=make_function_tool_call("sensitive_tool", call_id="call-1"),
+        )
+        state = make_state_with_interruptions(agent, [approval_item], original_input="test")
+        state._last_processed_response = make_processed_response(interruptions=[approval_item])
+
+        restored = await RunState.from_string(agent, state.to_string())
+
+        assert restored._last_processed_response is not None
+        assert len(restored._last_processed_response.interruptions) == 1
+        interruptions = restored.get_interruptions()
+        assert len(interruptions) == 1
+        assert interruptions[0].agent is agent
+        assert interruptions[0].raw_item.name == "sensitive_tool"  # type: ignore[union-attr]
+
     @pytest.mark.parametrize("drop_mode", ["disabled", "removed", "malformed_call"])
     async def test_nested_agent_tool_state_survives_when_earlier_function_is_dropped(
         self, drop_mode: str

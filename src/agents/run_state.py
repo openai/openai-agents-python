@@ -3052,6 +3052,7 @@ async def _build_run_state_from_json(
                 item_data,
                 agent_map=agent_map,
                 agent_identity_map=agent_identity_map,
+                fallback_agent=current_agent,
             )
             if approval_item is not None:
                 interruptions.append(approval_item)
