@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
 
+from agents import Agent, ModelSettings
+from agents.items import TResponseInputItem
 from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.models.openai_responses import OpenAIResponsesModel
+from agents.run_internal.error_handlers import create_message_output_item
 
 
 @pytest.fixture
@@ -91,6 +94,23 @@ class TestRemoveOpenAIResponsesAPIIncompatibleFields:
         assert "id" not in result[0]
         assert result[0]["content"] == "hello"
 
+    def test_removes_fake_responses_id_without_provider_data(self, model: OpenAIResponsesModel):
+        """Placeholder IDs are stripped even when no item carries provider_data.
+
+        Several SDK paths build output items with FAKE_RESPONSES_ID and no provider_data, so
+        the placeholder cannot be assumed to travel alongside it.
+        """
+        list_input = [
+            {"role": "user", "content": "hi"},
+            {"type": "message", "id": FAKE_RESPONSES_ID, "content": "hello"},
+        ]
+
+        result = model._remove_openai_responses_api_incompatible_fields(list_input)
+
+        assert len(result) == 2
+        assert "id" not in result[1]
+        assert result[1]["content"] == "hello"
+
     def test_preserves_real_ids(self, model: OpenAIResponsesModel):
         """Real IDs (not FAKE_RESPONSES_ID) should be preserved."""
         list_input = [
@@ -160,3 +180,26 @@ class TestRemoveOpenAIResponsesAPIIncompatibleFields:
         assert result[3]["content"] == "The weather is 72F"
         assert "id" not in result[3]
         assert "provider_data" not in result[3]
+
+    def test_request_payload_drops_sdk_generated_placeholder_ids(
+        self, model: OpenAIResponsesModel
+    ) -> None:
+        """A replayed SDK-built assistant message must not send its placeholder ID upstream."""
+        message = create_message_output_item(
+            Agent(name="test"), "the run error handler final output"
+        ).raw_item
+
+        create_kwargs = model._build_response_create_kwargs(
+            system_instructions=None,
+            input=[
+                {"role": "user", "content": "hi"},
+                cast(TResponseInputItem, message.model_dump()),
+            ],
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+        )
+
+        assert message.id == FAKE_RESPONSES_ID
+        assert "id" not in create_kwargs["input"][1]

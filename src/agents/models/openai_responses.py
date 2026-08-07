@@ -916,17 +916,20 @@ class OpenAIResponsesModel(Model):
         This data transformation does not always guarantee that items from other provider
         interactions are accepted by the OpenAI Responses API.
 
-        Only items with truthy provider_data are processed.
         This function handles the following incompatibilities:
         - provider_data: Removes fields specific to other providers (e.g., Gemini, Claude).
         - Fake IDs: Removes temporary IDs (FAKE_RESPONSES_ID) that should not be sent to OpenAI.
         - Reasoning items: Filters out provider-specific reasoning items entirely.
         """
-        # Early return optimization: if no item has provider_data, return unchanged.
-        has_provider_data = any(
-            isinstance(item, dict) and item.get("provider_data") for item in list_input
+        # Early return optimization: skip the copy when nothing needs cleaning. Placeholder IDs
+        # are emitted without provider_data by several SDK paths, so they have to be checked
+        # independently of it.
+        needs_cleaning = any(
+            isinstance(item, dict)
+            and (item.get("provider_data") or item.get("id") == FAKE_RESPONSES_ID)
+            for item in list_input
         )
-        if not has_provider_data:
+        if not needs_cleaning:
             return list_input
 
         result = []
