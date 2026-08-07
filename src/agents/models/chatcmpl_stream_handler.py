@@ -56,6 +56,7 @@ from ..usage import (
     _cache_write_tokens,
     _extract_raw_usage_snapshot,
     _make_input_tokens_details,
+    mark_request_completed_without_usage,
 )
 from .chatcmpl_helpers import ChatCmplHelpers
 from .fake_id import FAKE_RESPONSES_ID
@@ -1285,6 +1286,11 @@ class ChatCmplStreamHandler:
         )
         if preserve_raw_usage:
             _attach_raw_usage_snapshot(final_response, raw_usage)
+        if usage is None:
+            # The stream reached a terminal response, so a request was made even though the
+            # provider reported no usage. Record that without inventing a usage payload, so
+            # the raw usage snapshot stays absent and tokens are not reported as real zeros.
+            mark_request_completed_without_usage(final_response)
 
         yield ResponseCompletedEvent(
             response=final_response,

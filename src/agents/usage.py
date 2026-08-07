@@ -310,6 +310,27 @@ class Usage:
             self.request_usage_entries.append(request_usage)
 
 
+_REQUEST_WITHOUT_USAGE_ATTR = "_agents_sdk_request_completed_without_usage"
+
+
+def mark_request_completed_without_usage(response: Any) -> None:
+    """Record that a response completed even though the provider reported no usage.
+
+    Adapters call this instead of synthesizing a zero-filled usage payload, so the raw
+    provider usage stays absent while the request itself is still counted.
+    """
+    object.__setattr__(response, _REQUEST_WITHOUT_USAGE_ATTR, True)
+
+
+def requests_for_response_without_usage(response: Any) -> int:
+    """How many requests a usage-less response represents.
+
+    Defaults to zero so adapters that multiplex several provider responses into one
+    response, and report their counts separately, are not double-counted.
+    """
+    return 1 if getattr(response, _REQUEST_WITHOUT_USAGE_ATTR, False) else 0
+
+
 def _response_usage_to_usage(response_usage: Any) -> Usage:
     """Convert Responses API usage, including adapter-supplied per-request details."""
     request_usages = getattr(response_usage, "_agents_sdk_request_usages", None)
