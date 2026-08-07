@@ -1179,6 +1179,65 @@ async def test_any_llm_responses_path_omits_reasoning_when_unset() -> None:
     assert provider.private_responses_calls[0]["params"].reasoning is None
 
 
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_any_llm_responses_path_forwards_prompt_cache_retention(stream: bool) -> None:
+    """`ModelSettings.prompt_cache_retention` must reach the any-llm Responses request."""
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
+
+    provider = _RecordingResponsesProvider(_response("Hello"))
+    model = _model_bound_to_provider(provider)
+
+    await cast(Any, model)._fetch_responses_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(prompt_cache_retention="24h"),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=stream,
+        prompt=None,
+    )
+
+    assert len(provider.private_responses_calls) == 1
+    assert provider.private_responses_calls[0]["params"].prompt_cache_retention == "24h"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_path_omits_prompt_cache_retention_when_unset() -> None:
+    """An unset retention stays unset instead of pinning a default on the request."""
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
+
+    provider = _RecordingResponsesProvider(_response("Hello"))
+    model = _model_bound_to_provider(provider)
+
+    await cast(Any, model)._fetch_responses_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert len(provider.private_responses_calls) == 1
+    assert provider.private_responses_calls[0]["params"].prompt_cache_retention is None
+
+
 def test_any_llm_provider_passes_api_override() -> None:
     pytest.importorskip(
         "any_llm",
