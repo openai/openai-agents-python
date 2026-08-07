@@ -641,15 +641,17 @@ if __name__ == "__main__":
 
 ## Custom session implementations
 
-You can implement your own session memory by creating a class that structurally follows the [`Session`][agents.memory.session.Session] protocol. You do not need to inherit from `SessionABC`; implement the four history methods directly:
+You can implement your own session memory by creating a class that structurally follows the [`Session`][agents.memory.session.Session] protocol. You do not need to inherit from `SessionABC`; define `session_id` and `session_settings`, and implement the four history methods directly:
 
 ```python
-from agents import Agent, Runner
+from agents import Agent, Runner, SessionSettings
 from agents.items import TResponseInputItem
 
 
 class MyCustomSession:
     """Custom session implementation following the Session protocol."""
+
+    session_settings: SessionSettings | None = None
 
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id

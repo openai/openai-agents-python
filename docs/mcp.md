@@ -46,9 +46,9 @@ HTTP transport customization must use the HTTP stack owned by the installed MCP 
 | --- | --- | --- |
 | `params["auth"]` | `httpx.Auth` | `httpx2.Auth` |
 | `params["httpx_client_factory"]` return value | `httpx.AsyncClient` | `httpx2.AsyncClient` |
-| `ignore_initialized_notification_failure=True` on `MCPServerStreamableHttp` | Supported | Not supported; rejected before connecting |
+| `params["ignore_initialized_notification_failure"] = True` | Supported | Not supported; rejected before connecting |
 
-Use an `Authorization` header when possible, as shown in the Streamable HTTP example below; that form works unchanged with both package versions. If you provide `auth` or a custom client factory, update its types when moving between v1 and v2. If you rely on `ignore_initialized_notification_failure=True`, keep `mcp<2` or disable the option before upgrading.
+Use an `Authorization` header when possible, as shown in the Streamable HTTP example below; that form works unchanged with both package versions. If you provide `auth` or a custom client factory, update its types when moving between v1 and v2. If you set `params["ignore_initialized_notification_failure"] = True`, keep `mcp<2` or disable the option before upgrading.
 
 These local dependency details do not apply to [`HostedMCPTool`][agents.tool.HostedMCPTool], where the OpenAI Responses API owns the remote MCP connection.
 
