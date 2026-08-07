@@ -183,12 +183,17 @@ def _ensure_strict_json_schema(
     all_of = json_schema.get("allOf")
     if is_list(all_of):
         if len(all_of) == 1:
-            json_schema.update(
-                _ensure_strict_json_schema(
-                    all_of[0], path=(*path, "allOf", "0"), root=root, budget=budget
+            entry = all_of[0]
+            if not is_dict(entry):
+                raise TypeError(
+                    f"Expected {entry} to be a dictionary; path={(*path, 'allOf', '0')}"
                 )
-            )
+            # Merge the single branch before converting it, then re-enter. Converting the branch
+            # on its own first would judge it in isolation, so a branch that constrains nothing
+            # by itself, such as a redundant `{"type": "object"}` next to a parent that already
+            # declares `properties`, would look like a free-form object and be rejected.
             json_schema.pop("allOf")
+            json_schema.update(entry)
             return _ensure_strict_json_schema(json_schema, path=path, root=root, budget=budget)
         else:
             json_schema["allOf"] = [

@@ -2395,3 +2395,40 @@ async def test_composed_and_enum_object_args_keep_their_non_strict_meaning(wrapp
     assert function_tool.strict_json_schema is False
     # Served exactly as the server described it, so the branches still match.
     assert function_tool.params_json_schema["properties"]["field"] == wrapper
+
+
+@pytest.mark.asyncio
+async def test_already_closed_root_keeps_the_openai_properties_shape():
+    """A server-closed root must still be served with the `properties` key OpenAI expects."""
+    server = FakeMCPServer()
+    tool = MCPTool(name="closed", inputSchema={"type": "object", "additionalProperties": False})
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is True
+    assert function_tool.params_json_schema["properties"] == {}
+    assert function_tool.params_json_schema["required"] == []
+    assert function_tool.params_json_schema["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "input_schema",
+    [{"description": "Test tool"}, {}],
+    ids=["annotation-only", "empty"],
+)
+async def test_typeless_root_keeps_its_no_argument_treatment(input_schema):
+    """Only a declared object root is exposed as free-form.
+
+    A schema that never states its type is left on the historical no-argument path rather than
+    having its meaning changed here, and it must not be served as a strict non-object schema.
+    """
+    server = FakeMCPServer()
+    tool = MCPTool(name="t", inputSchema=input_schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is True
+    assert function_tool.params_json_schema["type"] == "object"
+    assert function_tool.params_json_schema["properties"] == {}
+    assert function_tool.params_json_schema["additionalProperties"] is False

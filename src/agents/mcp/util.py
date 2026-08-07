@@ -237,6 +237,14 @@ def create_static_tool_filter(
     return filter_dict
 
 
+def _declares_object_type(schema: dict[str, Any]) -> bool:
+    """Whether a schema states it is an object, rather than leaving its type unstated."""
+    declared_type = schema.get("type")
+    return declared_type == "object" or (
+        isinstance(declared_type, list) and "object" in declared_type
+    )
+
+
 class MCPUtil:
     """Set of utilities for interop between MCP and Agents SDK tools."""
 
@@ -549,14 +557,22 @@ class MCPUtil:
             # non-strict. Convert a separate copy so the non-strict fallback keeps
             # the original schema intact.
             strict_source = copy.deepcopy(schema)
-            if not declared_properties:
+            if not declared_properties and _declares_object_type(strict_source):
                 # Convert what the server actually sent. The synthetic ``properties: {}`` above
                 # is an OpenAI-spec accommodation, not a statement by the server that the tool
                 # takes no arguments, so leaving it in would let a free-form root be closed as
-                # an empty object instead of falling back to non-strict.
+                # an empty object instead of falling back to non-strict. Only an explicit object
+                # root is exposed this way; a schema that does not declare its type keeps the
+                # historical no-argument treatment rather than changing meaning here.
                 strict_source.pop("properties", None)
             try:
-                schema = ensure_strict_json_schema(strict_source)
+                converted = ensure_strict_json_schema(strict_source)
+                if "properties" not in converted:
+                    # Restore the shape the OpenAI spec wants. Only reachable when the root was
+                    # already closed by the server, e.g. ``additionalProperties: false``.
+                    converted["properties"] = {}
+                    converted.setdefault("required", [])
+                schema = converted
                 is_strict = True
             except Exception as e:
                 if _debug.DONT_LOG_TOOL_DATA:

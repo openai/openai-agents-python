@@ -473,3 +473,20 @@ def test_ref_to_an_object_is_normalized_before_the_check():
     assert field["description"] == "d"
     assert field["additionalProperties"] is False
     assert field["required"] == ["a"]
+
+
+def test_redundant_single_entry_allof_branch_does_not_block_conversion():
+    # The parent already declares the properties; the branch adds nothing on its own. Judging
+    # that branch in isolation would call it free-form and reject an otherwise strictable object.
+    result = ensure_strict_json_schema(
+        {
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "allOf": [{"type": "object"}],
+        }
+    )
+
+    assert result["properties"] == {"a": {"type": "string"}}
+    assert result["required"] == ["a"]
+    assert result["additionalProperties"] is False
+    assert "allOf" not in result
