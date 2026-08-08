@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = ROOT / ".tmp" / "integration-tests"
 DIST = WORKSPACE / "dist"
+RESULTS = WORKSPACE / "results"
 TESTS = ROOT / "integration_tests"
 EXTRAS = "any-llm,litellm,realtime,voice"
 OPTIONAL_EXTRAS = (
@@ -24,6 +28,7 @@ OPTIONAL_EXTRAS = (
 )
 PROFILES = (
     "packaging",
+    "security",
     "mcp-v1",
     "core",
     "providers",
@@ -43,7 +48,26 @@ def run(command: list[str], *, env: dict[str, str] | None = None) -> None:
     subprocess.run(command, cwd=ROOT, env=env, check=True)
 
 
+def run_pytest(command: list[str], *, env: dict[str, str]) -> tuple[int, str]:
+    print(f"[integration] {' '.join(command)}", flush=True)
+    process = subprocess.Popen(
+        command,
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    output: list[str] = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end="", flush=True)
+        output.append(line)
+    return process.wait(), "".join(output)
+
+
 def build_distributions() -> tuple[Path, Path]:
+    shutil.rmtree(DIST, ignore_errors=True)
     DIST.mkdir(parents=True, exist_ok=True)
     run(["uv", "build", "--out-dir", str(DIST)])
     wheels = sorted(DIST.glob("openai_agents-*.whl"), key=lambda path: path.stat().st_mtime)
@@ -139,6 +163,7 @@ def run_suite(
     selection: str,
     environment_kind: str,
     additional_env: dict[str, str] | None = None,
+    profile: str,
 ) -> None:
     child_env = dict(os.environ)
     child_env.pop("PYTHONPATH", None)
@@ -179,7 +204,86 @@ def run_suite(
         "-m",
         selection,
     ]
-    run(command, env=child_env)
+    result_path = RESULTS / profile / f"{environment_kind}.xml"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    command.append(f"--junitxml={result_path}")
+    return_code = 1
+    output = ""
+    try:
+        return_code, output = run_pytest(command, env=child_env)
+    finally:
+        deselected_matches = re.findall(r"(\d+) deselected", output)
+        deselected = int(deselected_matches[-1]) if deselected_matches else 0
+        _print_junit_summary(profile, environment_kind, result_path, deselected=deselected)
+    if return_code:
+        raise subprocess.CalledProcessError(return_code, command)
+
+
+def _print_junit_summary(
+    profile: str,
+    environment_kind: str,
+    result_path: Path,
+    *,
+    deselected: int,
+) -> None:
+    if not result_path.exists():
+        print(
+            f"[integration] summary profile={profile} environment={environment_kind} "
+            "result=missing",
+            flush=True,
+        )
+        return
+    root = _sanitize_and_load_junit(result_path)
+    if root is None:
+        print(
+            f"[integration] summary profile={profile} environment={environment_kind} "
+            "result=invalid",
+            flush=True,
+        )
+        return
+    suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+    totals = {
+        key: sum(int(suite.attrib.get(key, "0")) for suite in suites)
+        for key in ("tests", "failures", "errors", "skipped")
+    }
+    passed = totals["tests"] - totals["failures"] - totals["errors"] - totals["skipped"]
+    print(
+        f"[integration] summary profile={profile} environment={environment_kind} "
+        f"passed={passed} failed={totals['failures']} errors={totals['errors']} "
+        f"skipped={totals['skipped']} deselected={deselected}",
+        flush=True,
+    )
+
+
+def _sanitize_and_load_junit(result_path: Path) -> ET.Element | None:
+    try:
+        tree = ET.parse(result_path)
+        root = tree.getroot()
+        for element_name in ("failure", "error", "system-out", "system-err"):
+            for element in root.iter(element_name):
+                element.text = None
+                if element_name in {"failure", "error"}:
+                    element.attrib.pop("message", None)
+        tree.write(result_path, encoding="utf-8", xml_declaration=True)
+        suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+        if not suites:
+            raise ValueError("JUnit report does not contain a test suite.")
+        for suite in suites:
+            counts: dict[str, int] = {}
+            for key in ("tests", "failures", "errors", "skipped"):
+                value = int(suite.attrib.get(key, "0"))
+                if value < 0:
+                    raise ValueError(f"JUnit {key} count must be non-negative.")
+                counts[key] = value
+            if counts["failures"] + counts["errors"] + counts["skipped"] > counts["tests"]:
+                raise ValueError("JUnit outcome counts exceed the total test count.")
+    except (ET.ParseError, OSError, ValueError):
+        try:
+            result_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+    return root
 
 
 def main() -> None:
@@ -191,6 +295,7 @@ def main() -> None:
         help="Include configured direct Anthropic and Gemini providers alongside OpenRouter.",
     )
     args = parser.parse_args()
+    shutil.rmtree(RESULTS / args.profile, ignore_errors=True)
     if args.all:
         os.environ["OPENAI_AGENTS_INTEGRATION_EXTERNAL_PROVIDERS"] = "1"
         os.environ["OPENAI_AGENTS_INTEGRATION_DIRECT_PROVIDERS"] = "1"
@@ -212,12 +317,23 @@ def main() -> None:
                 selection="mcp_compat",
                 environment_kind=environment_kind,
                 additional_env={"OPENAI_AGENTS_INTEGRATION_MCP_VERSION": mcp_version},
+                profile=args.profile,
             )
 
-    if args.profile in {"packaging", "core", "hosted", "full", "release", "nightly", "manual"}:
+    if args.profile in {
+        "packaging",
+        "security",
+        "core",
+        "hosted",
+        "full",
+        "release",
+        "nightly",
+        "manual",
+    }:
         python = create_environment("core", wheel)
         selections = {
             "packaging": "packaging",
+            "security": "security",
             "core": "packaging or core",
             "hosted": "packaging or hosted",
             "full": "packaging or ((core or hosted) and not nightly and not manual)",
@@ -231,6 +347,7 @@ def main() -> None:
             sdist,
             selection=selections[args.profile],
             environment_kind="core",
+            profile=args.profile,
         )
 
     if args.profile in {"providers", "realtime", "voice", "full", "release", "nightly", "manual"}:
@@ -249,17 +366,38 @@ def main() -> None:
             sdist,
             selection=selection,
             environment_kind="extended",
+            profile=args.profile,
         )
 
-    if args.profile in {"packaging", "full", "release", "nightly", "manual"}:
+    if args.profile in {"packaging", "security", "full", "release", "nightly", "manual"}:
         python = create_environment("sdist", sdist)
-        run_suite(python, wheel, sdist, selection="packaging", environment_kind="sdist")
+        if args.profile == "security":
+            selection = "security"
+        elif args.profile in {"release", "nightly", "manual"}:
+            selection = "packaging or distribution_smoke"
+        else:
+            selection = "packaging"
+        run_suite(
+            python,
+            wheel,
+            sdist,
+            selection=selection,
+            environment_kind="sdist",
+            profile=args.profile,
+        )
 
     if args.profile in {"extras", "full", "release", "nightly", "manual"}:
         for optional_extra in OPTIONAL_EXTRAS:
             environment_kind = f"extra-{optional_extra}"
             python = create_environment(environment_kind, wheel, optional_extra=optional_extra)
-            run_suite(python, wheel, sdist, selection="extras", environment_kind=environment_kind)
+            run_suite(
+                python,
+                wheel,
+                sdist,
+                selection="extras",
+                environment_kind=environment_kind,
+                profile=args.profile,
+            )
 
 
 if __name__ == "__main__":

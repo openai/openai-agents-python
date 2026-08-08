@@ -6,6 +6,16 @@ sync:
 update-rclone-pin:
 	uv run python .github/scripts/update_rclone_pin.py --cooldown-days $(or $(RCLONE_COOLDOWN_DAYS),7) $(if $(RCLONE_VERSION),--version $(RCLONE_VERSION))
 
+.PHONY: update-released-api-contract
+update-released-api-contract:
+	@test -n "$(VERSION)" || (echo "VERSION is required, for example VERSION=0.20.0" >&2; exit 2)
+	uv run python .github/scripts/update_released_api_contract.py --version "$(VERSION)"
+
+.PHONY: check-released-api-contract
+check-released-api-contract:
+	@test -n "$(VERSION)" || (echo "VERSION is required, for example VERSION=0.20.0" >&2; exit 2)
+	uv run python .github/scripts/update_released_api_contract.py --version "$(VERSION)" --check
+
 .PHONY: format
 format: 
 	uv run ruff format
@@ -91,6 +101,10 @@ integration-tests-manual:
 .PHONY: integration-tests-packaging
 integration-tests-packaging:
 	uv run python .github/scripts/run_integration_tests.py --profile packaging
+
+.PHONY: integration-tests-security
+integration-tests-security:
+	uv run python .github/scripts/run_integration_tests.py --profile security
 
 .PHONY: integration-tests-mcp-v1
 integration-tests-mcp-v1:

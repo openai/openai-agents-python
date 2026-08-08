@@ -66,7 +66,8 @@ async def test_responses_function_tools_preserve_calls_outputs_and_usage(
     assert result.context_wrapper.usage.total_tokens > 0
 
 
-async def test_responses_structured_output_is_deserialized_from_the_installed_wheel(
+@pytest.mark.distribution_smoke
+async def test_responses_structured_output_is_deserialized_from_the_installed_distribution(
     integration_model: str,
 ) -> None:
     agent = Agent(

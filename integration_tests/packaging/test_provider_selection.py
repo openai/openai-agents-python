@@ -6,7 +6,8 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from conftest import _external_providers, pytest_runtest_setup
+
+from integration_tests.conftest import _external_providers, pytest_runtest_setup
 
 pytestmark = pytest.mark.packaging
 
