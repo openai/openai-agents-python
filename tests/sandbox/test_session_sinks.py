@@ -919,3 +919,16 @@ async def test_sandbox_session_aclose_flushes_best_effort_sink_tasks(tmp_path: P
 
     assert ("stop", "finish") in seen
     assert ("shutdown", "finish") in seen
+
+
+def test_sandbox_session_preserves_falsey_instrumentation(tmp_path: Path) -> None:
+    class FalseyInstrumentation(Instrumentation):
+        def __bool__(self) -> bool:
+            return False
+
+    instrumentation = FalseyInstrumentation()
+    inner = _build_unix_local_session(tmp_path)
+
+    session = SandboxSession(inner, instrumentation=instrumentation)
+
+    assert session._instrumentation is instrumentation

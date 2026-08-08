@@ -1052,7 +1052,9 @@ class BlaxelSandboxClient(BaseSandboxClient["BlaxelSandboxClientOptions"]):
     ) -> None:
         # Validate that the Blaxel SDK is importable.
         _import_blaxel_sdk()
-        self._instrumentation = instrumentation or Instrumentation()
+        self._instrumentation = (
+            instrumentation if instrumentation is not None else Instrumentation()
+        )
         self._dependencies = dependencies
         self._token = token or os.environ.get("BL_API_KEY")
 

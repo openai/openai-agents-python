@@ -1545,7 +1545,9 @@ class RunloopSandboxClient(BaseSandboxClient[RunloopSandboxClientOptions | None]
     ) -> None:
         self._sdk = _import_runloop_sdk().async_sdk(bearer_token=bearer_token, base_url=base_url)
         self._platform = RunloopPlatformClient(self._sdk)
-        self._instrumentation = instrumentation or Instrumentation()
+        self._instrumentation = (
+            instrumentation if instrumentation is not None else Instrumentation()
+        )
         self._dependencies = dependencies
 
     @property

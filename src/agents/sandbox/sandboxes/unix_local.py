@@ -1090,7 +1090,9 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         instrumentation: Instrumentation | None = None,
         dependencies: Dependencies | None = None,
     ) -> None:
-        self._instrumentation = instrumentation or Instrumentation()
+        self._instrumentation = (
+            instrumentation if instrumentation is not None else Instrumentation()
+        )
         self._dependencies = dependencies
 
     async def create(

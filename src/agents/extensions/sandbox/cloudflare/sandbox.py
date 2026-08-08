@@ -1435,7 +1435,9 @@ class CloudflareSandboxClient(BaseSandboxClient[CloudflareSandboxClientOptions])
         request_timeout_s: float = _DEFAULT_REQUEST_TIMEOUT_S,
     ) -> None:
         super().__init__()
-        self._instrumentation = instrumentation or Instrumentation()
+        self._instrumentation = (
+            instrumentation if instrumentation is not None else Instrumentation()
+        )
         self._dependencies = dependencies
         self._exec_timeout_s = exec_timeout_s
         self._request_timeout_s = request_timeout_s

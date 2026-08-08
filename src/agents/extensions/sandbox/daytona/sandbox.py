@@ -1195,7 +1195,9 @@ class DaytonaSandboxClient(BaseSandboxClient[DaytonaSandboxClientOptions]):
         AsyncDaytona, DaytonaConfig, _, _ = _import_daytona_sdk()
         config = DaytonaConfig(api_key=api_key, api_url=api_url) if (api_key or api_url) else None
         self._daytona = AsyncDaytona(config)
-        self._instrumentation = instrumentation or Instrumentation()
+        self._instrumentation = (
+            instrumentation if instrumentation is not None else Instrumentation()
+        )
         self._dependencies = dependencies
 
     async def _build_create_params(

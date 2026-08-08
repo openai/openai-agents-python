@@ -1947,7 +1947,9 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
     ) -> None:
         self._default_image = image
         self._default_sandbox = sandbox
-        self._instrumentation = instrumentation or Instrumentation()
+        self._instrumentation = (
+            instrumentation if instrumentation is not None else Instrumentation()
+        )
         self._dependencies = dependencies
 
     def _validate_manifest_for_workspace_persistence(

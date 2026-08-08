@@ -1326,7 +1326,9 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
         self._token = token
         self._project_id = project_id
         self._team_id = team_id
-        self._instrumentation = instrumentation or Instrumentation()
+        self._instrumentation = (
+            instrumentation if instrumentation is not None else Instrumentation()
+        )
         self._dependencies = dependencies
 
     def _wrap_session(
