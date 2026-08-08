@@ -736,3 +736,52 @@ def test_dependency_keywords_keep_an_empty_properties_object_open(dependency_key
 
     with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
         ensure_strict_json_schema({"type": "object", "properties": {"f": field}})
+
+
+def test_alias_declared_before_its_free_form_target_is_still_caught():
+    # The registries are precomputed from the untouched tree, so declaration order between an
+    # alias and its target cannot matter. Populating them during the walk missed this: the
+    # alias was inlined and closed before its target was ever recorded.
+    with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
+        ensure_strict_json_schema(
+            {
+                "$defs": {
+                    "Outer": {"$ref": "#/$defs/Inner", "description": "d"},
+                    "Inner": {"type": "object"},
+                },
+                "type": "object",
+                "properties": {"f": {"$ref": "#/$defs/Outer"}},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "defs",
+    [
+        {"Outer": {"$ref": "#/$defs/Inner", "description": "d"}, "Inner": {"type": "object"}},
+        {"Inner": {"type": "object"}, "Outer": {"$ref": "#/$defs/Inner"}},
+    ],
+    ids=["annotated-alias-first", "bare-alias-last"],
+)
+def test_unreferenced_aliases_to_free_form_targets_stay_harmless(defs):
+    # A template is only a problem once something references it, in either declaration order.
+    result = ensure_strict_json_schema(
+        {"$defs": defs, "type": "object", "properties": {"a": {"type": "string"}}}
+    )
+
+    assert result["properties"] == {"a": {"type": "string"}}
+
+
+def test_alias_to_a_shaped_target_converts_in_either_order():
+    result = ensure_strict_json_schema(
+        {
+            "$defs": {
+                "Outer": {"$ref": "#/$defs/Inner", "description": "d"},
+                "Inner": {"type": "object", "properties": {"a": {"type": "string"}}},
+            },
+            "type": "object",
+            "properties": {"f": {"$ref": "#/$defs/Outer"}},
+        }
+    )
+
+    assert result["$defs"]["Inner"]["additionalProperties"] is False

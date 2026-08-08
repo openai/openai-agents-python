@@ -74,9 +74,9 @@ def ensure_strict_json_schema(
     """
     if schema == {}:
         return copy.deepcopy(_EMPTY_SCHEMA)
-    converted = _ensure_strict_json_schema(
-        schema, path=(), root=schema, budget=_NodeBudget(_MAX_SCHEMA_NODES)
-    )
+    budget = _NodeBudget(_MAX_SCHEMA_NODES)
+    _precompute_definition_registries(schema, budget)
+    converted = _ensure_strict_json_schema(schema, path=(), root=schema, budget=budget)
     return _ensure_strict_root(converted)
 
 
@@ -194,6 +194,138 @@ def _resolves_to_free_form_definition(
     )
 
 
+_DEFINITION_CONTAINER_KEYS = ("$defs", "definitions")
+
+
+def _iter_schema_nodes(root: object, *, limit: int) -> list[dict[str, object]]:
+    """Every dict node in the tree, cycle-safe and bounded like the conversion itself."""
+    nodes: list[dict[str, object]] = []
+    stack: list[object] = [root]
+    seen: set[int] = set()
+    count = 0
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        count += 1
+        if count > limit:
+            raise UserError(
+                "JSON schema is too large to convert to a strict schema. This can happen when a "
+                "schema expands `$ref`s exponentially, which may indicate a malformed or "
+                "malicious schema."
+            )
+        if is_dict(node):
+            nodes.append(node)
+            stack.extend(node.values())
+        elif is_list(node):
+            stack.extend(node)
+    return nodes
+
+
+def _node_is_unshaped_ref(node: dict[str, object]) -> bool:
+    """A `$ref` node whose sibling keys do not shape or close the referenced object."""
+    return isinstance(node.get("$ref"), str) and not _siblings_supply_the_shape(
+        {key: value for key, value in node.items() if key != "$ref"}
+    )
+
+
+def _precompute_definition_registries(root: dict[str, object], budget: _NodeBudget) -> None:
+    """Populate the free-form and tainted registries before anything is walked or mutated.
+
+    Populating during the definition walk is order-dependent: an alias that appears before
+    its target would be inlined and closed while the target is still unrecorded. This pass
+    reads the untouched tree, seeds both registries from what each definition says on its
+    own, then iterates alias and interior references to a fixpoint, so declaration order
+    cannot matter.
+    """
+    definition_entries: list[dict[str, object]] = []
+    for node in _iter_schema_nodes(root, limit=_MAX_SCHEMA_NODES):
+        for container_key in _DEFINITION_CONTAINER_KEYS:
+            container = node.get(container_key)
+            if is_dict(container):
+                definition_entries.extend(entry for entry in container.values() if is_dict(entry))
+
+    interior_nodes: dict[int, list[dict[str, object]]] = {}
+    for entry in definition_entries:
+        # A definition's own nested definition containers are separate templates and do not
+        # shape this definition's value, so they are excluded from its interior.
+        interior: list[dict[str, object]] = []
+        stack: list[object] = [
+            value for key, value in entry.items() if key not in _DEFINITION_CONTAINER_KEYS
+        ]
+        seen: set[int] = set()
+        while stack:
+            interior_node = stack.pop()
+            if id(interior_node) in seen:
+                continue
+            seen.add(id(interior_node))
+            if is_dict(interior_node):
+                interior.append(interior_node)
+                stack.extend(
+                    value
+                    for key, value in interior_node.items()
+                    if key not in _DEFINITION_CONTAINER_KEYS
+                )
+            elif is_list(interior_node):
+                stack.extend(interior_node)
+        interior_nodes[id(entry)] = interior
+
+        if _is_unclosable_object(entry):
+            budget.free_form_definition_ids.add(id(entry))
+        for node in interior:
+            if _is_unclosable_object(node):
+                budget.tainted_definition_ids.add(id(entry))
+                break
+            required = node.get("required")
+            properties = node.get("properties")
+            if (
+                "$ref" not in node
+                and is_dict(properties)
+                and is_list(required)
+                and any(name not in properties for name in required)
+            ):
+                budget.tainted_definition_ids.add(id(entry))
+                break
+
+    changed = True
+    while changed:
+        changed = False
+        for entry in definition_entries:
+            entry_id = id(entry)
+            if entry_id in budget.tainted_definition_ids:
+                continue
+            root_ref = entry.get("$ref")
+            if isinstance(root_ref, str) and entry_id not in budget.free_form_definition_ids:
+                target = _resolve_ref_chain(root_ref, root=root)
+                if target is not None:
+                    if id(target) in budget.tainted_definition_ids:
+                        # No sibling merge reaches inside the referenced subtree.
+                        budget.tainted_definition_ids.add(entry_id)
+                        changed = True
+                        continue
+                    if id(target) in budget.free_form_definition_ids and _node_is_unshaped_ref(
+                        entry
+                    ):
+                        budget.free_form_definition_ids.add(entry_id)
+                        changed = True
+            for node in interior_nodes[entry_id]:
+                if node is entry:
+                    continue
+                node_ref = node.get("$ref")
+                if not isinstance(node_ref, str):
+                    continue
+                target = _resolve_ref_chain(node_ref, root=root)
+                if target is None:
+                    continue
+                if id(target) in budget.tainted_definition_ids or (
+                    id(target) in budget.free_form_definition_ids and _node_is_unshaped_ref(node)
+                ):
+                    budget.tainted_definition_ids.add(entry_id)
+                    changed = True
+                    break
+
+
 def _ensure_strict_json_schema(
     json_schema: object,
     *,
@@ -209,6 +341,7 @@ def _ensure_strict_json_schema(
     # exponentially and exhaust CPU and memory.
     if budget is None:
         budget = _NodeBudget(_MAX_SCHEMA_NODES)
+        _precompute_definition_registries(root, budget)
     budget.spend()
 
     defs = json_schema.get("$defs")
@@ -389,9 +522,15 @@ def _ensure_strict_json_schema(
     ref = json_schema.get("$ref")
     if isinstance(ref, str) and not has_more_than_n_keys(json_schema, 1):
         if _resolves_to_free_form_definition(ref, root=root, budget=budget):
-            # A bare `$ref` is never inlined, so the strict schema would keep pointing at a
-            # definition that the walk above has since closed into the empty object.
-            raise UserError(_FREE_FORM_OBJECT_ERROR)
+            if in_definitions:
+                # Inside a template this only matters if something references the template,
+                # so record it rather than failing a possibly unreferenced definition.
+                if budget.definition_stack:
+                    budget.tainted_definition_ids.add(budget.definition_stack[-1])
+            else:
+                # A bare `$ref` is never inlined, so the strict schema would keep pointing at
+                # a definition that the walk above has since closed into the empty object.
+                raise UserError(_FREE_FORM_OBJECT_ERROR)
     if ref and has_more_than_n_keys(json_schema, 1):
         assert isinstance(ref, str), f"Received non-string $ref - {ref}"
 
@@ -405,11 +544,19 @@ def _ensure_strict_json_schema(
         # (chained refs), we preserve it for the recursive expansion below instead of
         # silently dropping it.
         json_schema.pop("$ref")
-        if id(resolved) in budget.tainted_definition_ids:
+        reference_cannot_be_strict = id(resolved) in budget.tainted_definition_ids or (
+            id(resolved) in budget.free_form_definition_ids
+            and not _siblings_supply_the_shape(json_schema)
+        )
+        if reference_cannot_be_strict and in_definitions:
+            # Same as the bare-ref case: a template is only a problem once referenced.
+            if budget.definition_stack:
+                budget.tainted_definition_ids.add(budget.definition_stack[-1])
+        elif id(resolved) in budget.tainted_definition_ids:
             # The free-form node is inside the referenced subtree, out of reach of any
             # sibling merge, so this reference can never be made strict.
             raise UserError(_FREE_FORM_OBJECT_ERROR)
-        if id(resolved) in budget.free_form_definition_ids and not _siblings_supply_the_shape(
+        elif id(resolved) in budget.free_form_definition_ids and not _siblings_supply_the_shape(
             json_schema
         ):
             # The definition was free-form, so the keys alongside the `$ref` must supply the
