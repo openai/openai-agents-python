@@ -237,6 +237,18 @@ def create_static_tool_filter(
     return filter_dict
 
 
+def _is_strict_object_root(schema: dict[str, Any]) -> bool:
+    """Whether a converted schema is the closed object envelope a strict tool needs."""
+    if schema.get("additionalProperties") is not False:
+        return False
+    declared_type = schema.get("type")
+    return (
+        declared_type is None
+        or declared_type == "object"
+        or (isinstance(declared_type, list) and "object" in declared_type)
+    )
+
+
 class MCPUtil:
     """Set of utilities for interop between MCP and Agents SDK tools."""
 
@@ -538,7 +550,8 @@ class MCPUtil:
         schema, is_strict = copy.deepcopy(tool_input_schema(tool)), False
 
         # MCP spec doesn't require the inputSchema to have `properties`, but OpenAI spec does.
-        if "properties" not in schema:
+        declared_properties = "properties" in schema
+        if not declared_properties:
             schema["properties"] = {}
 
         if convert_schemas_to_strict:
@@ -547,8 +560,42 @@ class MCPUtil:
             # ``additionalProperties: false``) on a schema we still serve as
             # non-strict. Convert a separate copy so the non-strict fallback keeps
             # the original schema intact.
+            strict_source = copy.deepcopy(schema)
+            if not declared_properties:
+                # Convert what the server actually sent. The synthetic ``properties: {}`` above
+                # is an OpenAI-spec accommodation, not a statement by the server that the tool
+                # takes no arguments, so leaving it in would let a free-form root, including one
+                # reached through a composed root such as ``allOf``, be closed as an empty
+                # object instead of falling back to non-strict.
+                strict_source.pop("properties", None)
             try:
-                schema = ensure_strict_json_schema(copy.deepcopy(schema))
+                converted = ensure_strict_json_schema(strict_source)
+                if _is_strict_object_root(converted) and converted.get("type") is None:
+                    # A root that never declared its type but is already closed still
+                    # describes an object; normalize it explicitly here, on the copy this
+                    # branch owns, rather than inside the predicate.
+                    converted["type"] = "object"
+                if not _is_strict_object_root(converted):
+                    # Without the shim a root that never declared its type converts to something
+                    # that is not a strict object envelope. Serve the original instead of
+                    # sending the provider a strict schema it cannot use.
+                    raise UserError(
+                        "strict conversion did not produce an object root for this MCP schema"
+                    )
+                if "properties" not in converted:
+                    stale_required = converted.get("required")
+                    if isinstance(stale_required, list) and stale_required:
+                        # The root requires keys it never declares. Restoring the empty
+                        # properties shim would serve a strict schema whose required names
+                        # are all forbidden, so serve the original non-strict instead.
+                        raise UserError(
+                            "strict conversion left required names with no declared properties"
+                        )
+                    # Restore the shape the OpenAI spec wants. Only reachable when the root was
+                    # already closed by the server, e.g. ``additionalProperties: false``.
+                    converted["properties"] = {}
+                    converted.setdefault("required", [])
+                schema = converted
                 is_strict = True
             except Exception as e:
                 if _debug.DONT_LOG_TOOL_DATA:

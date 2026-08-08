@@ -2287,3 +2287,213 @@ def test_to_function_tool_description_falls_back_to_mcp_title():
 
     assert function_tool.description == "Search Docs"
     assert function_tool._mcp_title == "Search Docs"
+
+
+@pytest.mark.asyncio
+async def test_free_form_object_arg_falls_back_to_non_strict_schema():
+    """A free-form object arg must stay usable rather than becoming "empty object only".
+
+    Strict conversion cannot express `{"type": "object"}` with no properties. Forcing
+    `additionalProperties: false` onto it would leave the model able to send only `{}`, so the
+    tool silently loses the ability to carry any data. Conversion must fail and the server must
+    fall back to the original schema.
+    """
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="set_properties",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string"},
+                "keys_and_values": {"type": "object", "description": "key/value pairs"},
+            },
+            "required": ["target", "keys_and_values"],
+        },
+    )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    keys_and_values = function_tool.params_json_schema["properties"]["keys_and_values"]
+    # The free-form object is served as-is, so arbitrary keys remain valid.
+    assert "additionalProperties" not in keys_and_values
+
+
+@pytest.mark.asyncio
+async def test_fully_specified_object_args_still_convert_to_strict():
+    """The fallback above must not stop ordinary schemas from becoming strict."""
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="set_properties",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string"},
+                "options": {"type": "object", "properties": {"visible": {"type": "boolean"}}},
+            },
+            "required": ["target", "options"],
+        },
+    )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is True
+    options = function_tool.params_json_schema["properties"]["options"]
+    assert options["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_free_form_root_schema_falls_back_to_non_strict():
+    """A root that declares no properties is free-form, not a no-argument tool.
+
+    `to_function_tool` adds a synthetic `properties: {}` because the OpenAI spec wants one.
+    That accommodation must not be read back as the server saying the tool takes no arguments,
+    which would close a free-form root into "call me with no arguments".
+    """
+    server = FakeMCPServer()
+    tool = MCPTool(name="passthrough", inputSchema={"type": "object"})
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert "additionalProperties" not in function_tool.params_json_schema
+
+
+@pytest.mark.asyncio
+async def test_declared_empty_properties_root_still_converts_to_strict():
+    """A server that explicitly declares `properties: {}` does mean "no arguments"."""
+    server = FakeMCPServer()
+    tool = MCPTool(name="ping", inputSchema={"type": "object", "properties": {}})
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is True
+    assert function_tool.params_json_schema["additionalProperties"] is False
+    assert function_tool.params_json_schema["required"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        {"type": "object", "anyOf": [{"properties": {"a": {"type": "string"}}}]},
+        {"type": "object", "enum": [{"a": 1}]},
+        {"type": "object", "const": {"a": 1}},
+    ],
+    ids=["composed-wrapper", "object-enum", "object-const"],
+)
+async def test_composed_and_enum_object_args_keep_their_non_strict_meaning(wrapper):
+    """Wrappers that describe contents elsewhere must be served unchanged, not closed."""
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="set_properties",
+        inputSchema={"type": "object", "properties": {"field": wrapper}},
+    )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    # Served exactly as the server described it, so the branches still match.
+    assert function_tool.params_json_schema["properties"]["field"] == wrapper
+
+
+@pytest.mark.asyncio
+async def test_already_closed_root_keeps_the_openai_properties_shape():
+    """A server-closed root must still be served with the `properties` key OpenAI expects."""
+    server = FakeMCPServer()
+    tool = MCPTool(name="closed", inputSchema={"type": "object", "additionalProperties": False})
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is True
+    assert function_tool.params_json_schema["properties"] == {}
+    assert function_tool.params_json_schema["required"] == []
+    assert function_tool.params_json_schema["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_empty_root_schema_still_converts_to_a_no_argument_tool():
+    """An entirely empty schema keeps its long-standing no-argument treatment."""
+    server = FakeMCPServer()
+    tool = MCPTool(name="t", inputSchema={})
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is True
+    assert function_tool.params_json_schema["type"] == "object"
+    assert function_tool.params_json_schema["properties"] == {}
+    assert function_tool.params_json_schema["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_annotation_only_root_falls_back_instead_of_faking_an_envelope():
+    """A schema that never declares an object cannot be served as a strict object.
+
+    Without the synthetic `properties`, conversion produces something that is not a closed
+    object envelope. Serving that as strict would hand the provider a schema it cannot use, so
+    the original is served non-strict instead.
+    """
+    server = FakeMCPServer()
+    tool = MCPTool(name="t", inputSchema={"description": "Test tool"})
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema["description"] == "Test tool"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "input_schema",
+    [
+        {"allOf": [{"type": "object"}]},
+        {"allOf": [{"type": "object", "enum": [{"a": 1}]}]},
+    ],
+    ids=["composed-free-form-root", "composed-enum-root"],
+)
+async def test_composed_root_without_a_declared_type_falls_back(input_schema):
+    """The synthetic `properties: {}` must not close a root reached through composition.
+
+    These declare no top-level `type`, so the shim would otherwise look like the server saying
+    the tool takes no arguments, and the composed meaning would be lost.
+    """
+    server = FakeMCPServer()
+    tool = MCPTool(name="t", inputSchema=input_schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema["allOf"] == input_schema["allOf"]
+
+
+@pytest.mark.asyncio
+async def test_typeless_but_closed_root_is_normalized_to_a_strict_envelope():
+    """A root that is already closed describes an object even without declaring `type`."""
+    server = FakeMCPServer()
+    tool = MCPTool(name="t", inputSchema={"additionalProperties": False})
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is True
+    assert function_tool.params_json_schema["type"] == "object"
+    assert function_tool.params_json_schema["properties"] == {}
+    assert function_tool.params_json_schema["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_closed_root_with_undeclared_required_falls_back():
+    """Restoring the properties shim must not manufacture an unsatisfiable strict schema.
+
+    The root is closed but requires a key it never declares. Serving it strict would forbid
+    the very key it requires, so the original is served non-strict instead.
+    """
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="t",
+        inputSchema={"type": "object", "additionalProperties": False, "required": ["a"]},
+    )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema["required"] == ["a"]
