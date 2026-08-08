@@ -272,6 +272,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             # Every auto-resolved input request replays stored history, including the
             # released store=False resolution; explicit input mode stays caller-owned.
             auto_input_replay = mode == "auto" and resolved_mode == "input"
+            force = args.get("force", False) if args else False
 
             if auto_input_replay and has_pending_tool_calls(session_items):
                 # Sanitization would drop the pending call as an orphan, so defer. The
@@ -282,10 +283,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                     store=store,
                     input_coverage=input_coverage,
                     reasoning_item_id_policy=reasoning_item_id_policy,
+                    force=force,
                 )
                 return
-
-            force = args.get("force", False) if args else False
             should_compact = force or self.should_trigger_compaction(
                 {
                     "response_id": response_id,
@@ -457,6 +457,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         store: bool | None = None,
         input_coverage: SessionInputCoverage | None = None,
         reasoning_item_id_policy: Literal["preserve", "omit"] | None = None,
+        force: bool = False,
     ) -> None:
         # A deferring turn ends its compaction attempt here, so its context must supersede
         # any older covered context a manual force could otherwise reuse. Deferral also
@@ -484,7 +485,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             and await self._infer_input_coverage(input_coverage) == "limit_only"
         ):
             resolved_mode = "input"
-        should_compact = self.should_trigger_compaction(
+        should_compact = force or self.should_trigger_compaction(
             {
                 "response_id": response_id,
                 "compaction_mode": resolved_mode,

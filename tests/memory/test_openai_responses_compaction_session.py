@@ -1926,6 +1926,30 @@ class TestOpenAIResponsesCompactionSession:
         mock_client.responses.compact.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_forced_compaction_is_remembered_when_a_pending_call_defers_it(self) -> None:
+        """A manual force blocked by a pending call must arm the deferral, not vanish."""
+        pending_call = cast(
+            TResponseInputItem, {"type": "function_call", "call_id": "call-pending"}
+        )
+        underlying = SimpleListSession(history=self.assistant_history(3) + [pending_call])
+        underlying.session_settings = SessionSettings(limit=4)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: False,
+        )
+
+        await session.run_compaction({"response_id": "resp-forced", "force": True})
+
+        mock_client.responses.compact.assert_not_called()
+        assert session._get_deferred_compaction_response_id() == "resp-forced"
+
+    @pytest.mark.asyncio
     async def test_covered_tool_output_deferral_forces_input_rebuild(self) -> None:
         """A deferring turn's tool outputs are not on its response chain, so no reuse."""
         underlying = SimpleListSession(history=self.assistant_history(2))
