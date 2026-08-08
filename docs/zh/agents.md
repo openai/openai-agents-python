@@ -276,7 +276,7 @@ agent = Agent[UserContext](
 - `on_tool_start` / `on_tool_end`：每次本地工具调用前后触发。对于工具调用，钩子的`context`通常是`ToolContext`，因此你可以检查`tool_call_id`等工具调用元数据。
 -   `on_handoff`：控制权从一个智能体转移到另一个智能体时。
 
-如果你希望使用单个观察器监控整个工作流，请使用`RunHooks`；如果某个智能体需要自定义副作用，请使用`AgentHooks`。
+如果你希望使用单个观察器监控整个工作流，请使用`RunHooks`；如果某个智能体需要自定义`Hooks`，请使用`AgentHooks`。
 
 ```python
 from agents import Agent, RunHooks, Runner
