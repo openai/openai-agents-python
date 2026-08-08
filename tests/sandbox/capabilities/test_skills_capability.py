@@ -20,7 +20,7 @@ from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.session.sandbox_session import SandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, FileMode, Group, Permissions, User
-from agents.sandbox.workspace_paths import coerce_posix_path
+from agents.sandbox.workspace_paths import coerce_posix_path, sandbox_path_str
 from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
 from agents.tracing import trace
@@ -583,7 +583,7 @@ class TestSkillsInstructions:
             '{"skill_name":"dynamic-skill"}',
         )
 
-        skill_dest = str(workspace_root / ".agents" / "dynamic-skill")
+        skill_dest = sandbox_path_str(workspace_root / ".agents" / "dynamic-skill")
         assert ("chmod", "0700", skill_dest) in session.commands
         assert ("chgrp", "staff", skill_dest) in session.commands
         # The configured source entry must not be repointed at the loaded skill.
@@ -615,7 +615,7 @@ class TestSkillsInstructions:
             '{"skill_name":"dynamic-skill"}',
         )
 
-        skill_dest = str(workspace_root / ".agents" / "dynamic-skill")
+        skill_dest = sandbox_path_str(workspace_root / ".agents" / "dynamic-skill")
         assert ("chmod", "0755", skill_dest) in session.commands
         assert not any(command[:1] == ("chgrp",) for command in session.commands)
 
