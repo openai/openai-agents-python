@@ -158,7 +158,9 @@ def hydrate_tool_use_tracker(
     agent_map = _build_agent_map(starting_agent)
     agent_identity_map = _build_agent_identity_map(starting_agent)
     for agent_name, tool_names in snapshot.items():
-        agent = agent_identity_map.get(agent_name) or agent_map.get(agent_name)
+        agent = agent_identity_map.get(agent_name)
+        if agent is None:
+            agent = agent_map.get(agent_name)
         if agent is None:
             continue
         tool_use_tracker.add_tool_use(agent, list(tool_names))

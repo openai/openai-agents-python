@@ -156,7 +156,7 @@ class StreamedAudioResult:
                                 audio_np = self._transform_audio_buffer(
                                     [combined], self.tts_settings.dtype
                                 )
-                                if self.tts_settings.transform_data:
+                                if self.tts_settings.transform_data is not None:
                                     audio_np = self.tts_settings.transform_data(audio_np)
                                 await local_queue.put(
                                     VoiceStreamEventAudio(data=audio_np)
@@ -172,7 +172,7 @@ class StreamedAudioResult:
                     if len(combined) % 2 != 0:
                         combined += b"\x00"
                     audio_np = self._transform_audio_buffer([combined], self.tts_settings.dtype)
-                    if self.tts_settings.transform_data:
+                    if self.tts_settings.transform_data is not None:
                         audio_np = self.tts_settings.transform_data(audio_np)
                     await local_queue.put(VoiceStreamEventAudio(data=audio_np))  # Use local queue
 
@@ -245,7 +245,7 @@ class StreamedAudioResult:
         await asyncio.gather(*self._tasks)
 
     def _finish_turn(self):
-        if self._tracing_span:
+        if self._tracing_span is not None:
             if self._voice_pipeline_config.trace_include_sensitive_data:
                 self._tracing_span.span_data.input = self._turn_text_buffer
             else:
@@ -321,8 +321,9 @@ class StreamedAudioResult:
     def _check_errors(self):
         for task in self._tasks:
             if task.done() and not task.cancelled():
-                if task.exception():
-                    self._stored_exception = task.exception()
+                error = task.exception()
+                if error is not None:
+                    self._stored_exception = error
                     break
 
     async def stream(self) -> AsyncIterator[VoiceStreamEvent]:
@@ -353,7 +354,7 @@ class StreamedAudioResult:
                     break
 
             self._check_errors()
-            if self._stored_exception:
+            if self._stored_exception is not None:
                 raise self._stored_exception
         except BaseException as exc:
             primary_exception = exc
@@ -423,5 +424,5 @@ class StreamedAudioResult:
                 raise exception_to_raise
 
         self._check_errors()
-        if self._stored_exception:
+        if self._stored_exception is not None:
             raise self._stored_exception

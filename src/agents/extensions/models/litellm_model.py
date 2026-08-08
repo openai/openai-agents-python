@@ -179,7 +179,7 @@ class LitellmModel(Model):
         """
         reasoning_effort: Any | None = None
 
-        if model_settings.reasoning:
+        if model_settings.reasoning is not None:
             reasoning_effort = model_settings.reasoning.effort
             if model_settings.reasoning.summary is not None:
                 logger.warning(
@@ -267,7 +267,7 @@ class LitellmModel(Model):
                         json.dumps(message.model_dump(), indent=2, ensure_ascii=False),
                     )
                 else:
-                    finish_reason = first_choice.finish_reason if first_choice else "-"
+                    finish_reason = first_choice.finish_reason if first_choice is not None else "-"
                     logger.debug("LLM resp had no message. finish_reason: %s", finish_reason)
 
             if hasattr(response, "usage"):
@@ -294,7 +294,7 @@ class LitellmModel(Model):
                             or 0
                         ),
                     )
-                    if response.usage
+                    if response_usage is not None
                     # The request completed, so it counts even when the provider omits usage.
                     else Usage(requests=1)
                 )
@@ -353,7 +353,9 @@ class LitellmModel(Model):
             # LiteLLM's Choices omits the logprobs attribute entirely when it was not requested,
             # so access it defensively (mirrors the finish_reason handling above).
             logprob_models = None
-            choice_logprobs = getattr(first_choice, "logprobs", None) if first_choice else None
+            choice_logprobs = (
+                getattr(first_choice, "logprobs", None) if first_choice is not None else None
+            )
             if choice_logprobs is not None and getattr(choice_logprobs, "content", None):
                 logprob_models = ChatCmplHelpers.convert_logprobs_for_output_text(
                     choice_logprobs.content
@@ -466,7 +468,7 @@ class LitellmModel(Model):
         if tracing.include_data():
             span_generation.span_data.output = [final_response.model_dump()]
 
-        if final_response.usage:
+        if final_response.usage is not None:
             span_generation.span_data.usage = {
                 "requests": 1,
                 "input_tokens": final_response.usage.input_tokens,
@@ -474,12 +476,12 @@ class LitellmModel(Model):
                 "total_tokens": final_response.usage.total_tokens,
                 "input_tokens_details": (
                     final_response.usage.input_tokens_details.model_dump()
-                    if final_response.usage.input_tokens_details
+                    if final_response.usage.input_tokens_details is not None
                     else {"cached_tokens": 0, "cache_write_tokens": 0}
                 ),
                 "output_tokens_details": (
                     final_response.usage.output_tokens_details.model_dump()
-                    if final_response.usage.output_tokens_details
+                    if final_response.usage.output_tokens_details is not None
                     else {"reasoning_tokens": 0}
                 ),
             }

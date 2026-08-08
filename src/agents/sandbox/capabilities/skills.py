@@ -592,7 +592,7 @@ class Skills(Capability):
         skills_root = posix_path_as_path(coerce_posix_path(self.skills_path))
         existing_paths = _manifest_entry_paths(manifest)
 
-        if self.lazy_from:
+        if self.lazy_from is not None:
             # Lazy sources do not claim `skills_root` in the manifest up front, so reserve the
             # whole namespace here and fail fast if any existing manifest entry is equal to,
             # above, or below that path.
@@ -612,7 +612,7 @@ class Skills(Capability):
                 )
             return manifest
 
-        if self.from_:
+        if self.from_ is not None:
             if skills_root in existing_paths:
                 existing_entry = _get_manifest_entry_by_path(manifest, skills_root)
                 if existing_entry is None:

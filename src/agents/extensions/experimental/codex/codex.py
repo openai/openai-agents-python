@@ -58,7 +58,9 @@ class Codex:
             )
         if has_kwargs:
             options = {key: value for key, value in kw_values.items() if value is not _UNSET}
-        resolved_options = coerce_codex_options(options) or CodexOptions()
+        resolved_options = coerce_codex_options(options)
+        if resolved_options is None:
+            resolved_options = CodexOptions()
         self._exec = CodexExec(
             executable_path=resolved_options.codex_path_override,
             env=_normalize_env(resolved_options),
@@ -67,7 +69,9 @@ class Codex:
         self._options = resolved_options
 
     def start_thread(self, options: ThreadOptions | Mapping[str, Any] | None = None) -> Thread:
-        resolved_options = coerce_thread_options(options) or ThreadOptions()
+        resolved_options = coerce_thread_options(options)
+        if resolved_options is None:
+            resolved_options = ThreadOptions()
         return Thread(
             exec_client=self._exec,
             options=self._options,
@@ -77,7 +81,9 @@ class Codex:
     def resume_thread(
         self, thread_id: str, options: ThreadOptions | Mapping[str, Any] | None = None
     ) -> Thread:
-        resolved_options = coerce_thread_options(options) or ThreadOptions()
+        resolved_options = coerce_thread_options(options)
+        if resolved_options is None:
+            resolved_options = ThreadOptions()
         return Thread(
             exec_client=self._exec,
             options=self._options,

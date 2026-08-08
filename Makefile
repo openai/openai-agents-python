@@ -18,6 +18,7 @@ format-check:
 .PHONY: lint
 lint: 
 	uv run ruff check
+	uv run python .github/scripts/check_optional_truthiness.py src/agents
 
 .PHONY: mypy
 mypy: 

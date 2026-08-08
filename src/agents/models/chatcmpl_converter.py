@@ -106,7 +106,7 @@ class Converter:
     def convert_response_format(
         cls, final_output_schema: AgentOutputSchemaBase | None
     ) -> ResponseFormat | Omit:
-        if not final_output_schema or final_output_schema.is_plain_text():
+        if final_output_schema is None or final_output_schema.is_plain_text():
             return omit
 
         return {

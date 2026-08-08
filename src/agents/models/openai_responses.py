@@ -527,8 +527,12 @@ class OpenAIResponsesModel(Model):
                         ),
                     )
 
-                usage = _response_usage_to_usage(response.usage) if response.usage else Usage()
-                if response.usage:
+                usage = (
+                    _response_usage_to_usage(response.usage)
+                    if response.usage is not None
+                    else Usage()
+                )
+                if response.usage is not None:
                     span_response.span_data.usage = model_usage_to_span_usage(usage)
 
                 if tracing.include_data():
@@ -661,10 +665,10 @@ class OpenAIResponsesModel(Model):
                 if terminal_failure_error is not None:
                     raise terminal_failure_error
 
-                if final_response and tracing.include_data():
+                if final_response is not None and tracing.include_data():
                     span_response.span_data.response = final_response
                     span_response.span_data.input = input
-                if final_response and final_response.usage:
+                if final_response is not None and final_response.usage is not None:
                     span_response.span_data.usage = model_usage_to_span_usage(
                         _response_usage_to_usage(final_response.usage)
                     )

@@ -82,6 +82,21 @@ class TestStartOpenAIConversationsSession:
                 mock_default_client.conversations.create.assert_called_once_with(items=[])
 
     @pytest.mark.asyncio
+    async def test_start_preserves_falsy_default_client(self):
+        mock_default_client = AsyncMock()
+        mock_default_client.__bool__.return_value = False
+        mock_default_client.conversations.create.return_value = MagicMock(id="default_client_id")
+
+        with patch(
+            "agents.memory.openai_conversations_session.get_default_openai_client",
+            return_value=mock_default_client,
+        ):
+            conversation_id = await start_openai_conversations_session(None)
+
+        assert conversation_id == "default_client_id"
+        mock_default_client.conversations.create.assert_awaited_once_with(items=[])
+
+    @pytest.mark.asyncio
     async def test_start_with_none_client_fallback(self):
         """Test starting a conversation session when get_default_openai_client returns None."""
         with patch(

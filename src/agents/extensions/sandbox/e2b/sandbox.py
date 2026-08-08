@@ -1680,7 +1680,9 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
         instrumentation: Instrumentation | None = None,
         dependencies: Dependencies | None = None,
     ) -> None:
-        self._instrumentation = instrumentation or Instrumentation()
+        self._instrumentation = (
+            instrumentation if instrumentation is not None else Instrumentation()
+        )
         self._dependencies = dependencies
 
     async def create(
@@ -1692,7 +1694,7 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
     ) -> SandboxSession:
         if options is None:
             raise ValueError("E2BSandboxClient.create requires options")
-        manifest = manifest or Manifest()
+        manifest = manifest if manifest is not None else Manifest()
 
         sandbox_type = _coerce_sandbox_type(options.sandbox_type)
 

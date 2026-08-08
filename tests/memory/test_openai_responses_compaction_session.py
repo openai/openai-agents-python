@@ -4,7 +4,7 @@ import logging
 import warnings as warnings_module
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -87,6 +87,20 @@ class TestSelectCompactionCandidateItems:
 
 
 class TestOpenAIResponsesCompactionSession:
+    def test_client_preserves_falsy_default_client(self) -> None:
+        mock_client = MagicMock()
+        mock_client.__bool__.return_value = False
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=self.create_mock_session(),
+        )
+
+        with patch(
+            "agents.memory.openai_responses_compaction_session.get_default_openai_client",
+            return_value=mock_client,
+        ):
+            assert session.client is mock_client
+
     def create_mock_session(self) -> MagicMock:
         mock = MagicMock(spec=Session)
         mock.session_id = "test-session"

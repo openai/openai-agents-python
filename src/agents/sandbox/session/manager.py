@@ -24,7 +24,7 @@ class Instrumentation:
         payload_policy_by_op: dict[OpName, EventPayloadPolicy] | None = None,
     ) -> None:
         self._sinks: list[EventSink] = list(sinks or [])
-        self.payload_policy = payload_policy or EventPayloadPolicy()
+        self.payload_policy = payload_policy if payload_policy is not None else EventPayloadPolicy()
         self.payload_policy_by_op = payload_policy_by_op or {}
         self._tasks: set[asyncio.Task[None]] = set()
 

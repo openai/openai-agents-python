@@ -157,7 +157,7 @@ def _populate_state_from_result(
     trace_state = getattr(result, "_trace_state", None)
     if trace_state is None:
         trace_state = TraceState.from_trace(getattr(result, "trace", None))
-    state._trace_state = copy.deepcopy(trace_state) if trace_state else None
+    state._trace_state = copy.deepcopy(trace_state) if trace_state is not None else None
     sandbox_resume_state = getattr(result, "_sandbox_resume_state", None)
     if isinstance(sandbox_resume_state, dict):
         state._sandbox = copy.deepcopy(sandbox_resume_state)
@@ -865,7 +865,7 @@ class RunResultStreaming(RunResultBase):
                     self._stored_exception is not None
                     and _should_drain_stream_events_before_raising(self._stored_exception)
                 )
-                if self._stored_exception and (
+                if self._stored_exception is not None and (
                     not should_drain_queued_events or self._event_queue.empty()
                 ):
                     logger.debug("Breaking due to stored exception")
@@ -935,7 +935,7 @@ class RunResultStreaming(RunResultBase):
                 self._drain_input_guardrail_queue()
 
         stored_exception = self._stored_exception
-        if stored_exception:
+        if stored_exception is not None:
             if _is_error_data_redacted(stored_exception):
                 _detach_data_redacted_error_traceback(stored_exception)
                 # The streaming result retains caller-visible run data. Drop the local reference
@@ -988,7 +988,7 @@ class RunResultStreaming(RunResultBase):
         if self.run_loop_task and self.run_loop_task.done():
             if not self.run_loop_task.cancelled():
                 run_impl_exc = self.run_loop_task.exception()
-                if run_impl_exc and isinstance(run_impl_exc, Exception):
+                if isinstance(run_impl_exc, Exception):
                     if (
                         isinstance(run_impl_exc, AgentsException)
                         and run_impl_exc.run_data is None
@@ -1000,7 +1000,7 @@ class RunResultStreaming(RunResultBase):
         if self._input_guardrails_task and self._input_guardrails_task.done():
             if not self._input_guardrails_task.cancelled():
                 in_guard_exc = self._input_guardrails_task.exception()
-                if in_guard_exc and isinstance(in_guard_exc, Exception):
+                if isinstance(in_guard_exc, Exception):
                     if (
                         isinstance(in_guard_exc, AgentsException)
                         and in_guard_exc.run_data is None
@@ -1012,7 +1012,7 @@ class RunResultStreaming(RunResultBase):
         if self._output_guardrails_task and self._output_guardrails_task.done():
             if not self._output_guardrails_task.cancelled():
                 out_guard_exc = self._output_guardrails_task.exception()
-                if out_guard_exc and isinstance(out_guard_exc, Exception):
+                if isinstance(out_guard_exc, Exception):
                     if (
                         isinstance(out_guard_exc, AgentsException)
                         and out_guard_exc.run_data is None

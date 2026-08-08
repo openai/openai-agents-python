@@ -69,6 +69,34 @@ def test_streamed_audio_result_odd_length_buffer_int16() -> None:
 
 
 @pytest.mark.asyncio
+async def test_streamed_audio_result_raises_falsy_task_exception() -> None:
+    class FalsyError(RuntimeError):
+        def __bool__(self) -> bool:
+            return False
+
+    result = StreamedAudioResult(
+        FakeTTS(),
+        TTSModelSettings(),
+        VoicePipelineConfig(),
+    )
+    error = FalsyError("failed")
+
+    async def fail() -> None:
+        raise error
+
+    task = asyncio.create_task(fail())
+    result._tasks.append(task)
+    await asyncio.gather(task, return_exceptions=True)
+    await result._queue.put(cast(Any, None))
+
+    with pytest.raises(FalsyError) as exc_info:
+        async for _ in result.stream():
+            pass
+
+    assert exc_info.value is error
+
+
+@pytest.mark.asyncio
 async def test_streamed_audio_result_propagates_consumer_cancellation(monkeypatch) -> None:
     result = StreamedAudioResult(
         FakeTTS(),

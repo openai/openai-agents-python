@@ -119,7 +119,7 @@ class ComputerAction:
         trace_tool_name = get_tool_trace_name_for_tool(action.computer_tool) or cls.TRACE_TOOL_NAME
 
         async def _run_action(span: Any | None) -> RunItem:
-            if span and config.trace_include_sensitive_data:
+            if span is not None and config.trace_include_sensitive_data:
                 span.span_data.input = _serialize_trace_payload(
                     cls._get_trace_input_payload(action.tool_call)
                 )
@@ -132,7 +132,7 @@ class ComputerAction:
                 hooks.on_tool_start(context_wrapper, agent, action.computer_tool),
                 (
                     agent_hooks.on_tool_start(context_wrapper, agent, action.computer_tool)
-                    if agent_hooks
+                    if agent_hooks is not None
                     else _coro.noop_coroutine()
                 ),
             )
@@ -145,7 +145,7 @@ class ComputerAction:
                     trace_include_sensitive_data=config.trace_include_sensitive_data,
                     error_message=error_text,
                 )
-                if span:
+                if span is not None:
                     span.set_error(
                         SpanError(
                             message="Error running tool",
@@ -191,12 +191,12 @@ class ComputerAction:
                 hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),
                 (
                     agent_hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output)
-                    if agent_hooks
+                    if agent_hooks is not None
                     else _coro.noop_coroutine()
                 ),
             )
 
-            if span and config.trace_include_sensitive_data:
+            if span is not None and config.trace_include_sensitive_data:
                 span.span_data.output = image_url
 
             return output_item
@@ -407,7 +407,7 @@ class LocalShellAction:
             hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool),
             (
                 agent_hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool)
-                if agent_hooks
+                if agent_hooks is not None
                 else _coro.noop_coroutine()
             ),
         )
@@ -436,7 +436,7 @@ class LocalShellAction:
             hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result),
             (
                 agent_hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result)
-                if agent_hooks
+                if agent_hooks is not None
                 else _coro.noop_coroutine()
             ),
         )
@@ -468,7 +468,7 @@ class ShellAction:
         )
 
         async def _run_call(span: Any | None) -> RunItem:
-            if span and config.trace_include_sensitive_data:
+            if span is not None and config.trace_include_sensitive_data:
                 span.span_data.input = _serialize_trace_payload(
                     dataclasses.asdict(shell_call.action)
                 )
@@ -530,7 +530,7 @@ class ShellAction:
                 hooks.on_tool_start(context_wrapper, agent, shell_tool),
                 (
                     agent_hooks.on_tool_start(context_wrapper, agent, shell_tool)
-                    if agent_hooks
+                    if agent_hooks is not None
                     else _coro.noop_coroutine()
                 ),
             )
@@ -585,7 +585,7 @@ class ShellAction:
                     trace_include_sensitive_data=config.trace_include_sensitive_data,
                     error_message=output_text,
                 )
-                if span:
+                if span is not None:
                     span.set_error(
                         SpanError(
                             message="Error running tool",
@@ -641,12 +641,12 @@ class ShellAction:
                 hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text),
                 (
                     agent_hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text)
-                    if agent_hooks
+                    if agent_hooks is not None
                     else _coro.noop_coroutine()
                 ),
             )
 
-            if span and config.trace_include_sensitive_data:
+            if span is not None and config.trace_include_sensitive_data:
                 span.span_data.output = output_text
 
             return output_item
@@ -696,7 +696,7 @@ class CustomToolAction:
         )
 
         async def _run_call(span: Any | None) -> RunItem:
-            if span and config.trace_include_sensitive_data:
+            if span is not None and config.trace_include_sensitive_data:
                 span.span_data.input = tool_input
 
             approval_status = context_wrapper.get_approval_status(
@@ -757,7 +757,7 @@ class CustomToolAction:
                 hooks.on_tool_start(tool_context, agent, custom_tool),
                 (
                     agent_hooks.on_tool_start(tool_context, agent, custom_tool)
-                    if agent_hooks
+                    if agent_hooks is not None
                     else _coro.noop_coroutine()
                 ),
             )
@@ -772,7 +772,7 @@ class CustomToolAction:
                     trace_include_sensitive_data=config.trace_include_sensitive_data,
                     error_message=output_text,
                 )
-                if span:
+                if span is not None:
                     span.set_error(
                         SpanError(
                             message="Error running tool",
@@ -813,12 +813,12 @@ class CustomToolAction:
                 hooks.on_tool_end(tool_context, agent, custom_tool, output_text),
                 (
                     agent_hooks.on_tool_end(tool_context, agent, custom_tool, output_text)
-                    if agent_hooks
+                    if agent_hooks is not None
                     else _coro.noop_coroutine()
                 ),
             )
 
-            if span and config.trace_include_sensitive_data:
+            if span is not None and config.trace_include_sensitive_data:
                 span.span_data.output = output_text
             return output_item
 
@@ -895,7 +895,7 @@ class ApplyPatchAction:
         )
 
         async def _run_call(span: Any | None) -> RunItem:
-            if span and config.trace_include_sensitive_data:
+            if span is not None and config.trace_include_sensitive_data:
                 span.span_data.input = _serialize_trace_payload(
                     [
                         {
@@ -964,7 +964,7 @@ class ApplyPatchAction:
                 hooks.on_tool_start(context_wrapper, agent, apply_patch_tool),
                 (
                     agent_hooks.on_tool_start(context_wrapper, agent, apply_patch_tool)
-                    if agent_hooks
+                    if agent_hooks is not None
                     else _coro.noop_coroutine()
                 ),
             )
@@ -989,7 +989,7 @@ class ApplyPatchAction:
 
                     awaited = await result if inspect.isawaitable(result) else result
                     normalized = normalize_apply_patch_result(awaited)
-                    if normalized:
+                    if normalized is not None:
                         if normalized.status == "failed":
                             status = "failed"
                         elif normalized.status == "completed" and status != "failed":
@@ -1004,7 +1004,7 @@ class ApplyPatchAction:
                     trace_include_sensitive_data=config.trace_include_sensitive_data,
                     error_message=output_text,
                 )
-                if span:
+                if span is not None:
                     span.set_error(
                         SpanError(
                             message="Error running tool",
@@ -1050,12 +1050,12 @@ class ApplyPatchAction:
                 hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text),
                 (
                     agent_hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text)
-                    if agent_hooks
+                    if agent_hooks is not None
                     else _coro.noop_coroutine()
                 ),
             )
 
-            if span and config.trace_include_sensitive_data:
+            if span is not None and config.trace_include_sensitive_data:
                 span.span_data.output = output_text
 
             return output_item

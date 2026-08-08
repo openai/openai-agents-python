@@ -863,12 +863,12 @@ class ChatCmplStreamHandler:
                     )
                 delta_logprobs = (
                     ChatCmplHelpers.convert_logprobs_for_text_delta(
-                        choice_logprobs.content if choice_logprobs else None
+                        choice_logprobs.content if choice_logprobs is not None else None
                     )
                     or []
                 )
                 output_logprobs = ChatCmplHelpers.convert_logprobs_for_output_text(
-                    choice_logprobs.content if choice_logprobs else None
+                    choice_logprobs.content if choice_logprobs is not None else None
                 )
                 # Emit the delta for this segment of content
                 yield ResponseTextDeltaEvent(

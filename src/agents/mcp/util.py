@@ -806,7 +806,7 @@ class MCPUtil:
             context._custom_data = custom_data
 
         current_span = get_current_span()
-        if current_span:
+        if current_span is not None:
             if isinstance(current_span.span_data, FunctionSpanData):
                 if not isinstance(context, ToolContext) or (
                     context.run_config is None or context.run_config.trace_include_sensitive_data

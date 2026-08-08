@@ -17,6 +17,11 @@ from agents.run_internal.tool_use_tracker import (
 from .test_responses import get_function_tool_call
 
 
+class FalsyAgent(Agent[Any]):
+    def __bool__(self) -> bool:
+        return False
+
+
 def test_tool_use_tracker_as_serializable_uses_agent_map_or_runtime_snapshot() -> None:
     tracker = AgentToolUseTracker()
     tracker.agent_map = {"agent-a": {"tool-b", "tool-a"}}
@@ -40,7 +45,7 @@ def test_tool_use_tracker_from_and_serialize_snapshots() -> None:
 
 
 def test_serialize_and_hydrate_tool_use_tracker_preserves_duplicate_agent_identity() -> None:
-    second = Agent(name="duplicate")
+    second = FalsyAgent(name="duplicate")
     first = Agent(name="duplicate", handoffs=[second])
     second.handoffs = [first]
 

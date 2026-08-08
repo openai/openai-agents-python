@@ -556,7 +556,7 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
         self,
         active: _ActiveWebSocketResponse | None = None,
     ) -> None:
-        target = active or self._active_response
+        target = active if active is not None else self._active_response
         if target is None:
             return
         if self._active_response is target:

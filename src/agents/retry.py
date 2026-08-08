@@ -151,11 +151,11 @@ def _mark_retry_capabilities(
 
 
 def retry_policy_retries_safe_transport_errors(policy: RetryPolicy | None) -> bool:
-    return bool(policy and getattr(policy, _RETRIES_SAFE_TRANSPORT_ERRORS_ATTR, False))
+    return bool(policy is not None and getattr(policy, _RETRIES_SAFE_TRANSPORT_ERRORS_ATTR, False))
 
 
 def retry_policy_retries_all_transient_errors(policy: RetryPolicy | None) -> bool:
-    return bool(policy and getattr(policy, _RETRIES_ALL_TRANSIENT_ERRORS_ATTR, False))
+    return bool(policy is not None and getattr(policy, _RETRIES_ALL_TRANSIENT_ERRORS_ATTR, False))
 
 
 @pydantic_dataclass
@@ -345,7 +345,11 @@ class _RetryPolicies:
                     continue
                 last_negative = decision
 
-            return first_positive or last_negative or RetryDecision(retry=False)
+            if first_positive is not None:
+                return first_positive
+            if last_negative is not None:
+                return last_negative
+            return RetryDecision(retry=False)
 
         return _mark_retry_capabilities(
             policy,

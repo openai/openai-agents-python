@@ -20,10 +20,10 @@ def format_response_terminal_failure(
     if status:
         details.append(f"status={status}")
     error = getattr(response, "error", None)
-    if error:
+    if error is not None:
         details.append(f"error={error}")
     incomplete_details = getattr(response, "incomplete_details", None)
-    if incomplete_details:
+    if incomplete_details is not None:
         details.append(f"incomplete_details={incomplete_details}")
 
     if details:

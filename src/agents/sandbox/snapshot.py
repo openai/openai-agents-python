@@ -257,4 +257,5 @@ SnapshotSpecUnion = Annotated[
 def resolve_snapshot(spec: SnapshotBase | SnapshotSpec | None, snapshot_id: str) -> SnapshotBase:
     if isinstance(spec, SnapshotBase):
         return spec
-    return (spec or NoopSnapshotSpec()).build(snapshot_id)
+    resolved_spec = spec if spec is not None else NoopSnapshotSpec()
+    return resolved_spec.build(snapshot_id)

@@ -260,7 +260,7 @@ def resolve_trace_settings(
     metadata: dict[str, Any] | None = run_config.trace_metadata
     tracing: TracingConfig | None = run_config.tracing
 
-    if trace_state:
+    if trace_state is not None:
         if workflow_name == default_workflow_name and trace_state.workflow_name:
             workflow_name = trace_state.workflow_name
         if trace_id is None:
@@ -367,7 +367,9 @@ def build_resumed_stream_debug_extra(
     """Build the logger extra payload when resuming a streamed run."""
     return {
         "current_turn": run_state._current_turn,
-        "current_agent": run_state._current_agent.name if run_state._current_agent else None,
+        "current_agent": (
+            run_state._current_agent.name if run_state._current_agent is not None else None
+        ),
         "generated_items_count": len(run_state._generated_items),
         "generated_items_types": [item.type for item in run_state._generated_items],
         "generated_items_details": build_generated_items_details(

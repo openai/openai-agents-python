@@ -78,7 +78,7 @@ class SingleAgentVoiceWorkflow(VoiceWorkflowBase):
         self._callbacks = callbacks
 
     async def run(self, transcription: str) -> AsyncIterator[str]:
-        if self._callbacks:
+        if self._callbacks is not None:
             self._callbacks.on_run(self, transcription)
 
         # Add the transcription to the input history

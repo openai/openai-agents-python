@@ -252,7 +252,11 @@ def tool_invocation_approval_scope(
     if invocation_role is not None:
         payload["invocation_role"] = invocation_role
     if invocation_type == "function_call":
-        resolved_lookup_key = tool_lookup_key or get_function_tool_lookup_key_for_call(mapping)
+        resolved_lookup_key = (
+            tool_lookup_key
+            if tool_lookup_key is not None
+            else get_function_tool_lookup_key_for_call(mapping)
+        )
         if resolved_lookup_key is None:
             return None
         payload["tool_lookup_key"] = _normalize_value(resolved_lookup_key)

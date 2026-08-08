@@ -57,7 +57,7 @@ def create_trace_for_run(
 ) -> Trace | None:
     """Return a trace object for this run when one is not already active."""
     current_trace = get_current_trace()
-    if current_trace:
+    if current_trace is not None:
         return None
 
     if (
@@ -123,11 +123,10 @@ class TraceCtxManager:
             trace_state=self.trace_state,
             reattach_resumed_trace=self.reattach_resumed_trace,
         )
-        if self.trace:
-            assert self.trace is not None
+        if self.trace is not None:
             self.trace.start(mark_as_current=True)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.trace:
+        if self.trace is not None:
             self.trace.finish(reset_current=True)

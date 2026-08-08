@@ -67,7 +67,7 @@ def get_all_nodes(
     parts = []
 
     # Start and end the graph
-    if not parent:
+    if parent is None:
         parts.append(
             '"__start__" [label="__start__", shape=ellipse, style=filled, '
             "fillcolor=lightblue, width=0.5, height=0.3];"
@@ -142,7 +142,7 @@ def get_all_edges(
 
     agent_name = _escape_label(agent.name)
 
-    if not parent:
+    if parent is None:
         parts.append(f'"__start__" -> "{agent_name}";')
 
     for tool in agent.tools:

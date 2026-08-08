@@ -805,15 +805,19 @@ class RunContextWrapper(Generic[TContext]):
         pending_namespace = (
             self._resolve_tool_namespace(existing_pending) if existing_pending is not None else None
         )
-        pending_key = self._resolve_approval_key(existing_pending) if existing_pending else None
-        pending_tool_name = self._resolve_tool_name(existing_pending) if existing_pending else None
+        pending_key = (
+            self._resolve_approval_key(existing_pending) if existing_pending is not None else None
+        )
+        pending_tool_name = (
+            self._resolve_tool_name(existing_pending) if existing_pending is not None else None
+        )
         pending_keys = (
             list(self._resolve_approval_keys(existing_pending))
             if existing_pending is not None
             else []
         )
 
-        if existing_pending and pending_key is not None:
+        if existing_pending is not None and pending_key is not None:
             candidates.append(pending_key)
         explicit_keys = (
             list(
@@ -840,7 +844,7 @@ class RunContextWrapper(Generic[TContext]):
             and tool_name not in candidates
         ):
             candidates.append(tool_name)
-        if existing_pending:
+        if existing_pending is not None:
             for pending_candidate in pending_keys:
                 if pending_candidate not in candidates:
                     candidates.append(pending_candidate)
@@ -1063,7 +1067,9 @@ class RunContextWrapper(Generic[TContext]):
                 hosted_status, _ = self._resolve_hosted_mcp_approval_decision(existing_pending)
                 if hosted_status is None:
                     return None
-                effective_invocation = current_invocation or existing_pending
+                effective_invocation = (
+                    current_invocation if current_invocation is not None else existing_pending
+                )
                 binding_status = self._approved_tool_invocation_status(
                     effective_invocation.raw_item,
                     tool_lookup_key=effective_invocation.tool_lookup_key,
@@ -1078,15 +1084,19 @@ class RunContextWrapper(Generic[TContext]):
         pending_namespace = (
             self._resolve_tool_namespace(existing_pending) if existing_pending is not None else None
         )
-        pending_key = self._resolve_approval_key(existing_pending) if existing_pending else None
-        pending_tool_name = self._resolve_tool_name(existing_pending) if existing_pending else None
+        pending_key = (
+            self._resolve_approval_key(existing_pending) if existing_pending is not None else None
+        )
+        pending_tool_name = (
+            self._resolve_tool_name(existing_pending) if existing_pending is not None else None
+        )
         pending_keys = (
             list(self._resolve_approval_keys(existing_pending))
             if existing_pending is not None
             else []
         )
 
-        if existing_pending and pending_key is not None:
+        if existing_pending is not None and pending_key is not None:
             candidates.append(pending_key)
         explicit_keys = (
             list(
@@ -1113,7 +1123,7 @@ class RunContextWrapper(Generic[TContext]):
             and tool_name not in candidates
         ):
             candidates.append(tool_name)
-        if existing_pending:
+        if existing_pending is not None:
             for pending_candidate in pending_keys:
                 if pending_candidate not in candidates:
                     candidates.append(pending_candidate)
@@ -1131,7 +1141,9 @@ class RunContextWrapper(Generic[TContext]):
             if status is not None:
                 matched_record = self._approvals.get(candidate)
                 break
-        selected_invocation = current_invocation or existing_pending
+        selected_invocation = (
+            current_invocation if current_invocation is not None else existing_pending
+        )
         if status is None or matched_record is None or selected_invocation is None:
             return status
         is_sticky = isinstance(matched_record.approved, bool) or isinstance(

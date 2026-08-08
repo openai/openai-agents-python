@@ -23,6 +23,7 @@ from typing_extensions import TypedDict
 import agents._debug as _debug
 from agents import (
     Agent,
+    AgentOutputSchema,
     GuardrailFunctionOutput,
     Handoff,
     HandoffInputData,
@@ -68,6 +69,7 @@ from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.run import AgentRunner, get_default_agent_runner, set_default_agent_runner
 from agents.run_config import _default_trace_include_sensitive_data
 from agents.run_internal.agent_bindings import bind_public_agent
+from agents.run_internal.agent_runner_helpers import build_resumed_stream_debug_extra
 from agents.run_internal.items import (
     TOOL_CALL_SESSION_DESCRIPTION_KEY,
     TOOL_CALL_SESSION_TITLE_KEY,
@@ -596,6 +598,38 @@ def test_set_default_agent_runner_roundtrip():
     # Reset to ensure other tests are unaffected.
     set_default_agent_runner(None)
     assert isinstance(get_default_agent_runner(), AgentRunner)
+
+
+def test_set_default_agent_runner_preserves_falsey_runner():
+    class FalseyRunner(AgentRunner):
+        def __bool__(self) -> bool:
+            return False
+
+    original_runner = get_default_agent_runner()
+    runner = FalseyRunner()
+    try:
+        set_default_agent_runner(runner)
+        assert get_default_agent_runner() is runner
+    finally:
+        set_default_agent_runner(original_runner)
+
+
+def test_resumed_stream_debug_extra_preserves_falsy_current_agent() -> None:
+    class FalsyAgent(Agent[Any]):
+        def __bool__(self) -> bool:
+            return False
+
+    agent: Agent[Any] = FalsyAgent(name="falsy")
+    state: RunState[None] = RunState(
+        context=RunContextWrapper(context=None),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+
+    extra = build_resumed_stream_debug_extra(state, include_tool_output=False)
+
+    assert extra["current_agent"] == "falsy"
 
 
 def test_run_streamed_preserves_legacy_positional_previous_response_id():
@@ -4530,13 +4564,17 @@ def test_tool_two():
 
 @pytest.mark.asyncio
 async def test_tool_use_behavior_first_output():
+    class FalsyAgentOutputSchema(AgentOutputSchema):
+        def __bool__(self) -> bool:
+            return False
+
     model = FakeModel()
     agent = Agent(
         name="test",
         model=model,
         tools=[get_function_tool("foo", "tool_result"), test_tool_one, test_tool_two],
         tool_use_behavior="stop_on_first_tool",
-        output_type=Foo,
+        output_type=FalsyAgentOutputSchema(Foo),
     )
 
     model.add_multiple_turn_outputs(

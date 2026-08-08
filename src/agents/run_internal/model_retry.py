@@ -284,7 +284,8 @@ async def _evaluate_retry(
         or (provider_advice is not None and provider_advice.replay_safety == "unsafe")
     ):
         return RetryDecision(
-            retry=False, reason=provider_advice.reason if provider_advice else None
+            retry=False,
+            reason=provider_advice.reason if provider_advice is not None else None,
         )
 
     if retry_policy is None:
@@ -310,7 +311,8 @@ async def _evaluate_retry(
     if replay_unsafe_request and not decision._approves_replay and not provider_marks_replay_safe:
         return RetryDecision(
             retry=False,
-            reason=decision.reason or (provider_advice.reason if provider_advice else None),
+            reason=decision.reason
+            or (provider_advice.reason if provider_advice is not None else None),
         )
 
     return RetryDecision(
@@ -324,7 +326,7 @@ async def _evaluate_retry(
                 else _default_retry_delay(attempt, retry_backoff)
             )
         ),
-        reason=decision.reason or (provider_advice.reason if provider_advice else None),
+        reason=decision.reason or (provider_advice.reason if provider_advice is not None else None),
     )
 
 
@@ -485,9 +487,11 @@ async def get_response_with_retry(
             decision = await _evaluate_retry(
                 error=error,
                 attempt=policy_attempt,
-                max_retries=max(retry_settings.max_retries or 0, 0) if retry_settings else 0,
-                retry_policy=retry_settings.policy if retry_settings else None,
-                retry_backoff=retry_settings.backoff if retry_settings else None,
+                max_retries=(
+                    max(retry_settings.max_retries or 0, 0) if retry_settings is not None else 0
+                ),
+                retry_policy=retry_settings.policy if retry_settings is not None else None,
+                retry_backoff=retry_settings.backoff if retry_settings is not None else None,
                 stream=False,
                 replay_unsafe_request=stateful_request or replay_unsafe_request,
                 emitted_retry_unsafe_event=False,
@@ -501,7 +505,7 @@ async def get_response_with_retry(
                 decision.delay,
                 policy_attempt,
                 retry_settings.max_retries
-                if retry_settings and retry_settings.max_retries is not None
+                if retry_settings is not None and retry_settings.max_retries is not None
                 else 0,
             )
             await rewind()
@@ -608,9 +612,11 @@ async def stream_response_with_retry(
             decision = await _evaluate_retry(
                 error=error,
                 attempt=policy_attempt,
-                max_retries=max(retry_settings.max_retries or 0, 0) if retry_settings else 0,
-                retry_policy=retry_settings.policy if retry_settings else None,
-                retry_backoff=retry_settings.backoff if retry_settings else None,
+                max_retries=(
+                    max(retry_settings.max_retries or 0, 0) if retry_settings is not None else 0
+                ),
+                retry_policy=retry_settings.policy if retry_settings is not None else None,
+                retry_backoff=retry_settings.backoff if retry_settings is not None else None,
                 stream=True,
                 replay_unsafe_request=stateful_request or replay_unsafe_request,
                 emitted_retry_unsafe_event=emitted_retry_unsafe_event,
@@ -624,7 +630,7 @@ async def stream_response_with_retry(
                 decision.delay,
                 policy_attempt,
                 retry_settings.max_retries
-                if retry_settings and retry_settings.max_retries is not None
+                if retry_settings is not None and retry_settings.max_retries is not None
                 else 0,
             )
             await rewind()

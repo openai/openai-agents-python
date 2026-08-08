@@ -140,7 +140,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     @property
     def client(self) -> AsyncOpenAI:
         if self._client is None:
-            self._client = get_default_openai_client() or AsyncOpenAI()
+            default_client = get_default_openai_client()
+            self._client = default_client if default_client is not None else AsyncOpenAI()
         return self._client
 
     def _resolve_compaction_mode_for_response(

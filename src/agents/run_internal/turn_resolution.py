@@ -232,7 +232,7 @@ async def _maybe_finalize_from_tool_results(
     if not check_tool_use.is_final_output:
         return None
 
-    if not public_agent.output_type or public_agent.output_type is str:
+    if public_agent.output_type is None or public_agent.output_type is str:
         check_tool_use.final_output = str(check_tool_use.final_output)
 
     if check_tool_use.final_output is None:
@@ -348,7 +348,7 @@ async def run_final_output_hooks(
     await gather_with_cancel(
         hooks.on_agent_end(agent_hook_context, agent, final_output),
         agent.hooks.on_end(agent_hook_context, agent, final_output)
-        if agent.hooks
+        if agent.hooks is not None
         else _coro.noop_coroutine(),
     )
 
@@ -371,7 +371,11 @@ async def execute_final_output_step(
     | None = None,
 ) -> SingleStepResult:
     """Finalize a turn once final output is known and run end hooks."""
-    final_output_hooks = run_final_output_hooks_fn or run_final_output_hooks
+    final_output_hooks = (
+        run_final_output_hooks_fn
+        if run_final_output_hooks_fn is not None
+        else run_final_output_hooks
+    )
     await final_output_hooks(public_agent, hooks, context_wrapper, final_output)
 
     return SingleStepResult(
@@ -618,7 +622,7 @@ async def execute_handoffs(
                     agent=new_agent,
                     source=public_agent,
                 )
-                if public_agent.hooks
+                if public_agent.hooks is not None
                 else _coro.noop_coroutine()
             ),
         )
@@ -981,7 +985,7 @@ async def execute_tools_and_side_effects(
                     tool_input_guardrail_results=tool_input_guardrail_results,
                     tool_output_guardrail_results=tool_output_guardrail_results,
                 )
-            if output_schema and not output_schema.is_plain_text():
+            if output_schema is not None and not output_schema.is_plain_text():
                 if potential_final_output_text:
                     validation_error: ModelBehaviorError | None = None
                     try:
@@ -1058,7 +1062,7 @@ async def execute_tools_and_side_effects(
                     tool_input_guardrail_results=tool_input_guardrail_results,
                     tool_output_guardrail_results=tool_output_guardrail_results,
                 )
-            if not output_schema or output_schema.is_plain_text():
+            if output_schema is None or output_schema.is_plain_text():
                 return await execute_final_output_call(
                     public_agent=public_agent,
                     original_input=original_input,
@@ -2330,8 +2334,7 @@ async def resolve_interrupted_turn(
     ):
         append_if_new(item)
     for pending_item in pending_interruptions:
-        if pending_item:
-            append_if_new(pending_item)
+        append_if_new(pending_item)
     for shell_rejection in rejected_shell_results:
         append_if_new(shell_rejection)
     for custom_tool_rejection in rejected_custom_tool_results:
@@ -2368,9 +2371,7 @@ async def resolve_interrupted_turn(
                 model_response=new_response,
                 pre_step_items=original_pre_step_items,
                 new_step_items=new_items,
-                next_step=NextStepInterruption(
-                    interruptions=[item for item in pending_interruptions if item]
-                ),
+                next_step=NextStepInterruption(interruptions=list(pending_interruptions)),
                 tool_input_guardrail_results=tool_input_guardrail_results,
                 tool_output_guardrail_results=tool_output_guardrail_results,
                 processed_response=processed_response,
@@ -2691,7 +2692,7 @@ def process_model_response(
                     "created_by": get_mapping_or_attr(output, "created_by"),
                 }
             shell_call_raw.pop("created_by", None)
-            if not shell_tool:
+            if shell_tool is None:
                 tools_used.append("shell")
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
@@ -2743,7 +2744,7 @@ def process_model_response(
                 tool_name=shell_tool.name if shell_tool is not None else "shell",
                 agent_name=agent.name,
             )
-            tools_used.append(shell_tool.name if shell_tool else "shell")
+            tools_used.append(shell_tool.name if shell_tool is not None else "shell")
             if isinstance(output, dict):
                 shell_output_raw = dict(output)
             else:
@@ -2777,7 +2778,7 @@ def process_model_response(
                     "created_by": get_mapping_or_attr(output, "created_by"),
                 }
             apply_patch_call_raw.pop("created_by", None)
-            if apply_patch_tool:
+            if apply_patch_tool is not None:
                 ensure_tool_caller_allowed(
                     tool_call=apply_patch_call_raw,
                     allowed_callers=apply_patch_tool.allowed_callers,
@@ -2880,7 +2881,7 @@ def process_model_response(
         elif isinstance(output, ResponseReasoningItem):
             items.append(ReasoningItem(raw_item=output, agent=agent))
         elif isinstance(output, ResponseComputerToolCall):
-            if not computer_tool:
+            if computer_tool is None:
                 tools_used.append("computer")
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
@@ -2929,7 +2930,7 @@ def process_model_response(
                     mcp_tool=server,
                 )
             )
-            if not server.on_approval_request:
+            if server.on_approval_request is None:
                 logger.debug(
                     "Hosted MCP server %s has no on_approval_request hook; approvals will be "
                     "surfaced as interruptions for the caller to handle.",
@@ -3001,7 +3002,7 @@ def process_model_response(
             items.append(ToolCallItem(raw_item=output, agent=agent))
             tools_used.append("code_interpreter")
         elif isinstance(output, LocalShellCall):
-            if local_shell_tool:
+            if local_shell_tool is not None:
                 ensure_tool_caller_allowed(
                     tool_call=output,
                     allowed_callers=None,
@@ -3019,7 +3020,7 @@ def process_model_response(
                 local_shell_calls.append(
                     ToolRunLocalShellCall(tool_call=output, local_shell_tool=local_shell_tool)
                 )
-            elif shell_tool:
+            elif shell_tool is not None:
                 ensure_tool_caller_allowed(
                     tool_call=output,
                     allowed_callers=shell_tool.allowed_callers,
@@ -3061,7 +3062,7 @@ def process_model_response(
             elif is_apply_patch_name(output.name, apply_patch_tool):
                 pseudo_call = normalize_apply_patch_fallback_call(output)
                 assert pseudo_call is not None
-                if apply_patch_tool:
+                if apply_patch_tool is not None:
                     ensure_tool_caller_allowed(
                         tool_call=pseudo_call,
                         allowed_callers=apply_patch_tool.allowed_callers,
@@ -3110,7 +3111,7 @@ def process_model_response(
         ):
             pseudo_call = normalize_apply_patch_fallback_call(output)
             assert pseudo_call is not None
-            if apply_patch_tool:
+            if apply_patch_tool is not None:
                 ensure_tool_caller_allowed(
                     tool_call=pseudo_call,
                     allowed_callers=apply_patch_tool.allowed_callers,
@@ -3295,7 +3296,7 @@ def _preflight_response_invocations_after_processing_error(
         elif output_type == "shell_call":
             tool_name = shell_tool.name if shell_tool is not None else None
         elif isinstance(output, LocalShellCall):
-            selected_shell_tool = local_shell_tool or shell_tool
+            selected_shell_tool = local_shell_tool if local_shell_tool is not None else shell_tool
             tool_name = selected_shell_tool.name if selected_shell_tool is not None else None
         elif output_type == "apply_patch_call":
             tool_name = apply_patch_tool.name if apply_patch_tool is not None else None

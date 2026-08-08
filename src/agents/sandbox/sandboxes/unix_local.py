@@ -1090,7 +1090,9 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         instrumentation: Instrumentation | None = None,
         dependencies: Dependencies | None = None,
     ) -> None:
-        self._instrumentation = instrumentation or Instrumentation()
+        self._instrumentation = (
+            instrumentation if instrumentation is not None else Instrumentation()
+        )
         self._dependencies = dependencies
 
     async def create(
@@ -1100,7 +1102,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         manifest: Manifest | None = None,
         options: UnixLocalSandboxClientOptions | None = None,
     ) -> SandboxSession:
-        resolved_options = options or UnixLocalSandboxClientOptions()
+        resolved_options = options if options is not None else UnixLocalSandboxClientOptions()
         if manifest is not None:
             _assert_unix_local_host_path_grants_unsupported(manifest)
         # For local execution, runner-created sessions should always get an isolated temp root

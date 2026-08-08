@@ -1559,6 +1559,52 @@ async def test_resume_skips_needs_approval_checker_when_status_resolved() -> Non
 
 
 @pytest.mark.asyncio
+async def test_function_resume_reuses_falsy_pending_item() -> None:
+    class FalsyToolApprovalItem(ToolApprovalItem):
+        def __bool__(self) -> bool:
+            return False
+
+    @function_tool(needs_approval=True)
+    async def approve_me(value: str) -> str:
+        return value
+
+    tool_call = make_function_tool_call(
+        approve_me.name,
+        call_id="pending-function",
+        arguments='{"value":"a"}',
+    )
+    agent = Agent(name="agent", tools=[approve_me])
+    existing_pending = FalsyToolApprovalItem(agent=agent, raw_item=tool_call)
+    run = ToolRunFunction(tool_call=tool_call, function_tool=approve_me)
+    pending: list[ToolApprovalItem] = []
+
+    async def _needs_approval_checker(_run: ToolRunFunction) -> bool:
+        return True
+
+    async def _record_rejection(
+        _call_id: str | None,
+        _tool_call: ResponseFunctionToolCall,
+        _tool: FunctionTool,
+    ) -> None:
+        raise AssertionError("unresolved approval must not be recorded as a rejection")
+
+    selected = await _select_function_tool_runs_for_resume(
+        [run],
+        approval_items_by_call_id={tool_call.call_id: existing_pending},
+        context_wrapper=make_context_wrapper(),
+        needs_approval_checker=_needs_approval_checker,
+        output_exists_checker=lambda _run: False,
+        record_rejection=_record_rejection,
+        pending_interruption_adder=pending.append,
+        pending_item_builder=lambda _run: ToolApprovalItem(agent=agent, raw_item=tool_call),
+    )
+
+    assert selected == []
+    assert pending == [existing_pending]
+    assert pending[0] is existing_pending
+
+
+@pytest.mark.asyncio
 async def test_resume_rechecks_rejection_after_function_approval_checker() -> None:
     """A rejection recorded while the checker waits must prevent another interruption."""
 
@@ -2133,6 +2179,51 @@ async def test_collect_runs_by_approval_skips_checker_when_status_resolved() -> 
     assert checker_calls == []
     assert approved == [runs[0]]
     assert len(rejections) == 1
+
+
+@pytest.mark.asyncio
+async def test_collect_runs_by_approval_reuses_falsy_pending_item() -> None:
+    class FalsyToolApprovalItem(ToolApprovalItem):
+        def __bool__(self) -> bool:
+            return False
+
+    shell_tool = ShellTool(executor=lambda _req: "ok", needs_approval=True)
+    shell_call = make_shell_call("pending-shell")
+    agent = Agent(name="agent")
+    existing_pending = FalsyToolApprovalItem(
+        agent=agent,
+        raw_item=cast(dict[str, Any], shell_call),
+        tool_name=shell_tool.name,
+    )
+    run = ToolRunShellCall(tool_call=shell_call, shell_tool=shell_tool)
+    pending: list[ToolApprovalItem] = []
+
+    async def _build_rejection(_run: ToolRunShellCall, call_id: str) -> RunItem:
+        return ToolCallOutputItem(
+            output="rejected",
+            raw_item={"type": "function_call_output", "call_id": call_id, "output": "rejected"},
+            agent=agent,
+        )
+
+    async def _needs_approval(_run: ToolRunShellCall) -> bool:
+        return True
+
+    approved, rejections = await _collect_runs_by_approval(
+        [run],
+        call_id_extractor=lambda item: item.tool_call["call_id"],
+        tool_name_resolver=lambda item: item.shell_tool.name,
+        rejection_builder=_build_rejection,
+        context_wrapper=make_context_wrapper(),
+        approval_items_by_call_id={"pending-shell": existing_pending},
+        agent=agent,
+        pending_interruption_adder=pending.append,
+        needs_approval_checker=_needs_approval,
+    )
+
+    assert approved == []
+    assert rejections == []
+    assert pending == [existing_pending]
+    assert pending[0] is existing_pending
 
 
 @pytest.mark.parametrize("approved", [True, False], ids=["approved", "rejected"])
@@ -3229,6 +3320,10 @@ async def test_resume_skips_computer_actions_with_existing_output() -> None:
 async def test_rebuild_function_runs_handles_pending_and_rejections() -> None:
     """Rebuilt function runs should surface pending approvals and emit rejections."""
 
+    class FalsyToolApprovalItem(ToolApprovalItem):
+        def __bool__(self) -> bool:
+            return False
+
     @function_tool(needs_approval=True)
     def reject_me(text: str = "nope") -> str:
         return text
@@ -3254,7 +3349,7 @@ async def test_rebuild_function_runs_handles_pending_and_rejections() -> None:
     }
 
     rejected_item = ToolApprovalItem(agent=agent, raw_item=rejected_raw)
-    pending_item = ToolApprovalItem(agent=agent, raw_item=pending_raw)
+    pending_item = FalsyToolApprovalItem(agent=agent, raw_item=pending_raw)
     context_wrapper.reject_tool(rejected_item)
 
     run_state = make_state_with_interruptions(agent, [rejected_item, pending_item])
@@ -3284,7 +3379,8 @@ async def test_rebuild_function_runs_handles_pending_and_rejections() -> None:
     )
 
     assert isinstance(result.next_step, NextStepInterruption)
-    assert pending_item in result.next_step.interruptions
+    assert any(item is pending_item for item in result.next_step.interruptions)
+    assert any(item is pending_item for item in result.new_step_items)
     rejection_outputs = [
         item
         for item in result.new_step_items

@@ -369,7 +369,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         if effective_manifest is not None or run_as_user is not None:
             effective_manifest = self._process_manifest(
                 capabilities,
-                effective_manifest or Manifest(),
+                effective_manifest if effective_manifest is not None else Manifest(),
                 run_as_user=run_as_user,
             )
 
@@ -530,7 +530,11 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         agent: SandboxAgent[TContext],
     ) -> Manifest | None:
         sandbox_config = self._require_sandbox_config()
-        return sandbox_config.manifest or agent.default_manifest
+        return (
+            sandbox_config.manifest
+            if sandbox_config.manifest is not None
+            else agent.default_manifest
+        )
 
     @staticmethod
     def _process_manifest(

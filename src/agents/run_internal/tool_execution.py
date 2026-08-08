@@ -879,7 +879,7 @@ def is_apply_patch_name(name: str | None, tool: ApplyPatchTool | None) -> bool:
     candidate = name.strip().lower()
     if candidate.startswith("apply_patch"):
         return True
-    if tool and candidate == tool.name.strip().lower():
+    if tool is not None and candidate == tool.name.strip().lower():
         return True
     return False
 
@@ -1188,7 +1188,7 @@ async def resolve_approval_status(
         tool_lookup_key=tool_lookup_key,
         current_invocation=approval_item,
     )
-    if approval_status is None and on_approval:
+    if approval_status is None and on_approval is not None:
         decision_result = on_approval(context_wrapper, approval_item)
         if inspect.isawaitable(decision_result):
             decision_result = await decision_result
@@ -1588,7 +1588,9 @@ class _FunctionToolBatchExecutor:
         self.propagating_failure: BaseException | None = None
         self.available_function_tools: list[FunctionTool] = []
         self.max_function_tool_concurrency = (
-            config.tool_execution.max_function_tool_concurrency if config.tool_execution else None
+            config.tool_execution.max_function_tool_concurrency
+            if config.tool_execution is not None
+            else None
         )
 
     async def execute(
@@ -2021,7 +2023,7 @@ class _FunctionToolBatchExecutor:
                 self.hooks.on_tool_start(tool_context, self.public_agent, func_tool),
                 (
                     agent_hooks.on_tool_start(tool_context, self.public_agent, func_tool)
-                    if agent_hooks
+                    if agent_hooks is not None
                     else _coro.noop_coroutine()
                 ),
             )
@@ -2157,7 +2159,7 @@ class _FunctionToolBatchExecutor:
             self.hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result),
             (
                 agent_hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result)
-                if agent_hooks
+                if agent_hooks is not None
                 else _coro.noop_coroutine()
             ),
         )
@@ -2456,7 +2458,10 @@ async def execute_computer_actions(
             tool_name=action.computer_tool.name,
         )
         acknowledged: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None
-        if action.tool_call.pending_safety_checks and action.computer_tool.on_safety_check:
+        if (
+            action.tool_call.pending_safety_checks
+            and action.computer_tool.on_safety_check is not None
+        ):
             acknowledged = []
             for check in action.tool_call.pending_safety_checks:
                 data = ComputerToolSafetyCheckData(

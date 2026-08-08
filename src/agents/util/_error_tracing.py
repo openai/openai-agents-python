@@ -25,7 +25,7 @@ def attach_error_to_span(span: Span[Any], error: SpanError) -> None:
 
 def attach_error_to_current_span(error: SpanError) -> None:
     span = get_current_span()
-    if span:
+    if span is not None:
         attach_error_to_span(span, error)
     elif _debug.DONT_LOG_MODEL_DATA or _debug.DONT_LOG_TOOL_DATA:
         logger.warning("No active span; trace error was not attached")

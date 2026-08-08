@@ -873,7 +873,7 @@ class RunState(Generic[TContext, TAgent]):
 
     def _current_generated_items_merge_marker(self) -> str | None:
         """Return a marker for the processed response already reflected in _generated_items."""
-        if not (self._last_processed_response and self._last_processed_response.new_items):
+        if self._last_processed_response is None or not self._last_processed_response.new_items:
             return None
 
         latest_response_id = (
@@ -909,7 +909,7 @@ class RunState(Generic[TContext, TAgent]):
     def _merge_generated_items_with_processed(self) -> list[RunItem]:
         """Merge persisted and newly processed items without duplication."""
         generated_items = list(self._generated_items)
-        if not (self._last_processed_response and self._last_processed_response.new_items):
+        if self._last_processed_response is None or not self._last_processed_response.new_items:
             return generated_items
 
         current_merge_marker = self._current_generated_items_merge_marker()
@@ -1094,7 +1094,7 @@ class RunState(Generic[TContext, TAgent]):
                 strict_context=strict_context,
                 include_tracing_api_key=include_tracing_api_key,
             )
-            if self._last_processed_response
+            if self._last_processed_response is not None
             else None
         )
         result["current_turn_persisted_item_count"] = self._current_turn_persisted_item_count
@@ -1326,7 +1326,7 @@ class RunState(Generic[TContext, TAgent]):
         self._trace_state = TraceState.from_trace(trace)
 
     def _serialize_trace_data(self, *, include_tracing_api_key: bool) -> dict[str, Any] | None:
-        if not self._trace_state:
+        if self._trace_state is None:
             return None
         return self._trace_state.to_json(include_tracing_api_key=include_tracing_api_key)
 
@@ -2146,7 +2146,7 @@ async def _deserialize_processed_response(
         deserialized: list[TAction] = []
         for entry in entries or []:
             tool_container = entry.get(tool_key, {}) if isinstance(entry, Mapping) else {}
-            if name_resolver:
+            if name_resolver is not None:
                 tool_name = name_resolver(entry)
             else:
                 if isinstance(tool_container, Mapping):
@@ -2165,7 +2165,7 @@ async def _deserialize_processed_response(
                     bare_lookup_key = get_function_tool_lookup_key(bare_name)
                     if bare_lookup_key is not None:
                         tool = tool_map.get(bare_lookup_key)
-            if not tool:
+            if tool is None:
                 continue
 
             tool_call_data_raw = entry.get("tool_call", {}) if isinstance(entry, Mapping) else {}
@@ -2400,7 +2400,7 @@ async def _deserialize_processed_response(
 
         mcp_tool = mcp_tools_map.get(request_item.server_label)
 
-        if mcp_tool:
+        if mcp_tool is not None:
             _ensure_restored_tool_call_allowed(
                 tool_call=request_item,
                 allowed_callers=mcp_tool.tool_config.get("allowed_callers"),
@@ -2557,7 +2557,8 @@ def _resolve_agent_from_data(
             resolved = agent_identity_map.get(agent_name)
             if resolved is not None:
                 return resolved
-        return agent_map.get(agent_name) or fallback_agent
+        resolved = agent_map.get(agent_name)
+        return resolved if resolved is not None else fallback_agent
     return fallback_agent
 
 
@@ -2989,7 +2990,7 @@ async def _build_run_state_from_json(
         agent_map,
         agent_identity_map=agent_identity_map,
     )
-    if not current_agent:
+    if current_agent is None:
         raise UserError(f"Agent {current_agent_name} not found in agent map")
 
     context_data = state_json["context"]
@@ -3650,7 +3651,7 @@ def _iter_agent_graph(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
                     continue
                 tool_agent = getattr(tool, "_agent_instance", None)
                 tool_agent_name = getattr(tool_agent, "name", None)
-                if tool_agent and tool_agent_name:
+                if tool_agent is not None and tool_agent_name:
                     queue.append(tool_agent)
 
 
@@ -4156,7 +4157,7 @@ def _deserialize_items(
                 agent_map,
                 agent_identity_map,
             )
-            if agent_candidate:
+            if agent_candidate is not None:
                 return agent_candidate, agent_candidate.name
 
         return None, candidate_name
@@ -4168,7 +4169,7 @@ def _deserialize_items(
             continue
 
         agent, agent_name = _resolve_agent_info(item_data, item_type)
-        if not agent:
+        if agent is None:
             if agent_name:
                 log_model_and_tool_data_warning(
                     logger,
@@ -4273,7 +4274,7 @@ def _deserialize_items(
                 )
 
                 # If we cannot resolve both agents, skip this item gracefully
-                if not source_agent or not target_agent:
+                if source_agent is None or target_agent is None:
                     source_name = item_data.get("source_agent")
                     target_name = item_data.get("target_agent")
                     log_model_and_tool_data_warning(

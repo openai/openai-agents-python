@@ -283,6 +283,33 @@ async def test_user_agent_header_any_llm_chat(override_ua: str | None, monkeypat
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_any_llm_chat_preserves_falsy_reasoning(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FalsyReasoning(Reasoning):
+        def __bool__(self) -> bool:
+            return False
+
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=_chat_completion("Hello"))
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+
+    await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(reasoning=FalsyReasoning(effort="low")),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    assert provider.chat_calls[0]["reasoning_effort"] == "low"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 @pytest.mark.parametrize("provider_name", ["gemini", "vertexai"])
 @pytest.mark.parametrize("options_type", ["unset", "dictionary", "model"])
 async def test_any_llm_google_chat_headers_use_http_options(

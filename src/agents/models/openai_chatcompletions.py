@@ -282,7 +282,7 @@ class OpenAIChatCompletionsModel(Model):
                         json.dumps(message.model_dump(), indent=2, ensure_ascii=False),
                     )
                 else:
-                    finish_reason = first_choice.finish_reason if first_choice else "-"
+                    finish_reason = first_choice.finish_reason if first_choice is not None else "-"
                     logger.debug("LLM resp had no message. finish_reason: %s", finish_reason)
 
             usage = (
@@ -295,7 +295,7 @@ class OpenAIChatCompletionsModel(Model):
                     input_tokens_details=response.usage.prompt_tokens_details,  # type: ignore[arg-type]
                     output_tokens_details=response.usage.completion_tokens_details,  # type: ignore[arg-type]
                 )
-                if response.usage
+                if response.usage is not None
                 # The request completed, so it counts even when the provider omits usage.
                 else Usage(requests=1)
             )
@@ -342,7 +342,11 @@ class OpenAIChatCompletionsModel(Model):
             )
 
             logprob_models = None
-            if first_choice and first_choice.logprobs and first_choice.logprobs.content:
+            if (
+                first_choice is not None
+                and first_choice.logprobs is not None
+                and first_choice.logprobs.content
+            ):
                 logprob_models = ChatCmplHelpers.convert_logprobs_for_output_text(
                     first_choice.logprobs.content
                 )
@@ -506,7 +510,7 @@ class OpenAIChatCompletionsModel(Model):
         if tracing.include_data():
             span_generation.span_data.output = [final_response.model_dump()]
 
-        if final_response.usage:
+        if final_response.usage is not None:
             span_generation.span_data.usage = {
                 "requests": 1,
                 "input_tokens": final_response.usage.input_tokens,
@@ -514,12 +518,12 @@ class OpenAIChatCompletionsModel(Model):
                 "total_tokens": final_response.usage.total_tokens,
                 "input_tokens_details": (
                     final_response.usage.input_tokens_details.model_dump()
-                    if final_response.usage.input_tokens_details
+                    if final_response.usage.input_tokens_details is not None
                     else {"cached_tokens": 0, "cache_write_tokens": 0}
                 ),
                 "output_tokens_details": (
                     final_response.usage.output_tokens_details.model_dump()
-                    if final_response.usage.output_tokens_details
+                    if final_response.usage.output_tokens_details is not None
                     else {"reasoning_tokens": 0}
                 ),
             }
@@ -666,7 +670,9 @@ class OpenAIChatCompletionsModel(Model):
                 response_format,
             )
 
-        reasoning_effort = model_settings.reasoning.effort if model_settings.reasoning else None
+        reasoning_effort = (
+            model_settings.reasoning.effort if model_settings.reasoning is not None else None
+        )
         store = ChatCmplHelpers.get_store_param(self._get_client(), model_settings)
 
         stream_options = ChatCmplHelpers.get_stream_options_param(

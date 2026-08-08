@@ -6,6 +6,7 @@ import pytest
 from openai.types.responses import ResponseCompletedEvent
 
 from agents import Agent, Runner
+from agents.guardrail import input_guardrail
 from agents.stream_events import RawResponsesStreamEvent
 
 from .fake_model import FakeModel
@@ -269,3 +270,43 @@ async def test_run_loop_exception_surfaced_after_stream():
     assert result.run_loop_exception is not None
     assert isinstance(result.run_loop_exception, RuntimeError)
     assert "run loop boom" in str(result.run_loop_exception)
+
+
+@pytest.mark.asyncio
+async def test_falsy_run_loop_exception_is_surfaced_after_stream() -> None:
+    class FalsyRuntimeError(RuntimeError):
+        def __bool__(self) -> bool:
+            return False
+
+    class BoomModel(FakeModel):
+        async def stream_response(self, *args, **kwargs):
+            raise FalsyRuntimeError("falsy run loop boom")
+            yield
+
+    result = Runner.run_streamed(Agent(name="A", model=BoomModel()), input="hi")
+
+    with pytest.raises(FalsyRuntimeError, match="falsy run loop boom"):
+        async for _ in result.stream_events():
+            pass
+
+
+@pytest.mark.asyncio
+async def test_falsy_input_guardrail_exception_is_surfaced_after_stream() -> None:
+    class FalsyRuntimeError(RuntimeError):
+        def __bool__(self) -> bool:
+            return False
+
+    @input_guardrail
+    async def raising_guardrail(context, agent, input):
+        raise FalsyRuntimeError("falsy guardrail boom")
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("done")])
+    result = Runner.run_streamed(
+        Agent(name="A", model=model, input_guardrails=[raising_guardrail]),
+        input="hi",
+    )
+
+    with pytest.raises(FalsyRuntimeError, match="falsy guardrail boom"):
+        async for _ in result.stream_events():
+            pass

@@ -612,10 +612,11 @@ async def start_streaming(
     sandbox_runtime: SandboxRuntime[TContext] | None = None,
 ):
     """Run the streaming loop for a run result."""
-    if streamed_result.trace:
+    if streamed_result.trace is not None:
         streamed_result.trace.start(mark_as_current=True)
     if run_state is not None:
-        run_state.set_trace(get_current_trace() or streamed_result.trace)
+        current_trace = get_current_trace()
+        run_state.set_trace(current_trace if current_trace is not None else streamed_result.trace)
         streamed_result._trace_state = run_state._trace_state
 
     if is_resumed_state and run_state is not None:
@@ -634,7 +635,7 @@ async def start_streaming(
     current_task_span: Span[TaskSpanData] | None = (
         task_span(name=trace_workflow_name) if use_task_and_turn_spans else None
     )
-    if current_task_span:
+    if current_task_span is not None:
         current_task_span.start(mark_as_current=True)
     task_usage_start = snapshot_usage(context_wrapper.usage)
 
@@ -830,13 +831,13 @@ async def start_streaming(
                 store=store_setting,
             )
     except BaseException:
-        if current_task_span:
+        if current_task_span is not None:
             attach_usage_to_span(
                 current_task_span,
                 usage_delta(task_usage_start, context_wrapper.usage),
             )
             current_task_span.finish(reset_current=True)
-        if streamed_result.trace:
+        if streamed_result.trace is not None:
             streamed_result.trace.finish(reset_current=True)
         if not streamed_result.is_complete:
             streamed_result.is_complete = True
@@ -915,7 +916,7 @@ async def start_streaming(
 
             if is_resumed_state and run_state is not None and run_state._current_step is not None:
                 if isinstance(run_state._current_step, NextStepInterruption):
-                    if not run_state._model_responses or not run_state._last_processed_response:
+                    if not run_state._model_responses or run_state._last_processed_response is None:
                         raise UserError("No model response found in previous state")
 
                     last_model_response = run_state._model_responses[-1]
@@ -1014,7 +1015,7 @@ async def start_streaming(
                         if run_state is not None:
                             run_state._current_agent = current_agent
                         _publish_streamed_result_agent(streamed_result, current_agent)
-                        if current_span:
+                        if current_span is not None:
                             current_span.finish(reset_current=True)
                         current_span = None
                         should_run_agent_start_hooks = True
@@ -1072,7 +1073,7 @@ async def start_streaming(
             )
 
             if current_span is None:
-                if output_schema := get_output_schema(execution_agent):
+                if (output_schema := get_output_schema(execution_agent)) is not None:
                     output_type_name = output_schema.name()
                 else:
                     output_type_name = "str"
@@ -1088,7 +1089,7 @@ async def start_streaming(
             current_turn += 1
             streamed_result.current_turn = current_turn
             streamed_result._current_turn_persisted_item_count = 0
-            if run_state:
+            if run_state is not None:
                 run_state._current_turn_persisted_item_count = 0
 
             if max_turns is not None and current_turn > max_turns:
@@ -1223,7 +1224,7 @@ async def start_streaming(
                     if use_task_and_turn_spans
                     else None
                 )
-                if current_turn_span:
+                if current_turn_span is not None:
                     current_turn_span.start(mark_as_current=True)
                 try:
                     if (
@@ -1254,7 +1255,7 @@ async def start_streaming(
                         agent_span=current_span,
                     )
                 finally:
-                    if current_turn_span:
+                    if current_turn_span is not None:
                         attach_usage_to_span(
                             current_turn_span,
                             usage_delta(turn_usage_start, context_wrapper.usage),
@@ -1312,7 +1313,7 @@ async def start_streaming(
 
                 if isinstance(turn_result.next_step, NextStepRunAgain):
                     streamed_result._current_turn_persisted_item_count = 0
-                    if run_state:
+                    if run_state is not None:
                         run_state._current_turn_persisted_item_count = 0
 
                 if server_conversation_tracker is not None:
@@ -1455,15 +1456,15 @@ async def start_streaming(
             await dispose_resolved_computers(run_context=context_wrapper)
         except Exception as error:
             log_tool_action_warning(logger, "Failed to dispose computers after streamed run", error)
-        if current_span:
+        if current_span is not None:
             current_span.finish(reset_current=True)
-        if current_task_span:
+        if current_task_span is not None:
             attach_usage_to_span(
                 current_task_span,
                 usage_delta(task_usage_start, context_wrapper.usage),
             )
             current_task_span.finish(reset_current=True)
-        if streamed_result.trace:
+        if streamed_result.trace is not None:
             streamed_result.trace.finish(reset_current=True)
 
         if not streamed_result.is_complete:
@@ -1526,7 +1527,7 @@ async def run_single_turn_streamed(
             hooks.on_agent_start(agent_hook_context, public_agent),
             (
                 public_agent.hooks.on_start(agent_hook_context, public_agent)
-                if public_agent.hooks
+                if public_agent.hooks is not None
                 else _coro.noop_coroutine()
             ),
         )
@@ -1611,7 +1612,7 @@ async def run_single_turn_streamed(
                 filtered.instructions,
                 filtered.input,
             )
-            if public_agent.hooks
+            if public_agent.hooks is not None
             else _coro.noop_coroutine()
         ),
     )
@@ -1641,12 +1642,14 @@ async def run_single_turn_streamed(
 
     previous_response_id = (
         server_conversation_tracker.previous_response_id
-        if server_conversation_tracker
+        if server_conversation_tracker is not None
         and server_conversation_tracker.previous_response_id is not None
         else None
     )
     conversation_id = (
-        server_conversation_tracker.conversation_id if server_conversation_tracker else None
+        server_conversation_tracker.conversation_id
+        if server_conversation_tracker is not None
+        else None
     )
     if conversation_id:
         logger.debug("Using conversation_id=%s", conversation_id)
@@ -1751,7 +1754,7 @@ async def run_single_turn_streamed(
         if isinstance(event, ResponseOutputItemDoneEvent):
             streamed_response_output.append(event.item)
 
-    if not final_response:
+    if final_response is None:
         raise ModelBehaviorError("Model did not produce a final response!")
 
     context_wrapper.usage.add(final_response.usage)
@@ -1773,7 +1776,7 @@ async def run_single_turn_streamed(
         await gather_with_cancel(
             (
                 public_agent.hooks.on_llm_end(context_wrapper, public_agent, final_response)
-                if public_agent.hooks
+                if public_agent.hooks is not None
                 else _coro.noop_coroutine()
             ),
             hooks.on_llm_end(context_wrapper, public_agent, final_response),
@@ -1852,7 +1855,7 @@ async def run_single_turn(
             hooks.on_agent_start(agent_hook_context, public_agent),
             (
                 public_agent.hooks.on_start(agent_hook_context, public_agent)
-                if public_agent.hooks
+                if public_agent.hooks is not None
                 else _coro.noop_coroutine()
             ),
         )
@@ -1907,7 +1910,7 @@ async def run_single_turn(
         await gather_with_cancel(
             (
                 public_agent.hooks.on_llm_end(context_wrapper, public_agent, new_response)
-                if public_agent.hooks
+                if public_agent.hooks is not None
                 else _coro.noop_coroutine()
             ),
             hooks.on_llm_end(context_wrapper, public_agent, new_response),
@@ -1979,19 +1982,21 @@ async def get_new_response(
                 filtered.instructions,
                 filtered.input,
             )
-            if public_agent.hooks
+            if public_agent.hooks is not None
             else _coro.noop_coroutine()
         ),
     )
 
     previous_response_id = (
         server_conversation_tracker.previous_response_id
-        if server_conversation_tracker
+        if server_conversation_tracker is not None
         and server_conversation_tracker.previous_response_id is not None
         else None
     )
     conversation_id = (
-        server_conversation_tracker.conversation_id if server_conversation_tracker else None
+        server_conversation_tracker.conversation_id
+        if server_conversation_tracker is not None
+        else None
     )
     if conversation_id:
         logger.debug("Using conversation_id=%s", conversation_id)
@@ -2059,7 +2064,7 @@ async def get_new_response(
         await gather_with_cancel(
             (
                 public_agent.hooks.on_llm_end(context_wrapper, public_agent, new_response)
-                if public_agent.hooks
+                if public_agent.hooks is not None
                 else _coro.noop_coroutine()
             ),
             hooks.on_llm_end(context_wrapper, public_agent, new_response),

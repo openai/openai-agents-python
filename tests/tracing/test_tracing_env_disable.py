@@ -132,3 +132,32 @@ def test_noop_current_span_id_does_not_become_parent_id():
         Scope.reset_current_trace(trace_token)
 
     assert isinstance(span, NoOpSpan)
+
+
+def test_falsy_current_span_becomes_parent() -> None:
+    class FalsySpan(SpanImpl[AgentSpanData]):
+        def __bool__(self) -> bool:
+            return False
+
+    Scope.set_current_trace(None)
+    Scope.set_current_span(None)
+    provider = DefaultTraceProvider()
+    trace = provider.create_trace("active", trace_id="trace_123")
+    parent = FalsySpan(
+        trace_id="trace_123",
+        span_id="span_parent",
+        parent_id=None,
+        processor=provider._multi_processor,
+        span_data=AgentSpanData(name="parent"),
+        tracing_api_key=None,
+    )
+    trace_token = Scope.set_current_trace(trace)
+    span_token = Scope.set_current_span(parent)
+    try:
+        child = provider.create_span(AgentSpanData(name="child"))
+    finally:
+        Scope.reset_current_span(span_token)
+        Scope.reset_current_trace(trace_token)
+
+    assert isinstance(child, SpanImpl)
+    assert child.parent_id == "span_parent"

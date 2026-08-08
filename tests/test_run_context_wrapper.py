@@ -10,6 +10,11 @@ class BrokenStr:
         raise RuntimeError("broken")
 
 
+class FalsyToolApprovalItem(ToolApprovalItem):
+    def __bool__(self) -> bool:
+        return False
+
+
 def test_run_context_to_str_or_none_handles_errors() -> None:
     assert RunContextWrapper._to_str_or_none("ok") == "ok"
     assert RunContextWrapper._to_str_or_none(123) == "123"
@@ -83,6 +88,40 @@ def test_run_context_honors_global_approval_and_rejection() -> None:
 
     wrapper.reject_tool(approval, always_reject=True)
     assert wrapper.is_tool_approved("tool_call", "call-3") is False
+
+
+def test_run_context_uses_falsy_pending_item_for_sticky_decisions() -> None:
+    approval = FalsyToolApprovalItem(
+        agent=make_agent(),
+        raw_item={
+            "type": "function_call",
+            "name": "tool_call",
+            "call_id": "call-1",
+            "arguments": "{}",
+        },
+    )
+
+    approved: RunContextWrapper[None] = RunContextWrapper(context=None)
+    approved.approve_tool(approval, always_approve=True)
+    assert (
+        approved.get_approval_status(
+            "tool_call",
+            "call-2",
+            existing_pending=approval,
+        )
+        is True
+    )
+
+    rejected: RunContextWrapper[None] = RunContextWrapper(context=None)
+    rejected.reject_tool(approval, always_reject=True, rejection_message="Denied")
+    assert (
+        rejected.get_rejection_message(
+            "tool_call",
+            "call-2",
+            existing_pending=approval,
+        )
+        == "Denied"
+    )
 
 
 def test_run_context_stores_per_call_rejection_messages() -> None:

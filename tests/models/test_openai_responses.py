@@ -10,6 +10,7 @@ import pytest
 from openai import NOT_GIVEN, APIConnectionError, AsyncOpenAI, RateLimitError, omit
 from openai.types.responses import ResponseCompletedEvent, ResponseErrorEvent
 from openai.types.responses.response_create_params import ContextManagement, PromptCacheOptions
+from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.reasoning import Reasoning
 
 from agents import (
@@ -268,13 +269,20 @@ async def test_get_response_exposes_request_id():
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 async def test_get_response_span_exports_usage():
+    class FalsyResponseUsage(ResponseUsage):
+        def __bool__(self) -> bool:
+            return False
+
     class DummyResponses:
         async def create(self, **kwargs):
-            return get_response_obj(
+            response = get_response_obj(
                 [],
                 response_id="resp-usage",
                 usage=Usage(requests=1, input_tokens=10, output_tokens=4, total_tokens=14),
             )
+            assert response.usage is not None
+            response.usage = FalsyResponseUsage.model_validate(response.usage.model_dump())
+            return response
 
     class DummyResponsesClient:
         def __init__(self):

@@ -1457,7 +1457,9 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
     ) -> None:
         super().__init__()
         self.docker_client = docker_client
-        self._instrumentation = instrumentation or Instrumentation()
+        self._instrumentation = (
+            instrumentation if instrumentation is not None else Instrumentation()
+        )
         self._dependencies = dependencies
 
     async def create(
@@ -1469,7 +1471,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
     ) -> SandboxSession:
         image = options.image
         session_id = uuid.uuid4()
-        manifest = manifest or Manifest()
+        manifest = manifest if manifest is not None else Manifest()
         _validate_docker_path_grants(manifest)
 
         container = await self._create_container(
@@ -1583,7 +1585,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
 
         assert self.image_exists(image)
         environment: dict[str, str] | None = None
-        if manifest:
+        if manifest is not None:
             environment = await manifest.environment.resolve()
         create_kwargs: dict[str, object] = {
             "entrypoint": ["tail"],

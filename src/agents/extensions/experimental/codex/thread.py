@@ -90,7 +90,7 @@ class Thread:
     async def run_streamed(
         self, input: Input, turn_options: TurnOptions | None = None
     ) -> StreamedTurn:
-        options = turn_options or TurnOptions()
+        options = turn_options if turn_options is not None else TurnOptions()
         return StreamedTurn(events=self._run_streamed_internal(input, options))
 
     async def _run_streamed_internal(
@@ -161,7 +161,7 @@ class Thread:
 
     async def run(self, input: Input, turn_options: TurnOptions | None = None) -> Turn:
         # Aggregate events into a single Turn result (matching the TS SDK behavior).
-        options = turn_options or TurnOptions()
+        options = turn_options if turn_options is not None else TurnOptions()
         generator = self._run_streamed_internal(input, options)
         items: list[ThreadItem] = []
         final_response = ""
@@ -182,7 +182,7 @@ class Thread:
             elif isinstance(event, ThreadErrorEvent):
                 raise RuntimeError(f"Codex stream error: {event.message}")
 
-        if turn_failure:
+        if turn_failure is not None:
             raise RuntimeError(turn_failure.message)
 
         return Turn(items=items, final_response=final_response, usage=usage)

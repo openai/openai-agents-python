@@ -24,6 +24,8 @@ from agents.retry import (
     RetryDecision,
     RetryPolicyContext,
     retry_policies,
+    retry_policy_retries_all_transient_errors,
+    retry_policy_retries_safe_transport_errors,
 )
 from agents.run_internal.model_retry import get_response_with_retry, stream_response_with_retry
 from agents.usage import Usage
@@ -54,6 +56,25 @@ def test_model_retry_backoff_settings_allow_zero_values() -> None:
     assert backoff.initial_delay == 0
     assert backoff.max_delay == 0
     assert backoff.multiplier == 0
+
+
+def test_retry_capabilities_preserve_falsey_policy() -> None:
+    class FalseyPolicy:
+        _openai_agents_retries_safe_transport_errors: bool
+        _openai_agents_retries_all_transient_errors: bool
+
+        def __bool__(self) -> bool:
+            return False
+
+        def __call__(self, _context: RetryPolicyContext) -> bool:
+            return False
+
+    policy = FalseyPolicy()
+    policy._openai_agents_retries_safe_transport_errors = True
+    policy._openai_agents_retries_all_transient_errors = True
+
+    assert retry_policy_retries_safe_transport_errors(policy) is True
+    assert retry_policy_retries_all_transient_errors(policy) is True
 
 
 def _connection_error(message: str = "connection error") -> APIConnectionError:

@@ -133,7 +133,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         self._tracing_span.start()
 
     def _end_turn(self, _transcript: str) -> None:
-        if self._tracing_span:
+        if self._tracing_span is not None:
             # Only encode audio if tracing is enabled AND buffer is not empty
             if self._trace_include_sensitive_audio_data and self._turn_audio_buffer:
                 self._tracing_span.span_data.input = _audio_to_base64(self._turn_audio_buffer)
@@ -332,7 +332,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             and not self._connection_task.cancelled()
         ):
             exc = self._connection_task.exception()
-            if exc and isinstance(exc, Exception):
+            if isinstance(exc, Exception):
                 self._stored_exception = exc
 
         if (
@@ -341,7 +341,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             and not self._process_events_task.cancelled()
         ):
             exc = self._process_events_task.exception()
-            if exc and isinstance(exc, Exception):
+            if isinstance(exc, Exception):
                 self._stored_exception = exc
 
         if (
@@ -350,7 +350,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             and not self._stream_audio_task.cancelled()
         ):
             exc = self._stream_audio_task.exception()
-            if exc and isinstance(exc, Exception):
+            if isinstance(exc, Exception):
                 self._stored_exception = exc
 
         if (
@@ -359,7 +359,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             and not self._listener_task.cancelled()
         ):
             exc = self._listener_task.exception()
-            if exc and isinstance(exc, Exception):
+            if isinstance(exc, Exception):
                 self._stored_exception = exc
 
     async def _cleanup_tasks(self) -> None:

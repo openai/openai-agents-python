@@ -89,6 +89,27 @@ def test_process_model_response_shell_call_without_tool_raises() -> None:
         )
 
 
+def test_process_model_response_dispatches_falsy_shell_tool() -> None:
+    class FalsyShellTool(ShellTool):
+        def __bool__(self) -> bool:
+            return False
+
+    shell_tool = FalsyShellTool(environment={"type": "container_auto"})
+    shell_call = make_shell_call("shell-falsy")
+
+    processed = run_loop.process_model_response(
+        agent=Agent(name="falsy-shell", tools=[shell_tool]),
+        all_tools=[shell_tool],
+        response=_response([shell_call]),
+        output_schema=None,
+        handoffs=[],
+    )
+
+    assert processed.tools_used == [shell_tool.name]
+    assert isinstance(processed.new_items[0], ToolCallItem)
+    assert processed.new_items[0]._resolved_tool_name == shell_tool.name
+
+
 def test_process_model_response_sets_title_for_local_mcp_function_tool() -> None:
     agent = Agent(name="local-mcp", model=FakeModel())
     mcp_tool = MCPTool(name="search_docs", inputSchema={}, description=None, title="Search Docs")
@@ -374,6 +395,26 @@ def test_process_model_response_queues_apply_patch_call() -> None:
     converted_call = processed.apply_patch_calls[0].tool_call
     assert isinstance(converted_call, dict)
     assert converted_call.get("type") == "apply_patch_call"
+
+
+def test_process_model_response_dispatches_falsy_apply_patch_tool() -> None:
+    class FalsyApplyPatchTool(ApplyPatchTool):
+        def __bool__(self) -> bool:
+            return False
+
+    apply_patch_tool = FalsyApplyPatchTool(editor=RecordingEditor())
+    apply_patch_call = make_apply_patch_dict("apply-falsy")
+
+    processed = run_loop.process_model_response(
+        agent=Agent(name="falsy-apply", tools=[apply_patch_tool]),
+        all_tools=[apply_patch_tool],
+        response=_response([apply_patch_call]),
+        output_schema=None,
+        handoffs=[],
+    )
+
+    assert processed.tools_used == [apply_patch_tool.name]
+    assert processed.apply_patch_calls[0].apply_patch_tool is apply_patch_tool
 
 
 def test_process_model_response_queues_hosted_apply_patch_from_custom_tool_call() -> None:

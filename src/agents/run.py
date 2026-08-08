@@ -169,7 +169,7 @@ def set_default_agent_runner(runner: AgentRunner | None) -> None:
     It should not be used directly.
     """
     global DEFAULT_AGENT_RUNNER
-    DEFAULT_AGENT_RUNNER = runner or AgentRunner()
+    DEFAULT_AGENT_RUNNER = runner if runner is not None else AgentRunner()
 
 
 def get_default_agent_runner() -> AgentRunner:
@@ -721,7 +721,7 @@ class AgentRunner:
             current_task_span: Span[TaskSpanData] | None = (
                 task_span(name=trace_workflow_name) if use_task_and_turn_spans else None
             )
-            if current_task_span:
+            if current_task_span is not None:
                 current_task_span.start(mark_as_current=True)
             task_usage_start = snapshot_usage(context_wrapper.usage)
 
@@ -843,7 +843,7 @@ class AgentRunner:
                     )
                     session_input_items_for_persistence = []
             except BaseException:
-                if current_task_span:
+                if current_task_span is not None:
                     attach_usage_to_span(
                         current_task_span,
                         usage_delta(task_usage_start, context_wrapper.usage),
@@ -1155,7 +1155,7 @@ class AgentRunner:
                     )
 
                     if current_span is None:
-                        if output_schema := get_output_schema(execution_agent):
+                        if (output_schema := get_output_schema(execution_agent)) is not None:
                             output_type_name = output_schema.name()
                         else:
                             output_type_name = "str"
@@ -1294,7 +1294,7 @@ class AgentRunner:
                         if use_task_and_turn_spans
                         else None
                     )
-                    if current_turn_span:
+                    if current_turn_span is not None:
                         current_turn_span.start(mark_as_current=True)
                     try:
                         if current_turn <= 1:
@@ -1417,7 +1417,7 @@ class AgentRunner:
                                 agent_span=current_span,
                             )
                     finally:
-                        if current_turn_span:
+                        if current_turn_span is not None:
                             attach_usage_to_span(
                                 current_turn_span,
                                 usage_delta(turn_usage_start, context_wrapper.usage),
@@ -1481,7 +1481,7 @@ class AgentRunner:
                                     call_id in output_call_ids
                                     and item not in items_to_save_turn
                                     and not (
-                                        run_state
+                                        run_state is not None
                                         and run_state._current_turn_persisted_item_count > 0
                                     )
                                 ):
@@ -1759,9 +1759,9 @@ class AgentRunner:
                     await dispose_resolved_computers(run_context=context_wrapper)
                 except Exception as error:
                     log_tool_action_warning(logger, "Failed to dispose computers after run", error)
-                if current_span:
+                if current_span is not None:
                     current_span.finish(reset_current=True)
-                if current_task_span:
+                if current_task_span is not None:
                     attach_usage_to_span(
                         current_task_span,
                         usage_delta(task_usage_start, context_wrapper.usage),
@@ -1987,7 +1987,7 @@ class AgentRunner:
             reattach_resumed_trace=is_resumed_state,
         )
         if run_state is not None:
-            run_state.set_trace(new_trace or get_current_trace())
+            run_state.set_trace(new_trace if new_trace is not None else get_current_trace())
 
         sandbox_runtime = SandboxRuntime(
             starting_agent=starting_agent,
@@ -2001,7 +2001,9 @@ class AgentRunner:
         )
 
         schema_agent = (
-            run_state._current_agent if run_state and run_state._current_agent else starting_agent
+            run_state._current_agent
+            if run_state is not None and run_state._current_agent is not None
+            else starting_agent
         )
         sandbox_runtime.assert_agent_supported(schema_agent)
         output_schema = get_output_schema(schema_agent)
@@ -2017,22 +2019,28 @@ class AgentRunner:
             # primeFromState will mark items as sent so prepareInput skips them.
             # Copy it: the streamed loop appends to new_items, and the caller still
             # owns the state as a resumable snapshot.
-            new_items=list(run_state._session_items) if run_state else [],
+            new_items=list(run_state._session_items) if run_state is not None else [],
             current_agent=schema_agent,
-            raw_responses=run_state._model_responses if run_state else [],
+            raw_responses=run_state._model_responses if run_state is not None else [],
             final_output=None,
             is_complete=False,
-            current_turn=run_state._current_turn if run_state else 0,
+            current_turn=run_state._current_turn if run_state is not None else 0,
             max_turns=max_turns,
-            input_guardrail_results=(list(run_state._input_guardrail_results) if run_state else []),
+            input_guardrail_results=(
+                list(run_state._input_guardrail_results) if run_state is not None else []
+            ),
             output_guardrail_results=(
-                list(run_state._output_guardrail_results) if run_state else []
+                list(run_state._output_guardrail_results) if run_state is not None else []
             ),
             tool_input_guardrail_results=(
-                list(getattr(run_state, "_tool_input_guardrail_results", [])) if run_state else []
+                list(getattr(run_state, "_tool_input_guardrail_results", []))
+                if run_state is not None
+                else []
             ),
             tool_output_guardrail_results=(
-                list(getattr(run_state, "_tool_output_guardrail_results", [])) if run_state else []
+                list(getattr(run_state, "_tool_output_guardrail_results", []))
+                if run_state is not None
+                else []
             ),
             _current_agent_output_schema=output_schema,
             trace=new_trace,
@@ -2042,13 +2050,13 @@ class AgentRunner:
             # If a cross-SDK state omits the counter, fall back to len(generated_items)
             # to avoid duplication.
             _current_turn_persisted_item_count=(
-                run_state._current_turn_persisted_item_count if run_state else 0
+                run_state._current_turn_persisted_item_count if run_state is not None else 0
             ),
             # When resuming from RunState, preserve the original input from the state
             # This ensures originalInput in serialized state reflects the first turn's input
             _original_input=(
                 copy_input_items(run_state._original_input)
-                if run_state and run_state._original_input is not None
+                if run_state is not None and run_state._original_input is not None
                 else copy_input_items(streamed_input)
             ),
         )

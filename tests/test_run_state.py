@@ -130,6 +130,7 @@ from agents.tool_guardrails import (
     ToolOutputGuardrail,
     ToolOutputGuardrailResult,
 )
+from agents.tracing.traces import TraceState
 from agents.usage import Usage
 from tests.utils.factories import TestSessionState
 
@@ -303,6 +304,37 @@ def set_last_processed_response(
 class TestRunState:
     """Test RunState initialization, serialization, and core functionality."""
 
+    @pytest.mark.asyncio
+    async def test_results_to_state_preserve_falsy_trace_state(self) -> None:
+        class FalsyTraceState(TraceState):
+            def __bool__(self) -> bool:
+                return False
+
+        trace_state = FalsyTraceState(trace_id="trace_falsy")
+
+        model = FakeModel()
+        model.set_next_output([get_final_output_message("done")])
+        result = await Runner.run(Agent(name="test", model=model), "input")
+        result._trace_state = trace_state
+
+        restored = result.to_state()._trace_state
+        assert isinstance(restored, FalsyTraceState)
+        assert restored.trace_id == "trace_falsy"
+
+        streaming_model = FakeModel()
+        streaming_model.set_next_output([get_final_output_message("done")])
+        streaming_result = Runner.run_streamed(
+            Agent(name="streaming-test", model=streaming_model),
+            "input",
+        )
+        async for _ in streaming_result.stream_events():
+            pass
+        streaming_result._trace_state = trace_state
+
+        streaming_restored = streaming_result.to_state()._trace_state
+        assert isinstance(streaming_restored, FalsyTraceState)
+        assert streaming_restored.trace_id == "trace_falsy"
+
     def test_initializes_with_default_values(self):
         """Test that RunState initializes with correct default values."""
         context = RunContextWrapper(context={"foo": "bar"})
@@ -318,6 +350,18 @@ class TestRunState:
         assert state._current_step is None
         assert state._context is not None
         assert state._context.context == {"foo": "bar"}
+
+    def test_to_json_preserves_falsy_processed_response(self) -> None:
+        class FalsyProcessedResponse(ProcessedResponse):
+            def __bool__(self) -> bool:
+                return False
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        state = make_state(Agent(name="test"), context=context)
+        processed = make_processed_response()
+        state._last_processed_response = FalsyProcessedResponse(**vars(processed))
+
+        assert state.to_json()["last_processed_response"] is not None
 
     def test_set_tool_use_tracker_snapshot_filters_non_strings(self):
         """Test that set_tool_use_tracker_snapshot filters out non-string agent names and tools."""
@@ -497,6 +541,31 @@ class TestRunState:
 
         json_data = state.to_json()
         assert json_data["current_agent"] == {"name": "duplicate"}
+
+        restored = await RunState.from_json(root, json_data)
+        assert restored._current_agent is second
+
+    @pytest.mark.asyncio
+    async def test_from_json_restores_falsy_current_agent_via_identity_map(self):
+        class FalsyAgent(Agent[Any]):
+            def __bool__(self) -> bool:
+                return False
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        first = Agent(name="duplicate", instructions="zeta")
+        second = FalsyAgent(name="duplicate", instructions="alpha")
+        root = Agent(name="triage", handoffs=[first, second])
+        first.handoffs = [root]
+        second.handoffs = [root]
+
+        state = make_state(root, context=context, original_input="input1", max_turns=2)
+        state._current_agent = second
+
+        json_data = state.to_json()
+        assert json_data["current_agent"] == {
+            "name": "duplicate",
+            "identity": "duplicate#2",
+        }
 
         restored = await RunState.from_json(root, json_data)
         assert restored._current_agent is second
@@ -6130,10 +6199,14 @@ class TestRunStateSerializationEdgeCases:
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="TestAgent")
 
+        class FalsyShellTool(ShellTool):
+            def __bool__(self) -> bool:
+                return False
+
         async def shell_executor(request: Any) -> Any:
             return {"output": "test output"}
 
-        shell_tool = ShellTool(executor=shell_executor)
+        shell_tool = FalsyShellTool(executor=shell_executor)
         agent.tools = [shell_tool]
 
         # Create invalid tool_call_data that will cause ValidationError
@@ -6168,6 +6241,7 @@ class TestRunStateSerializationEdgeCases:
         assert len(result.shell_calls) == 1
         # shell_call should have raw tool_call_data (dict) instead of validated LocalShellCall
         assert isinstance(result.shell_calls[0].tool_call, dict)
+        assert result.shell_calls[0].shell_tool is shell_tool
 
     async def test_deserialize_processed_response_apply_patch_action_with_exception(self):
         """Test deserialization of ProcessedResponse with apply patch action Exception."""
@@ -8811,7 +8885,11 @@ async def test_resume_nested_agent_as_tool_with_context_override() -> None:
 
 @pytest.mark.asyncio
 async def test_hosted_mcp_approval_request_restores_matching_server_tool() -> None:
-    server_a = HostedMCPTool(
+    class FalsyHostedMCPTool(HostedMCPTool):
+        def __bool__(self) -> bool:
+            return False
+
+    server_a = FalsyHostedMCPTool(
         tool_config=Mcp(
             type="mcp",
             server_label="server-a",

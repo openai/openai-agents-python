@@ -43,8 +43,8 @@ def resolve_openai_agent_registration_config(
         config = _coerce_openai_agent_registration_config(config)
     default = get_default_openai_agent_registration_config()
     harness_id = _resolve_str(
-        explicit=config.harness_id if config else None,
-        default=default.harness_id if default else None,
+        explicit=config.harness_id if config is not None else None,
+        default=default.harness_id if default is not None else None,
         env_name=_ENV_HARNESS_ID,
     )
     if harness_id is None:

@@ -2,6 +2,7 @@ import asyncio
 import gc
 import os
 import weakref
+from typing import Any, cast
 
 import openai
 import pytest
@@ -37,6 +38,17 @@ def test_cc_set_default_openai_client():
     set_default_openai_client(client)
     chat_model = OpenAIProvider(use_responses=False).get_model("gpt-4")
     assert chat_model._client.api_key == "test_key"  # type: ignore
+
+
+def test_provider_preserves_falsy_default_client(monkeypatch):
+    class FalsyClient:
+        def __bool__(self) -> bool:
+            return False
+
+    client = cast(Any, FalsyClient())
+    monkeypatch.setattr(_openai_shared, "get_default_openai_client", lambda: client)
+
+    assert OpenAIProvider()._get_client() is client
 
 
 def test_resp_no_default_key_errors(monkeypatch):

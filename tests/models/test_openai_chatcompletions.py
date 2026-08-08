@@ -114,6 +114,20 @@ async def _run_chat_completions_model_with_custom_base_url(
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_falsy_reasoning_is_forwarded() -> None:
+    class FalsyReasoning(Reasoning):
+        def __bool__(self) -> bool:
+            return False
+
+    kwargs = await _run_chat_completions_model_with_custom_base_url(
+        ModelSettings(reasoning=FalsyReasoning(effort="low"))
+    )
+
+    assert kwargs["reasoning_effort"] == "low"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_get_response_with_text_message(monkeypatch) -> None:
     """
     When the model returns a ChatCompletionMessage with plain text content,
@@ -663,12 +677,20 @@ async def test_get_response_warns_and_sends_placeholder_for_non_text_tool_output
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 async def test_get_response_attaches_logprobs(monkeypatch) -> None:
+    class FalsyChoiceLogprobs(ChoiceLogprobs):
+        def __bool__(self) -> bool:
+            return False
+
+    class FalsyCompletionUsage(CompletionUsage):
+        def __bool__(self) -> bool:
+            return False
+
     msg = ChatCompletionMessage(role="assistant", content="Hi!")
     choice = Choice(
         index=0,
         finish_reason="stop",
         message=msg,
-        logprobs=ChoiceLogprobs(
+        logprobs=FalsyChoiceLogprobs(
             content=[
                 ChatCompletionTokenLogprob(
                     token="Hi",
@@ -691,7 +713,11 @@ async def test_get_response_attaches_logprobs(monkeypatch) -> None:
         model="fake",
         object="chat.completion",
         choices=[choice],
-        usage=None,
+        usage=FalsyCompletionUsage(
+            completion_tokens=2,
+            prompt_tokens=3,
+            total_tokens=5,
+        ),
     )
 
     async def patched_fetch_response(self, *args, **kwargs):
@@ -717,6 +743,9 @@ async def test_get_response_attaches_logprobs(monkeypatch) -> None:
     assert isinstance(text_part, ResponseOutputText)
     assert text_part.logprobs is not None
     assert [lp.token for lp in text_part.logprobs] == ["Hi", "!"]
+    assert resp.usage.input_tokens == 3
+    assert resp.usage.output_tokens == 2
+    assert resp.usage.total_tokens == 5
 
 
 @pytest.mark.allow_call_model_methods

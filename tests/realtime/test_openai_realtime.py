@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import websockets
+from openai.types.realtime.realtime_session_create_request import RealtimeSessionCreateRequest
 from pydantic import TypeAdapter
 
 from agents import Agent, WebSearchTool, function_tool
@@ -1271,6 +1272,35 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert model._ongoing_response is False
         assert model._response_control == "free"
         assert model._audio_state_tracker.get_last_audio_item() is None
+
+    @pytest.mark.asyncio
+    async def test_interrupt_honors_falsy_present_session_auto_cancellation(
+        self, model, monkeypatch
+    ):
+        class FalsySession(RealtimeSessionCreateRequest):
+            def __bool__(self) -> bool:
+                return False
+
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta("item_1", 0, b"\x00" * 4800)
+        await model._mark_response_created()
+        model._created_session = FalsySession.model_construct(
+            type="realtime",
+            model="gpt-realtime-2.1",
+            audio=SimpleNamespace(
+                input=SimpleNamespace(turn_detection=SimpleNamespace(interrupt_response=True))
+            ),
+        )
+
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+
+        await model._send_interrupt(RealtimeModelSendInterrupt())
+
+        assert send_raw.await_count == 1
+        sent = send_raw.await_args
+        assert sent is not None
+        assert sent.args[0].type == "conversation.item.truncate"
 
     @pytest.mark.asyncio
     async def test_response_only_interrupt_targets_response_without_touching_audio(

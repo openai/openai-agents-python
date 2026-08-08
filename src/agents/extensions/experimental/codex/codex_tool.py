@@ -585,7 +585,7 @@ def _resolve_codex_options(
     options: CodexOptions | Mapping[str, Any] | None,
 ) -> CodexOptions | None:
     options = coerce_codex_options(options)
-    if options and options.api_key:
+    if options is not None and options.api_key:
         return options
 
     api_key = _resolve_default_codex_api_key(options)
@@ -605,10 +605,10 @@ def _resolve_codex_options(
 
 
 def _resolve_default_codex_api_key(options: CodexOptions | None) -> str | None:
-    if options and options.api_key:
+    if options is not None and options.api_key:
         return options.api_key
 
-    env_override = options.env if options else None
+    env_override = options.env if options is not None else None
     if env_override:
         env_codex = env_override.get("CODEX_API_KEY")
         if env_codex:
@@ -656,12 +656,17 @@ def _resolve_thread_options(
     skip_git_repo_check: bool | None,
 ) -> ThreadOptions | None:
     defaults = coerce_thread_options(defaults)
-    if not defaults and not sandbox_mode and not working_directory and skip_git_repo_check is None:
+    if (
+        defaults is None
+        and not sandbox_mode
+        and not working_directory
+        and skip_git_repo_check is None
+    ):
         return None
 
     return ThreadOptions(
         **{
-            **(defaults.__dict__ if defaults else {}),
+            **(defaults.__dict__ if defaults is not None else {}),
             **({"sandbox_mode": sandbox_mode} if sandbox_mode else {}),
             **({"working_directory": working_directory} if working_directory else {}),
             **(

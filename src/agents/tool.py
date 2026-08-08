@@ -758,7 +758,11 @@ def get_function_tool_origin(function_tool: FunctionTool) -> ToolOrigin | None:
     """Return scalar origin metadata for a function tool."""
     if not function_tool._emit_tool_origin:
         return None
-    return function_tool._tool_origin or ToolOrigin(type=ToolOriginType.FUNCTION)
+    return (
+        function_tool._tool_origin
+        if function_tool._tool_origin is not None
+        else ToolOrigin(type=ToolOriginType.FUNCTION)
+    )
 
 
 @dataclass
@@ -903,7 +907,7 @@ async def resolve_computer(
         else None
     )
     initializer: ComputerCreate[Any] | None = None
-    disposer: ComputerDispose[Any] | None = lifecycle.dispose if lifecycle else None
+    disposer: ComputerDispose[Any] | None = lifecycle.dispose if lifecycle is not None else None
 
     if lifecycle is not None:
         initializer = lifecycle.create
@@ -914,7 +918,7 @@ async def resolve_computer(
         initializer = lifecycle_provider.create
         disposer = lifecycle_provider.dispose
 
-    if initializer:
+    if initializer is not None:
         computer_candidate = initializer(run_context=run_context)
         computer = (
             await computer_candidate

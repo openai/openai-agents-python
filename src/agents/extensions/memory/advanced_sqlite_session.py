@@ -81,7 +81,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         # branch pointer is established or a write begins. A mismatch means
         # another instance cleared the session, so the local pointer resets to main.
         self._generation = 0
-        self._logger = logger or logging.getLogger(__name__)
+        self._logger = logger if logger is not None else logging.getLogger(__name__)
 
     def _commit_branch_pointer(self, branch_id: str, generation: int) -> bool:
         """Set the current-branch pointer unless a clear has committed meanwhile.

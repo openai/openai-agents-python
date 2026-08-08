@@ -229,7 +229,9 @@ class SandboxSession(BaseSandboxSession):
     ) -> None:
         self._inner = inner
         self._inner.set_dependencies(dependencies)
-        self._instrumentation = instrumentation or Instrumentation()
+        self._instrumentation = (
+            instrumentation if instrumentation is not None else Instrumentation()
+        )
         self._seq = 0
 
         self._bind_session_to_sinks()

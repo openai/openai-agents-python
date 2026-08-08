@@ -1062,7 +1062,7 @@ class RealtimeSession(RealtimeModelListener):
         """Handle a tool call event."""
         mark_completed = False
         agent = dispatch_snapshot.agent if dispatch_snapshot is not None else agent_snapshot
-        agent = agent or self._current_agent
+        agent = agent if agent is not None else self._current_agent
         recorded_route = self._tool_invocation_routes.get(event.call_id)
         recorded_role = recorded_route[1] if recorded_route is not None else None
         if (
@@ -1636,7 +1636,7 @@ class RealtimeSession(RealtimeModelListener):
         if self._closing or self._closed:
             return False
 
-        source_agent = agent_snapshot or self._current_agent
+        source_agent = agent_snapshot if agent_snapshot is not None else self._current_agent
         combined_guardrails = source_agent.output_guardrails + self._run_config.get(
             "output_guardrails", []
         )
@@ -1832,7 +1832,7 @@ class RealtimeSession(RealtimeModelListener):
         # Check for exceptions and propagate as events
         if not task.cancelled():
             exception = task.exception()
-            if exception:
+            if exception is not None:
                 # Create an exception event instead of raising
                 self._put_event_nowait(
                     RealtimeError(

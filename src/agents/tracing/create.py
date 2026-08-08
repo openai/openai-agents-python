@@ -61,7 +61,7 @@ def trace(
         The newly created trace object.
     """
     current_trace = get_trace_provider().get_current_trace()
-    if current_trace:
+    if current_trace is not None:
         logger.warning(
             "Trace already exists. Creating a new trace, but this is probably a mistake."
         )

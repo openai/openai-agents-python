@@ -3,10 +3,13 @@ from __future__ import annotations
 import logging
 from uuid import uuid4
 
+from openai.types.responses import Response
+
 import agents.tracing.traces as trace_module
 from agents.tracing import TracingConfig, set_tracing_disabled, trace
-from agents.tracing.context import create_trace_for_run
+from agents.tracing.context import TraceCtxManager, create_trace_for_run
 from agents.tracing.scope import Scope
+from agents.tracing.span_data import ResponseSpanData
 from agents.tracing.traces import (
     NoOpTrace,
     ReattachedTrace,
@@ -52,6 +55,16 @@ def _mark_trace_as_started(
     trace_state = TraceState.from_trace(original)
     assert trace_state is not None
     return trace_state
+
+
+def test_response_span_data_preserves_falsy_response_id() -> None:
+    class FalsyResponse(Response):
+        def __bool__(self) -> bool:
+            return False
+
+    response = FalsyResponse.model_construct(id="resp_falsy")
+
+    assert ResponseSpanData(response=response).export()["response_id"] == "resp_falsy"
 
 
 def test_create_trace_for_run_reattaches_matching_started_trace() -> None:
@@ -235,6 +248,44 @@ def test_create_trace_for_run_uses_existing_current_trace() -> None:
         assert created is None
 
 
+def test_trace_context_manager_starts_and_finishes_falsy_trace(monkeypatch) -> None:
+    class FalsyTrace:
+        def __init__(self) -> None:
+            self.started = False
+            self.finished = False
+
+        def __bool__(self) -> bool:
+            return False
+
+        def start(self, *, mark_as_current: bool) -> None:
+            assert mark_as_current is True
+            self.started = True
+
+        def finish(self, *, reset_current: bool) -> None:
+            assert reset_current is True
+            self.finished = True
+
+    falsy_trace = FalsyTrace()
+    monkeypatch.setattr(
+        "agents.tracing.context.create_trace_for_run",
+        lambda **kwargs: falsy_trace,
+    )
+
+    manager = TraceCtxManager(
+        workflow_name="workflow",
+        trace_id=None,
+        group_id=None,
+        metadata=None,
+        tracing=None,
+        disabled=False,
+    )
+    with manager:
+        pass
+
+    assert falsy_trace.started is True
+    assert falsy_trace.finished is True
+
+
 def test_trace_logs_warning_when_current_trace_exists(
     caplog,
 ) -> None:
@@ -247,6 +298,32 @@ def test_trace_logs_warning_when_current_trace_exists(
             inner_trace = trace(workflow_name="inner", trace_id=_new_trace_id())
 
     assert isinstance(inner_trace, TraceImpl)
+    assert "Trace already exists" in caplog.text
+
+
+def test_trace_logs_warning_when_current_trace_is_falsy(
+    monkeypatch,
+    caplog,
+) -> None:
+    class FalsyTrace:
+        def __bool__(self) -> bool:
+            return False
+
+    created_trace = object()
+
+    class Provider:
+        def get_current_trace(self):
+            return FalsyTrace()
+
+        def create_trace(self, **_kwargs):
+            return created_trace
+
+    monkeypatch.setattr("agents.tracing.create.get_trace_provider", lambda: Provider())
+
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        result = trace(workflow_name="inner")
+
+    assert result is created_trace
     assert "Trace already exists" in caplog.text
 
 

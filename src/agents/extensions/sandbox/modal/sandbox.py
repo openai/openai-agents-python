@@ -679,7 +679,7 @@ class ModalSandboxSession(BaseSandboxSession):
             create_if_missing=True,
             call_timeout=10.0,
         )
-        if not self._image:
+        if self._image is None:
             image_id = self.state.image_id
             if image_id:
                 self._image = modal.Image.from_id(image_id)
@@ -1947,7 +1947,9 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
     ) -> None:
         self._default_image = image
         self._default_sandbox = sandbox
-        self._instrumentation = instrumentation or Instrumentation()
+        self._instrumentation = (
+            instrumentation if instrumentation is not None else Instrumentation()
+        )
         self._dependencies = dependencies
 
     def _validate_manifest_for_workspace_persistence(
@@ -2002,7 +2004,7 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
 
         if options is None:
             raise ValueError("ModalSandboxClient.create requires options with app_name")
-        manifest = manifest or Manifest()
+        manifest = manifest if manifest is not None else Manifest()
         app_name = options.app_name
         if not app_name:
             raise ValueError("ModalSandboxClient.create requires a valid app_name")

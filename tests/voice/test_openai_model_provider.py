@@ -1,9 +1,12 @@
 # Tests for the OpenAI voice model provider (OpenAIVoiceModelProvider).
 
+from typing import Any, cast
+
 import openai
 import pytest
 
 from agents.exceptions import UserError
+from agents.models import _openai_shared
 from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider
 
 
@@ -27,3 +30,14 @@ def test_voice_provider_accepts_client_without_conflicting_args():
     client = openai.AsyncOpenAI(api_key="test_key")
     provider = OpenAIVoiceModelProvider(openai_client=client)
     assert provider._get_client() is client
+
+
+def test_voice_provider_preserves_falsy_default_client(monkeypatch):
+    class FalsyClient:
+        def __bool__(self) -> bool:
+            return False
+
+    client = cast(Any, FalsyClient())
+    monkeypatch.setattr(_openai_shared, "get_default_openai_client", lambda: client)
+
+    assert OpenAIVoiceModelProvider()._get_client() is client

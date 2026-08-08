@@ -581,7 +581,7 @@ def _partition_mcp_approval_requests(
     manual: list[ToolRunMCPApprovalRequest] = []
     for request in requests:
         if (
-            request.mcp_tool.on_approval_request
+            request.mcp_tool.on_approval_request is not None
             and tool_invocation_identity(request.request_item) is not None
         ):
             with_callback.append(request)
@@ -774,7 +774,7 @@ async def _collect_runs_by_approval(
     rejection_items: list[RunItem] = []
     for run in runs:
         call_id = call_id_extractor(run)
-        if output_exists_checker and output_exists_checker(call_id):
+        if output_exists_checker is not None and output_exists_checker(call_id):
             continue
         tool_name = tool_name_resolver(run)
         existing_pending = approval_items_by_call_id.get(call_id)
@@ -803,7 +803,7 @@ async def _collect_runs_by_approval(
         )
 
         needs_approval = True
-        if approval_status is None and needs_approval_checker:
+        if approval_status is None and needs_approval_checker is not None:
             try:
                 needs_approval = await needs_approval_checker(run)
             except UserError:
@@ -834,7 +834,7 @@ async def _collect_runs_by_approval(
             approved_runs.append(run)
             continue
 
-        pending_item = existing_pending or current_item
+        pending_item = existing_pending if existing_pending is not None else current_item
         pending_interruption_adder(pending_item)
 
     return approved_runs, rejection_items
@@ -901,11 +901,12 @@ async def _select_function_tool_runs_for_resume(
             continue
 
         current_item = pending_item_builder(run)
+        existing_pending = approval_items_by_call_id.get(call_id)
         approval_status = context_wrapper.get_approval_status(
             run.function_tool.name,
             call_id,
             tool_namespace=get_tool_call_namespace(run.tool_call),
-            existing_pending=approval_items_by_call_id.get(call_id),
+            existing_pending=existing_pending,
             tool_lookup_key=current_item.tool_lookup_key,
             current_invocation=current_item,
         )
@@ -917,7 +918,7 @@ async def _select_function_tool_runs_for_resume(
                 run.function_tool.name,
                 call_id,
                 tool_namespace=get_tool_call_namespace(run.tool_call),
-                existing_pending=approval_items_by_call_id.get(call_id),
+                existing_pending=existing_pending,
                 tool_lookup_key=current_item.tool_lookup_key,
                 current_invocation=current_item,
             )
@@ -934,9 +935,8 @@ async def _select_function_tool_runs_for_resume(
             selected.append(run)
             continue
 
-        pending_interruption_adder(
-            approval_items_by_call_id.get(run.tool_call.call_id) or current_item
-        )
+        pending_item = existing_pending if existing_pending is not None else current_item
+        pending_interruption_adder(pending_item)
 
     return selected
 

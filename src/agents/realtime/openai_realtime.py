@@ -251,7 +251,11 @@ class _ResponseCreateSequencer:
 
     @property
     def pending_response_create_event_id(self) -> str | None:
-        return self._pending_response_create.event_id if self._pending_response_create else None
+        return (
+            self._pending_response_create.event_id
+            if self._pending_response_create is not None
+            else None
+        )
 
     def _next_pending_request_version(self) -> int | None:
         return min(self._pending_request_versions) if self._pending_request_versions else None
@@ -981,7 +985,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             self._start_response_create(request_version)
 
     def _get_playback_state(self) -> RealtimePlaybackState:
-        if self._playback_tracker:
+        if self._playback_tracker is not None:
             return self._playback_tracker.get_state()
 
         if last_audio_item_id := self._audio_state_tracker.get_last_audio_item():
@@ -1112,7 +1116,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 self._audio_state_tracker.on_response_interrupted(event.response_id)
             else:
                 self._audio_state_tracker.on_interrupted()
-            if self._playback_tracker:
+            if self._playback_tracker is not None:
                 latest_playback_state = self._playback_tracker.get_state()
                 latest_item_id = latest_playback_state.get("current_item_id")
                 latest_content_index = latest_playback_state.get("current_item_content_index") or 0
@@ -1141,7 +1145,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         if not event.playback_only:
             session = self._created_session
             automatic_response_cancellation_enabled = (
-                session
+                session is not None
                 and session.audio is not None
                 and session.audio.input is not None
                 and session.audio.input.turn_detection is not None
@@ -1438,14 +1442,14 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 # Reset trackers so subsequent playback state queries don't
                 # reference audio that has been interrupted client‑side.
                 self._audio_state_tracker.on_interrupted()
-                if self._playback_tracker:
+                if self._playback_tracker is not None:
                     self._playback_tracker.on_interrupted()
 
                 # If server isn't configured to auto‑interrupt/cancel, cancel the
                 # response to prevent further audio.
                 session = self._created_session
                 automatic_response_cancellation_enabled = (
-                    session
+                    session is not None
                     and session.audio is not None
                     and session.audio.input is not None
                     and session.audio.input.turn_detection is not None
@@ -1551,7 +1555,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
     ) -> None:
         # Only store/playback-format information for realtime sessions (not transcription-only)
         normalized_session = self._normalize_session_payload(session)
-        if not normalized_session:
+        if normalized_session is None:
             return
 
         self._created_session = normalized_session
@@ -1560,7 +1564,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             return
 
         self._audio_state_tracker.set_audio_format(normalized_format)
-        if self._playback_tracker:
+        if self._playback_tracker is not None:
             self._playback_tracker.set_audio_format(normalized_format)
 
     @staticmethod
@@ -1604,7 +1608,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
     @staticmethod
     def _extract_audio_format(session: OpenAISessionCreateRequest) -> str | None:
         audio = session.audio
-        if not audio or not audio.output or not audio.output.format:
+        if audio is None or audio.output is None or audio.output.format is None:
             return None
 
         return OpenAIRealtimeWebSocketModel._normalize_audio_format(audio.output.format)
@@ -1866,8 +1870,12 @@ class OpenAIRealtimeSIPModel(OpenAIRealtimeWebSocketModel):
         This helper can be used to accept SIP-originated calls by forwarding the returned payload to
         the Realtime Calls API without duplicating session setup logic.
         """
-        run_config_settings = (run_config or {}).get("model_settings") or {}
-        initial_model_settings = (model_config or {}).get("initial_model_settings") or {}
+        run_config_settings: RealtimeSessionModelSettings = (
+            run_config.get("model_settings") if run_config is not None else None
+        ) or {}
+        initial_model_settings: RealtimeSessionModelSettings = (
+            model_config.get("initial_model_settings") if model_config is not None else None
+        ) or {}
         base_settings: RealtimeSessionModelSettings = {
             **run_config_settings,
             **initial_model_settings,

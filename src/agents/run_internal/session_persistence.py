@@ -442,7 +442,7 @@ async def save_result_to_session(
     Returns:
         The number of new run items persisted for this call.
     """
-    already_persisted = run_state._current_turn_persisted_item_count if run_state else 0
+    already_persisted = run_state._current_turn_persisted_item_count if run_state is not None else 0
 
     if session is None:
         return 0
@@ -454,7 +454,7 @@ async def save_result_to_session(
         new_run_items = []
     else:
         new_run_items = new_items[already_persisted:]
-    if run_state and new_items and new_run_items:
+    if run_state is not None and new_items and new_run_items:
         missing_outputs = [
             item
             for item in new_items
@@ -525,13 +525,13 @@ async def save_result_to_session(
         ]
 
     if len(items_to_save) == 0:
-        if run_state:
+        if run_state is not None:
             run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
         return saved_run_items_count
 
     await _session_add_items(session, items_to_save, wrapper=wrapper)
 
-    if run_state:
+    if run_state is not None:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
 
     if response_id and is_openai_responses_compaction_aware_session(session):

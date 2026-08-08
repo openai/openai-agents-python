@@ -430,7 +430,7 @@ class DefaultTraceProvider(TraceProvider):
             logger.debug("Span id is no-op, returning NoOpSpan")
             return NoOpSpan(span_data)
 
-        if not parent:
+        if parent is None:
             current_span = Scope.get_current_span()
             current_trace = Scope.get_current_trace()
             if current_trace is None:
@@ -450,7 +450,7 @@ class DefaultTraceProvider(TraceProvider):
                     )
                 return NoOpSpan(span_data)
 
-            parent_id = current_span.span_id if current_span else None
+            parent_id = current_span.span_id if current_span is not None else None
             trace_id = current_trace.trace_id
             tracing_api_key = current_trace.tracing_api_key
             # Trace is an interface; custom implementations may omit metadata.

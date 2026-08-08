@@ -29,7 +29,7 @@ def default_local_snapshot_base_dir(
     platform: str | None = None,
     os_name: str | None = None,
 ) -> Path:
-    resolved_home = home or Path.home()
+    resolved_home = home if home is not None else Path.home()
     resolved_env = os.environ if env is None else env
     resolved_platform = platform or sys.platform
     resolved_os_name = os_name or os.name

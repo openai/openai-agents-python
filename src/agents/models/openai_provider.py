@@ -134,15 +134,20 @@ class OpenAIProvider(ModelProvider):
     # AsyncOpenAI() raises an error if you don't have an API key set.
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
-            self._client = _openai_shared.get_default_openai_client() or AsyncOpenAI(
-                api_key=self._stored_api_key or _openai_shared.get_default_openai_key(),
-                base_url=self._stored_base_url or os.getenv("OPENAI_BASE_URL"),
-                websocket_base_url=(
-                    self._stored_websocket_base_url or os.getenv("OPENAI_WEBSOCKET_BASE_URL")
-                ),
-                organization=self._stored_organization,
-                project=self._stored_project,
-                http_client=shared_http_client(),
+            default_client = _openai_shared.get_default_openai_client()
+            self._client = (
+                default_client
+                if default_client is not None
+                else AsyncOpenAI(
+                    api_key=self._stored_api_key or _openai_shared.get_default_openai_key(),
+                    base_url=self._stored_base_url or os.getenv("OPENAI_BASE_URL"),
+                    websocket_base_url=(
+                        self._stored_websocket_base_url or os.getenv("OPENAI_WEBSOCKET_BASE_URL")
+                    ),
+                    organization=self._stored_organization,
+                    project=self._stored_project,
+                    http_client=shared_http_client(),
+                )
             )
 
         return self._client

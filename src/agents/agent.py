@@ -870,7 +870,7 @@ class Agent(AgentBase, Generic[TContext]):
                     stream_handler = on_stream
                     run_result_streaming = Runner.run_streamed(
                         starting_agent=cast(Agent[Any], self),
-                        input=resume_state or resolved_input,
+                        input=resume_state if resume_state is not None else resolved_input,
                         # On resume, pass the parent application context so
                         # resolve_resumed_context can update the nested restored
                         # wrapper's .context without dropping nested approvals.
@@ -942,7 +942,7 @@ class Agent(AgentBase, Generic[TContext]):
                 else:
                     run_result = await Runner.run(
                         starting_agent=cast(Agent[Any], self),
-                        input=resume_state or resolved_input,
+                        input=resume_state if resume_state is not None else resolved_input,
                         # On resume, pass the parent application context so
                         # resolve_resumed_context can update the nested restored
                         # wrapper's .context without dropping nested approvals.

@@ -3,11 +3,23 @@ import logging
 import litellm
 import pytest
 from litellm.types.utils import Choices, Message, ModelResponse, Usage
+from openai.types.shared import Reasoning
 
 from agents import function_tool
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.model_settings import ModelSettings
 from agents.models.interface import ModelTracing
+
+
+def test_falsy_reasoning_effort_is_preserved() -> None:
+    class FalsyReasoning(Reasoning):
+        def __bool__(self) -> bool:
+            return False
+
+    model = LitellmModel(model="test-model")
+    settings = ModelSettings(reasoning=FalsyReasoning(effort="low"))
+
+    assert model._get_reasoning_effort(settings) == "low"
 
 
 @pytest.mark.allow_call_model_methods

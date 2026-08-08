@@ -236,7 +236,7 @@ class ResponseSpanData(SpanData):
     def export(self) -> dict[str, Any]:
         return {
             "type": self.type,
-            "response_id": self.response.id if self.response else None,
+            "response_id": self.response.id if self.response is not None else None,
             "usage": self.usage,
         }
 

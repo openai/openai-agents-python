@@ -419,7 +419,7 @@ class AnyLLMModel(Model):
                     input_tokens_details=response.usage.input_tokens_details,
                     output_tokens_details=response.usage.output_tokens_details,
                 )
-                if response.usage
+                if response.usage is not None
                 # The request completed, so it counts even when the provider omits usage.
                 else Usage(requests=1)
             )
@@ -517,12 +517,12 @@ class AnyLLMModel(Model):
                         if final_response is not None:
                             span_response.span_data.usage = model_usage_to_span_usage(
                                 _response_usage_to_usage(final_response.usage)
-                                if final_response.usage
+                                if final_response.usage is not None
                                 else Usage(
                                     requests=_requests_for_response_without_usage(final_response)
                                 )
                             )
-                        if tracing.include_data() and final_response:
+                        if tracing.include_data() and final_response is not None:
                             span_response.span_data.response = final_response
                             span_response.span_data.input = input
                         if terminal_failure_error is not None:
@@ -614,7 +614,7 @@ class AnyLLMModel(Model):
                         json.dumps(message.model_dump(), indent=2, ensure_ascii=False),
                     )
                 else:
-                    finish_reason = first_choice.finish_reason if first_choice else "-"
+                    finish_reason = first_choice.finish_reason if first_choice is not None else "-"
                     logger.debug("LLM resp had no message. finish_reason: %s", finish_reason)
 
             usage = (
@@ -626,7 +626,7 @@ class AnyLLMModel(Model):
                     input_tokens_details=response.usage.prompt_tokens_details,  # type: ignore[arg-type]
                     output_tokens_details=response.usage.completion_tokens_details,  # type: ignore[arg-type]
                 )
-                if response.usage
+                if response.usage is not None
                 # The request completed, so it counts even when the provider omits usage.
                 else Usage(requests=1)
             )
@@ -671,7 +671,11 @@ class AnyLLMModel(Model):
             )
 
             logprob_models = None
-            if first_choice and first_choice.logprobs and first_choice.logprobs.content:
+            if (
+                first_choice is not None
+                and first_choice.logprobs is not None
+                and first_choice.logprobs.content
+            ):
                 logprob_models = ChatCmplHelpers.convert_logprobs_for_output_text(
                     first_choice.logprobs.content
                 )
@@ -787,7 +791,7 @@ class AnyLLMModel(Model):
         if tracing.include_data():
             span_generation.span_data.output = [final_response.model_dump()]
 
-        if final_response.usage:
+        if final_response.usage is not None:
             span_generation.span_data.usage = {
                 "requests": 1,
                 "input_tokens": final_response.usage.input_tokens,
@@ -795,12 +799,12 @@ class AnyLLMModel(Model):
                 "total_tokens": final_response.usage.total_tokens,
                 "input_tokens_details": (
                     final_response.usage.input_tokens_details.model_dump()
-                    if final_response.usage.input_tokens_details
+                    if final_response.usage.input_tokens_details is not None
                     else {"cached_tokens": 0, "cache_write_tokens": 0}
                 ),
                 "output_tokens_details": (
                     final_response.usage.output_tokens_details.model_dump()
-                    if final_response.usage.output_tokens_details
+                    if final_response.usage.output_tokens_details is not None
                     else {"reasoning_tokens": 0}
                 ),
             }
@@ -905,7 +909,9 @@ class AnyLLMModel(Model):
                 response_format,
             )
 
-        reasoning_effort = model_settings.reasoning.effort if model_settings.reasoning else None
+        reasoning_effort = (
+            model_settings.reasoning.effort if model_settings.reasoning is not None else None
+        )
         if reasoning_effort is None and model_settings.extra_args:
             reasoning_effort = cast(Any, model_settings.extra_args.get("reasoning_effort"))
 

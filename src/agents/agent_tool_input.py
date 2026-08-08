@@ -84,15 +84,15 @@ async def resolve_agent_tool_input(
 ) -> str | list[TResponseInputItem]:
     """Resolve structured tool input into a string or list of input items."""
     should_build_structured_input = input_builder is not None or bool(
-        schema_info and (schema_info.summary or schema_info.json_schema)
+        schema_info is not None and (schema_info.summary or schema_info.json_schema)
     )
     if should_build_structured_input:
         builder = input_builder if input_builder is not None else default_tool_input_builder
         result = builder(
             {
                 "params": params,
-                "summary": schema_info.summary if schema_info else None,
-                "json_schema": schema_info.json_schema if schema_info else None,
+                "summary": schema_info.summary if schema_info is not None else None,
+                "json_schema": schema_info.json_schema if schema_info is not None else None,
             }
         )
         if inspect.isawaitable(result):

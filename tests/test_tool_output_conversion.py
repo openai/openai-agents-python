@@ -28,6 +28,17 @@ def test_tool_call_output_item_text_model() -> None:
     assert item["text"] == "hello"
 
 
+def test_tool_call_output_item_list_preserves_falsy_structured_model() -> None:
+    class FalsyToolOutputText(ToolOutputText):
+        def __bool__(self) -> bool:
+            return False
+
+    call = _make_tool_call()
+    payload = ItemHelpers.tool_call_output_item(call, [FalsyToolOutputText(text="hello")])
+
+    assert payload["output"] == [{"type": "input_text", "text": "hello"}]
+
+
 def test_tool_call_output_item_image_model() -> None:
     call = _make_tool_call()
     out = ToolOutputImage(image_url="data:image/png;base64,AAAA")
