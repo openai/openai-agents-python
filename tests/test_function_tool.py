@@ -820,6 +820,143 @@ async def test_shallow_copied_function_tool_normal_failure_uses_copied_policy() 
     assert cast(Any, copied_tool).custom_state is custom_state
 
 
+@dataclasses.dataclass(init=False)
+class _CustomConstructorFunctionTool(FunctionTool):
+    """FunctionTool subclass with its own constructor, like the sandbox shell tools."""
+
+    session: Any = dataclasses.field(init=False, repr=False, compare=False)
+
+    def __init__(self, *, session: Any) -> None:
+        self.session = session
+        super().__init__(
+            name="custom_constructor_tool",
+            description="Tool with a custom constructor.",
+            params_json_schema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+            on_invoke_tool=self._invoke,
+        )
+
+    async def _invoke(self, _ctx: ToolContext[Any], raw_input: str) -> str:
+        # Reads instance state so a copy that is still bound to the original is visible.
+        return f"{self.session}:{raw_input}"
+
+
+@dataclasses.dataclass
+class _PostInitStateFunctionTool(FunctionTool):
+    """FunctionTool subclass whose lifecycle hook owns additional shallow state."""
+
+    post_init_calls: int = dataclasses.field(default=0, init=False)
+    derived_state: list[str] = dataclasses.field(default_factory=list, init=False)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.post_init_calls += 1
+        self.derived_state.append(f"initialized-{self.post_init_calls}")
+
+
+def _tool_context(tool: FunctionTool) -> ToolContext[Any]:
+    return ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments="{}")
+
+
+@pytest.mark.asyncio
+async def test_shallow_copy_supports_function_tool_subclass_constructors() -> None:
+    session = object()
+    original_tool = _CustomConstructorFunctionTool(session=session)
+
+    copied_tool = copy.copy(original_tool)
+
+    assert isinstance(copied_tool, _CustomConstructorFunctionTool)
+    assert copied_tool is not original_tool
+    assert copied_tool.session is session
+    assert copied_tool.name == original_tool.name
+    assert await copied_tool.on_invoke_tool(_tool_context(copied_tool), "{}") == f"{session}:{{}}"
+
+
+@pytest.mark.asyncio
+async def test_shallow_copied_subclass_invoker_uses_the_copied_instance_state() -> None:
+    original_tool = _CustomConstructorFunctionTool(session="original-session")
+
+    copied_tool = copy.copy(original_tool)
+    copied_tool.session = "copied-session"
+
+    # The subclass passes its own bound method as the invoker, so the copy must be
+    # rebound; otherwise it keeps reading the original instance's session.
+    assert await copied_tool.on_invoke_tool(_tool_context(copied_tool), "{}") == (
+        "copied-session:{}"
+    )
+    assert await original_tool.on_invoke_tool(_tool_context(original_tool), "{}") == (
+        "original-session:{}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_shallow_copy_preserves_callable_with_bound_method_metadata() -> None:
+    async def invoke(_ctx: ToolContext[Any], raw_input: str) -> str:
+        return raw_input
+
+    async def metadata_target(_tool: FunctionTool, _ctx: ToolContext[Any], _raw_input: str) -> str:
+        return "metadata-target"
+
+    class CallableProxy:
+        def __init__(self, owner: FunctionTool) -> None:
+            self.__self__ = owner
+            self.__func__ = metadata_target
+
+        async def __call__(self, _ctx: ToolContext[Any], _raw_input: str) -> str:
+            return "proxy-call"
+
+    original_tool = FunctionTool(
+        name="callable_proxy_tool",
+        description="Tool with bound-method-like callable metadata.",
+        params_json_schema={},
+        on_invoke_tool=invoke,
+    )
+    proxy = CallableProxy(original_tool)
+    original_tool.on_invoke_tool = proxy
+
+    copied_tool = copy.copy(original_tool)
+
+    assert copied_tool.on_invoke_tool is proxy
+    assert await copied_tool.on_invoke_tool(_tool_context(copied_tool), "{}") == "proxy-call"
+
+
+def test_shallow_copy_does_not_rerun_subclass_post_init() -> None:
+    async def invoke(_ctx: ToolContext[Any], raw_input: str) -> str:
+        return raw_input
+
+    original_tool = _PostInitStateFunctionTool(
+        name="post_init_tool",
+        description="Tool with subclass post-init state.",
+        params_json_schema={},
+        on_invoke_tool=invoke,
+    )
+    original_tool.derived_state.append("mutated")
+
+    copied_tool = copy.copy(original_tool)
+
+    assert copied_tool.post_init_calls == 1
+    assert copied_tool.derived_state is original_tool.derived_state
+    assert copied_tool.derived_state == ["initialized-1", "mutated"]
+
+
+def test_tool_namespace_supports_function_tool_subclass_constructors() -> None:
+    original_tool = _CustomConstructorFunctionTool(session=object())
+
+    namespaced_tool = tool_namespace(
+        name="workspace",
+        description="Workspace tools.",
+        tools=[original_tool],
+    )[0]
+
+    assert isinstance(namespaced_tool, _CustomConstructorFunctionTool)
+    assert namespaced_tool.qualified_name == "workspace.custom_constructor_tool"
+    assert original_tool.qualified_name == "custom_constructor_tool"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("copy_style", ["replace", "shallow_copy"])
 async def test_copied_function_tool_invalid_input_uses_current_name(copy_style: str) -> None:

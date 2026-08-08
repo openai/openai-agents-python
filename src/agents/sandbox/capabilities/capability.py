@@ -6,7 +6,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...items import TResponseInputItem
-from ...tool import Tool
+from ...tool import FunctionTool, Tool
 from ..manifest import Manifest
 from ..session.base_sandbox_session import BaseSandboxSession
 from ..types import User
@@ -90,6 +90,8 @@ def _clone_capability_value(value: Any) -> Any:
     if hasattr(value, "__dict__"):
         cloned = copy.copy(value)
         for name, nested in value.__dict__.items():
+            if isinstance(value, FunctionTool) and name == "on_invoke_tool":
+                continue
             setattr(cloned, name, _clone_capability_value(nested))
         return cloned
     try:

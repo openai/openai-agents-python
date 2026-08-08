@@ -87,7 +87,8 @@ from agents.sandbox.session.sandbox_session_state import SandboxSessionState
 from agents.sandbox.snapshot import LocalSnapshotSpec, NoopSnapshot, SnapshotBase
 from agents.sandbox.types import ExecResult
 from agents.stream_events import RunItemStreamEvent
-from agents.tool import Tool
+from agents.tool import FunctionTool, Tool
+from agents.tool_context import ToolContext
 from agents.tracing import trace
 from tests.fake_model import FakeModel
 from tests.test_responses import (
@@ -664,6 +665,25 @@ class _NestedObjectCapability(Capability):
             type="nested-object-state",
             **cast(Any, {"state": _NestedObjectState()}),
         )
+
+
+class _StatefulFunctionTool(FunctionTool):
+    def __init__(self, state: str) -> None:
+        self.state = state
+        super().__init__(
+            name="stateful_tool",
+            description="Return state from the tool instance.",
+            params_json_schema={},
+            on_invoke_tool=self._invoke,
+        )
+
+    async def _invoke(self, _ctx: ToolContext[Any], _raw_input: str) -> str:
+        return self.state
+
+
+class _ToolStateCapability(Capability):
+    type: Literal["tool-state"] = "tool-state"
+    tool: Any
 
 
 class _AwaitableSessionCapability(Capability):
@@ -4667,6 +4687,43 @@ def test_capability_clone_preserves_session_field_identity() -> None:
     assert cloned.session is session
     assert capability.model_dump() == {"type": "shell"}
     assert cloned.model_dump() == {"type": "shell"}
+
+
+@pytest.mark.asyncio
+async def test_capability_clone_preserves_function_tool_invoker_owner() -> None:
+    original_tool = _StatefulFunctionTool("original")
+    capability = _ToolStateCapability(tool=original_tool)
+
+    cloned = cast(_ToolStateCapability, capability.clone())
+    cloned_tool = cast(_StatefulFunctionTool, cloned.tool)
+    cloned_tool.state = "cloned"
+
+    assert cloned_tool is not original_tool
+    assert getattr(cloned_tool.on_invoke_tool, "__self__", None) is cloned_tool
+    assert (
+        await cloned_tool.on_invoke_tool(
+            ToolContext(
+                None,
+                tool_name=cloned_tool.name,
+                tool_call_id="1",
+                tool_arguments="{}",
+            ),
+            "{}",
+        )
+        == "cloned"
+    )
+    assert (
+        await original_tool.on_invoke_tool(
+            ToolContext(
+                None,
+                tool_name=original_tool.name,
+                tool_call_id="2",
+                tool_arguments="{}",
+            ),
+            "{}",
+        )
+        == "original"
+    )
 
 
 @pytest.mark.asyncio
