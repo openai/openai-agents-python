@@ -50,7 +50,7 @@ graph LR
 
 ## Agents
 
-First, let's set up some Agents. This should feel familiar to you if you've built any agents with this SDK. We'll have a couple of Agents, a handoff, and a tool.
+First, let's set up some Agents. This should feel familiar to you if you've built any agents with this SDK. We'll have two Agents, a configured handoff, and a tool.
 
 ```python
 import random
@@ -190,4 +190,4 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-If you run this example, the agent will speak to you! Check out the example in [examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) to see a demo where you can speak to the agent yourself.
+If you run this example, the agent will produce spoken audio for you to hear! Check out the example in [examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) to see a demo where you can speak to the agent yourself.

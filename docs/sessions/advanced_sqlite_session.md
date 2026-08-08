@@ -81,7 +81,7 @@ session = AdvancedSQLiteSession(
 ### Parameters
 
 - `session_id` (str): Unique identifier for the conversation session
-- `db_path` (str | Path): Path to SQLite database file. Defaults to `:memory:` for in-memory storage
+- `db_path` (str | Path): Path to SQLite database file. Defaults to `:memory:`, which uses in-memory storage
 - `create_tables` (bool): Whether to automatically create the advanced tables. Defaults to `False`
 - `logger` (logging.Logger | None): Custom logger for the session. Defaults to module logger
 
@@ -245,7 +245,7 @@ for turn in matching_turns:
 
 The session automatically tracks message structure including:
 
-- Message types (user, assistant, tool_call, etc.)
+- Message type values (`user`, `assistant`, `tool_call`, etc.)
 - Tool names for tool calls
 - Turn numbers and sequence numbers
 - Branch associations
@@ -284,7 +284,7 @@ CREATE TABLE branch_reservations (
 );
 ```
 
-This table atomically reserves branch IDs, including branches whose copied prefix is empty. Reservation rows are retained after branch deletion and session clearing so stale session instances cannot merge history into a later branch that reused the same ID.
+This table atomically reserves branch IDs, including branches whose copied prefix is empty. Reservation rows are retained both when a branch is deleted and when the session is cleared, so stale session instances cannot merge history into a later branch that reused the same ID.
 
 ### turn_usage table
 

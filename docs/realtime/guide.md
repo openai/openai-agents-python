@@ -123,13 +123,13 @@ If server-side turn detection is disabled, you are responsible for marking turn 
 await session.send_audio(audio_bytes, commit=True)
 ```
 
-If you need lower-level control, you can also send raw client events such as `input_audio_buffer.commit` through the underlying model transport.
+If you need lower-level control, you can also send Realtime API client events such as `input_audio_buffer.commit` directly through the underlying model transport.
 
 ### Manual response control
 
-`session.send_message()` sends user input using the high-level path and starts a response for you. Raw audio buffering does **not** automatically do the same in every configuration.
+`session.send_message()` sends user input using the high-level path and starts a response for you. In some configurations, raw audio buffering does **not** automatically do the same.
 
-At the Realtime API level, manual turn control means clearing `turn_detection` with a raw `session.update`, then sending `input_audio_buffer.commit` and `response.create` yourself.
+At the Realtime API level, manual turn control means sending a `session.update` event that sets `turn_detection` to `null`, then sending `input_audio_buffer.commit` and `response.create` yourself.
 
 If you are managing turns manually, you can send raw client events through the model transport:
 
@@ -173,7 +173,7 @@ The most useful events for UI state are usually `history_added` and `history_upd
 
 ### Usage accounting
 
-When a completed model response includes usage, the OpenAI realtime model emits a [`RealtimeModelUsageEvent`][agents.realtime.model_events.RealtimeModelUsageEvent] inside a `raw_model_event`. Its `usage` field contains the token counts for that response, while `input_tokens_details` and `output_tokens_details` provide optional modality breakdowns.
+When a completed model response includes usage, the SDK's OpenAI `RealtimeModel` transport emits a [`RealtimeModelUsageEvent`][agents.realtime.model_events.RealtimeModelUsageEvent] inside a `raw_model_event`. Its `usage` field contains the token counts for that response, while `input_tokens_details` and `output_tokens_details` provide optional modality breakdowns.
 
 The session also adds each response's usage to the shared [`RunContextWrapper.usage`][agents.run_context.RunContextWrapper.usage]. Read it from `event.info.context.usage` on a subsequent high-level event such as `agent_end` to inspect cumulative usage for the live session.
 
@@ -199,7 +199,7 @@ Usage is reported only when the model provider includes it in the completed resp
 
 When the user interrupts the assistant, the session emits `audio_interrupted` and updates history so the server-side conversation stays aligned with what the user actually heard.
 
-In low-latency local playback, the default playback tracker is often enough. In remote or delayed playback scenarios, especially telephony, use [`RealtimePlaybackTracker`][agents.realtime.model.RealtimePlaybackTracker] so interruption truncation is based on actual playback progress rather than assuming all generated audio has already been heard.
+In low-latency local playback, the default playback tracker is often enough. In remote or delayed playback scenarios, especially telephony, use [`RealtimePlaybackTracker`][agents.realtime.model.RealtimePlaybackTracker] so the interrupted response is truncated at the actual playback position rather than assuming all generated audio has already been heard.
 
 The Twilio example in [`examples/realtime/twilio/twilio_handler.py`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/twilio/twilio_handler.py) shows this pattern.
 
@@ -264,11 +264,11 @@ main_agent = RealtimeAgent(
 )
 ```
 
-Bare `RealtimeAgent` handoffs are auto-wrapped, and `realtime_handoff(...)` lets you customize names, descriptions, validation, callbacks, and availability. Realtime handoffs do **not** support the regular handoff `input_filter`.
+`RealtimeAgent` objects used directly as handoffs are auto-wrapped, and `realtime_handoff(...)` lets you customize names, descriptions, validation, callbacks, and availability. Realtime handoffs do **not** support the regular handoff `input_filter`.
 
 ### Guardrails
 
-Realtime agents support output guardrails on agent responses and input guardrails on function-tool calls. Output guardrails run on debounced accumulation of output-text and audio-transcript deltas rather than on every partial delta, and they emit `guardrail_tripped` instead of raising an exception.
+Realtime agents support output guardrails on agent responses and input guardrails on function-tool calls. Output guardrail checks are debounced: each check runs on accumulated output-text and audio-transcript deltas rather than on every partial delta, and emits `guardrail_tripped` instead of raising an exception.
 
 ```python
 from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
@@ -288,9 +288,9 @@ agent = RealtimeAgent(
 )
 ```
 
-When a realtime output guardrail trips on an audio transcript, the session interrupts the active response, forces `response.cancel`, emits `guardrail_tripped`, and sends a follow-up user message that names the triggered guardrail so the model can produce a replacement response. Your audio player should still listen for `audio_interrupted` and stop local playback immediately, because some audio may already be buffered when the tripwire fires. With the built-in OpenAI Realtime transports, if the guardrail finishes after its source response has ended, the session interrupts only that response's buffered playback and does not cancel a newer response. For text-only output, the session instead sends a response-scoped `response.cancel`; it does not emit `audio_interrupted` because there is no audio playback to stop. The same `guardrail_tripped` event and follow-up user message are emitted for the text-only path when using the built-in OpenAI Realtime models.
+When a realtime output guardrail trips on an audio transcript, the session interrupts the active response, forces `response.cancel`, emits `guardrail_tripped`, and sends a follow-up user message that names the triggered guardrail so the model can produce a replacement response. Your audio player should still listen for `audio_interrupted` and stop local playback immediately, because some audio may already be buffered when the tripwire fires. With the built-in OpenAI Realtime transports, if the guardrail check finishes after the response it is checking has ended, the session interrupts only that response's buffered playback and does not cancel any response that started later. For text-only output, the session instead sends a response-scoped `response.cancel`; it does not emit `audio_interrupted` because there is no audio playback to stop. The same `guardrail_tripped` event and follow-up user message are emitted for the text-only path when using the built-in OpenAI Realtime models.
 
-Custom `RealtimeModel` transports must honor `RealtimeModelSendInterrupt.response_id` and `playback_only` to provide the same source-scoped audio interruption behavior. They must also override `RealtimeModel.send_event_if()` to support the text-only recovery message. The implementation must recheck or serialize the supplied condition at the transport's actual event commit boundary. The default implementation safely skips the recovery message because checking the condition before awaiting `send_event()` would allow a newer response to start before the message is committed; response cancellation and the `guardrail_tripped` event still occur.
+Custom `RealtimeModel` transports must honor `RealtimeModelSendInterrupt.response_id` and `playback_only` to provide the same source-scoped audio interruption behavior. They must also override `RealtimeModel.send_event_if()` to support the recovery message for the text-only output path. The implementation must either recheck the supplied condition at the transport's actual event commit boundary or serialize the condition check together with the event commit. The default implementation safely skips the recovery message because, if it checked the condition once and then sent the event separately, another response could start between that check and the event commit; response cancellation and the `guardrail_tripped` event still occur.
 
 ## SIP and telephony
 

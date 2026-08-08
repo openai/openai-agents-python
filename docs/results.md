@@ -59,9 +59,9 @@ In practice:
 
 When SDK-default nested handoff history preserves a message item verbatim, Sessions, `RunState`, and `to_input_list()` track the exact owned occurrence rather than deduplicating by content. Identical messages that occurred separately remain separate; only the already-owned occurrence is kept from being appended a second time.
 
-Unlike the JavaScript SDK, Python does not expose a separate `output` property for the model-shaped delta only. Use `new_items` when you need SDK metadata, or inspect `raw_responses` when you need the raw model payloads.
+Unlike the JavaScript SDK, Python does not expose a separate `output` property containing only the model-format items newly generated during the run. Use `new_items` when you need SDK metadata, or inspect `raw_responses` when you need the raw model payloads.
 
-Computer-tool replay follows the raw Responses payload shape. Preview-model `computer_call` items preserve a single `action`, while `gpt-5.5` computer calls can preserve batched `actions[]`. [`to_input_list()`][agents.result.RunResultBase.to_input_list] and [`RunState`][agents.run_state.RunState] keep whichever shape the model produced, so manual replay, pause/resume flows, and stored transcripts continue to work across both preview and GA computer-tool calls. Local execution results still appear as `computer_call_output` items in `new_items`.
+Resubmitting computer-tool items as conversation input uses the raw Responses payload shape. Preview-model `computer_call` items preserve a single `action`, while `gpt-5.5` computer calls can preserve batched `actions[]`. [`to_input_list()`][agents.result.RunResultBase.to_input_list] and [`RunState`][agents.run_state.RunState] keep whichever shape the model produced, so manually resubmitting those items as conversation input, pause/resume flows, and stored transcripts continue to work across both preview and GA computer-tool calls. Local execution results still appear as `computer_call_output` items in `new_items`.
 
 ### New items
 
@@ -103,7 +103,7 @@ caller_id = (
 )
 ```
 
-For a program-owned child call, `caller` has type `program`, and `caller_id` identifies the parent program call.
+For a program-owned child call, the `type` field of `caller` is `program`, and `caller_id` identifies the parent program call.
 
 ## Continue or resume the conversation
 
@@ -142,7 +142,7 @@ If you already continue the conversation with `to_input_list()`, `session`, or `
 
 ## Agent-as-tool metadata
 
-When a result comes from a nested [`Agent.as_tool()`][agents.agent.Agent.as_tool] run, [`agent_tool_invocation`][agents.result.RunResultBase.agent_tool_invocation] exposes immutable metadata about the outer tool call:
+When a result comes from a nested [`Agent.as_tool()`][agents.agent.Agent.as_tool] run, [`agent_tool_invocation`][agents.result.RunResultBase.agent_tool_invocation] exposes immutable metadata about the enclosing `Agent.as_tool()` call:
 
 -   `tool_name`
 -   `tool_call_id`
@@ -150,9 +150,9 @@ When a result comes from a nested [`Agent.as_tool()`][agents.agent.Agent.as_tool
 
 For ordinary top-level runs, `agent_tool_invocation` is `None`.
 
-This is especially useful inside `custom_output_extractor`, where you may need the outer tool name, call ID, or raw arguments while post-processing the nested result. See [Tools](tools.md) for the surrounding `Agent.as_tool()` patterns.
+This is especially useful inside `custom_output_extractor`, where you may need the enclosing `Agent.as_tool()` call's tool name, call ID, or raw arguments while post-processing the nested result. See [Tools](tools.md) for the surrounding `Agent.as_tool()` patterns.
 
-If you also need the parsed structured input for that nested run, read `context_wrapper.tool_input`. That is the field [`RunState`][agents.run_state.RunState] serializes generically for nested tool input, while `agent_tool_invocation` is the live result accessor for the current nested invocation.
+If you also need the parsed structured input for that nested run, read `context_wrapper.tool_input`. That is the field [`RunState`][agents.run_state.RunState] serializes generically for nested tool input, while `agent_tool_invocation` exposes metadata for the current nested invocation directly on the result.
 
 ## Streaming lifecycle and diagnostics
 
@@ -167,7 +167,7 @@ Keep consuming `stream_events()` until the async iterator finishes. A streaming 
 
 If you call `cancel()`, continue consuming `stream_events()` so cancellation and cleanup can finish correctly.
 
-Python does not expose a separate streamed `completed` promise or `error` property. Terminal streaming failures are surfaced by raising from `stream_events()`, and `is_complete` reflects whether the run has reached its terminal state.
+Python does not expose a separate streamed `completed` promise or `error` property. Streaming failures that terminate the run are raised by `stream_events()`, and `is_complete` reflects whether the run has reached its terminal state.
 
 ### Raw responses
 

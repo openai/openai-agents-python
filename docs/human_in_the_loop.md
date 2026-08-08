@@ -1,6 +1,6 @@
 # Human-in-the-loop
 
-Use the human-in-the-loop (HITL) flow to pause agent execution until a person approves or rejects sensitive tool calls. Tools declare when they need approval, run results surface pending approvals as interruptions, and `RunState` lets you serialize and resume runs after decisions are made.
+Use the human-in-the-loop (HITL) flow to pause agent execution until a person approves or rejects sensitive tool calls. Tools declare when they need approval, run results surface pending approvals as interruptions, and `RunState` lets you serialize paused runs and resume them after decisions are made.
 
 That approval surface is run-wide, not limited to the current top-level agent. The same pattern applies when the tool belongs to the current agent, to an agent reached through a handoff, or to a nested [`Agent.as_tool()`][agents.agent.Agent.as_tool] execution. In the nested `Agent.as_tool()` case, the interruption still surfaces on the outer run, so you approve or reject it on the outer `RunState` and resume the original top-level run.
 
@@ -46,7 +46,7 @@ agent = Agent(
 
 1. When the model emits a tool call, the runner evaluates its approval rule (`needs_approval`, `require_approval`, or the hosted MCP equivalent).
 2. If an approval decision for that tool call is already stored in the [`RunContextWrapper`][agents.run_context.RunContextWrapper], the runner proceeds without prompting. Per-call approvals are scoped to the specific call ID; pass `always_approve=True` or `always_reject=True` to persist the same decision for future calls to that tool during the rest of the run.
-3. Otherwise, execution pauses and `RunResult.interruptions` (or `RunResultStreaming.interruptions`) contains [`ToolApprovalItem`][agents.items.ToolApprovalItem] entries with details such as `agent.name`, `tool_name`, and `arguments`. This includes approvals raised after a handoff or inside nested `Agent.as_tool()` executions.
+3. If the approval rule requires approval and no decision for that tool call is stored, execution pauses, and `RunResult.interruptions` (or `RunResultStreaming.interruptions`) contains [`ToolApprovalItem`][agents.items.ToolApprovalItem] entries with details such as `agent.name`, `tool_name`, and `arguments`. This includes approvals raised after a handoff or inside nested `Agent.as_tool()` executions.
 4. Convert the result to a `RunState` with `result.to_state()`, call `state.approve(...)` or `state.reject(...)`, and then resume with `Runner.run(agent, state)` or `Runner.run_streamed(agent, state)`, where `agent` is the original top-level agent for the run.
 5. The resumed run continues where it left off and will re-enter this flow if new approvals are needed.
 
@@ -98,7 +98,7 @@ When these callbacks return a decision, the run continues without pausing for a 
 
 The same interruption flow works in streaming runs. After a streamed run pauses, keep consuming [`RunResultStreaming.stream_events()`][agents.result.RunResultStreaming.stream_events] until the iterator finishes, inspect [`RunResultStreaming.interruptions`][agents.result.RunResultStreaming.interruptions], resolve them, and resume with [`Runner.run_streamed(...)`][agents.run.Runner.run_streamed] if you want the resumed output to keep streaming. See [Streaming](streaming.md) for the streamed version of this pattern.
 
-If you are also using a session, keep passing the same session instance when you resume from `RunState`, or pass another session object that points at the same backing store. The resumed turn is then appended to the same stored conversation history. See [Sessions](sessions/index.md) for the session lifecycle details.
+If you are also using a session, keep passing the same session instance when you resume from `RunState`, or pass another session object configured for the same session ID and backing store. The resumed turn is then appended to the same stored conversation history. See [Sessions](sessions/index.md) for the session lifecycle details.
 
 ## Example: pause, approve, resume
 
@@ -169,16 +169,16 @@ if __name__ == "__main__":
 
 In this example, `prompt_approval` is synchronous because it uses `input()` and is executed with `run_in_executor(...)`. If your approval source is already asynchronous (for example, an HTTP request or async database query), you can use an `async def` function and `await` it directly instead.
 
-To stream output while waiting for approvals, call `Runner.run_streamed`, consume `result.stream_events()` until it completes, and then follow the same `result.to_state()` and resume steps shown above.
+To use streaming in a run that may pause for approvals, call `Runner.run_streamed`, consume `result.stream_events()` until it completes, and then follow the same `result.to_state()` and resume steps shown above.
 
 ## Repository patterns and examples
 
 - **Streaming approvals**: `examples/agent_patterns/human_in_the_loop_stream.py` shows how to drain `stream_events()` and then approve pending tool calls before resuming with `Runner.run_streamed(agent, state)`.
 - **Custom rejection text**: `examples/agent_patterns/human_in_the_loop_custom_rejection.py` shows how to combine run-level `tool_error_formatter` with per-call `rejection_message` overrides when approvals are rejected.
 - **Agent as tool approvals**: `Agent.as_tool(..., needs_approval=...)` applies the same interruption flow when delegated agent tasks need review. Nested interruptions still surface on the outer run, so resume the original top-level agent rather than the nested one.
-- **Local shell and apply_patch tools**: `ShellTool` and `ApplyPatchTool` also support `needs_approval`. Use `state.approve(interruption, always_approve=True)` or `state.reject(..., always_reject=True)` to cache the decision for future calls. For automatic decisions, provide `on_approval` (see `examples/tools/shell.py`); for manual decisions, handle interruptions (see `examples/tools/shell_human_in_the_loop.py`). Hosted shell environments do not support `needs_approval` or `on_approval`; see the [tools guide](tools.md).
+- **Local shell and apply_patch tools**: `ShellTool` and `ApplyPatchTool` also support `needs_approval`. Use `state.approve(interruption, always_approve=True)` or `state.reject(..., always_reject=True)` to cache the decision for future calls to that tool during the rest of the run. For automatic decisions, provide `on_approval` (see `examples/tools/shell.py`); for manual decisions, handle interruptions (see `examples/tools/shell_human_in_the_loop.py`). Hosted shell environments do not support `needs_approval` or `on_approval`; see the [tools guide](tools.md).
 - **Local MCP servers**: Use `require_approval` on `MCPServerStdio` / `MCPServerSse` / `MCPServerStreamableHttp` to gate MCP tool calls (see `examples/mcp/get_all_mcp_tools_example/main.py` and `examples/mcp/tool_filter_example/main.py`).
-- **Hosted MCP servers**: Set `require_approval` to `"always"` on `HostedMCPTool` to force HITL, optionally providing `on_approval_request` to auto-approve or reject (see `examples/hosted_mcp/human_in_the_loop.py` and `examples/hosted_mcp/on_approval.py`). Use `"never"` for trusted servers (`examples/hosted_mcp/simple.py`).
+- **Hosted MCP servers**: Set `tool_config={"require_approval": "always"}` on `HostedMCPTool` to force HITL, optionally providing `on_approval_request` to auto-approve or reject (see `examples/hosted_mcp/human_in_the_loop.py` and `examples/hosted_mcp/on_approval.py`). Use `"never"` for trusted servers (`examples/hosted_mcp/simple.py`).
 - **Sessions and memory**: Pass a session to `Runner.run` so approvals and conversation history survive multiple turns. SQLite and OpenAI Conversations session variants are in `examples/memory/memory_session_hitl_example.py` and `examples/memory/openai_session_hitl_example.py`.
 - **Realtime agents**: The realtime demo exposes WebSocket messages that approve or reject tool calls via `approve_tool_call` / `reject_tool_call` on the `RealtimeSession` (see `examples/realtime/app/server.py` for the server-side handlers and [Realtime guide](realtime/guide.md#tool-approvals) for the API surface).
 
@@ -190,7 +190,7 @@ Useful serialization options:
 
 -   `context_serializer`: Customize how non-mapping context objects are serialized.
 -   `context_deserializer`: Rebuild non-mapping context objects when loading state with `RunState.from_json(...)` or `RunState.from_string(...)`.
-- `strict_context=True`: Fail serialization or deserialization unless the context is already a mapping or you provide the appropriate serializer/deserializer.
+- `strict_context=True`: Fail serialization unless the context is already a mapping or you provide `context_serializer`; fail deserialization unless the context is already a mapping or you provide `context_deserializer`.
 - `context_override`: Replace the serialized context when loading state. This is useful when you do not want to restore the original context object, but it does not remove that context from an already serialized payload.
 - `include_tracing_api_key=True`: Include the tracing API key in the serialized trace payload when you need resumed work to keep exporting traces with the same credentials.
 

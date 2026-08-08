@@ -2,9 +2,9 @@
 
 Tools let agents take actions: things like fetching data, running code, calling external APIs, and even using a computer. The SDK supports five categories:
 
--   Hosted OpenAI tools: run alongside the model on OpenAI servers.
+-   Hosted OpenAI tools: execute for the model on OpenAI servers.
 -   Local/runtime execution tools: `ComputerTool` and `ApplyPatchTool` always run in your environment, while `ShellTool` can run locally or in a hosted container.
--   Function calling: wrap any Python function as a tool.
+-   `FunctionTool` instances: wrap any Python function as a tool.
 -   Agents as tools: expose an agent as a callable tool without a full handoff.
 -   Experimental: Codex tool: run workspace-scoped Codex tasks from a tool call.
 
@@ -167,7 +167,7 @@ What to know:
 -   Add at most one `ProgrammaticToolCallingTool()` to an agent. The agent must also expose at least one programmatically callable tool, a `ToolSearchTool()` backed by a namespace, deferred function, or deferred hosted MCP server, or an opaque prompt-managed tool surface. A bare `ToolSearchTool()` without a searchable surface is rejected.
 -   `allowed_callers` controls how a tool may be invoked. Omitting it allows direct model calls only. Use `["programmatic"]` for program-only access or `["direct", "programmatic"]` to allow both.
 -   SDK tool types that can opt in are `FunctionTool`, `CustomTool`, `ShellTool`, `ApplyPatchTool`, `HostedMCPTool`, and `CodeInterpreterTool`. Function, custom, shell, and apply-patch tools expose `allowed_callers` directly. For hosted MCP and code interpreter, set `allowed_callers` inside `tool_config`.
--   For `@function_tool(allowed_callers=[...])`, a structured return annotation such as a Pydantic model, TypedDict, or dataclass automatically becomes a strict object output schema and is validated before the value is returned to the program. Use `output_type=...` when the function has no usable annotation, or the lower-level `output_json_schema={...}` escape hatch when you already have a strict object schema. `output_type` and `output_json_schema` are mutually exclusive. Plain `str`, `Any`, and `None` returns remain untyped. For a schema-backed program-owned call, the default failure formatter is disabled because its free-form text does not satisfy the output schema. A handler exception therefore propagates unless you provide a custom `failure_error_function` that returns schema-conforming JSON.
+-   For `@function_tool(allowed_callers=[...])`, a structured return annotation such as a Pydantic model, TypedDict, or dataclass automatically becomes a strict object output schema, and the returned value is validated against that schema before it is returned to the program. Use `output_type=...` when the function has no usable annotation, or the lower-level `output_json_schema={...}` escape hatch when you already have a strict object schema. `output_type` and `output_json_schema` are mutually exclusive. Return annotations of `str`, `Any`, or `None` do not create an output schema. For a schema-backed program-owned call, the default failure formatter is disabled because its free-form text does not satisfy the output schema. A handler exception therefore propagates unless you provide a custom `failure_error_function` that returns schema-conforming JSON.
 -   Program-owned SDK tools still use the normal Runner lifecycle. Tool input and output guardrails, hooks, timeouts, concurrency limits, approvals, sessions, and `RunState` pause/resume behavior continue to apply, and the SDK preserves each child call's program caller relationship.
 -   Model-request retries use a stricter replay-safety boundary whenever `ProgrammaticToolCallingTool()` is present, even before a program executes. The SDK disables provider-managed retries and WebSocket pre-event retries for these requests. A Runner retry policy retries only when provider advice explicitly marks the replay safe; `retry_policies.network_error()` by itself does not override this boundary.
 -   Approval-sensitive or high-impact tools are usually better kept as direct calls so a person can review each action before it becomes part of a larger program. If a program-owned call pauses for approval, resolve the interruption through `RunState` and resume the original run as usual.
@@ -245,7 +245,7 @@ Shell action timeouts use positive integer milliseconds for a finite timeout. Th
 
 `ComputerTool` is still a local harness: you provide a [`Computer`][agents.computer.Computer] or [`AsyncComputer`][agents.computer.AsyncComputer] implementation, and the SDK maps that harness onto the OpenAI Responses API computer surface.
 
-For explicit [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) requests, the SDK sends the GA built-in tool payload `{"type": "computer"}`. The older `computer-use-preview` model keeps the preview payload `{"type": "computer_use_preview", "environment": ..., "display_width": ..., "display_height": ...}`. This mirrors the platform migration described in OpenAI's [Computer use guide](https://developers.openai.com/api/docs/guides/tools-computer-use/):
+For explicit [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) requests, the SDK sends the GA built-in tool payload `{"type": "computer"}`. For requests to the older `computer-use-preview` model, the SDK continues to send the preview payload `{"type": "computer_use_preview", "environment": ..., "display_width": ..., "display_height": ...}`. This mirrors the platform migration described in OpenAI's [Computer use guide](https://developers.openai.com/api/docs/guides/tools-computer-use/):
 
 -   Model: `computer-use-preview` -> `gpt-5.5`
 -   Tool selector: `computer_use_preview` -> `computer`
@@ -256,7 +256,7 @@ The SDK chooses that wire shape from the effective model on the actual Responses
 
 When a [`ComputerTool`][agents.tool.ComputerTool] is present, `tool_choice="computer"`, `"computer_use"`, and `"computer_use_preview"` are all accepted and normalized to the built-in selector that matches the effective request model. Without a `ComputerTool`, those strings still behave like ordinary function names.
 
-This distinction matters when `ComputerTool` is backed by a [`ComputerProvider`][agents.tool.ComputerProvider] factory. The GA `computer` payload does not need `environment` or dimensions at serialization time, so unresolved factories are fine. Preview-compatible serialization still needs a resolved `Computer` or `AsyncComputer` instance so the SDK can send `environment`, `display_width`, and `display_height`.
+This distinction matters when `ComputerTool` is backed by a [`ComputerProvider`][agents.tool.ComputerProvider] factory. The GA `computer` payload does not need `environment` or dimensions at serialization time, so serialization can occur before a factory has produced a `Computer` or `AsyncComputer` instance. Preview-compatible serialization still needs a resolved `Computer` or `AsyncComputer` instance so the SDK can send `environment`, `display_width`, and `display_height`.
 
 At runtime, both paths still use the same local harness. Preview responses emit `computer_call` items with a single `action`; `gpt-5.5` can emit batched `actions[]`, and the SDK executes them in order before producing a `computer_call_output` screenshot item. See `examples/tools/computer_use.py` for a runnable Playwright-based harness.
 
@@ -368,7 +368,7 @@ for tool in agent.tools:
 
 1.  You can use any Python types as arguments to your functions, and the function can be sync or async.
 2.  Docstrings, if present, are used to capture descriptions and argument descriptions
-3.  Functions can optionally take the `context` (must be the first argument). You can also set overrides, like the name of the tool, description, which docstring style to use, etc.
+3.  Functions can optionally take the run context as their first argument. You can also set overrides, like the name of the tool, description, which docstring style to use, etc.
 4.  You can pass the decorated functions to the list of tools.
 
 ??? note "Expand to see output"
@@ -653,7 +653,7 @@ if __name__ == "__main__":
 
 ### Customizing tool-agents
 
-The `agent.as_tool` function is a convenience method to make it easy to turn an agent into a tool. It supports common runtime options such as `max_turns`, `run_config`, `hooks`, `previous_response_id`, `conversation_id`, `session`, and `needs_approval`. It also supports structured input with `parameters`, `input_builder`, and `include_input_schema`.
+`agent.as_tool` is a convenience method for turning an agent into a tool. It supports common runtime options such as `max_turns`, `run_config`, `hooks`, `previous_response_id`, `conversation_id`, `session`, and `needs_approval`. It also supports structured input with `parameters`, `input_builder`, and `include_input_schema`.
 
 The state options configure the nested agent run started by the tool call; the parent run's conversation state is not inherited automatically. To share client-managed history between the parent and nested runs, explicitly pass the same `session` to both. As with `Runner.run`, choose one state strategy for the nested run: a client-managed `session`, or server-managed continuation through `previous_response_id` or `conversation_id`.
 
@@ -679,7 +679,7 @@ async def run_my_agent() -> str:
 
 ### Structured input for tool-agents
 
-By default, `Agent.as_tool()` expects a single string input (`{"input": "..."}`), but you can expose a structured schema by passing `parameters` (a Pydantic model or dataclass type).
+By default, `Agent.as_tool()` expects an object with one string field, `input` (`{"input": "..."}`), but you can expose a structured schema by passing `parameters` (a Pydantic model type or a dataclass type).
 
 Additional options:
 

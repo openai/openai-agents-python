@@ -1,6 +1,6 @@
 # Examples
 
-Check out a variety of sample implementations of the SDK in the examples section of the [repo](https://github.com/openai/openai-agents-python/tree/main/examples). The examples are organized into several categories that demonstrate different patterns and capabilities.
+Check out a variety of sample implementations that use the SDK in the examples section of the [repo](https://github.com/openai/openai-agents-python/tree/main/examples). The examples are organized into several categories that demonstrate different patterns and capabilities.
 
 ## Categories
 
@@ -12,7 +12,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Agents as tools with structured input parameters (`examples/agent_patterns/agents_as_tools_structured.py`)
     -   Parallel agent execution
     -   Conditional tool usage
-    -   Forcing tool use with different behaviors (`examples/agent_patterns/forcing_tool_use.py`)
+    -   Forcing tool use while demonstrating different tool-use behaviors (`examples/agent_patterns/forcing_tool_use.py`)
     -   Input/output guardrails
     -   LLM as a judge
     -   Routing
@@ -25,11 +25,11 @@ Check out a variety of sample implementations of the SDK in the examples section
 
     -   Hello world examples (Default model, GPT-5, open-weight model)
     -   Agent lifecycle management
-    -   Run hooks and agent hooks lifecycle example (`examples/basic/lifecycle_example.py`)
+    -   Agent and run lifecycle example using `RunHooks` and `AgentHooks` (`examples/basic/lifecycle_example.py`)
     -   Dynamic system prompts
     -   Basic tool usage (`examples/basic/tools.py`)
     -   Tool input/output guardrails (`examples/basic/tool_guardrails.py`)
-    -   Image tool output (`examples/basic/image_tool_output.py`)
+    -   Returning an image as tool output (`examples/basic/image_tool_output.py`)
     -   Streaming outputs (text, items, function call args)
     -   Responses websocket transport with a shared session helper across turns (`examples/basic/stream_ws.py`)
     -   Prompt templates
@@ -42,7 +42,7 @@ Check out a variety of sample implementations of the SDK in the examples section
 
 - **[customer_service](https://github.com/openai/openai-agents-python/tree/main/examples/customer_service):** Example customer service system for an airline.
 
-- **[financial_research_agent](https://github.com/openai/openai-agents-python/tree/main/examples/financial_research_agent):** A financial research agent that demonstrates structured research workflows with agents and tools for financial data analysis.
+- **[financial_research_agent](https://github.com/openai/openai-agents-python/tree/main/examples/financial_research_agent):** A financial research agent that demonstrates structured research workflows for financial data analysis using agents and tools.
 
 - **[handoffs](https://github.com/openai/openai-agents-python/tree/main/examples/handoffs):** Practical examples of agent handoffs with message filtering, including:
 
@@ -54,7 +54,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Simple hosted MCP without approval (`examples/hosted_mcp/simple.py`)
     -   MCP connectors such as Google Calendar (`examples/hosted_mcp/connectors.py`)
     -   Human-in-the-loop with interruption-based approvals (`examples/hosted_mcp/human_in_the_loop.py`)
-    -   On-approval callback for MCP tool calls (`examples/hosted_mcp/on_approval.py`)
+    -   Callback for MCP tool approval requests (`examples/hosted_mcp/on_approval.py`)
 
 - **[mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp):** Learn how to build agents with MCP (Model Context Protocol), including:
 
@@ -67,7 +67,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Streamable HTTP remote connection (`examples/mcp/streamable_http_remote_example`)
     -   Custom HTTP client factory for Streamable HTTP (`examples/mcp/streamablehttp_custom_client_example`)
     -   Prefetching all MCP tools with `MCPUtil.get_all_function_tools` (`examples/mcp/get_all_mcp_tools_example`)
-    -   MCPServerManager with FastAPI (`examples/mcp/manager_example`)
+    -   Using `MCPServerManager` in a FastAPI application (`examples/mcp/manager_example`)
     -   MCP tool filtering (`examples/mcp/tool_filter_example`)
 
 - **[memory](https://github.com/openai/openai-agents-python/tree/main/examples/memory):** Examples of different memory implementations for agents, including:
@@ -94,7 +94,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Web application patterns with structured text and image messages
     -   Command-line audio loops and playback handling
     -   Twilio Media Streams integration over WebSocket
-    -   Twilio SIP integration using Realtime Calls API attach flows
+    -   Twilio SIP integration using the Realtime Calls API's `attach` flows
 
 - **[reasoning_content](https://github.com/openai/openai-agents-python/tree/main/examples/reasoning_content):** Examples demonstrating how to work with reasoning content, including:
 
@@ -112,7 +112,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Sandbox memory and snapshot resume (`examples/sandbox/memory.py`)
     -   Sandbox agents exposed as tools (`examples/sandbox/sandbox_agents_as_tools.py`)
 
-- **[tools](https://github.com/openai/openai-agents-python/tree/main/examples/tools):** Learn how to implement OAI hosted tools and experimental Codex tooling such as:
+- **[tools](https://github.com/openai/openai-agents-python/tree/main/examples/tools):** Learn how to implement OpenAI-hosted tools and experimental Codex tooling. Examples include:
 
     -   Web search and web search with filters
     -   File search
@@ -123,11 +123,11 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Hosted container shell with inline skills (`examples/tools/container_shell_inline_skill.py`)
     -   Hosted container shell with skill references (`examples/tools/container_shell_skill_reference.py`)
     -   Local shell with local skills (`examples/tools/local_shell_skill.py`)
-    -   Tool search with namespaces and deferred tools (`examples/tools/tool_search.py`)
+    -   Tool search with namespaces and tools that use deferred loading (`examples/tools/tool_search.py`)
     -   Programmatic Tool Calling with concurrent structured tool calls (`examples/tools/programmatic_tool_calling.py`)
     -   Computer use
     -   Image generation
     -   Experimental Codex tool workflows (`examples/tools/codex.py`)
-    -   Experimental Codex same-thread workflows (`examples/tools/codex_same_thread.py`)
+    -   Experimental Codex workflows that reuse the same Codex conversation thread (`examples/tools/codex_same_thread.py`)
 
 - **[voice](https://github.com/openai/openai-agents-python/tree/main/examples/voice):** See examples of voice agents, using our TTS and STT models, including streamed voice examples.

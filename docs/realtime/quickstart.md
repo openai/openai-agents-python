@@ -118,7 +118,7 @@ Once the basic session works, the settings most people reach for next are:
 
 The older flat aliases such as `input_audio_format`, `output_audio_format`, `input_audio_transcription`, and `turn_detection` still work, but nested `audio` settings are preferred for new code.
 
-For manual turn control, use a raw `session.update` / `input_audio_buffer.commit` / `response.create` flow as described in the [Realtime agents guide](guide.md#manual-response-control).
+For manual turn control, use the low-level `session.update` / `input_audio_buffer.commit` / `response.create` flow described in the [Realtime agents guide](guide.md#manual-response-control).
 
 For the full schema, see [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] and [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings].
 
@@ -145,7 +145,7 @@ session = await runner.run(model_config={"api_key": "your-api-key"})
 
 If you pass `headers` explicitly, the SDK will **not** inject an `Authorization` header for you.
 
-When connecting to Azure OpenAI, pass a GA Realtime endpoint URL in `model_config["url"]` and explicit headers. Avoid the legacy beta path (`/openai/realtime?api-version=...`) with realtime agents. See the [Realtime agents guide](guide.md#low-level-access-and-custom-endpoints) for details.
+When connecting to Azure OpenAI, set `model_config["url"]` to a GA Realtime endpoint URL and pass headers explicitly. Avoid the legacy beta path (`/openai/realtime?api-version=...`) with realtime agents. See the [Realtime agents guide](guide.md#low-level-access-and-custom-endpoints) for details.
 
 ## Next steps
 

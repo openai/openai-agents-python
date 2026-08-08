@@ -26,7 +26,7 @@ You define the workspace around the data the agent needs. It can start from GitH
 
 Throughout this page, "sandbox session" means the live execution environment managed by a sandbox client. It is different from the SDK's conversational [`Session`][agents.memory.session.Session] interfaces described in [Sessions](../sessions/index.md).
 
-The outer runtime still owns approvals, tracing, handoffs, and resume bookkeeping. The sandbox session owns commands, file changes, and environment isolation. That split is a core part of the model.
+The outer runtime still owns approvals, tracing, handoffs, and tracking the state needed to resume runs. The sandbox session owns commands, file changes, and environment isolation. That split is a core part of the model.
 
 ### How the pieces fit together
 
@@ -54,7 +54,7 @@ Think about the lifecycle in three phases:
 2. Execute a run by giving `Runner` a `SandboxRunConfig` that injects, resumes, or creates the sandbox session.
 3. Continue later from runner-managed `RunState`, explicit sandbox `session_state`, or a saved workspace snapshot.
 
-If shell access is only one occasional tool, start with hosted shell in the [tools guide](../tools.md). Reach for sandbox agents when workspace isolation, sandbox client choice, or sandbox-session resume behavior are part of the design.
+If shell access is just one tool that you use occasionally, start with hosted shell in the [tools guide](../tools.md). Reach for sandbox agents when workspace isolation, sandbox client choice, or sandbox-session resume behavior are part of the design.
 
 ## When to use them
 
@@ -66,7 +66,7 @@ Sandbox agents are a good fit for workspace-centric workflows, for example:
 - isolated multi-agent patterns, for example giving each reviewer or coding sub-agent its own workspace
 - multi-step workspace tasks, for example fixing a bug in one run and adding a regression test later, or resuming from snapshot or sandbox session state
 
-If you do not need access to files or a living filesystem, keep using `Agent`. If shell access is just one occasional capability, add hosted shell; if the workspace boundary itself is part of the feature, use sandbox agents.
+If you do not need access to files or a stateful, mutable filesystem, keep using `Agent`. If shell access is just one occasional capability, add hosted shell; if the workspace boundary itself is part of the feature, use sandbox agents.
 
 ## Choose a sandbox client
 
@@ -119,7 +119,7 @@ At run time, the runner turns that definition into a concrete sandbox-backed run
 4. It builds the final instructions in a fixed order: the SDK's default sandbox prompt, or `base_instructions` if you explicitly override it, then `instructions`, then capability instruction fragments, then any remote-mount policy text, then a rendered filesystem tree.
 5. It binds capability tools to the live sandbox session and runs the prepared agent through the normal `Runner` APIs.
 
-Sandboxing does not change what a turn means. A turn is still a model step, not a single shell command or sandbox action. There is no fixed 1:1 mapping between sandbox-side operations and turns: some work may stay inside the sandbox execution layer, while other actions return tool results, approvals, or other state that requires another model step. As a practical rule, another turn is consumed only when the agent runtime needs another model response after sandbox work has happened.
+Sandboxing does not change what a turn means. A turn is still a model step, not a single shell command or sandbox action. There is no fixed 1:1 mapping between sandbox-side operations and turns: some work may stay inside the sandbox execution layer, while other actions return information that requires another model step, such as a tool result, an approval, or another kind of state. As a practical rule, another turn is consumed only when the agent runtime needs another model response after sandbox work has happened.
 
 Those preparation steps are why `default_manifest`, `instructions`, `base_instructions`, `capabilities`, and `run_as` are the main sandbox-specific options to think about when designing a `SandboxAgent`.
 
@@ -188,7 +188,7 @@ Built-in capabilities include:
 | `Shell` | The agent needs shell access. | Adds `exec_command`, plus `write_stdin` when the sandbox client supports PTY interaction. |
 | `Filesystem` | The agent needs to edit files or inspect local images. | Adds `apply_patch` and `view_image`; patch paths are workspace-root-relative. |
 | `Skills` | You want skill discovery and materialization in the sandbox. | Prefer this over manually mounting `.agents` or `.agents/skills`; `Skills` indexes and materializes skills into the sandbox for you. |
-| `Memory` | Follow-on runs should read or generate memory artifacts. | Requires `Shell`; live updates also require `Filesystem`. |
+| `Memory` | Follow-on runs should read or generate memory artifacts. | Requires `Shell`; updating memory artifacts during a run also requires `Filesystem`. |
 | `Compaction` | Long-running flows need context trimming after compaction items. | Adjusts model sampling and input handling. |
 
 </div>
@@ -237,7 +237,7 @@ Mount entries describe what storage to expose; mount strategies describe how a s
 
 Good manifest design usually means keeping the workspace contract narrow, putting long task recipes in workspace files such as `repo/task.md`, and using relative workspace paths in instructions, for example `repo/task.md` or `output/report.md`. If the agent edits files with the `Filesystem` capability's `apply_patch` tool, remember that patch paths are relative to the sandbox workspace root, not the shell `workdir`.
 
-Use `extra_path_grants` only when the agent needs a concrete absolute path outside the workspace or the manifest needs to copy a trusted local source outside the SDK process working directory. Examples include `/tmp` for temporary tool output, `/opt/toolchain` for a read-only runtime, or a generated skills directory that should be materialized into the sandbox. A grant applies to local source materialization, SDK file APIs, and shell execution where the backend can enforce filesystem policy:
+Use `extra_path_grants` only when the agent needs a concrete absolute path outside the workspace or the manifest needs to copy a trusted local source outside the SDK process working directory. Examples include `/tmp` for temporary tool output, `/opt/toolchain` for a read-only runtime, or a generated skills directory that should be materialized into the sandbox. A grant applies to local source materialization and SDK file APIs. It also applies to shell execution when the backend can enforce filesystem policy:
 
 ```python
 from agents.sandbox import Manifest, SandboxPathGrant
@@ -387,7 +387,7 @@ sequenceDiagram
 
 </div>
 
-Use SDK-owned lifecycle when the sandbox only needs to live for one run. Pass a `client`, optional `manifest`, optional `snapshot`, and client `options`; the runner creates or resumes the sandbox, starts it, runs the agent, persists snapshot-backed workspace state, shuts the sandbox down, and lets the client clean up runner-owned resources.
+Use SDK-owned lifecycle when the sandbox only needs to live for one run. Pass a `client`, optionally a `manifest` and `snapshot`, and any client `options` you need; the runner creates or resumes the sandbox, starts it, runs the agent, persists snapshot-backed workspace state, ends the sandbox session, and lets the client clean up runner-owned resources.
 
 ```python
 result = await Runner.run(
@@ -447,7 +447,7 @@ These options decide whether the runner should reuse, resume, or create the sand
 | --- | --- | --- |
 | `client` | You want the runner to create, resume, and clean up sandbox sessions for you. | Required unless you provide a live sandbox `session`. |
 | `session` | You already created a live sandbox session yourself. | The caller owns lifecycle; the runner reuses that live sandbox session. |
-| `session_state` | You have serialized sandbox session state but not a live sandbox session object. | Requires `client`; the runner resumes from that explicit state as an owning session. |
+| `session_state` | You have serialized sandbox session state but not a live sandbox session object. | Requires `client`; the runner resumes from that explicit state and owns the resumed session's lifecycle. |
 
 </div>
 
@@ -668,7 +668,7 @@ run_config = RunConfig(
 )
 ```
 
-Use this when a fresh run should start from saved workspace contents rather than only `agent.default_manifest`. See [examples/sandbox/memory.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/memory.py) for a local snapshot flow and [examples/sandbox/sandbox_agent_with_remote_snapshot.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/sandbox_agent_with_remote_snapshot.py) for a remote snapshot client.
+Use this when a run that creates a fresh sandbox session should start from saved workspace contents rather than only `agent.default_manifest`. See [examples/sandbox/memory.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/memory.py) for a local snapshot flow and [examples/sandbox/sandbox_agent_with_remote_snapshot.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/sandbox_agent_with_remote_snapshot.py) for a remote snapshot client.
 
 ### Load skills from Git
 
@@ -687,7 +687,7 @@ Use this when the skills bundle has its own release cadence or should be shared 
 
 ### Expose as tools
 
-Tool-agents can either get their own sandbox boundary or reuse a live sandbox from the parent run. Reuse is useful for a fast read-only explorer agent: it can inspect the exact workspace the parent is using without paying to create, hydrate, or snapshot another sandbox.
+Tool-agents can either get their own sandbox boundary or reuse a live sandbox from the parent run. Reuse is useful for a fast read-only explorer agent: it can inspect the exact workspace the parent run is using without paying to create, hydrate, or snapshot another sandbox.
 
 ```python
 from agents import Runner

@@ -42,7 +42,7 @@ If read is enabled, `Memory()` requires `Shell()`, which lets the agent read and
 
 By default, memory artifacts are stored in the sandbox workspace under `memories/`. To reuse them in a later run, preserve and reuse the whole configured memories directory by keeping the same live sandbox session or resuming from a persisted session state or snapshot; a fresh empty sandbox starts with empty memory.
 
-`Memory()` enables both reading and generating memories. Use `Memory(generate=None)` for agents that should read memory but should not generate new memories: for example, an internal agent, subagent, checker, or one-off tool agent whose run doesn't add much signal. Use `Memory(read=None)` when the run should generate memory for later, but the user doesn't want the run to be influenced by existing memory.
+`Memory()` enables both reading and generating memories. Use `Memory(generate=None)` for agents that should read memory but should not generate new memories—for example, when runs by internal agents, subagents, checkers, or one-off tool agents do not add much signal. Use `Memory(read=None)` when the run should generate memory for later, but the user doesn't want the run to be influenced by existing memory.
 
 ## Read memory
 
@@ -128,7 +128,7 @@ async with sandbox:
     )
 ```
 
-Both runs append to one memory conversation file because they pass the same SDK conversation session (`session=conversation_session`) and therefore share the same `session.session_id`. This is different from the sandbox (`sandbox`), which identifies the live workspace and is not used as the memory conversation ID. Phase 1 sees the accumulated conversation when the sandbox session closes, so it can extract memory from the whole exchange instead of two isolated turns.
+Both runs pass the same SDK conversation session (`session=conversation_session`) and therefore share the same `session.session_id`. As a result, both runs append to one memory conversation file. This is different from the sandbox (`sandbox`), which identifies the live workspace and is not used as the memory conversation ID. Phase 1 sees the accumulated conversation when the sandbox session closes, so it can extract memory from the whole exchange instead of two isolated turns.
 
 If you want multiple `Runner.run(...)` calls to become one memory conversation, pass a stable identifier across those calls. When memory associates a run with a conversation, it resolves in this order:
 

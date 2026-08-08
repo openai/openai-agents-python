@@ -4,7 +4,7 @@
 
 ## Installation
 
-SQLAlchemy sessions require the `sqlalchemy` extra:
+SQLAlchemy sessions require the `sqlalchemy` optional-dependency extra from the `openai-agents` package:
 
 ```bash
 pip install openai-agents[sqlalchemy]

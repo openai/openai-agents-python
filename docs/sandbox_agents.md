@@ -30,7 +30,7 @@ pip install "openai-agents[docker]"
 
 ## Create a local sandbox agent
 
-This example stages a local repo under `repo/`, loads local skills lazily, and lets the runner create a Unix-local sandbox session for the run.
+This example stages a local repo under `repo/`, loads local skills lazily, and has the runner create a Unix-local sandbox session for the run.
 
 ```python
 import asyncio
@@ -99,8 +99,8 @@ Once the basic run works, the choices most people reach for next are:
 - `default_manifest`: the files, repos, directories, and mounts for fresh sandbox sessions
 - `instructions`: short workflow rules that should apply across prompts
 - `base_instructions`: an advanced escape hatch for replacing the SDK sandbox prompt
-- `capabilities`: sandbox-native tools such as filesystem editing/image inspection, shell, skills, memory, and compaction
-- `run_as`: the sandbox user identity for model-facing tools
+- `capabilities`: sandbox-native tools such as filesystem editing/image inspection, shell, skills, memory, and the SDK's compaction mechanism
+- `run_as`: the sandbox user account under which model-facing tools execute
 - `SandboxRunConfig.client`: the sandbox backend
 - `SandboxRunConfig.session`, `session_state`, or `snapshot`: how later runs reconnect to prior work
 
@@ -110,4 +110,4 @@ Once the basic run works, the choices most people reach for next are:
 - [Sandbox clients](sandbox/clients.md): choose Unix-local, Docker, hosted providers, and mount strategies.
 - [Agent memory](sandbox/memory.md): preserve and reuse lessons from previous sandbox runs.
 
-If shell access is only one occasional tool, start with hosted shell in the [tools guide](tools.md). Reach for sandbox agents when workspace isolation, sandbox client choice, or sandbox-session resume behavior are part of the design.
+If shell access is just one tool that you use occasionally, start with hosted shell in the [tools guide](tools.md). Reach for sandbox agents when workspace isolation, sandbox client choice, or sandbox-session resume behavior are part of the design.

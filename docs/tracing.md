@@ -10,12 +10,12 @@ The Agents SDK includes built-in tracing, collecting a comprehensive record of e
     2. You can globally disable tracing in code with [`set_tracing_disabled(True)`][agents.set_tracing_disabled]
     3. You can disable tracing for a single run by setting [`agents.run.RunConfig.tracing_disabled`][] to `True`
 
-***For organizations operating under a Zero Data Retention (ZDR) policy using OpenAI's APIs, tracing is unavailable.***
+***Tracing is unavailable for organizations that use OpenAI's APIs under a Zero Data Retention (ZDR) policy.***
 
 ## Traces and spans
 
 -   **Traces** represent a single end-to-end operation of a "workflow". They're composed of Spans. Traces have the following properties:
-    -   `workflow_name`: This is the logical workflow or app. For example "Code generation" or "Customer service".
+    -   `workflow_name`: This is the name of the logical workflow or app. For example "Code generation" or "Customer service".
     -   `trace_id`: A unique ID for the trace. Automatically generated if you don't pass one. Must have the format `trace_<32_alphanumeric>`.
     -   `group_id`: Optional group ID, to link multiple traces from the same conversation. For example, you might use a chat thread ID.
     -   `disabled`: If True, the trace will not be recorded.
@@ -40,9 +40,9 @@ By default, the SDK traces the following:
 -   Handoffs are wrapped in `handoff_span()`
 -   Audio inputs (speech-to-text) are wrapped in a `transcription_span()`
 -   Audio outputs (text-to-speech) are wrapped in a `speech_span()`
--   Related audio spans may be parented under a `speech_group_span()`
+-   The SDK may parent related audio spans under a `speech_group_span()`
 
-By default, the trace is named "Agent workflow". You can set this name if you use `trace`, or you can configure the name and other properties with the [`RunConfig`][agents.run.RunConfig].
+By default, the trace name is the literal string `Agent workflow`. You can set this name if you use `trace`, or you can configure the name and other properties with the [`RunConfig`][agents.run.RunConfig].
 
 If you want a more compact hierarchy, disable the automatic task and turn spans for a run. Agent, generation, function, guardrail, handoff, and custom spans are still recorded.
 
@@ -118,7 +118,7 @@ async def main():
         print(f"Rating: {second_result.final_output}")
 ```
 
-1. Because the two calls to `Runner.run` are wrapped in a `with trace()`, the individual runs will be part of the overall trace rather than creating two traces.
+1. Because the two calls to `Runner.run` are wrapped in a `with trace()`, both runs become part of one overall trace instead of each creating a separate trace.
 
 ## Creating traces
 
@@ -127,7 +127,7 @@ You can use the [`trace()`][agents.tracing.trace] function to create a trace. Tr
 1. **Recommended**: use the trace as a context manager, i.e. `with trace(...) as my_trace`. This will automatically start and end the trace at the right time.
 2. You can also manually call [`trace.start()`][agents.tracing.Trace.start] and [`trace.finish()`][agents.tracing.Trace.finish].
 
-The current trace is tracked via a Python [`contextvar`](https://docs.python.org/3/library/contextvars.html). This means that it works with concurrency automatically. If you manually start/end a trace, you'll need to pass `mark_as_current` and `reset_current` to `start()`/`finish()` to update the current trace.
+The current trace is tracked via a Python [`contextvar`](https://docs.python.org/3/library/contextvars.html). This means that it works with concurrency automatically. If you manually start and finish a trace, pass `mark_as_current` to `start()` and `reset_current` to `finish()` to update the current trace.
 
 ## Creating spans
 
@@ -160,7 +160,7 @@ To customize this default setup, to send traces to alternative or additional bac
 
 ## Tracing with non-OpenAI models
 
-You can use an OpenAI API key with non-OpenAI models to enable free tracing in the OpenAI Traces dashboard without needing to disable tracing. See the [Third-party adapters](models/index.md#third-party-adapters) section in the Models guide for adapter selection and setup caveats.
+When using non-OpenAI models, you can provide an OpenAI API key to the tracing exporter to enable free tracing in the OpenAI Traces dashboard without disabling tracing. See the [Third-party adapters](models/index.md#third-party-adapters) section in the Models guide for adapter selection and setup caveats.
 
 ```python
 import os
@@ -199,7 +199,7 @@ await Runner.run(
 
 ## Ecosystem integrations
 
-The following community and vendor integrations support the OpenAI Agents SDK tracing surface.
+The following community and vendor integrations support the tracing API surface of the OpenAI Agents SDK.
 
 ### External tracing processors list
 

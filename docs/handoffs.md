@@ -2,7 +2,7 @@
 
 Handoffs allow an agent to delegate tasks to another agent. This is particularly useful in scenarios where different agents specialize in distinct areas. For example, a customer support app might have agents that each specifically handle tasks like order status, refunds, FAQs, etc.
 
-Handoffs are represented as tools to the LLM. So if there's a handoff to an agent named `Refund Agent`, the tool would be called `transfer_to_refund_agent`.
+Handoffs are represented as tools to the LLM. So if there's a handoff to an agent named `Refund Agent`, the tool would be named `transfer_to_refund_agent`.
 
 ## Creating a handoff
 
@@ -39,7 +39,7 @@ The [`handoff()`][agents.handoffs.handoff] function lets you customize things.
 -   `input_type`: The schema for the handoff tool-call arguments. When set, the parsed payload is passed to `on_handoff`.
 -   `input_filter`: This lets you filter the input received by the next agent. See below for more.
 -   `is_enabled`: Whether the handoff is enabled. This can be a boolean or a function that returns a boolean, allowing you to dynamically enable or disable the handoff at runtime.
--   `nest_handoff_history`: Optional per-call override for the RunConfig-level `nest_handoff_history` setting. If `None`, the value defined in the active run configuration is used instead.
+-   `nest_handoff_history`: Optional per-handoff override for the RunConfig-level `nest_handoff_history` setting. If `None`, the value defined in the active run configuration is used instead.
 
 The [`handoff()`][agents.handoffs.handoff] helper always transfers control to the specific `agent` you passed in. If you have multiple possible destinations, register one handoff per destination and let the model choose among them. Use a custom [`Handoff`][agents.handoffs.Handoff] only when your own handoff code must decide which agent to return at invocation time.
 
@@ -112,7 +112,7 @@ When a handoff occurs, it's as though the new agent takes over the conversation,
 -   `input_items`: optional items to forward to the next agent instead of `new_items`, allowing you to filter model input while keeping `new_items` intact for session history.
 -   `run_context`: the active [`RunContextWrapper`][agents.run_context.RunContextWrapper] at the time the handoff was invoked.
 
-Nested handoffs are available as an opt-in beta and are disabled by default while we stabilize them. When you enable [`RunConfig.nest_handoff_history`][agents.run.RunConfig.nest_handoff_history], the runner compacts summarizable history into ordered assistant summary segments while preserving lossless message items in their original positions. Each generated summary segment uses the `<CONVERSATION HISTORY>` wrapper, and later handoffs flatten earlier generated segments before rebuilding the ordered transcript. Sessions, `RunState`, and `RunResult.to_input_list()` track exact message occurrences moved into this SDK-default history so those occurrences are not appended twice; separate identical messages are still preserved. You can provide your own mapping function via [`RunConfig.handoff_history_mapper`][agents.run.RunConfig.handoff_history_mapper] to return the exact list of input items for the next agent instead of using the built-in segmentation. The opt-in only applies when neither the handoff nor the run supplies an explicit `input_filter`, so existing code that already customizes the payload (including the examples in this repository) keeps its current behavior without changes. You can override the nesting behaviour for a single handoff by passing `nest_handoff_history=True` or `False` to [`handoff(...)`][agents.handoffs.handoff], which sets [`Handoff.nest_handoff_history`][agents.handoffs.Handoff.nest_handoff_history]. If you just need to change the wrapper text for generated summary segments, call [`set_conversation_history_wrappers`][agents.handoffs.set_conversation_history_wrappers] (and optionally [`reset_conversation_history_wrappers`][agents.handoffs.reset_conversation_history_wrappers]) before running your agents.
+Nested handoff history is available as an opt-in beta and is disabled by default while we stabilize it. When you enable [`RunConfig.nest_handoff_history`][agents.run.RunConfig.nest_handoff_history], the runner compacts summarizable history into ordered assistant summary segments while preserving lossless message items in their original positions. Each generated summary segment uses the `<CONVERSATION HISTORY>` wrapper, and later handoffs flatten earlier generated segments before rebuilding the ordered transcript. Sessions, `RunState`, and `RunResult.to_input_list()` track exact message occurrences moved into this SDK-default history so those occurrences are not appended twice; separate identical messages are still preserved. You can provide your own mapping function via [`RunConfig.handoff_history_mapper`][agents.run.RunConfig.handoff_history_mapper] to return the exact list of input items for the next agent instead of using the built-in segmentation. The opt-in applies only when neither the handoff's `input_filter` nor the active run's `RunConfig.handoff_input_filter` is set, so existing code that already customizes the payload (including the examples in this repository) keeps its current behavior without changes. You can override the nesting behaviour for a single handoff by passing `nest_handoff_history=True` or `False` to [`handoff(...)`][agents.handoffs.handoff], which sets [`Handoff.nest_handoff_history`][agents.handoffs.Handoff.nest_handoff_history]. If you just need to change the wrapper text for generated summary segments, call [`set_conversation_history_wrappers`][agents.handoffs.set_conversation_history_wrappers] before running your agents. Call [`reset_conversation_history_wrappers`][agents.handoffs.reset_conversation_history_wrappers] before a later run when you need to restore the default wrappers.
 
 If both the handoff and the active [`RunConfig.handoff_input_filter`][agents.run.RunConfig.handoff_input_filter] define a filter, the per-handoff [`input_filter`][agents.handoffs.Handoff.input_filter] takes precedence for that specific handoff.
 
@@ -134,7 +134,7 @@ handoff_obj = handoff(
 )
 ```
 
-1. This will automatically remove all tools from the history when `FAQ agent` is called.
+1. This will automatically remove all tool-related items from the history when `FAQ agent` is called.
 
 ## Recommended prompts
 

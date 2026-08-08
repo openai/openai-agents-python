@@ -73,7 +73,7 @@ my_agent = Agent(
 
 For lower latency, using `reasoning.effort="none"` with GPT-5 models is recommended.
 
-GPT-5.6 also supports reasoning mode, persisted reasoning context, and the `"max"` effort level through the existing `reasoning` setting. These controls are available on the Responses API path:
+GPT-5.6 also supports reasoning mode, reasoning context carried across conversation turns, and the `"max"` effort level through the existing `reasoning` setting. These controls are available on the Responses API path:
 
 ```python
 from openai.types.shared import Reasoning
@@ -94,13 +94,13 @@ agent = Agent(
 
 `reasoning.mode` and `reasoning.context` are Responses-only settings. Chat Completions uses only `reasoning.effort`, and the supported effort levels depend on the model and API surface. Use the Responses API for GPT-5.6 `"max"` effort. The Chat Completions adapter ignores mode and context with a warning; set `strict_feature_validation=True` on the OpenAI provider to turn that warning into an error.
 
-When using `context="all_turns"`, preserve the conversation through `previous_response_id`, a server-side conversation, or by replaying prior reasoning items. For stateless `store=False` calls, include `reasoning.encrypted_content` in the response and replay those reasoning items on the next request.
+When using `context="all_turns"`, preserve the conversation through `previous_response_id`, a server-side Responses API conversation, or by including prior reasoning items in the next request. For stateless `store=False` calls, request `reasoning.encrypted_content` in the response, then include those reasoning items as input in the next request.
 
 #### ComputerTool model selection
 
 If an agent includes [`ComputerTool`][agents.tool.ComputerTool], the effective model on the actual Responses request determines which computer-tool payload the SDK sends. Explicit `gpt-5.5` requests use the GA built-in `computer` tool, while explicit `computer-use-preview` requests keep the older `computer_use_preview` payload.
 
-Prompt-managed calls are the main exception. If a prompt template owns the model and the SDK omits `model` from the request, the SDK defaults to the preview-compatible computer payload so it does not guess which model the prompt pins. To keep the GA path in that flow, either make `model="gpt-5.5"` explicit on the request or force the GA selector with `ModelSettings(tool_choice="computer")` or `ModelSettings(tool_choice="computer_use")`.
+Prompt-managed calls are the main exception. If a prompt template specifies the model and the SDK omits `model` from the request, the SDK defaults to the preview-compatible computer payload so it does not guess which model the prompt pins. To keep the GA path in that flow, either make `model="gpt-5.5"` explicit on the request or force the GA selector with `ModelSettings(tool_choice="computer")` or `ModelSettings(tool_choice="computer_use")`.
 
 With a registered [`ComputerTool`][agents.tool.ComputerTool], `tool_choice="computer"`, `"computer_use"`, and `"computer_use_preview"` are normalized to the built-in selector that matches the effective request model. If no `ComputerTool` is registered, those strings continue to behave like ordinary function names.
 
@@ -123,7 +123,7 @@ These features are rejected on Chat Completions models and on non-Responses back
 
 ### Responses WebSocket transport
 
-By default, OpenAI Responses API requests use HTTP transport. You can opt in to websocket transport when using OpenAI-backed models.
+By default, OpenAI Responses API requests use HTTP transport. You can opt in to websocket transport when using the OpenAI Responses provider path.
 
 #### Basic setup
 
@@ -133,7 +133,7 @@ from agents import set_default_openai_responses_transport
 set_default_openai_responses_transport("websocket")
 ```
 
-This affects OpenAI Responses models resolved by the default OpenAI provider (including string model names such as `"gpt-5.6-sol"`).
+This affects OpenAI Responses models that result when the default OpenAI provider resolves a model name (including string model names such as `"gpt-5.6-sol"`).
 
 Transport selection happens when the SDK resolves a model name into a model instance. If you pass a concrete [`Model`][agents.models.interface.Model] object, its transport is already fixed: [`OpenAIResponsesWSModel`][agents.models.openai_responses.OpenAIResponsesWSModel] uses websocket, [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] uses HTTP, and [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] stays on Chat Completions. If you pass `RunConfig(model_provider=...)`, that provider controls transport selection instead of the global default.
 
@@ -160,7 +160,7 @@ result = await Runner.run(
 )
 ```
 
-OpenAI-backed providers also accept optional agent registration config. This is an advanced option for cases where your OpenAI setup expects provider-level registration metadata such as a harness ID.
+Providers that route through the SDK's OpenAI integration also accept optional agent registration config. This is an advanced option for cases where your OpenAI setup expects provider-level registration metadata such as a harness ID.
 
 ```python
 from agents import (
@@ -227,19 +227,19 @@ If you use a custom OpenAI-compatible endpoint or proxy, websocket transport als
 
 #### Notes
 
--   This is the Responses API over websocket transport, not the [Realtime API](../realtime/guide.md). It does not apply to Chat Completions or non-OpenAI providers unless they support the Responses websocket `/responses` endpoint.
+-   This is the Responses API over websocket transport, not the [Realtime API](../realtime/guide.md). It does not apply to Chat Completions. It applies to non-OpenAI providers only if they support the Responses websocket `/responses` endpoint.
 -   Install the `websockets` package if it is not already available in your environment.
 -   You can use [`Runner.run_streamed()`][agents.run.Runner.run_streamed] directly after enabling websocket transport. For multi-turn workflows where you want to reuse the same websocket connection across turns (and nested agent-as-tool calls), the [`responses_websocket_session()`][agents.responses_websocket_session] helper is recommended. See the [Running agents](../running_agents.md) guide and [`examples/basic/stream_ws.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/stream_ws.py).
 -   For long reasoning turns or networks with latency spikes, customize websocket keepalive behavior with `responses_websocket_options`. Increase `ping_timeout` to tolerate delayed pong frames, or set `ping_timeout=None` to disable heartbeat timeouts while keeping pings enabled. Prefer HTTP/SSE transport when reliability is more important than websocket latency.
 -   By default the SDK disables the incoming message-size limit (`max_size=None`). For long-lived agent processes behind proxies or in memory-constrained containers, set `responses_websocket_options={"max_size": 8 * 1024 * 1024}` to bound per-message memory usage.
 -   The [Responses API WebSocket service](https://developers.openai.com/api/docs/guides/websocket-mode) processes one response at a time on each connection and limits each connection to 60 minutes. Open a new connection after that limit; use multiple connections when you need parallel runs.
--   The service keeps only the most recent response in connection-local memory. A failed `4xx` or `5xx` turn evicts the referenced `previous_response_id`. After reconnecting, a stored response can still be continued when available, but `store=False` and ZDR flows have no persisted fallback. Start a new chain with `previous_response_id=None` and send the full input context, or rebuild that context from locally managed session state.
+-   The service keeps only the most recent response in connection-local memory. A failed `4xx` or `5xx` turn evicts from that memory the response referenced by `previous_response_id`. After reconnecting, a stored response can still be continued when available, but `store=False` and ZDR flows have no persisted fallback. Start a new chain with `previous_response_id=None` and send the full input context, or rebuild that context from locally managed session state.
 
 ### Hosted multi-agent (experimental)
 
 The OpenAI Responses API hosted multi-agent beta lets a GPT-5.6 root model create and coordinate server-hosted subagents. The Agents SDK can keep using its normal `Runner`: hosted orchestration stays on the service, while developer-defined function tools execute in your application.
 
-This integration is experimental and uses the Responses WebSocket transport so local function outputs can be returned to an active hosted agent with `response.inject`. It requires `openai[realtime]>=2.45.0`, including a beta build that exposes `client.beta.responses.connect`. The interface and beta item schemas may change before general availability.
+This integration is experimental and uses the Responses WebSocket transport so local function outputs can be returned to an active hosted agent with `response.inject`. It requires a build of `openai[realtime]` version 2.45.0 or later that exposes `client.beta.responses.connect`. The interface and beta item schemas may change before general availability.
 
 #### Configure the model
 
@@ -285,7 +285,7 @@ Hosted agent names are observational metadata, not a local routing mechanism. Ro
 
 Only a message attributed to `/root` with phase `final_answer` becomes a normal final message. The experimental adapter filters subagent messages and hosted orchestration records out of the high-level `RunResult`; the SDK never executes those records as local functions.
 
-Raw streaming continues to expose beta Responses events, including hosted output items and `response.inject.created` acknowledgements. The adapter divides one active provider response into SDK-visible logical model turns when a function call is ready, then resumes that same provider response after the Runner produces an output. Use `get_hosted_agent_metadata()` with a raw hosted item or a `ToolContext` to inspect attribution.
+Raw streaming continues to expose beta Responses events, including hosted output items and `response.inject.created` acknowledgements. The adapter divides one active provider response into SDK-visible logical model turns when a function call is ready, then resumes that same provider response after the Runner produces an output. Use `get_hosted_agent_metadata()` with a raw hosted item or a `ToolContext` to identify the hosted agent to which the item or tool call is attributed.
 
 #### Relationship to SDK orchestration
 
@@ -314,7 +314,7 @@ If you need a non-OpenAI provider, start with the SDK's built-in provider integr
 | [`set_default_openai_client`][agents.set_default_openai_client] | One OpenAI-compatible endpoint should be the default for most or all agents | Global default |
 | [`ModelProvider`][agents.models.interface.ModelProvider] | One custom provider should apply to a single run | Per run |
 | [`Agent.model`][agents.agent.Agent.model] | Different agents need different providers or concrete model objects | Per agent |
-| Third-party adapter | You need adapter-managed provider coverage or routing that the built-in paths do not provide | See [Third-party adapters](#third-party-adapters) |
+| Third-party adapter | You need provider coverage or routing from an adapter because the built-in paths do not provide it | See [Third-party adapters](#third-party-adapters) |
 
 You can integrate other LLM providers with these built-in paths:
 
@@ -604,7 +604,7 @@ The SDK uses the Responses API by default, but many other LLM providers still do
 
 ### Chat Completions compatibility options
 
-When you route through Chat Completions, the SDK preserves compatibility by silently dropping Responses-only fields that Chat Completions cannot send, such as `previous_response_id`, `conversation_id`, prompts, or non-text-only tool outputs. If you want those mismatches to fail fast during development, enable strict feature validation on the OpenAI provider:
+When you route through Chat Completions, the SDK preserves compatibility by silently dropping Responses-only fields that Chat Completions cannot send, such as `previous_response_id`, `conversation_id`, the Responses API `prompt` field, or tool outputs that are not text-only. If you want those mismatches to fail fast during development, enable strict feature validation on the OpenAI provider:
 
 ```python
 from agents import Agent, OpenAIProvider, RunConfig, Runner
@@ -659,7 +659,7 @@ You need to be aware of feature differences between model providers, or you may 
 
 ## Third-party adapters
 
-Reach for a third-party adapter only when the SDK's built-in provider integration points are not enough. If you are using OpenAI models only with this SDK, prefer the built-in [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] path instead of Any-LLM or LiteLLM. Third-party adapters are for cases where you need to combine OpenAI models with non-OpenAI providers, or need adapter-managed provider coverage or routing that the built-in paths do not provide. Adapters add another compatibility layer between the SDK and the upstream model provider, so feature support and request semantics can vary by provider. The SDK currently includes Any-LLM and LiteLLM as best-effort, beta adapter integrations.
+Reach for a third-party adapter only when the SDK's built-in provider integration points are not enough. If you are using OpenAI models only with this SDK, prefer the built-in [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] path instead of Any-LLM or LiteLLM. Third-party adapters are for cases where you need to combine OpenAI models with non-OpenAI providers, or need provider coverage or routing that only an adapter provides. Adapters add another compatibility layer between the SDK and the upstream model provider, so feature support and request semantics can vary by provider. The SDK currently includes Any-LLM and LiteLLM as best-effort, beta adapter integrations.
 
 ### Any-LLM
 
@@ -677,7 +677,7 @@ LiteLLM support is included on a best-effort, beta basis for cases where you nee
 
 If you need LiteLLM, install `openai-agents[litellm]`, then start from [`examples/model_providers/litellm_auto.py`](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/litellm_auto.py) or [`examples/model_providers/litellm_provider.py`](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/litellm_provider.py). You can use `litellm/...` model names or instantiate [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] directly.
 
-Some LiteLLM-backed providers do not populate SDK usage metrics by default. If you need usage reporting, pass `ModelSettings(include_usage=True)` and validate the exact provider backend you plan to deploy if you depend on structured outputs, tool calling, usage reporting, or adapter-specific routing behavior.
+Some providers accessed through the LiteLLM adapter do not populate SDK usage metrics by default. If you need usage reporting, pass `ModelSettings(include_usage=True)` and validate the exact provider backend you plan to deploy if you depend on structured outputs, tool calling, usage reporting, or adapter-specific routing behavior.
 
 If LiteLLM emits Pydantic serializer warnings for response objects, you can opt in to the SDK's compatibility patch before importing the LiteLLM adapter:
 

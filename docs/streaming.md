@@ -8,7 +8,7 @@ Keep consuming `result.stream_events()` until the async iterator finishes. A str
 
 ## Raw response events
 
-[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] are raw events passed directly from the LLM. They are in OpenAI Responses API format, which means each event has a type (like `response.created`, `response.output_text.delta`, etc) and data. These events are useful if you want to stream response messages to the user as soon as they are generated.
+[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] objects wrap raw events passed directly from the LLM. Each object's `data` field contains an OpenAI Responses API event with a type such as `response.created` or `response.output_text.delta`. These events are useful if you want to stream response messages to the user as soon as they are generated.
 
 Computer-tool raw events keep the same preview-vs-GA distinction as stored results. Preview flows stream `computer_call` items with one `action`, while `gpt-5.5` can stream `computer_call` items with batched `actions[]`. The higher-level [`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] surface does not add a special computer-only event name for this: both shapes still surface as `tool_called`, and the screenshot result comes back as `tool_output` wrapping a `computer_call_output` item.
 
@@ -61,7 +61,7 @@ If you need to stop a streaming run in the middle, call [`result.cancel()`][agen
 
 A streamed run is not complete until `result.stream_events()` finishes. The SDK may still be persisting session items, finalizing approval state, or compacting history after the last visible token.
 
-If you are manually continuing from [`result.to_input_list(mode="normalized")`][agents.result.RunResultBase.to_input_list], and `cancel(mode="after_turn")` stops after a tool turn, continue that unfinished turn by rerunning `result.last_agent` with that normalized input instead of appending a fresh user turn right away.
+If you are manually continuing from [`result.to_input_list(mode="normalized")`][agents.result.RunResultBase.to_input_list], and `cancel(mode="after_turn")` stops after a tool turn, rerun `result.last_agent` with that normalized input to continue the unfinished existing user turn instead of appending a fresh user turn right away.
 -   If a streamed run stopped for tool approval, do not treat that as a new turn. Finish draining the stream, inspect `result.interruptions`, and resume from `result.to_state()` instead.
 -   Use [`RunConfig.session_input_callback`][agents.run.RunConfig.session_input_callback] to customize how retrieved session history and the new user input are merged before the next model call. If you rewrite new-turn items there, the rewritten version is what gets persisted for that turn.
 
@@ -91,7 +91,7 @@ A handoff call is emitted only as `handoff_requested`; it is not also emitted as
 
 When you use hosted tool search, `tool_search_called` is emitted when the model issues a tool-search request and `tool_search_output_created` is emitted when the Responses API returns the loaded subset.
 
-With Programmatic Tool Calling, `tool_called` is emitted for the generated `program` and for ordinary program-owned child tool calls. `tool_output` is emitted for child tool outputs and the matching `program_output`. Program-owned hosted MCP `mcp_approval_request` and `mcp_list_tools` items are exceptions: they are emitted as `mcp_approval_requested` and `mcp_list_tools`, wrapping [`MCPApprovalRequestItem`][agents.items.MCPApprovalRequestItem] and [`MCPListToolsItem`][agents.items.MCPListToolsItem], respectively. Inspect the raw item's `type` to distinguish the remaining items; program-owned child calls also carry a `caller` whose type is `program` and whose caller ID identifies the parent program.
+With Programmatic Tool Calling, `tool_called` is emitted for the generated `program` and for ordinary program-owned child tool calls. `tool_output` is emitted for child tool outputs and for the `program_output` that matches the generated `program`. Program-owned hosted MCP `mcp_approval_request` and `mcp_list_tools` items are exceptions: they are emitted as `mcp_approval_requested` and `mcp_list_tools`, wrapping [`MCPApprovalRequestItem`][agents.items.MCPApprovalRequestItem] and [`MCPListToolsItem`][agents.items.MCPListToolsItem], respectively. Inspect the raw item's `type` to distinguish the remaining items; program-owned child calls also carry a `caller` whose type is `program` and whose caller ID identifies the parent program.
 
 For example, this will ignore raw events and stream updates to the user.
 

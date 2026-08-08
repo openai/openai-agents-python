@@ -1,6 +1,6 @@
 # Guardrails
 
-Guardrails enable you to do checks and validations of user input and agent output. For example, imagine you have an agent that uses a very smart (and hence slow/expensive) model to help with customer requests. You wouldn't want malicious users to ask the model to help them with their math homework. So, you can run a guardrail with a fast/cheap model. If the guardrail detects malicious usage, it can immediately raise an error and prevent the expensive model from running, saving you time and money (**when using blocking guardrails; for parallel guardrails, the expensive model may have already started running before the guardrail completes. See "Execution modes" below for details**).
+Guardrails enable you to do checks and validations of user input and agent output. For example, imagine you have an agent that uses a very smart (and hence slow/expensive) model to help with customer requests. You wouldn't want malicious users to ask the model to help them with their math homework. So, you can run a guardrail with a fast/cheap model. If the guardrail detects malicious usage, it can immediately raise an error, saving time and money. Blocking execution guarantees that the expensive model does not start; with parallel execution, the expensive model may already have started before the guardrail completes. See "Execution modes" below for details.
 
 There are two kinds of guardrails:
 
@@ -15,7 +15,7 @@ Guardrails are attached to agents and tools, but they do not all run at the same
 -   **Output guardrails** run only for the agent that produces the final output.
 -   **Tool guardrails** run on every custom function-tool invocation, with input guardrails before execution and output guardrails after execution.
 
-If you need checks around each custom function-tool call in a workflow that includes managers, handoffs, or delegated specialists, use tool guardrails instead of relying only on agent-level input/output guardrails.
+If you need checks before and/or after each custom function-tool call in a workflow that includes managers, handoffs, or delegated specialists, use tool guardrails instead of relying only on agent-level input/output guardrails.
 
 ## Input guardrails
 
@@ -33,7 +33,7 @@ Input guardrails run in 3 steps:
 
 Input guardrails support two execution modes:
 
-- **Parallel execution** (default, `run_in_parallel=True`): The guardrail runs concurrently with the agent's execution. This provides the best latency since both start at the same time. However, if the guardrail fails, the agent may have already consumed tokens and executed tools before being cancelled.
+- **Parallel execution** (default, `run_in_parallel=True`): The guardrail runs concurrently with the agent's execution. This provides the best latency since both start at the same time. However, if the guardrail's tripwire is triggered, the agent may have already consumed tokens and executed tools before being cancelled.
 
 - **Blocking execution** (`run_in_parallel=False`): The guardrail runs and completes *before* the agent starts. If the guardrail tripwire is triggered, the agent never executes, preventing token consumption and tool execution. This is ideal for cost optimization and when you want to avoid potential side effects from tool calls.
 
@@ -53,7 +53,7 @@ Output guardrails run in 3 steps:
 
 ## Tool guardrails
 
-Tool guardrails wrap **function tools** and let you validate or block tool calls before and after execution. They are configured on the tool itself and run every time that tool is invoked.
+Tool guardrails wrap **`FunctionTool` instances** and let you validate or block calls to those tools before and after execution. They are configured on the tool itself and run every time that tool is invoked.
 
 - Input tool guardrails run before the tool executes and can skip the call, replace the output with a message, or raise a tripwire.
 - Output tool guardrails run after the tool executes and can replace the output or raise a tripwire.
@@ -68,7 +68,7 @@ If an agent input or output fails a guardrail, the guardrail can signal this wit
 
 For agent-level tripwires, the exception's `guardrail_result` identifies the guardrail that triggered the tripwire. For an input tripwire raised by the runner, `exception.run_data.input_guardrail_results` contains every input guardrail result completed before the run stopped, including the result that triggered the tripwire. Output tripwires provide the equivalent accumulated results through `exception.run_data.output_guardrail_results`.
 
-Tool tripwire exceptions instead expose the triggering `guardrail` and `output` directly. Their `run_data.tool_input_guardrail_results` and `run_data.tool_output_guardrail_results` lists preserve results accumulated from completed turns before the failure; the triggering result is available through the exception's `output`. Other runner-managed failures, such as `MaxTurnsExceeded`, also preserve completed tool guardrail results in these lists. After `stream_events()` raises, the streamed result exposes the same accumulated agent and tool guardrail result lists. `run_data` can be `None` when an exception is raised outside a runner-managed execution path.
+Tool tripwire exceptions instead expose the triggering `guardrail` and `output` directly. Their `run_data.tool_input_guardrail_results` and `run_data.tool_output_guardrail_results` lists preserve results accumulated from completed turns before the failure; the triggering result is available through the exception's `output`. Other runner-managed failures, such as `MaxTurnsExceeded`, also preserve completed tool guardrail results in these lists. After `stream_events()` raises an exception, the streamed result exposes the same accumulated agent and tool guardrail result lists. `run_data` can be `None` when an exception is raised outside a runner-managed execution path.
 
 ## Implementing a guardrail
 

@@ -14,7 +14,7 @@ If you need to configure a specific agent or run instead, start with:
 
 ## Configuration objects and dictionaries
 
-SDK-owned configuration parameters generally accept either their typed settings object or a dictionary containing the same fields. This applies across agent, run, model, session, sandbox, and voice configuration boundaries whose type annotations include a dictionary. Nested SDK-owned settings can also use dictionaries.
+Configuration parameters defined by the SDK generally accept either their typed settings object or a dictionary containing the same fields. This applies across agent, run, model, session, sandbox, and voice configuration boundaries whose type annotations include a dictionary. Nested settings types defined by the SDK can also use dictionaries.
 
 ```python
 from agents import Agent
@@ -29,7 +29,7 @@ agent = Agent(
 )
 ```
 
-The SDK normalizes these dictionaries into the corresponding settings objects. Unknown fields in SDK-owned dataclass configurations raise `TypeError`, which helps catch misspelled option names early. Check the parameter's type annotation or API reference to confirm whether a specific boundary accepts a dictionary.
+The SDK normalizes these dictionaries into the corresponding settings objects. Unknown fields in dataclass configuration types defined by the SDK raise `TypeError`, which helps catch misspelled option names early. Check the parameter's type annotation or API reference to confirm whether a specific boundary accepts a dictionary.
 
 ## API keys and clients
 
@@ -68,7 +68,7 @@ set_default_openai_api("chat_completions")
 
 ## OpenAI provider defaults
 
-OpenAI-backed providers also read SDK-wide defaults when they resolve model names. Use [`set_default_openai_responses_transport()`][agents.set_default_openai_responses_transport] to make OpenAI Responses models use websocket transport by default:
+Providers that use the SDK's OpenAI backend also read SDK-wide defaults when they map model-name strings to models. Use [`set_default_openai_responses_transport()`][agents.set_default_openai_responses_transport] to make OpenAI Responses models use websocket transport by default:
 
 ```python
 from agents import set_default_openai_responses_transport
@@ -76,7 +76,7 @@ from agents import set_default_openai_responses_transport
 set_default_openai_responses_transport("websocket")
 ```
 
-This affects OpenAI Responses models resolved by the default OpenAI provider. For provider-level setup, connection reuse, keepalive options, and custom websocket endpoints, see [Responses WebSocket transport](models/index.md#responses-websocket-transport).
+This affects OpenAI Responses models that result when the default OpenAI provider resolves a model name. For provider-level setup, connection reuse, keepalive options, and custom websocket endpoints, see [Responses WebSocket transport](models/index.md#responses-websocket-transport).
 
 If your OpenAI setup expects provider-level agent registration metadata, configure a default harness ID once at startup:
 
@@ -96,7 +96,7 @@ set_default_openai_agent_registration(
 )
 ```
 
-If no SDK default is set, OpenAI-backed providers fall back to the `OPENAI_AGENT_HARNESS_ID` environment variable. When a harness ID is configured, the SDK adds it to trace metadata as `agent_harness_id` unless that key is already present in `RunConfig.trace_metadata`.
+If no SDK default is set, providers that use the SDK's OpenAI backend fall back to the `OPENAI_AGENT_HARNESS_ID` environment variable. When a harness ID is configured, the SDK adds it to trace metadata as `agent_harness_id` unless that key is already present in `RunConfig.trace_metadata`.
 
 ## Tracing
 
@@ -219,4 +219,4 @@ export OPENAI_AGENTS_DONT_LOG_MODEL_DATA=0
 export OPENAI_AGENTS_DONT_LOG_TOOL_DATA=0
 ```
 
-These flags also control whether affected failures retain payload-bearing diagnostic details. For example, with tool-data redaction enabled, invalid function-tool arguments raise a generic `ModelBehaviorError` without chaining the underlying validation error. Setting either variable to `0` can expose raw model or tool data in logs, exception messages, exception chains, and other diagnostic context, so enable it only in a controlled development environment.
+These flags also control whether affected failures retain payload-bearing diagnostic details. For example, with tool-data redaction enabled, invalid arguments for a `FunctionTool` raise a generic `ModelBehaviorError` without chaining the underlying validation error. Setting either variable to `0` can expose raw model or tool data in logs, exception messages, exception chains, and other diagnostic context, so enable it only in a controlled development environment.

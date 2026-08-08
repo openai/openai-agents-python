@@ -1,8 +1,10 @@
 # ruff: noqa
-import os
-import sys
 import argparse
+import os
+import re
 import subprocess
+import sys
+from collections import Counter
 from pathlib import Path
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor
@@ -98,7 +100,6 @@ eng_to_non_eng_mapping = {
         "orchestrating multiple agents": "에이전트 오케스트레이션",
         "handoffs": "핸드오프",
         "function tools": "함수 도구",
-        "function calling": "함수 호출",
         "tracing": "트레이싱",
         "code examples": "코드 예제",
         "vector store": "벡터 스토어",
@@ -118,7 +119,6 @@ eng_to_non_eng_mapping = {
         "Human in the loop": "휴먼인더루프 (HITL)",
         "Hosted tool": "호스티드 툴",
         "Hosted MCP server tools": "호스티드 MCP 서버 도구",
-        "raw": "원문",
         "Realtime Agents": "실시간 에이전트",
         "Build your first agent in minutes.": "단 몇 분 만에 첫 에이전트를 만들 수 있습니다",
         "Let's build": "시작하기",
@@ -132,16 +132,13 @@ eng_to_non_eng_mapping = {
         "well formed data": "格式良好的数据",
         "guardrail": "安全防护措施",
         "handoffs": "任务转移",
-        "function tools": "工具调用",
+        "function tools": "函数工具",
         "tracing": "追踪",
         "code examples": "代码示例",
         "vector store": "向量存储",
         "deep research": "深度研究",
-        "category": "目录",
         "user": "用户",
         "parameter": "参数",
-        "processor": "进程",
-        "server": "服务",
         "web search": "网络检索",
         "file search": "文件检索",
         "streaming": "流式传输",
@@ -155,6 +152,9 @@ eng_to_non_eng_instructions = {
     "common": [
         "* The term 'examples' must be code examples when the page mentions the code examples in the repo, it can be translated as either 'code examples' or 'sample code'.",
         "* The term 'primitives' can be translated as basic components.",
+        "* Prefer established technical usage in the target language. Do not invent an awkward localized alternative solely to avoid an English term when that English term is standard in developer documentation.",
+        "* Preserve distinctions between SDK concepts. For example, a function tool is not a tool call, a processor is not a process, and a server is not automatically a service.",
+        "* In Python packaging contexts, 'extras' means installable optional-dependency extras, not dependency groups. Keep 'extras' in English when a literal translation would be unfamiliar or ambiguous.",
         "* When the terms 'instructions' and 'tools' are mentioned as API parameter names, they must be kept as is.",
         "* The terms 'temperature', 'top_p', 'max_tokens', 'presence_penalty', 'frequency_penalty' as parameter names must be kept as is.",
         "* Keep the original structure like `* **The thing**: foo`; this needs to be translated as `* **(translation)**: (translation)`",
@@ -168,6 +168,7 @@ eng_to_non_eng_instructions = {
     "ko": [
         "* 공손하고 중립적인 문체(합니다/입니다체)를 일관되게 사용하세요.",
         "* 개발자 문서이므로 자연스러운 의역을 허용하되 정확성을 유지하세요.",
+        "* 기술 문맥의 'raw'는 가공되지 않은 저수준 데이터라는 뜻입니다. 문맥에 따라 자연스럽게 번역하거나 영어 'raw'를 유지하되, 원문(source text)이라는 뜻으로 번역하지 마세요.",
         "* 'instructions', 'tools' 같은 API 매개변수와 temperature, top_p, max_tokens, presence_penalty, frequency_penalty 등은 영문 그대로 유지하세요.",
         "* 문장이 아닌 불릿 항목 끝에는 마침표를 찍지 마세요.",
     ],
@@ -210,7 +211,7 @@ You must return **only** the translated markdown. Do not include any commentary,
 - Do not change the markdown data structure, including the indentations.
 - Section titles starting with # or ## must be a noun form rather than a sentence.
 - Section titles must be translated except for the Do-Not-Translate list.
-- Keep all placeholders such as `CODE_BLOCK_*` and `CODE_LINE_PREFIX` unchanged.
+- Keep all placeholders such as `CODE_BLOCK_*`, `INLINE_CODE_*`, and `CODE_LINE_PREFIX` unchanged.
 - Convert asset paths: `./assets/…` → `../assets/…`.  
   *Example:* `![img](./assets/pic.png)` → `![img](../assets/pic.png)`
 - Treat the **Do‑Not‑Translate list** and **Term‑Specific list** as case‑insensitive; preserve the original casing you see.
@@ -223,6 +224,7 @@ You must return **only** the translated markdown. Do not include any commentary,
 ##  HARD CONSTRAINTS   ##
 #########################
 - Never insert spaces immediately inside emphasis markers. Use `**bold**`, not `** bold **`.
+- Preserve every source inline-code span exactly once. Do not add, remove, duplicate, split, merge, or translate inline-code spans. Keep each span with the text it describes, but move it when target-language grammar requires a different word order.
 - Preserve the number of emphasis markers from the source: if the source uses `**` or `__`, keep the same pair count.
 - Ensure one space after heading markers: `##Heading` -> `## Heading`.
 - Ensure one space after list markers: `-Item` -> `- Item`, `*Item` -> `* Item` (does not apply to `**`).
@@ -292,77 +294,272 @@ Follow the following workflow to translate the given markdown text data:
 """
 
 
+FENCE_OPENING_PATTERN = re.compile(r"^[ \t]*(?P<marker>`{3,}|~{3,})(?P<info>.*)$")
+
+
+def opening_fence(line: str) -> tuple[str, int] | None:
+    match = FENCE_OPENING_PATTERN.match(line)
+    if match is None:
+        return None
+    marker = match.group("marker")
+    if marker[0] == "`" and "`" in match.group("info"):
+        return None
+    return marker[0], len(marker)
+
+
+def is_closing_fence(line: str, marker: str, minimum_length: int) -> bool:
+    return re.fullmatch(rf"[ \t]*{re.escape(marker)}{{{minimum_length},}}[ \t]*", line) is not None
+
+
+def fenced_code_ranges(markdown: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    open_fence: tuple[str, int] | None = None
+    block_start = 0
+    offset = 0
+    for line_with_ending in markdown.splitlines(keepends=True):
+        line = line_with_ending.rstrip("\r\n")
+        line_end = offset + len(line)
+        if open_fence is None:
+            opening = opening_fence(line)
+            if opening is not None:
+                open_fence = opening
+                block_start = offset
+        elif is_closing_fence(line, *open_fence):
+            ranges.append((block_start, line_end))
+            open_fence = None
+        offset += len(line_with_ending)
+    if open_fence is not None:
+        raise ValueError("Unclosed fenced code block")
+    return ranges
+
+
+def fenced_code_blocks(markdown: str) -> list[str]:
+    return [markdown[start:end] for start, end in fenced_code_ranges(markdown)]
+
+
+def remove_fenced_code_blocks(markdown: str) -> str:
+    parts: list[str] = []
+    cursor = 0
+    for start, end in fenced_code_ranges(markdown):
+        parts.append(markdown[cursor:start])
+        cursor = end
+    parts.append(markdown[cursor:])
+    return "".join(parts)
+
+
+def protect_fenced_code(markdown: str, *, namespace: str) -> tuple[str, list[str]]:
+    parts: list[str] = []
+    code_blocks: list[str] = []
+    cursor = 0
+    for index, (start, end) in enumerate(fenced_code_ranges(markdown)):
+        parts.append(markdown[cursor:start])
+        parts.append(code_block_placeholder(namespace, index))
+        code_blocks.append(markdown[start:end])
+        cursor = end
+    parts.append(markdown[cursor:])
+    return "".join(parts), code_blocks
+
+
+def backtick_run_end(markdown: str, start: int) -> int:
+    end = start + 1
+    while end < len(markdown) and markdown[end] == "`":
+        end += 1
+    return end
+
+
+def inline_code_ranges(markdown: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    while cursor < len(markdown):
+        opener_start = markdown.find("`", cursor)
+        if opener_start < 0:
+            break
+        opener_end = backtick_run_end(markdown, opener_start)
+        delimiter_length = opener_end - opener_start
+        search_from = opener_end
+        matching_closer_end: int | None = None
+        while search_from < len(markdown):
+            closer_start = markdown.find("`", search_from)
+            if closer_start < 0:
+                break
+            closer_end = backtick_run_end(markdown, closer_start)
+            if closer_end - closer_start == delimiter_length:
+                matching_closer_end = closer_end
+                break
+            search_from = closer_end
+        if matching_closer_end is None:
+            cursor = opener_end
+        else:
+            ranges.append((opener_start, matching_closer_end))
+            cursor = matching_closer_end
+    return ranges
+
+
+def inline_code_spans(markdown: str) -> list[str]:
+    without_fences = remove_fenced_code_blocks(markdown)
+    return [without_fences[start:end] for start, end in inline_code_ranges(without_fences)]
+
+
+def inline_code_spans_match(source: str, translated: str) -> bool:
+    try:
+        return Counter(inline_code_spans(source)) == Counter(inline_code_spans(translated))
+    except ValueError:
+        return False
+
+
+def fenced_code_blocks_match(source: str, translated: str) -> bool:
+    try:
+        return fenced_code_blocks(source) == fenced_code_blocks(translated)
+    except ValueError:
+        return False
+
+
+def placeholder_namespace(markdown: str) -> str:
+    namespace_index = 0
+    while True:
+        namespace = f"T{namespace_index}_"
+        if f"CODE_BLOCK_{namespace}" not in markdown and f"INLINE_CODE_{namespace}" not in markdown:
+            return namespace
+        namespace_index += 1
+
+
+def code_block_placeholder(namespace: str, index: int) -> str:
+    return f"CODE_BLOCK_{namespace}{index:03}"
+
+
+def inline_code_placeholder(namespace: str, index: int) -> str:
+    return f"`INLINE_CODE_{namespace}{index:04}`"
+
+
+def restore_placeholders(markdown: str, replacements: dict[str, str]) -> str:
+    if not replacements:
+        return markdown
+    placeholders = sorted(replacements, key=len, reverse=True)
+    pattern = re.compile("|".join(re.escape(value) for value in placeholders))
+    return pattern.sub(lambda match: replacements[match.group(0)], markdown)
+
+
+def placeholders_preserved(markdown: str, placeholders: list[str]) -> bool:
+    return all(markdown.count(placeholder) == 1 for placeholder in placeholders)
+
+
+def protect_inline_code(
+    markdown: str, *, namespace: str = "", start_index: int = 0
+) -> tuple[str, list[str]]:
+    parts: list[str] = []
+    inline_codes: list[str] = []
+    cursor = 0
+    for start, end in inline_code_ranges(markdown):
+        parts.append(markdown[cursor:start])
+        parts.append(inline_code_placeholder(namespace, start_index + len(inline_codes)))
+        inline_codes.append(markdown[start:end])
+        cursor = end
+    parts.append(markdown[cursor:])
+    return "".join(parts), inline_codes
+
+
+def restore_inline_code(markdown: str, inline_codes: list[str], *, namespace: str = "") -> str:
+    replacements = {
+        inline_code_placeholder(namespace, idx): inline_code
+        for idx, inline_code in enumerate(inline_codes)
+    }
+    return restore_placeholders(markdown, replacements)
+
+
+def restore_code_blocks(markdown: str, code_blocks: list[str], *, namespace: str) -> str:
+    replacements = {
+        code_block_placeholder(namespace, idx): code_block
+        for idx, code_block in enumerate(code_blocks)
+    }
+    return restore_placeholders(markdown, replacements)
+
+
+def translate_chunk(chunk: str, instructions: str) -> str:
+    if OPENAI_MODEL.startswith("gpt-5"):
+        response = openai_client.responses.create(
+            model=OPENAI_MODEL,
+            instructions=instructions,
+            input=chunk,
+            reasoning={"effort": "high"},
+            text={"verbosity": "medium"},
+        )
+    elif OPENAI_MODEL.startswith("o"):
+        response = openai_client.responses.create(
+            model=OPENAI_MODEL,
+            instructions=instructions,
+            input=chunk,
+        )
+    else:
+        response = openai_client.responses.create(
+            model=OPENAI_MODEL,
+            instructions=instructions,
+            input=chunk,
+            temperature=0.0,
+        )
+    return response.output_text
+
+
 # Function to translate and save files
 def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
     print(f"Translating {file_path} into a different language: {lang_code}")
     with open(file_path, encoding="utf-8") as f:
         content = f.read()
+    namespace = placeholder_namespace(content)
+
+    if ENABLE_CODE_SNIPPET_EXCLUSION is True:
+        protected_content, code_blocks = protect_fenced_code(content, namespace=namespace)
+    else:
+        protected_content = content
+        code_blocks = []
 
     # Split content into lines
-    lines: list[str] = content.splitlines()
+    lines: list[str] = protected_content.splitlines()
     chunks: list[str] = []
     current_chunk: list[str] = []
 
     # Split content into chunks of up to 120 lines, ensuring splits occur before section titles
-    in_code_block = False
-    code_blocks: list[str] = []
-    code_block_chunks: list[str] = []
     for line in lines:
         if (
             ENABLE_SMALL_CHUNK_TRANSLATION is True
             and len(current_chunk) >= 120  # required for gpt-4.5
-            and not in_code_block
             and line.startswith("#")
         ):
             chunks.append("\n".join(current_chunk))
             current_chunk = []
-        if ENABLE_CODE_SNIPPET_EXCLUSION is True and line.strip().startswith("```"):
-            code_block_chunks.append(line)
-            if in_code_block is True:
-                code_blocks.append("\n".join(code_block_chunks))
-                current_chunk.append(f"CODE_BLOCK_{(len(code_blocks) - 1):03}")
-                code_block_chunks.clear()
-            in_code_block = not in_code_block
-            continue
-        if in_code_block is True:
-            code_block_chunks.append(line)
-        else:
-            current_chunk.append(line)
+        current_chunk.append(line)
     if current_chunk:
         chunks.append("\n".join(current_chunk))
 
-    # Translate each chunk separately and combine results
-    translated_content: list[str] = []
+    inline_codes: list[str] = []
+    protected_chunks: list[str] = []
     for chunk in chunks:
-        instructions = built_instructions(languages[lang_code], lang_code)
-        if OPENAI_MODEL.startswith("gpt-5"):
-            response = openai_client.responses.create(
-                model=OPENAI_MODEL,
-                instructions=instructions,
-                input=chunk,
-                reasoning={"effort": "high"},
-                text={"verbosity": "medium"},
-            )
-            translated_content.append(response.output_text)
-        elif OPENAI_MODEL.startswith("o"):
-            response = openai_client.responses.create(
-                model=OPENAI_MODEL,
-                instructions=instructions,
-                input=chunk,
-            )
-            translated_content.append(response.output_text)
-        else:
-            response = openai_client.responses.create(
-                model=OPENAI_MODEL,
-                instructions=instructions,
-                input=chunk,
-                temperature=0.0,
-            )
-            translated_content.append(response.output_text)
+        protected_chunk, chunk_inline_codes = protect_inline_code(
+            chunk, namespace=namespace, start_index=len(inline_codes)
+        )
+        protected_chunks.append(protected_chunk)
+        inline_codes.extend(chunk_inline_codes)
+    chunks = protected_chunks
 
-    translated_text = "\n".join(translated_content)
-    for idx, code_block in enumerate(code_blocks):
-        translated_text = translated_text.replace(f"CODE_BLOCK_{idx:03}", code_block)
+    instructions = built_instructions(languages[lang_code], lang_code)
+    translated_text = ""
+    for _attempt in range(3):
+        translated_text = "\n".join(translate_chunk(chunk, instructions) for chunk in chunks)
+        placeholders = [
+            *(code_block_placeholder(namespace, idx) for idx in range(len(code_blocks))),
+            *(inline_code_placeholder(namespace, idx) for idx in range(len(inline_codes))),
+        ]
+        if not placeholders_preserved(translated_text, placeholders):
+            continue
+        translated_text = restore_inline_code(translated_text, inline_codes, namespace=namespace)
+        translated_text = restore_code_blocks(translated_text, code_blocks, namespace=namespace)
+        if inline_code_spans_match(content, translated_text) and fenced_code_blocks_match(
+            content, translated_text
+        ):
+            break
+    else:
+        raise ValueError(
+            f"Protected Markdown changed after 3 translation attempts for {file_path} to {lang_code}"
+        )
 
     # FIXME: enable mkdocs search plugin to seamlessly work with i18n plugin
     translated_text = SEARCH_EXCLUSION + translated_text

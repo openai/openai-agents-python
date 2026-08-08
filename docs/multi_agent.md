@@ -1,6 +1,6 @@
 # Agent orchestration
 
-Orchestration refers to the flow of agents in your app. Which agents run, in what order, and how do they decide what happens next? There are two main ways to orchestrate agents:
+Orchestration refers to the flow of agents in your app. Which agents run, in what order, and how is the next step decided? There are two main ways to orchestrate agents:
 
 1. Allowing the LLM to make decisions: this uses the intelligence of an LLM to plan, reason, and decide on what steps to take based on that.
 2. Orchestrating via code: determining the flow of agents via your code.
@@ -9,10 +9,10 @@ You can mix and match these patterns. Each has their own tradeoffs, described be
 
 ## Orchestrating via LLM
 
-An agent is an LLM equipped with instructions, tools and handoffs. This means that given an open-ended task, the LLM can autonomously plan how it will tackle the task, using tools to take actions and acquire data, and using handoffs to delegate tasks to sub-agents. For example, a research agent could be equipped with tools like:
+An agent is an LLM equipped with instructions, tools and handoffs. This means that given an open-ended task, the LLM can autonomously plan how it will tackle the task, using tools to take actions and acquire data, and using handoffs to delegate tasks to sub-agents. For example, a research agent could be equipped with capabilities like:
 
 -   Web search to find information online
--   File search and retrieval to search through proprietary data and connections
+-   File search and retrieval to search through proprietary data and connected data sources
 -   Computer use to take actions on a computer
 -   Code execution to do data analysis
 -   Handoffs to specialized agents that are great at planning, report writing and more.
@@ -23,16 +23,16 @@ In the Python SDK, two orchestration patterns come up most often:
 
 | Pattern | How it works | Best when |
 | --- | --- | --- |
-| Agents as tools | A manager agent keeps control of the conversation and calls specialist agents through `Agent.as_tool()`. | You want one agent to own the final answer, combine outputs from multiple specialists, or enforce shared guardrails in one place. |
-| Handoffs | A triage agent routes the conversation to a specialist, and that specialist becomes the active agent for the rest of the turn. | You want the specialist to respond directly, keep prompts focused, or swap instructions without the manager narrating the result. |
+| Agents as tools | A manager agent keeps control of the conversation and calls specialist agents through `Agent.as_tool()`. | You want one agent to own the final answer, combine outputs from multiple specialists, or enforce shared SDK guardrails in one place. |
+| Handoffs | A triage agent routes the conversation to a specialist, and that specialist becomes the active agent for the rest of the turn. | You want the specialist to respond directly, keep prompts focused, or have the handoff switch the active instructions without requiring the manager to narrate the result. |
 
-Use **agents as tools** when a specialist should help with a bounded subtask but should not take over the user-facing conversation. Use **handoffs** when routing itself is part of the workflow and you want the chosen specialist to own the next part of the interaction.
+Use **agents as tools** when a specialist should help with a bounded subtask but should not take over the user-facing conversation. Use **handoffs** when routing itself is part of the workflow and you want the chosen specialist to own the remainder of the current turn.
 
 You can also combine the two. A triage agent might hand off to a specialist, and that specialist can still call other agents as tools for narrow subtasks.
 
 This pattern is great when the task is open-ended and you want to rely on the intelligence of an LLM. The most important tactics here are:
 
-1. Invest in good prompts. Make it clear what tools are available, how to use them, and what parameters it must operate within.
+1. Invest in good prompts. Make it clear what tools are available, how to use them, and what constraints the agent must follow.
 2. Monitor your app and iterate on it. See where things go wrong, and iterate on your prompts.
 3. Allow the agent to introspect and improve. For example, run it in a loop, and let it critique itself; or, provide error messages and let it improve.
 4. Have specialized agents that excel in one task, rather than having a general purpose agent that is expected to be good at anything.
@@ -46,7 +46,7 @@ While orchestrating via LLM is powerful, orchestrating via code makes tasks more
 
 -   Using [structured outputs](https://platform.openai.com/docs/guides/structured-outputs) to generate well formed data that you can inspect with your code. For example, you might ask an agent to classify the task into a few categories, and then pick the next agent based on the category.
 -   Chaining multiple agents by transforming the output of one into the input of the next. You can decompose a task like writing a blog post into a series of steps - do research, write an outline, write the blog post, critique it, and then improve it.
--   Running the agent that performs the task in a `while` loop with an agent that evaluates and provides feedback, until the evaluator says the output passes certain criteria.
+-   In each iteration of a `while` loop, run the task agent to produce an output, then run an evaluator agent to assess that output and provide feedback; stop when the evaluator says the output passes the required criteria.
 -   Running multiple agents in parallel, e.g. via Python primitives like `asyncio.gather`. This is useful for speed when you have multiple tasks that don't depend on each other.
 
 We have a number of examples in [`examples/agent_patterns`](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns).

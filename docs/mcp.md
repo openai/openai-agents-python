@@ -54,7 +54,7 @@ Notes:
 - `failure_error_function` controls how MCP tool call failures are surfaced to the model.
 - When `failure_error_function` is unset, the SDK uses the default tool error formatter.
 - Server-level `failure_error_function` overrides `Agent.mcp_config["failure_error_function"]` for that server.
-- `include_server_in_tool_names` is opt-in. When enabled, each local MCP tool is exposed to the model with a deterministic server-prefixed name, which helps avoid collisions when multiple MCP servers publish tools with the same name. Generated names are ASCII-safe, stay within the function-tool name length limit, and avoid existing local function tool and enabled handoff names on the same agent. The SDK still invokes the original MCP tool name on the original server.
+- `include_server_in_tool_names` is opt-in. When enabled, each local MCP tool is exposed to the model with a deterministic server-prefixed name, which helps avoid collisions when multiple MCP servers publish tools with the same name. Generated names are ASCII-safe, stay within the name-length limit for `FunctionTool` instances, and do not collide with the configured names of local `FunctionTool` instances or enabled handoffs on the same agent. The SDK still invokes the original MCP tool name on the original server.
 
 ## Shared patterns across transports
 
@@ -229,7 +229,7 @@ The constructor accepts additional options:
 Supported forms:
 
 - `"always"` or `"never"` for all tools.
-- `True` / `False` (equivalent to always/never).
+- `True` requires approval for all tools, and `False` requires approval for none (equivalent to `"always"` and `"never"`, respectively).
 - A per-tool map, for example `{"delete_file": "always", "read_file": "never"}`.
 - A grouped object: `{"always": {"tool_names": [...]}, "never": {"tool_names": [...]}}`.
 
@@ -271,7 +271,7 @@ If your run context is a Pydantic model, dataclass, or custom class, read the te
 
 ### MCP tool outputs: text and images
 
-When an MCP tool returns image content, the SDK maps it to image tool output entries automatically. Mixed text/image responses are forwarded as a list of output items, so agents can consume MCP image results the same way they consume image output from regular function tools.
+When an MCP tool returns image content, the SDK automatically maps it to image-type entries in the tool output. Mixed text/image responses are forwarded as a list of output items, so agents can consume MCP image results the same way they consume image output from regular function tools.
 
 ## 3. HTTP with SSE MCP servers
 
@@ -336,7 +336,7 @@ async with MCPServerStdio(
 
 ## 5. MCP server manager
 
-When you have multiple MCP servers, use `MCPServerManager` to connect them up front and expose the connected subset to your agents. See the [MCPServerManager API reference](ref/mcp/manager.md) for constructor options and reconnect behavior.
+When you have multiple MCP servers, use `MCPServerManager` to connect them up front and expose the successfully connected subset of those servers to your agents. See the [MCPServerManager API reference](ref/mcp/manager.md) for constructor options and reconnect behavior.
 
 ```python
 from agents import Agent, Runner
@@ -449,7 +449,7 @@ agent = Agent(
 
 ## Pagination
 
-The built-in local MCP server classes automatically follow `nextCursor` when listing tools and prompts. `list_tools()` returns the complete tool list before applying filters or populating its cache, and `list_prompts()` returns one combined result with `nextCursor=None`. If a later page fails or a server repeats a cursor, the operation raises an error instead of exposing or caching partial results.
+The built-in local MCP server classes automatically follow `nextCursor` when listing tools and prompts. `list_tools()` collects the complete tool list before applying filters or populating its cache, and `list_prompts()` returns one combined result with `nextCursor=None`. If a later page fails or a server repeats a cursor, the operation raises an error instead of exposing or caching partial results.
 
 Resources remain explicitly paginated. Pass the `nextCursor` from `list_resources()` or `list_resource_templates()` back as the `cursor` argument to retrieve the next page.
 

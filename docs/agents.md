@@ -2,7 +2,7 @@
 
 Agents are the core building block in your apps. An agent is a large language model (LLM) configured with instructions, tools, and optional runtime behavior such as handoffs, guardrails, and structured outputs.
 
-Use this page when you want to define or customize a single plain `Agent`. If you are deciding how multiple agents should collaborate, read [Agent orchestration](multi_agent.md). If the agent should run inside an isolated workspace with manifest-defined files and sandbox-native capabilities, read [Sandbox agent concepts](sandbox/guide.md).
+Use this page when you want to define or customize a single base `Agent` rather than a `SandboxAgent`. If you are deciding how multiple agents should collaborate, read [Agent orchestration](multi_agent.md). If the agent should run inside an isolated workspace with manifest-defined files and sandbox-native capabilities, read [Sandbox agent concepts](sandbox/guide.md).
 
 The SDK uses the Responses API by default for OpenAI models, but the distinction here is orchestration: `Agent` plus `Runner` lets the SDK manage turns, tools, guardrails, handoffs, and sessions for you. If you want to own that loop yourself, use the Responses API directly instead.
 
@@ -35,8 +35,8 @@ The most common properties of an agent are:
 | `model` | no | Which LLM to use. See [Models](models/index.md). |
 | `model_settings` | no | Model tuning parameters such as `temperature`, `top_p`, and `tool_choice`. |
 | `tools` | no | Tools the agent can call. See [Tools](tools.md). |
-| `mcp_servers` | no | MCP-backed tools for the agent. See the [MCP guide](mcp.md). |
-| `mcp_config` | no | Fine-tune how MCP tools are prepared, such as strict schema conversion and MCP failure formatting. See the [MCP guide](mcp.md#agent-level-mcp-configuration). |
+| `mcp_servers` | no | MCP servers that provide MCP-backed tools to the agent. See the [MCP guide](mcp.md). |
+| `mcp_config` | no | Fine-tune how MCP tools are prepared, such as converting their schemas to strict mode and formatting MCP failures. See the [MCP guide](mcp.md#agent-level-mcp-configuration). |
 | `input_guardrails` | no | Guardrails that run on the first user input for this agent chain. See [Guardrails](guardrails.md). |
 | `output_guardrails` | no | Guardrails that run on the final output for this agent. See [Guardrails](guardrails.md). |
 | `output_type` | no | Structured output type instead of plain text. See [Output types](#output-types). |
@@ -65,7 +65,7 @@ Everything in this section applies to `Agent`. `SandboxAgent` builds on the same
 
 ## Prompt templates
 
-You can reference a prompt template created in the OpenAI platform by setting `prompt`. This works with OpenAI models using the Responses API.
+You can reference a prompt template created in the OpenAI platform by setting `prompt`. This works when OpenAI models are accessed through the Responses API.
 
 To use it, please:
 
@@ -215,7 +215,7 @@ customer_facing_agent = Agent(
 
 ### Handoffs
 
-Handoffs are sub‑agents the agent can delegate to. When a handoff occurs, the delegated agent receives the conversation history and takes over the conversation. This pattern enables modular, specialized agents that excel at a single task. Read more in the [handoffs](handoffs.md) documentation.
+Configured handoff targets are sub‑agents to which the agent can delegate. When a handoff occurs, the delegated agent receives the conversation history and takes over the conversation. This pattern enables modular, specialized agents that excel at a single task. Read more in the [handoffs](handoffs.md) documentation.
 
 ```python
 from agents import Agent
@@ -269,12 +269,12 @@ The callback context also changes depending on the event:
 
 Typical hook timing:
 
--   `on_agent_start` / `on_agent_end`: when a specific agent begins or finishes producing a final output.
+-   `on_agent_start`: when a specific agent begins running; `on_agent_end`: when that agent finishes producing a final output.
 -   `on_llm_start` / `on_llm_end`: immediately around each model call.
 - `on_tool_start` / `on_tool_end`: around each local tool invocation. For function tools, the hook `context` is typically a `ToolContext`, so you can inspect tool-call metadata such as `tool_call_id`.
 -   `on_handoff`: when control moves from one agent to another.
 
-Use `RunHooks` when you want a single observer for the whole workflow, and `AgentHooks` when one agent needs custom side effects.
+Use `RunHooks` when you want a single observer for the whole workflow, and `AgentHooks` when you want lifecycle callbacks scoped to a specific agent.
 
 ```python
 from agents import Agent, RunHooks, Runner
@@ -396,7 +396,7 @@ agent = Agent(
 )
 ```
 
-- `ToolsToFinalOutputFunction`: A custom function that processes tool results and decides whether to stop or continue with the LLM.
+- `ToolsToFinalOutputFunction`: A custom function that processes tool results and decides whether to end the run with a final output or continue processing with the LLM.
 
 ```python
 from agents import Agent, FunctionToolResult, RunContextWrapper

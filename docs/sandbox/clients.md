@@ -27,7 +27,7 @@ For most users, start with one of these two sandbox clients:
 | Client | Install | Choose it when | Example |
 | --- | --- | --- | --- |
 | `UnixLocalSandboxClient` | none | Fastest local iteration on macOS or Linux. Good default for local development. | [Unix-local starter](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/unix_local_runner.py) |
-| `DockerSandboxClient` | `openai-agents[docker]` | You want container isolation or a specific image for local parity. | [Docker starter](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docker/docker_runner.py) |
+| `DockerSandboxClient` | `openai-agents[docker]` | You want container isolation or a specific image to reproduce a target environment locally. | [Docker starter](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docker/docker_runner.py) |
 
 </div>
 
@@ -52,7 +52,7 @@ run_config = RunConfig(
 )
 ```
 
-Use this when you want container isolation or image parity. See [examples/sandbox/docker/docker_runner.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docker/docker_runner.py).
+Use this when you want container isolation or want the sandbox image to match the image used in another environment. See [examples/sandbox/docker/docker_runner.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docker/docker_runner.py).
 
 ## Mounts and remote storage
 
@@ -76,7 +76,7 @@ Generic local/container strategies:
 | `InContainerMountStrategy(pattern=MountpointMountPattern(...))` | The image has `mount-s3` and you want Mountpoint-style S3 or S3-compatible access. | Supports `S3Mount` and `GCSMount`. |
 | `InContainerMountStrategy(pattern=FuseMountPattern(...))` | The image has `blobfuse2` and FUSE support. | Supports `AzureBlobMount`. |
 | `InContainerMountStrategy(pattern=S3FilesMountPattern(...))` | The image has `mount.s3files` and can reach an existing S3 Files mount target. | Supports `S3FilesMount`. |
-| `DockerVolumeMountStrategy(driver=...)` | Docker should attach a volume-driver-backed mount before the container starts. | Docker-only. S3, GCS, R2, Azure Blob, and Box support `rclone`; S3 and GCS also support `mountpoint`. |
+| `DockerVolumeMountStrategy(driver=...)` | Docker should attach a volume-driver-backed mount before the container starts. | Docker-only. S3, GCS, R2, Azure Blob, and Box can be mounted through `rclone`; S3 and GCS can also be mounted through `mountpoint`. |
 
 </div>
 
@@ -109,13 +109,13 @@ Hosted sandbox clients expose provider-specific mount strategies. Choose the bac
 | Backend | Mount notes |
 | --- | --- |
 | Docker | Supports `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, `BoxMount`, and `S3FilesMount` with local strategies such as `InContainerMountStrategy` and `DockerVolumeMountStrategy`. |
-| `ModalSandboxClient` | Supports Modal cloud bucket mounts with `ModalCloudBucketMountStrategy` on `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`. You can use inline credentials or a named Modal Secret. |
-| `CloudflareSandboxClient` | Supports Cloudflare bucket mounts with `CloudflareBucketMountStrategy` on `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`. |
-| `BlaxelSandboxClient` | Supports cloud bucket mounts with `BlaxelCloudBucketMountStrategy` on `S3Mount`, `R2Mount`, and `GCSMount`. Also supports persistent Blaxel Drives with `BlaxelDriveMount` and `BlaxelDriveMountStrategy` from `agents.extensions.sandbox.blaxel`. |
-| `DaytonaSandboxClient` | Supports rclone-backed cloud storage mounts with `DaytonaCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
-| `E2BSandboxClient` | Supports rclone-backed cloud storage mounts with `E2BCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
-| `RunloopSandboxClient` | Supports rclone-backed cloud storage mounts with `RunloopCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
-| `VercelSandboxClient` | Supports create-time-only S3 and S3-compatible bucket mounts with `VercelCloudBucketMountStrategy` on `S3Mount`; mounted sessions cannot be resumed, and inline credentials require `allow_s3_credential_exposure=True`. |
+| `ModalSandboxClient` | Supports cloud bucket mounts by using `ModalCloudBucketMountStrategy` with `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`. You can use inline credentials or a named Modal Secret. |
+| `CloudflareSandboxClient` | Supports bucket mounts by using `CloudflareBucketMountStrategy` with `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`. |
+| `BlaxelSandboxClient` | Supports cloud bucket mounts by pairing `BlaxelCloudBucketMountStrategy` with an `S3Mount`, `R2Mount`, or `GCSMount` entry. Also supports persistent Blaxel Drives with `BlaxelDriveMount` and `BlaxelDriveMountStrategy`, both available from `agents.extensions.sandbox.blaxel`. |
+| `DaytonaSandboxClient` | Supports mounting cloud storage through `rclone` by using `DaytonaCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
+| `E2BSandboxClient` | Supports mounting cloud storage through `rclone` by using `E2BCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
+| `RunloopSandboxClient` | Supports mounting cloud storage through `rclone` by using `RunloopCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
+| `VercelSandboxClient` | Supports create-time-only S3 and S3-compatible bucket mounts by pairing `VercelCloudBucketMountStrategy` with an `S3Mount` entry; mounted sessions cannot be resumed, and inline credentials require `allow_s3_credential_exposure=True`. |
 
 </div>
 

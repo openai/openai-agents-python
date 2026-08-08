@@ -27,16 +27,16 @@ print("Output tokens:", usage.output_tokens)
 print("Total tokens:", usage.total_tokens)
 ```
 
-Usage is aggregated across all model calls during the run (including tool calls and handoffs).
+Usage is aggregated across all model calls during the run, including model calls that produce tool calls or handoffs.
 
 ### Enabling usage with third-party adapters
 
-Usage reporting varies across third-party adapters and provider backends. If you rely on adapter-backed models and need accurate `result.context_wrapper.usage` values:
+Usage reporting varies across third-party adapters and provider backends. If you access models through third-party adapters and need accurate `result.context_wrapper.usage` values:
 
-- With `AnyLLMModel`, usage is propagated automatically when the upstream provider returns it. For streamed Chat Completions backends, you may need `ModelSettings(include_usage=True)` before usage chunks are emitted.
+- With `AnyLLMModel`, usage is propagated automatically when the upstream provider returns it. When streaming responses from a Chat Completions backend, you may need `ModelSettings(include_usage=True)` for usage chunks to be emitted.
 - With `LitellmModel`, some provider backends do not report usage by default, so `ModelSettings(include_usage=True)` is often required.
 
-Review the adapter-specific notes in the [Third-party adapters](models/index.md#third-party-adapters) section of the Models guide and validate the exact provider backend you plan to deploy.
+Review the adapter-specific notes in the [Third-party adapters](models/index.md#third-party-adapters) section of the Models guide and validate usage reporting on the exact provider backend you plan to deploy.
 
 ## Per-request usage tracking
 

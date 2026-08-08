@@ -4,7 +4,7 @@ The Agents SDK provides built-in session memory to automatically maintain conver
 
 Sessions stores conversation history for a specific session, allowing agents to maintain context without requiring explicit manual memory management. This is particularly useful for building chat applications or multi-turn conversations where you want the agent to remember previous interactions.
 
-Use sessions when you want the SDK to manage client-side memory for you. Sessions cannot be combined with `conversation_id`, `previous_response_id`, or `auto_previous_response_id` in the same run. If you want OpenAI server-managed continuation instead, choose one of those mechanisms rather than layering a session on top.
+Use sessions when you want the SDK to manage client-side memory for you. In the same run, a session cannot be combined with the run-level continuation options `conversation_id`, `previous_response_id`, or `auto_previous_response_id`. If you want OpenAI server-managed continuation instead, choose one of those mechanisms rather than layering a session on top.
 
 ## Quick start
 
@@ -47,7 +47,7 @@ print(result.final_output)  # "Approximately 39 million"
 
 ## Resuming interrupted runs with the same session
 
-If a run pauses for approval, resume it with the same session instance (or another session instance that points at the same backing store) so the resumed turn continues the same stored conversation history.
+If a run pauses for approval, resume it with the same session instance (or another instance configured with the same session ID and the same underlying storage backend) so the resumed turn continues the same stored conversation history.
 
 ```python
 result = await Runner.run(agent, "Delete temporary files that are no longer needed.", session=session)
@@ -130,7 +130,7 @@ result = await Runner.run(
 )
 ```
 
-If your session implementation exposes default session settings, `RunConfig.session_settings` overrides any non-`None` values for that run. This is useful for long conversations where you want to cap retrieval size without changing the session's default behavior.
+If your session implementation exposes default session settings, each non-`None` value in `RunConfig.session_settings` overrides the corresponding default for that run. This is useful for long conversations where you want to cap retrieval size without changing the session's default behavior.
 
 ## Memory operations
 
@@ -274,9 +274,9 @@ result = await Runner.run(agent, "Hello", session=session)
 print(result.final_output)
 ```
 
-By default, compaction runs after each turn once the candidate threshold is reached.
+By default, after each turn, the SDK checks whether the compaction candidate meets the threshold and compacts only if it does.
 
-`compaction_mode="previous_response_id"` works best when you are already chaining turns with Responses API response IDs. `compaction_mode="input"` rebuilds the compaction request from the current session items instead, which is useful when the response chain is unavailable or you want the session contents to be the source of truth. The default `"auto"` chooses the safest available option.
+`compaction_mode="previous_response_id"` uses Responses API response IDs retained by the compaction session and works best while that response chain remains available. `compaction_mode="input"` rebuilds the compaction request from the current session items instead, which is useful when the response chain is unavailable or you want the session contents to be the source of truth. The default `"auto"` chooses the safest available option.
 
 If your agent runs with `ModelSettings(store=False)`, the Responses API does not retain the last response for later lookup. In that stateless setup, the default `"auto"` mode falls back to input-based compaction instead of relying on `previous_response_id`. See [`examples/memory/compaction_session_stateless_example.py`](https://github.com/openai/openai-agents-python/tree/main/examples/memory/compaction_session_stateless_example.py) for a complete example.
 
@@ -390,7 +390,7 @@ See [SQLAlchemy Sessions](sqlalchemy_session.md) for detailed documentation.
 
 ### Dapr sessions
 
-Use `DaprSession` when you already run Dapr sidecars or want session storage that can move across different state-store backends without changing your agent code.
+Use `DaprSession` when you already run Dapr sidecars or want to switch the configured state-store backend without changing your agent code.
 
 ```bash
 pip install openai-agents[dapr]
@@ -415,7 +415,7 @@ Notes:
 
 -   `from_address(...)` creates and owns the Dapr client for you. If your app already manages one, construct `DaprSession(...)` directly with `dapr_client=...`.
 -   Exiting the context or calling `close()` makes an owned-client session terminal; subsequent session operations raise `RuntimeError`, while repeated or concurrent `close()` calls are safe. With an injected client, `close()` is a no-op and the session remains usable.
--   Pass `ttl=...` to let the backing state store expire old session data automatically when the store supports TTL.
+-   If the backing state store supports TTL, pass `ttl=...` so it automatically applies TTL expiration to the session data.
 -   Pass `consistency=DAPR_CONSISTENCY_STRONG` when you need stronger read-after-write guarantees.
 -   The Dapr Python SDK also checks the HTTP sidecar endpoint. In local development, start Dapr with `--dapr-http-port 3500` as well as the gRPC port used in `dapr_address`.
 -   See [`examples/memory/dapr_session_example.py`](https://github.com/openai/openai-agents-python/tree/main/examples/memory/dapr_session_example.py) for a full setup walkthrough, including local components and troubleshooting.
@@ -448,7 +448,7 @@ await session.close()
 
 Notes:
 
--   `from_uri(...)` creates and owns the `AsyncMongoClient` and closes it on `session.close()`. An owned-client session is terminal after `close()`, and subsequent session operations raise `RuntimeError`. If your application already manages a client, construct `MongoDBSession(...)` directly with `client=...`; in that case `session.close()` is a no-op, and lifecycle plus session usability stay with the caller.
+-   `from_uri(...)` creates and owns the `AsyncMongoClient` and closes it on `session.close()`. An owned-client session is terminal after `close()`, and subsequent session operations raise `RuntimeError`. If your application already manages a client, construct `MongoDBSession(...)` directly with `client=...`; in that case, `session.close()` is a no-op, the caller retains responsibility for the client lifecycle, and the session remains usable.
 -   Connect to [MongoDB Atlas](https://www.mongodb.com/products/platform) by passing an `mongodb+srv://user:password@cluster.example.mongodb.net` URI to `from_uri(...)` with no other changes.
 -   Two collections are used and both names are configurable via `sessions_collection=` (default `agent_sessions`) and `messages_collection=` (default `agent_messages`). Indexes are created automatically on first use. Each non-empty `add_items()` call writes one logical-batch document whose monotonically increasing `seq` orders the batch by its final item; legacy per-item message documents remain readable. A logical batch must fit within MongoDB's single-document size limit; an oversized batch fails atomically without storing a partial batch.
 -   Use `await session.ping()` to verify connectivity before your first run.
@@ -526,7 +526,7 @@ Use meaningful session IDs that help you organize conversations:
 -   Use Redis-backed sessions (`RedisSession.from_url("session_id", url="redis://...")`) for shared, low-latency session memory
 -   Use SQLAlchemy-powered sessions (`SQLAlchemySession("session_id", engine=engine, create_tables=True)`) for production systems with existing databases supported by SQLAlchemy
 -   Use MongoDB sessions (`MongoDBSession.from_uri("session_id", uri="mongodb://localhost:27017")`) for applications already using MongoDB or needing multi-process, horizontally-scalable session storage
--   Use Dapr state store sessions (`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`) for production cloud-native deployments with support for 30+ database backends with built-in telemetry, tracing, and data isolation
+-   Use Dapr state store sessions (`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`) for production cloud-native deployments with built-in telemetry, tracing, and data isolation and support for 30+ database backends
 -   Use OpenAI-hosted storage (`OpenAIConversationsSession()`) when you prefer to store history in the OpenAI Conversations API
 -   Use encrypted sessions (`EncryptedSession(session_id, underlying_session, encryption_key)`) to wrap any session with transparent encryption and TTL-based expiration
 -   Consider implementing custom session backends for other production systems (for example, Django) for more advanced use cases

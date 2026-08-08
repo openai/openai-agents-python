@@ -18,21 +18,21 @@ The SDK has two driving design principles:
 Here are the main features of the SDK:
 
 -   **Agents**: Build agents with instructions, tools, guardrails, handoffs, and a built-in loop that continues until the task is complete.
--   **Sandbox agents**: Run specialists inside real isolated workspaces with manifest-defined files, sandbox client choice, and resumable sandbox sessions.
+-   **Sandbox agents**: Run specialists inside real isolated workspaces. Sandbox agents support manifest-defined files, sandbox client selection, and resumable sandbox sessions.
 -   **Realtime agents**: Build powerful voice agents with `gpt-realtime-2.1`, automatic interruption detection, context management, guardrails, and more.
 -   **Voice agents**: Build voice pipelines that combine speech-to-text, an agent workflow, and text-to-speech.
 -   **Python-first**: Use built-in language features to orchestrate and chain agents, rather than needing to learn new abstractions.
 -   **Agents as tools / Handoffs**: A powerful mechanism for coordinating and delegating work across multiple agents.
 -   **Guardrails**: Run input validation and safety checks in parallel with agent execution, and fail fast when checks do not pass.
 -   **Function tools**: Turn any Python function into a tool with automatic schema generation and Pydantic-powered validation.
--   **MCP server tool calling**: Built-in MCP server tool integration that works the same way as function tools.
+-   **MCP server tool calling**: Built-in integration that exposes remote MCP tools to agents alongside function tools.
 -   **Sessions**: A persistent memory layer for maintaining working context within an agent loop.
--   **Human in the loop**: Built-in mechanisms for involving humans across agent runs.
+-   **Human in the loop**: Built-in mechanisms for involving humans during agent runs.
 -   **Tracing**: Built-in tracing for visualizing, debugging, and monitoring workflows, with support for the OpenAI suite of evaluation, fine-tuning, and distillation tools.
 
 ## Agents SDK or Responses API?
 
-The SDK uses the Responses API by default for OpenAI models, but it adds a higher-level runtime around model calls.
+The SDK uses the Responses API by default for OpenAI models, but it wraps model calls in a higher-level runtime.
 
 Use the Responses API directly when:
 

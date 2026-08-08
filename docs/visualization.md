@@ -1,6 +1,6 @@
 # Agent visualization
 
-Agent visualization allows you to generate a structured graphical representation of agents and their relationships using **Graphviz**. This is useful for understanding how agents, tools, and handoffs interact within an application.
+Agent visualization allows you to generate a structured graphical representation of agents and their connections to other agents, tools, and MCP servers using **Graphviz**. This is useful for understanding how agents, tools, and handoffs interact within an application.
 
 ## Installation
 
@@ -83,7 +83,7 @@ The generated graph includes:
   - **Dashed arrows** for MCP server invocations.
 - An **end node** (`__end__`) indicating where execution terminates.
 
-**Note:** MCP servers are rendered in recent versions of the `agents` package (verified in **v0.2.8**). If you don’t see MCP boxes in your visualization, upgrade to the latest release.
+**Note:** MCP servers are rendered in recent versions of the `agents` package, including **v0.2.8**, where this behavior was verified. If you don’t see MCP boxes in your visualization, upgrade to the latest release.
 
 ## Customizing the graph
 

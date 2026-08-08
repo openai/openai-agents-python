@@ -11,9 +11,9 @@ This is represented via the [`RunContextWrapper`][agents.run_context.RunContextW
 
 1. You create any Python object you want. A common pattern is to use a dataclass or a Pydantic object.
 2. You pass that object to the various run methods (e.g. `Runner.run(..., context=whatever)`).
-3. All your tool calls, lifecycle hooks etc will be passed a wrapper object, `RunContextWrapper[T]`, where `T` represents your context object type which you can access via `wrapper.context`.
+3. All your tool calls, lifecycle hooks etc will be passed a wrapper object, `RunContextWrapper[T]`, where `T` represents the type of your context object; the object itself is available via `wrapper.context`.
 
-For some runtime-specific callbacks, the SDK may pass a more specialized subclass of `RunContextWrapper[T]`. For example, function-tool lifecycle hooks typically receive `ToolContext`, which also exposes tool-call metadata like `tool_call_id`, `tool_name`, and `tool_arguments`.
+For some runtime-specific callbacks, the SDK may pass a more specialized subclass of `RunContextWrapper[T]`. For example, lifecycle hooks for `FunctionTool` instances typically receive `ToolContext`, which also exposes tool-call metadata like `tool_call_id`, `tool_name`, and `tool_arguments`.
 
 The **most important** thing to be aware of: every agent, tool function, lifecycle etc for a given agent run must use the same _type_ of context.
 
@@ -142,5 +142,5 @@ When an LLM is called, the **only** data it can see is from the conversation his
 
 1. You can add it to the Agent `instructions`. This is also known as a "system prompt" or "developer message". System prompts can be static strings, or they can be dynamic functions that receive the context and output a string. This is a common tactic for information that is always useful (for example, the user's name or the current date).
 2. Add it to the `input` when calling the `Runner.run` functions. This is similar to the `instructions` tactic, but allows you to have messages that are lower in the [chain of command](https://cdn.openai.com/spec/model-spec-2024-05-08.html#follow-the-chain-of-command).
-3. Expose it via function tools. This is useful for _on-demand_ context - the LLM decides when it needs some data, and can call the tool to fetch that data.
+3. Expose it through `FunctionTool` instances. This is useful for _on-demand_ context - the LLM decides when it needs some data, and can call the tool to fetch that data.
 4. Use retrieval or web search. These are special tools that are able to fetch relevant data from files or databases (retrieval), or from the web (web search). This is useful for "grounding" the response in relevant contextual data.
