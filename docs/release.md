@@ -19,6 +19,16 @@ We will increment `Z` for non-breaking changes:
 
 ## Breaking change changelog
 
+### 0.20.0
+
+This minor release does **not** introduce a breaking change. Version 0.20.0 updates the SDK default model used when an agent or run does not explicitly select one.
+
+Highlights:
+
+-   The SDK default model is now `gpt-5.6-luna` instead of `gpt-5.4-mini`. The default `reasoning.effort="none"` and `verbosity="low"` settings are unchanged.
+-   Explicit agent models, run-level model overrides, and the `OPENAI_DEFAULT_MODEL` environment variable continue to take precedence over the SDK default.
+-   Local MCP connections created by the Agents SDK now support MCP Python SDK v2 while retaining v1 compatibility through `mcp>=1.19.0,<3`. The Agents SDK adapts stdio, SSE, and Streamable HTTP connections automatically. Custom HTTP authentication and client factories must use `httpx` with MCP v1 or `httpx2` with MCP v2, and `params["ignore_initialized_notification_failure"] = True` remains v1-only. See [MCP Python SDK v1 and v2](mcp.md#mcp-python-sdk-v1-and-v2) for migration details.
+
 ### 0.19.0
 
 This minor release does **not** introduce a breaking change. The minor version bump reflects a significant new OpenAI Responses feature area: Programmatic Tool Calling.

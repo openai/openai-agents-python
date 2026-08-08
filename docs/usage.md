@@ -11,6 +11,7 @@ The Agents SDK automatically tracks token usage for every run. You can access it
 - **request_usage_entries**: list of per-request usage breakdowns
 - **details**:
   - `input_tokens_details.cached_tokens`
+  - `input_tokens_details.cache_write_tokens`
   - `output_tokens_details.reasoning_tokens`
 
 ## Accessing usage from a run
@@ -48,6 +49,27 @@ result = await Runner.run(agent, "What's the weather in Tokyo?")
 for i, request in enumerate(result.context_wrapper.usage.request_usage_entries):
     print(f"Request {i + 1}: {request.input_tokens} in, {request.output_tokens} out")
 ```
+
+## Preserving provider usage payloads
+
+The Agents SDK normalizes provider usage into [`Usage`][agents.usage.Usage] fields that provide consistent totals across model providers. Set [`ModelSettings.preserve_raw_usage`][agents.model_settings.ModelSettings.preserve_raw_usage] to `True` when an application must retain provider-specific usage fields or distinguish an omitted field from a provider-reported zero:
+
+```python
+from agents import Agent, ModelSettings, Runner
+
+agent = Agent(
+    name="Assistant",
+    model_settings=ModelSettings(preserve_raw_usage=True),
+)
+result = await Runner.run(agent, "What's the weather in Tokyo?")
+
+for response in result.raw_responses:
+    print(response.raw_usage)
+```
+
+The Agents SDK stores each [`ModelResponse.raw_usage`][agents.items.ModelResponse.raw_usage] value as a detached, JSON-compatible snapshot of the provider payload for that model call. The Agents SDK does not aggregate `raw_usage` across the run. The value remains `None` when preservation is disabled, the provider returns no usage payload, or an upstream adapter has already discarded the original field-presence information.
+
+`preserve_raw_usage` preserves only a usage payload that reaches the model adapter; the setting does not request usage from the provider. When a streaming Chat Completions provider requires an explicit usage request, also set `ModelSettings(include_usage=True)`.
 
 ## Accessing usage with sessions
 

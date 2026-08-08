@@ -26,6 +26,32 @@ Before wiring an MCP server into an agent decide where the tool calls should exe
 
 The sections below walk through each option, how to configure it, and when to prefer one transport over another.
 
+## MCP Python SDK v1 and v2
+
+The Agents SDK supports both major versions of the `mcp` Python package through the dependency range `mcp>=1.19.0,<3`. The installed `mcp` package version is separate from the MCP protocol version negotiated with a server. The Agents SDK detects the installed package major version and adapts stdio, SSE, and Streamable HTTP connections automatically, so ordinary server configuration does not need a version switch.
+
+Most applications should let their dependency resolver select a compatible version. If your application must stay on one major version, add an explicit constraint alongside `openai-agents`:
+
+```bash
+# MCP Python SDK v1
+pip install "mcp>=1.19.0,<2"
+
+# MCP Python SDK v2
+pip install "mcp>=2,<3"
+```
+
+HTTP transport customization must use the HTTP stack owned by the installed MCP package:
+
+| Customization | MCP Python SDK v1 | MCP Python SDK v2 |
+| --- | --- | --- |
+| `params["auth"]` | `httpx.Auth` | `httpx2.Auth` |
+| `params["httpx_client_factory"]` return value | `httpx.AsyncClient` | `httpx2.AsyncClient` |
+| `params["ignore_initialized_notification_failure"] = True` | Supported | Not supported; rejected before connecting |
+
+Use an `Authorization` header when possible, as shown in the Streamable HTTP example below; an `Authorization` header works unchanged with both package versions. When an application supplies `params["auth"]` or `params["httpx_client_factory"]`, those values must use the HTTP types for the installed `mcp` package major version. When an application sets `params["ignore_initialized_notification_failure"] = True`, the application must keep `mcp<2` or disable the option before upgrading.
+
+These local `mcp` dependency requirements do not apply to [`HostedMCPTool`][agents.tool.HostedMCPTool] because the OpenAI Responses API owns the remote MCP connection.
+
 ## Agent-level MCP configuration
 
 In addition to choosing a transport, you can tune how MCP tools are prepared by setting `Agent.mcp_config`.
