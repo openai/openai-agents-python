@@ -403,13 +403,33 @@ def _format_transcript_item(item: TResponseInputItem) -> str:
     role = item.get("role")
     if isinstance(role, str):
         content = item.get("content")
-        if content is None or (isinstance(content, str) and not _contains_newline(content)):
+        if (
+            content is None or (isinstance(content, str) and not _contains_newline(content))
+        ) and _legacy_summary_line_is_reversible(item):
             return _format_transcript_item_legacy(item)
     return _format_transcript_item_json(item)
 
 
 def _contains_newline(value: str) -> bool:
     return "\n" in value or "\r" in value
+
+
+# Characters the compact ``role (name): content`` summary line splits on. A role or name that
+# contains any of them cannot be recovered from that form: a ":" is consumed by the
+# ``role: content`` split, and "(" / ")" confuse the ``(name)`` extraction. The item is encoded
+# as JSON instead, which round-trips losslessly.
+_LEGACY_SUMMARY_DELIMITERS = (":", "(", ")", "\n", "\r")
+
+
+def _legacy_summary_line_is_reversible(item: TResponseInputItem) -> bool:
+    """Return whether the legacy compact summary form round-trips for this item."""
+    role = item.get("role")
+    if not isinstance(role, str) or any(char in role for char in _LEGACY_SUMMARY_DELIMITERS):
+        return False
+    name = item.get("name")
+    if isinstance(name, str) and any(char in name for char in _LEGACY_SUMMARY_DELIMITERS):
+        return False
+    return True
 
 
 def _format_transcript_item_json(item: TResponseInputItem) -> str:

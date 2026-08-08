@@ -2343,6 +2343,40 @@ def test_nested_history_keeps_turns_with_no_content(empty_item: dict[str, Any]) 
     assert [item.get("role") for item in transcript] == ["user", empty_item["role"], "user"]
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["bob", "O(1)", "a:b", "foo(bar)", "x)y"],
+    ids=["plain", "trailing_call", "colon", "parens", "close_paren"],
+)
+def test_nested_history_preserves_message_name(name: str) -> None:
+    """A message ``name`` must survive being summarized and flattened again.
+
+    The compact ``role (name): content`` summary line cannot be reversed when the name
+    contains the delimiters the parser splits on (":", "(", ")"), so such a name was
+    silently corrupted on the next handoff. The item must be rendered losslessly instead.
+    """
+    named = {"role": "assistant", "name": name, "content": "answer here"}
+    history = (
+        {"role": "user", "content": "first question"},
+        named,
+        {"role": "user", "content": "second question"},
+    )
+    data = HandoffInputData(
+        input_history=cast(Any, history),
+        pre_handoff_items=(),
+        new_items=(),
+        run_context=None,
+    )
+
+    # Flatten across several handoffs to confirm the encoding is also idempotent.
+    nested = nest_handoff_history(data)
+    for _ in range(3):
+        transcript = _extract_nested_history_transcript(cast(Any, nested.input_history)[0])
+        assert transcript is not None
+        assert transcript == list(history)
+        nested = nest_handoff_history(nested)
+
+
 def test_nested_history_survives_repeated_handoffs() -> None:
     """Flattening and re-nesting must not shed the empty turn on each hop."""
     history = (
