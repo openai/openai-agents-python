@@ -1398,6 +1398,161 @@ async def test_streamed_output_guardrail_omits_run_data_from_redacted_error(
     _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
 
 
+@pytest.mark.parametrize("redacted", [False, True])
+@pytest.mark.parametrize("persistence_failure", ["error", "cancelled"])
+@pytest.mark.asyncio
+async def test_streamed_session_error_after_output_guardrail_respects_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    redacted: bool,
+    persistence_failure: Literal["error", "cancelled"],
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    guardrail_failed = False
+    payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
+
+    class FailingFinalTurnSession(SimpleListSession):
+        async def add_items(self, items: list[Any]) -> None:
+            if guardrail_failed:
+                cause = RuntimeError(f"session save cause: {_MODEL_OUTPUT_SECRET}")
+                if persistence_failure == "cancelled":
+                    raise asyncio.CancelledError(
+                        f"session save cancelled: {_MODEL_OUTPUT_SECRET}"
+                    ) from cause
+                raise LookupError(f"session save failed: {_MODEL_OUTPUT_SECRET}") from cause
+            await super().add_items(items)
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _agent_output: Any,
+    ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_failed
+        guardrail_failed = True
+        AgentOutputSchema(_RequiredOutput).validate_json(payload)
+        raise AssertionError("validation should fail")  # pragma: no cover
+
+    caplog.set_level(logging.ERROR, logger="openai.agents")
+    model = FakeModel(initial_output=[get_text_message(_MODEL_OUTPUT_SECRET)])
+    agent = Agent(
+        name="A",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    result = Runner.run_streamed(agent, "go", session=FailingFinalTurnSession())
+    run_loop_callback_errors: list[BaseException] = []
+    run_loop_done = asyncio.Event()
+
+    if redacted and persistence_failure == "cancelled":
+        assert result.run_loop_task is not None
+
+        def inspect_run_loop_task(task: asyncio.Task[Any]) -> None:
+            try:
+                task.result()
+            except BaseException as error:
+                run_loop_callback_errors.append(error)
+            finally:
+                run_loop_done.set()
+
+        result.run_loop_task.add_done_callback(inspect_run_loop_task)
+    expected_error_type = (
+        asyncio.CancelledError
+        if persistence_failure == "cancelled"
+        else UserError
+        if redacted
+        else LookupError
+    )
+    expected_message = (
+        "Error details are redacted."
+        if redacted
+        else "session save cancelled"
+        if persistence_failure == "cancelled"
+        else "session save failed"
+    )
+
+    with pytest.raises(expected_error_type, match=expected_message) as exc_info:
+        async for _ in result.stream_events():
+            pass
+
+    error = exc_info.value
+    guardrail_error = error.__context__
+
+    if redacted:
+        assert guardrail_error is None
+        assert error.__cause__ is None
+        assert _MODEL_OUTPUT_SECRET not in str(error)
+        _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+        for record in caplog.records:
+            assert _MODEL_OUTPUT_SECRET not in repr(record.__dict__)
+            assert _MODEL_OUTPUT_SECRET not in logging.Formatter().format(record)
+            assert record.exc_info is None
+    else:
+        assert isinstance(guardrail_error, ModelBehaviorError)
+        assert error.__cause__ is not None
+        assert _MODEL_OUTPUT_SECRET in str(error.__cause__)
+        assert _MODEL_OUTPUT_SECRET in str(guardrail_error)
+        assert any(
+            _MODEL_OUTPUT_SECRET in repr(frame) for frame in _agents_traceback_frame_locals(error)
+        )
+
+    if persistence_failure == "cancelled":
+        assert result._stored_exception is error
+        assert result.run_loop_exception is None
+        if redacted:
+            await asyncio.wait_for(run_loop_done.wait(), timeout=1)
+            assert run_loop_callback_errors == []
+    else:
+        assert result.run_loop_exception is error
+        if redacted:
+            assert error.__traceback__ is None
+
+
+@pytest.mark.asyncio
+async def test_streamed_session_hostile_error_after_redacted_output_guardrail_is_replaced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persistence_secret = "HOSTILE_SESSION_FAILURE_SECRET"
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    guardrail_failed = False
+    payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
+
+    class FailingFinalTurnSession(SimpleListSession):
+        async def add_items(self, items: list[Any]) -> None:
+            if guardrail_failed:
+                raise _HostileAttributeWriteException(persistence_secret)
+            await super().add_items(items)
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _agent_output: Any,
+    ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_failed
+        guardrail_failed = True
+        AgentOutputSchema(_RequiredOutput).validate_json(payload)
+        raise AssertionError("validation should fail")  # pragma: no cover
+
+    agent = Agent(
+        name="A",
+        model=FakeModel(initial_output=[get_text_message(_MODEL_OUTPUT_SECRET)]),
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    result = Runner.run_streamed(agent, "go", session=FailingFinalTurnSession())
+
+    with pytest.raises(UserError, match="Error details are redacted.") as exc_info:
+        async for _ in result.stream_events():
+            pass
+
+    error = exc_info.value
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert persistence_secret not in str(error)
+    _assert_secret_absent_from_agents_traceback(error, persistence_secret)
+    _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+
+
 @pytest.mark.asyncio
 async def test_streamed_input_guardrail_omits_run_data_from_redacted_error(
     monkeypatch: pytest.MonkeyPatch,

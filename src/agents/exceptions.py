@@ -24,33 +24,35 @@ _DATA_REDACTED_ATTR = "_agents_data_redacted"
 _DATA_REDACTED_ERROR_MESSAGE = "Error details are redacted."
 
 
-def _mark_error_to_drain_stream_events(error: Exception) -> None:
+def _mark_error_to_drain_stream_events(error: BaseException) -> None:
     setattr(error, _DRAIN_STREAM_EVENTS_ATTR, True)
 
 
-def _should_drain_stream_events_before_raising(error: Exception) -> bool:
+def _should_drain_stream_events_before_raising(error: BaseException) -> bool:
     return bool(getattr(error, _DRAIN_STREAM_EVENTS_ATTR, False))
 
 
-def _mark_error_data_redacted(error: Exception) -> None:
+def _mark_error_data_redacted(error: BaseException) -> None:
     setattr(error, _DATA_REDACTED_ATTR, True)
 
 
-def _is_error_data_redacted(error: Exception) -> bool:
+def _is_error_data_redacted(error: BaseException) -> bool:
     return bool(getattr(error, _DATA_REDACTED_ATTR, False))
 
 
-def _clear_data_redacted_error_traceback(error: Exception) -> None:
+def _clear_data_redacted_error_traceback(error: BaseException) -> None:
     if _is_error_data_redacted(error) and error.__traceback__ is not None:
         traceback.clear_frames(error.__traceback__)
 
 
-def _detach_data_redacted_error_traceback(error: Exception) -> None:
+def _detach_data_redacted_error_traceback(error: BaseException) -> None:
     if _is_error_data_redacted(error):
         error.__traceback__ = None
+        error.__cause__ = None
+        error.__context__ = None
 
 
-def _raise_data_redacted_error(error: Exception) -> NoReturn:
+def _raise_data_redacted_error(error: BaseException) -> NoReturn:
     """Raise a detached redacted error from a frame that owns no payload data."""
     raise error from None
 

@@ -575,7 +575,7 @@ class RunResultStreaming(RunResultBase):
     _input_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _triggered_input_guardrail_result: InputGuardrailResult | None = field(default=None, repr=False)
     _output_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
-    _stored_exception: Exception | None = field(default=None, repr=False)
+    _stored_exception: BaseException | None = field(default=None, repr=False)
     _cancel_mode: Literal["none", "immediate", "after_turn"] = field(default="none", repr=False)
     _last_processed_response: ProcessedResponse | None = field(default=None, repr=False)
     """The last processed model response. This is needed for resuming from interruptions."""
@@ -988,7 +988,7 @@ class RunResultStreaming(RunResultBase):
         if self.run_loop_task and self.run_loop_task.done():
             if not self.run_loop_task.cancelled():
                 run_impl_exc = self.run_loop_task.exception()
-                if isinstance(run_impl_exc, Exception):
+                if run_impl_exc is not None:
                     if (
                         isinstance(run_impl_exc, AgentsException)
                         and run_impl_exc.run_data is None
@@ -1008,18 +1008,6 @@ class RunResultStreaming(RunResultBase):
                     ):
                         in_guard_exc.run_data = self._create_error_details()
                     self._stored_exception = in_guard_exc
-
-        if self._output_guardrails_task and self._output_guardrails_task.done():
-            if not self._output_guardrails_task.cancelled():
-                out_guard_exc = self._output_guardrails_task.exception()
-                if isinstance(out_guard_exc, Exception):
-                    if (
-                        isinstance(out_guard_exc, AgentsException)
-                        and out_guard_exc.run_data is None
-                        and not _is_error_data_redacted(out_guard_exc)
-                    ):
-                        out_guard_exc.run_data = self._create_error_details()
-                    self._stored_exception = out_guard_exc
 
     def _cleanup_tasks(self):
         if self.run_loop_task and not self.run_loop_task.done():

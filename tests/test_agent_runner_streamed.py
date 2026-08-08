@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -2420,6 +2421,231 @@ async def test_mixed_final_turn_session_order_and_committed_items(
 
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_failing_output_guardrail_keeps_the_whole_final_turn(
+    mode: str,
+) -> None:
+    """A guardrail *error* is not a tripwire: the completed final turn stays replayable.
+
+    Only a tripwire means the output was judged undeliverable. An ordinary guardrail exception
+    leaves the verdict unknown, so the turn must be persisted whole, exactly as the non-streamed
+    path does.
+    """
+
+    @function_tool(name_override="commit_tool")
+    def commit_tool() -> str:
+        return "committed-result"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        raise RuntimeError("guardrail failed")
+
+    model = FakeModel()
+    model.set_next_output(
+        [
+            get_text_message("assistant-preamble"),
+            get_function_tool_call("commit_tool", "{}", call_id="call-mixed"),
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[commit_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = SimpleListSession()
+
+    async def run_once() -> None:
+        if mode == "non_streamed":
+            await Runner.run(agent, "Use commit_tool", session=session)
+        else:
+            result = Runner.run_streamed(agent, "Use commit_tool", session=session)
+            await consume_stream(result)
+
+    with pytest.raises(RuntimeError, match="guardrail failed"):
+        await run_once()
+
+    saved_items = await session.get_items()
+    saved = [item.get("type") or item.get("role") for item in saved_items if isinstance(item, dict)]
+    assert saved == ["user", "message", "function_call", "function_call_output"]
+
+
+@pytest.mark.asyncio
+async def test_streamed_session_save_error_takes_precedence_over_output_guardrail_error() -> None:
+    guardrail_failed = False
+    final_turn_save_attempted = False
+
+    class FailingFinalTurnSession(SimpleListSession):
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            nonlocal final_turn_save_attempted
+            if guardrail_failed:
+                final_turn_save_attempted = True
+                raise LookupError("session save failed")
+            await super().add_items(items)
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_failed
+        guardrail_failed = True
+        raise RuntimeError("guardrail failed")
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("assistant-preamble")])
+    agent = Agent(
+        name="test",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = FailingFinalTurnSession()
+    result = Runner.run_streamed(agent, "Hello", session=session)
+
+    with pytest.raises(LookupError, match="session save failed") as exc_info:
+        await consume_stream(result)
+
+    assert final_turn_save_attempted is True
+    assert isinstance(exc_info.value.__context__, RuntimeError)
+    assert str(exc_info.value.__context__) == "guardrail failed"
+    assert result.run_loop_exception is exc_info.value
+    assert await session.get_items() == [{"content": "Hello", "role": "user"}]
+
+
+@pytest.mark.asyncio
+async def test_streamed_session_save_cancellation_is_not_a_public_immediate_cancel() -> None:
+    guardrail_failed = False
+
+    class CancellingFinalTurnSession(SimpleListSession):
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            if guardrail_failed:
+                raise asyncio.CancelledError("session save cancelled")
+            await super().add_items(items)
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_failed
+        guardrail_failed = True
+        raise RuntimeError("guardrail failed")
+
+    model = FakeModel(initial_output=[get_text_message("assistant-preamble")])
+    agent = Agent(
+        name="test",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = CancellingFinalTurnSession()
+    result = Runner.run_streamed(agent, "Hello", session=session)
+
+    with pytest.raises(asyncio.CancelledError, match="session save cancelled") as exc_info:
+        await consume_stream(result)
+
+    assert result._cancel_mode == "none"
+    assert result._stored_exception is exc_info.value
+    assert isinstance(exc_info.value.__context__, RuntimeError)
+    assert str(exc_info.value.__context__) == "guardrail failed"
+    assert await session.get_items() == [{"content": "Hello", "role": "user"}]
+
+
+@pytest.mark.asyncio
+async def test_streamed_session_save_direct_base_exception_is_terminal() -> None:
+    guardrail_failed = False
+
+    class DirectAbort(BaseException):
+        pass
+
+    class AbortingFinalTurnSession(SimpleListSession):
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            if guardrail_failed:
+                raise DirectAbort("session save aborted")
+            await super().add_items(items)
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_failed
+        guardrail_failed = True
+        raise RuntimeError("guardrail failed")
+
+    agent = Agent(
+        name="test",
+        model=FakeModel(initial_output=[get_text_message("assistant-preamble")]),
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = AbortingFinalTurnSession()
+    result = Runner.run_streamed(agent, "Hello", session=session)
+
+    with pytest.raises(DirectAbort, match="session save aborted") as exc_info:
+        await consume_stream(result)
+
+    assert result._stored_exception is exc_info.value
+    assert result.run_loop_exception is exc_info.value
+    assert await session.get_items() == [{"content": "Hello", "role": "user"}]
+
+
+@pytest.mark.asyncio
+async def test_public_immediate_cancel_during_guardrail_recovery_save_stays_prompt() -> None:
+    guardrail_failed = False
+    save_started = asyncio.Event()
+    save_cancelled = asyncio.Event()
+    never_set = asyncio.Event()
+
+    class BlockingFinalTurnSession(SimpleListSession):
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            if guardrail_failed:
+                save_started.set()
+                try:
+                    await never_set.wait()
+                finally:
+                    save_cancelled.set()
+                return
+            await super().add_items(items)
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_failed
+        guardrail_failed = True
+        raise RuntimeError("guardrail failed")
+
+    model = FakeModel(initial_output=[get_text_message("assistant-preamble")])
+    agent = Agent(
+        name="test",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = BlockingFinalTurnSession()
+    result = Runner.run_streamed(agent, "Hello", session=session)
+    drain_task = asyncio.create_task(consume_stream(result))
+
+    try:
+        await asyncio.wait_for(save_started.wait(), timeout=1)
+        result.cancel()
+        await asyncio.wait_for(drain_task, timeout=1)
+    finally:
+        if not drain_task.done():
+            result.cancel()
+            drain_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await drain_task
+
+    assert save_cancelled.is_set()
+    assert result._stored_exception is None
+    assert await session.get_items() == [{"content": "Hello", "role": "user"}]
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
 @pytest.mark.parametrize("tripwire", [False, True], ids=["passes", "trips"])
 @pytest.mark.asyncio
 async def test_blocked_tool_final_keeps_reasoning_context_with_the_committed_call(
@@ -3213,3 +3439,88 @@ async def test_streamed_resume_handoff_turn_reports_tool_guardrail_results():
     assert len(streamed.tool_output_guardrail_results) == len(
         non_streamed.tool_output_guardrail_results
     )
+
+
+@pytest.mark.asyncio
+async def test_streamed_cancel_during_output_guardrail_starts_no_final_turn_write() -> None:
+    """Immediate cancel() must not start a final-turn session write.
+
+    `cancel()` in its default immediate mode cancels outstanding work; `after_turn` is the mode
+    that finishes the turn and saves. A cancellation raised inside an in-flight output guardrail
+    must therefore not be treated like a guardrail error, or `stream_events()` would stay blocked
+    on whatever the session backend does.
+    """
+    entered_guardrail = asyncio.Event()
+    never_set = asyncio.Event()
+    cancelled = False
+    tool_call_count = 0
+
+    async def parked_output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        entered_guardrail.set()
+        await never_set.wait()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    class BlockingAfterCancelSession(SimpleListSession):
+        """Writes before the cancel are the turn's own; any write after it would hang the stream."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.wrote_after_cancel = False
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            if cancelled:
+                self.wrote_after_cancel = True
+                await never_set.wait()
+            await super().add_items(items)
+
+    @function_tool(name_override="commit_tool")
+    def commit_tool() -> str:
+        nonlocal tool_call_count
+        tool_call_count += 1
+        return "committed-result"
+
+    model = FakeModel()
+    model.set_next_output(
+        [
+            get_text_message("assistant-preamble"),
+            get_function_tool_call("commit_tool", "{}", call_id="call-cancel"),
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[commit_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=parked_output_guardrail)],
+    )
+    session = BlockingAfterCancelSession()
+
+    result = Runner.run_streamed(agent, "Use commit_tool", session=session)
+
+    async def drain() -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            async for _event in result.stream_events():
+                pass
+
+    drain_task = asyncio.create_task(drain())
+    try:
+        await asyncio.wait_for(entered_guardrail.wait(), timeout=1)
+        cancelled = True
+        result.cancel()
+        # A final-turn write here would block on never_set and hang the stream.
+        await asyncio.wait_for(drain_task, timeout=1)
+    finally:
+        if not drain_task.done():
+            drain_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await drain_task
+
+    assert session.wrote_after_cancel is False
+    assert tool_call_count == 1
+    saved_items = await session.get_items()
+    saved = [item.get("type") or item.get("role") for item in saved_items if isinstance(item, dict)]
+    assert saved == ["user"]

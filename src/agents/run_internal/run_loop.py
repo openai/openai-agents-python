@@ -27,6 +27,7 @@ from .._tool_identity import (
 from ..agent import Agent
 from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import (
+    _DATA_REDACTED_ERROR_MESSAGE,
     AgentsException,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
@@ -37,6 +38,7 @@ from ..exceptions import (
     _clear_data_redacted_error_traceback,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
+    _mark_error_data_redacted,
 )
 from ..handoffs import Handoff
 from ..items import (
@@ -517,6 +519,7 @@ async def _finalize_streamed_final_output(
     store_setting: bool | None,
     persist_before_output_guardrails: bool,
 ) -> None:
+    redacted_persistence_error: BaseException | None = None
     if persist_before_output_guardrails:
         # A resumed approval has already committed the tool side effect, so keep its call/output
         # pair even when an agent output guardrail blocks delivery of the final result.
@@ -530,7 +533,7 @@ async def _finalize_streamed_final_output(
             context_wrapper=context_wrapper,
             streamed_result=streamed_result,
         )
-    except Exception:
+    except OutputGuardrailTripwireTriggered:
         # The blocked output itself is not persisted, but a tool that already ran is: the next run
         # has to see that side effect rather than re-issue it. This turn reaches here with tool
         # items when `tool_use_behavior="stop_on_first_tool"` (or `stop_at_tool_names`, or a custom
@@ -540,6 +543,60 @@ async def _finalize_streamed_final_output(
             if retained_items:
                 await save_items(retained_items, response_id, store_setting)
         raise
+    except Exception as guardrail_error:
+        # Only a tripwire means the output was judged undeliverable. A guardrail error leaves the
+        # verdict unknown, so the completed final turn is persisted whole and remains replayable.
+        # `asyncio.CancelledError` is deliberately not caught here: `cancel()` in its default
+        # immediate mode has to stay prompt, and awaiting a session write would block
+        # `stream_events()` on an arbitrary backend. `after_turn` is the mode that finishes the
+        # turn and saves.
+        guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
+        if guardrail_error_is_redacted:
+            _detach_data_redacted_error_traceback(guardrail_error)
+        if not persist_before_output_guardrails:
+            try:
+                await save_items(items, response_id, store_setting)
+            except (Exception, asyncio.CancelledError) as persistence_error:
+                if guardrail_error_is_redacted:
+                    if isinstance(persistence_error, asyncio.CancelledError):
+                        safe_persistence_error: BaseException = asyncio.CancelledError(
+                            _DATA_REDACTED_ERROR_MESSAGE
+                        )
+                    else:
+                        safe_persistence_error = UserError(_DATA_REDACTED_ERROR_MESSAGE)
+                    _mark_error_data_redacted(safe_persistence_error)
+                    if (
+                        isinstance(safe_persistence_error, asyncio.CancelledError)
+                        and streamed_result._cancel_mode != "immediate"
+                    ):
+                        # A cancelled session write is distinct from the caller requesting
+                        # immediate cancellation. Retain a safe cancellation for `stream_events()`
+                        # without completing the run-loop task with the payload-bearing backend
+                        # exception.
+                        streamed_result._stored_exception = safe_persistence_error
+                        streamed_result.is_complete = True
+                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                        return
+                    if isinstance(safe_persistence_error, asyncio.CancelledError):
+                        # Public immediate cancellation already owns stream completion and must
+                        # not surface a recovery failure.
+                        return
+                    redacted_persistence_error = safe_persistence_error
+                if (
+                    isinstance(persistence_error, asyncio.CancelledError)
+                    and streamed_result._cancel_mode != "immediate"
+                ):
+                    # A cancelled session write is distinct from the caller requesting immediate
+                    # cancellation. The run-loop task itself becomes cancelled, so retain the
+                    # backend cancellation for `stream_events()` to surface.
+                    streamed_result._stored_exception = persistence_error
+                if redacted_persistence_error is None:
+                    raise
+        if redacted_persistence_error is None:
+            raise
+
+    if redacted_persistence_error is not None:
+        raise redacted_persistence_error from None
 
     streamed_result.output_guardrail_results = output_guardrail_results
     streamed_result.final_output = output
