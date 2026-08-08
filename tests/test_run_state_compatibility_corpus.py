@@ -5,10 +5,49 @@ import pytest
 
 from agents import Agent, RunState
 from agents.run_state import SUPPORTED_SCHEMA_VERSIONS
-from integration_tests._contract_support import validate_historical_run_state_fixture
+from integration_tests._contract_support import (
+    _find_subset_errors,
+    _normalized_durable_state,
+    validate_historical_run_state_fixture,
+)
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "run_state"
 SOURCES = json.loads((FIXTURE_ROOT / "sources.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "no_active_agent_run",
+        "last_model_response",
+        "generated_session_item_indexes",
+        "conversation_id",
+        "input_guardrail_results",
+        "tool_use_tracker",
+    ],
+)
+def test_historical_state_comparison_covers_every_durable_field(field_name: str) -> None:
+    historical = {"$schemaVersion": "1.0", field_name: {"value": "preserve-me"}}
+    canonical = {"$schemaVersion": "1.15"}
+
+    errors = _find_subset_errors(
+        _normalized_durable_state(historical),
+        _normalized_durable_state(canonical),
+    )
+
+    assert errors == [f"state.{field_name} was dropped"]
+
+
+def test_historical_state_comparison_preserves_json_scalar_types() -> None:
+    errors = _find_subset_errors(
+        {"no_active_agent_run": True, "current_turn": 1},
+        {"no_active_agent_run": 1, "current_turn": 1.0},
+    )
+
+    assert errors == [
+        "state.no_active_agent_run changed type from bool to int",
+        "state.current_turn changed type from int to float",
+    ]
 
 
 def test_historical_fixture_corpus_matches_supported_schema_versions() -> None:

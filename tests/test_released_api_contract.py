@@ -126,11 +126,15 @@ def test_release_contract_update_freezes_new_exports_and_classes() -> None:
     def new_helper() -> None:
         return None
 
+    class Uninspectable:
+        __signature__ = "invalid"
+
     agents_module = SimpleNamespace(
-        __all__=["new_helper", "Existing", "NewPublic"],
+        __all__=["new_helper", "Existing", "NewPublic", "Uninspectable"],
         Existing=Existing,
         new_helper=new_helper,
         NewPublic=NewPublic,
+        Uninspectable=Uninspectable,
     )
     contract: dict[str, Any] = {
         "baseline": "v0.19.4",
@@ -138,12 +142,7 @@ def test_release_contract_update_freezes_new_exports_and_classes() -> None:
         "required_top_level_exports": ["Existing"],
         "public_modules": ["agents"],
         "canonical_imports": [],
-        "constructors": {
-            "Existing": {
-                "parameters": _parameter_contract(Existing),
-                "dataclass_fields": [],
-            }
-        },
+        "constructors": {},
     }
 
     updated = build_released_api_contract(
@@ -155,8 +154,17 @@ def test_release_contract_update_freezes_new_exports_and_classes() -> None:
 
     assert updated["baseline"] == "v0.20.0"
     assert updated["baseline_commit"] == "b" * 40
-    assert updated["required_top_level_exports"] == ["Existing", "new_helper", "NewPublic"]
+    assert updated["required_top_level_exports"] == [
+        "Existing",
+        "new_helper",
+        "NewPublic",
+        "Uninspectable",
+    ]
     assert set(updated["constructors"]) == {"Existing", "NewPublic"}
+    assert [field["name"] for field in updated["constructors"]["Existing"]["dataclass_fields"]] == [
+        "value",
+        "optional",
+    ]
     assert [
         field["name"] for field in updated["constructors"]["NewPublic"]["dataclass_fields"]
     ] == [
@@ -173,6 +181,80 @@ def test_release_contract_update_freezes_new_exports_and_classes() -> None:
         agents_module=agents_module,
     )
     assert unchanged["baseline_commit"] == "b" * 40
+
+
+def test_release_contract_update_rejects_incompatible_current_surface() -> None:
+    class Released:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+    class Incompatible:
+        def __init__(self, renamed: str) -> None:
+            self.renamed = renamed
+
+    agents_module = SimpleNamespace(__all__=["Released"], Released=Incompatible)
+    contract: dict[str, Any] = {
+        "baseline": "v0.19.4",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": ["Released"],
+        "public_modules": ["agents"],
+        "canonical_imports": [],
+        "constructors": {
+            "Released": {
+                "parameters": _parameter_contract(Released),
+                "dataclass_fields": [],
+            }
+        },
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="Cannot promote an incompatible released API contract",
+    ):
+        build_released_api_contract(
+            contract,
+            baseline="v0.20.0",
+            baseline_commit="b" * 40,
+            agents_module=agents_module,
+        )
+
+
+def test_release_contract_update_rejects_class_replaced_by_function() -> None:
+    class Released:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+    def replacement(value: str) -> None:
+        _ = value
+
+    agents_module = SimpleNamespace(__all__=["Released"], Released=replacement)
+    contract: dict[str, Any] = {
+        "baseline": "v0.19.4",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": ["Released"],
+        "public_modules": ["agents"],
+        "canonical_imports": [],
+        "constructors": {
+            "Released": {
+                "parameters": _parameter_contract(Released),
+                "dataclass_fields": [],
+            }
+        },
+    }
+
+    assert validate_released_api_contract(contract, agents_module=agents_module) == [
+        "Released constructor agents.Released is no longer a class"
+    ]
+    with pytest.raises(
+        ValueError,
+        match="Released constructor agents.Released is no longer a class",
+    ):
+        build_released_api_contract(
+            contract,
+            baseline="v0.20.0",
+            baseline_commit="b" * 40,
+            agents_module=agents_module,
+        )
 
 
 def test_release_contract_update_rejects_duplicate_exports() -> None:

@@ -72,11 +72,14 @@ def main() -> int:
         )
 
     current = load_api_contract(CONTRACT)
-    updated = build_released_api_contract(
-        current,
-        baseline=f"v{version}",
-        baseline_commit=_head_commit(),
-    )
+    try:
+        updated = build_released_api_contract(
+            current,
+            baseline=f"v{version}",
+            baseline_commit=_head_commit(),
+        )
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
     rendered = _render(updated)
     existing = CONTRACT.read_text(encoding="utf-8")
     if rendered == existing:

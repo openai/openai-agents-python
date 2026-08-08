@@ -79,6 +79,11 @@ def build_released_api_contract(
 ) -> dict[str, Any]:
     """Build the next rolling release contract from the current public surface."""
     agents = agents_module or importlib.import_module("agents")
+    compatibility_errors = validate_released_api_contract(contract, agents_module=agents)
+    if compatibility_errors:
+        details = "\n".join(f"- {error}" for error in compatibility_errors)
+        raise ValueError(f"Cannot promote an incompatible released API contract:\n{details}")
+
     current_exports = list(agents.__all__)
     if not all(isinstance(name, str) for name in current_exports):
         raise ValueError("agents.__all__ must contain only strings")
@@ -99,7 +104,7 @@ def build_released_api_contract(
     for name in ordered_exports:
         value = getattr(agents, name)
         should_track = name in tracked_constructors
-        if not should_track and name not in released_exports and inspect.isclass(value):
+        if not should_track and inspect.isclass(value):
             try:
                 inspect.signature(value)
             except (TypeError, ValueError):
@@ -162,8 +167,16 @@ def _validate_parameter_contract(
     return errors
 
 
-def validate_released_api_contract(contract: dict[str, Any]) -> list[str]:
-    agents = importlib.import_module("agents")
+def _import_contract_module(module_name: str, agents_module: Any | None) -> Any:
+    if module_name == "agents" and agents_module is not None:
+        return agents_module
+    return importlib.import_module(module_name)
+
+
+def validate_released_api_contract(
+    contract: dict[str, Any], *, agents_module: Any | None = None
+) -> list[str]:
+    agents = agents_module or importlib.import_module("agents")
     errors: list[str] = []
 
     missing_exports = sorted(set(contract["required_top_level_exports"]) - set(agents.__all__))
@@ -177,13 +190,13 @@ def validate_released_api_contract(contract: dict[str, Any]) -> list[str]:
 
     for module_name in contract["public_modules"]:
         try:
-            importlib.import_module(module_name)
+            _import_contract_module(module_name, agents_module)
         except Exception as error:
             errors.append(f"Failed to import released module {module_name}: {error!r}")
 
     for entry in contract["canonical_imports"]:
-        module = importlib.import_module(entry["module"])
-        canonical = importlib.import_module(entry["canonical_module"])
+        module = _import_contract_module(entry["module"], agents_module)
+        canonical = _import_contract_module(entry["canonical_module"], agents_module)
         actual = getattr(module, entry["name"], None)
         expected = getattr(canonical, entry["canonical_name"], None)
         if actual is not expected:
@@ -196,6 +209,9 @@ def validate_released_api_contract(contract: dict[str, Any]) -> list[str]:
         value = getattr(agents, name, None)
         if value is None:
             errors.append(f"Missing released constructor agents.{name}")
+            continue
+        if not inspect.isclass(value):
+            errors.append(f"Released constructor agents.{name} is no longer a class")
             continue
         current_parameters = _parameter_contract(value)
         errors.extend(
@@ -216,38 +232,10 @@ def validate_released_api_contract(contract: dict[str, Any]) -> list[str]:
     return errors
 
 
-def _semantic_projection(payload: dict[str, Any]) -> dict[str, Any]:
-    projected: dict[str, Any] = {}
-    for key in (
-        "current_agent",
-        "original_input",
-        "generated_items",
-        "session_items",
-        "current_step",
-        "model_responses",
-        "max_turns",
-        "generated_prompt_cache_key",
-        "reasoning_item_id_policy",
-        "nested_history_owned_session_item_refs",
-        "sandbox",
-        "trace",
-    ):
-        if key in payload:
-            projected[key] = payload[key]
-
-    context = payload.get("context")
-    if isinstance(context, dict):
-        projected["context"] = {
-            key: context[key]
-            for key in (
-                "usage",
-                "approvals",
-                "hosted_mcp_approvals",
-                "tool_invocations",
-            )
-            if key in context
-        }
-    return projected
+def _normalized_durable_state(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = deepcopy(payload)
+    normalized.pop("$schemaVersion", None)
+    return normalized
 
 
 def _find_subset_errors(expected: object, actual: object, path: str = "state") -> list[str]:
@@ -270,6 +258,8 @@ def _find_subset_errors(expected: object, actual: object, path: str = "state") -
         for index, (expected_item, actual_item) in enumerate(zip(expected, actual, strict=True)):
             errors.extend(_find_subset_errors(expected_item, actual_item, f"{path}[{index}]"))
         return errors
+    if type(expected) is not type(actual):
+        return [f"{path} changed type from {type(expected).__name__} to {type(actual).__name__}"]
     if expected != actual:
         return [f"{path} changed from {expected!r} to {actual!r}"]
     return []
@@ -308,8 +298,8 @@ async def validate_historical_run_state_fixture(path: Path) -> list[str]:
             f"expected {CURRENT_SCHEMA_VERSION!r}"
         )
     semantic_errors = _find_subset_errors(
-        _semantic_projection(payload),
-        _semantic_projection(canonical),
+        _normalized_durable_state(payload),
+        _normalized_durable_state(canonical),
     )
     errors.extend(f"{path.name}: {error}" for error in semantic_errors)
 

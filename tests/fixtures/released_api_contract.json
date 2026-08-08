@@ -359,6 +359,87 @@
         }
       ]
     },
+    "AgentBase": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "handoff_description"
+        },
+        {
+          "default": {
+            "factory": "builtins.list",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "tools"
+        },
+        {
+          "default": {
+            "factory": "builtins.list",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "mcp_servers"
+        },
+        {
+          "default": {
+            "factory": "agents.agent.AgentBase.<lambda>",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "mcp_config"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "handoff_description"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tools"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "mcp_servers"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "mcp_config"
+        }
+      ]
+    },
     "AgentHookContext": {
       "dataclass_fields": [
         {
@@ -429,6 +510,1113 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "tool_input"
+        }
+      ]
+    },
+    "AgentOutputSchema": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output_type"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output_type"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "strict_json_schema"
+        }
+      ]
+    },
+    "AgentOutputSchemaBase": {
+      "dataclass_fields": [],
+      "parameters": []
+    },
+    "AgentSpanData": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "handoffs"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tools"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output_type"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "metadata"
+        }
+      ]
+    },
+    "AgentToolInvocation": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_call_id"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_arguments"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_call_id"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_arguments"
+        }
+      ]
+    },
+    "AgentUpdatedStreamEvent": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "new_agent"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "agent_updated_stream_event"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "new_agent"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "agent_updated_stream_event"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        }
+      ]
+    },
+    "AgentsException": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "VAR_POSITIONAL",
+          "name": "args"
+        }
+      ]
+    },
+    "ApplyPatchEditor": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "VAR_POSITIONAL",
+          "name": "args"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "VAR_KEYWORD",
+          "name": "kwargs"
+        }
+      ]
+    },
+    "ApplyPatchOperation": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "type"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "path"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "diff"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "ctx_wrapper"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "move_to"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "path"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "diff"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx_wrapper"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "move_to"
+        }
+      ]
+    },
+    "ApplyPatchResult": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "status"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "output"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "status"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        }
+      ]
+    },
+    "ApplyPatchTool": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "editor"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "apply_patch"
+          },
+          "init": true,
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "init": true,
+          "name": "needs_approval"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "on_approval"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "custom_data_extractor"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "allowed_callers"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "editor"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "apply_patch"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "needs_approval"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "on_approval"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "custom_data_extractor"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "allowed_callers"
+        }
+      ]
+    },
+    "ApplyPatchToolCustomDataContext": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "run_context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "operations"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "status"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "run_context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "operations"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "status"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        }
+      ]
+    },
+    "AsyncComputer": {
+      "dataclass_fields": [],
+      "parameters": []
+    },
+    "CodeInterpreterTool": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_config"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_config"
+        }
+      ]
+    },
+    "CompactionItem": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "compaction_item"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "compaction_item"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        }
+      ]
+    },
+    "Computer": {
+      "dataclass_fields": [],
+      "parameters": []
+    },
+    "ComputerProvider": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "create"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "dispose"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "create"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "dispose"
+        }
+      ]
+    },
+    "ComputerTool": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "computer"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "on_safety_check"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "custom_data_extractor"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "computer"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "on_safety_check"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "custom_data_extractor"
+        }
+      ]
+    },
+    "ComputerToolCustomDataContext": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "run_context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_call"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "run_context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_call"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        }
+      ]
+    },
+    "CustomSpanData": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "data"
+        }
+      ]
+    },
+    "CustomTool": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "description"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "on_invoke_tool"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "format"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "init": true,
+          "name": "needs_approval"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "on_approval"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "init": true,
+          "name": "defer_loading"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "custom_data_extractor"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "allowed_callers"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": false,
+          "name": "tool_config"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "description"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "on_invoke_tool"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "format"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "needs_approval"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "on_approval"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "defer_loading"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "custom_data_extractor"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "allowed_callers"
+        }
+      ]
+    },
+    "CustomToolCustomDataContext": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        }
+      ]
+    },
+    "FileSearchTool": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "vector_store_ids"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "max_num_results"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "init": true,
+          "name": "include_search_results"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "ranking_options"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "filters"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "vector_store_ids"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "max_num_results"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "include_search_results"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ranking_options"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "filters"
+        }
+      ]
+    },
+    "FunctionSpanData": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "mcp_data"
         }
       ]
     },
@@ -782,6 +1970,280 @@
         }
       ]
     },
+    "FunctionToolCustomDataContext": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        }
+      ]
+    },
+    "FunctionToolResult": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "run_item"
+        },
+        {
+          "default": {
+            "factory": "builtins.list",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "interruptions"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "agent_run_result"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "run_item"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "interruptions"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent_run_result"
+        }
+      ]
+    },
+    "GenerateDynamicPromptData": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        }
+      ]
+    },
+    "GenerationSpanData": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model_config"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "usage"
+        }
+      ]
+    },
+    "GuardrailFunctionOutput": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output_info"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tripwire_triggered"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output_info"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tripwire_triggered"
+        }
+      ]
+    },
+    "GuardrailSpanData": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "triggered"
+        }
+      ]
+    },
     "Handoff": {
       "dataclass_fields": [
         {
@@ -927,6 +2389,1190 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "_default_tool_identity"
+        }
+      ]
+    },
+    "HandoffCallItem": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "handoff_call_item"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "handoff_call_item"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        }
+      ]
+    },
+    "HandoffInputData": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "input_history"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "pre_handoff_items"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "new_items"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "run_context"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "input_items"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input_history"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "pre_handoff_items"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "new_items"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "run_context"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input_items"
+        }
+      ]
+    },
+    "HandoffOutputItem": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "source_agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "target_agent"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "handoff_output_item"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "source_agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "target_agent"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "handoff_output_item"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        }
+      ]
+    },
+    "HandoffSpanData": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "from_agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "to_agent"
+        }
+      ]
+    },
+    "HostedMCPTool": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_config"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "on_approval_request"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_config"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "on_approval_request"
+        }
+      ]
+    },
+    "ImageGenerationTool": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_config"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_config"
+        }
+      ]
+    },
+    "InputGuardrail": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "guardrail_function"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "init": true,
+          "name": "run_in_parallel"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "guardrail_function"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "run_in_parallel"
+        }
+      ]
+    },
+    "InputGuardrailResult": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "guardrail"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "guardrail"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        }
+      ]
+    },
+    "InputGuardrailTripwireTriggered": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "guardrail_result"
+        }
+      ]
+    },
+    "ItemHelpers": {
+      "dataclass_fields": [],
+      "parameters": []
+    },
+    "LocalShellCommandRequest": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "ctx_wrapper"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "data"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx_wrapper"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "data"
+        }
+      ]
+    },
+    "LocalShellTool": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "executor"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "executor"
+        }
+      ]
+    },
+    "MCPApprovalRequestItem": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "mcp_approval_request_item"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "mcp_approval_request_item"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        }
+      ]
+    },
+    "MCPApprovalResponseItem": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "mcp_approval_response_item"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "mcp_approval_response_item"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        }
+      ]
+    },
+    "MCPListToolsItem": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "mcp_list_tools_item"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "mcp_list_tools_item"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        }
+      ]
+    },
+    "MCPListToolsSpanData": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "server"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "result"
+        }
+      ]
+    },
+    "MCPToolApprovalRequest": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "ctx_wrapper"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "data"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx_wrapper"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "data"
+        }
+      ]
+    },
+    "MCPToolCancellationError": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        }
+      ]
+    },
+    "MaxTurnsExceeded": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        }
+      ]
+    },
+    "MessageOutputItem": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "message_output_item"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "message_output_item"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        }
+      ]
+    },
+    "Model": {
+      "dataclass_fields": [],
+      "parameters": []
+    },
+    "ModelBehaviorError": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        }
+      ]
+    },
+    "ModelProvider": {
+      "dataclass_fields": [],
+      "parameters": []
+    },
+    "ModelRefusalError": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "refusal"
+        }
+      ]
+    },
+    "ModelResponse": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "usage"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "response_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "request_id"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "usage"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "response_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "request_id"
+        }
+      ]
+    },
+    "ModelRetryAdvice": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "suggested"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "retry_after"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "replay_safety"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "reason"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "normalized"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "suggested"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "retry_after"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "replay_safety"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "reason"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "normalized"
+        }
+      ]
+    },
+    "ModelRetryAdviceRequest": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "error"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "attempt"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "stream"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "previous_response_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "conversation_id"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "error"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "attempt"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "stream"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "previous_response_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "conversation_id"
+        }
+      ]
+    },
+    "ModelRetryBackoffSettings": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "typed",
+            "type": "pydantic.fields.FieldInfo"
+          },
+          "init": true,
+          "name": "initial_delay"
+        },
+        {
+          "default": {
+            "kind": "typed",
+            "type": "pydantic.fields.FieldInfo"
+          },
+          "init": true,
+          "name": "max_delay"
+        },
+        {
+          "default": {
+            "kind": "typed",
+            "type": "pydantic.fields.FieldInfo"
+          },
+          "init": true,
+          "name": "multiplier"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "jitter"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "initial_delay"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "max_delay"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "multiplier"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "jitter"
+        }
+      ]
+    },
+    "ModelRetryNormalizedError": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "status_code"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "error_code"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "request_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "retry_after"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "init": true,
+          "name": "is_abort"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "init": true,
+          "name": "is_network_error"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "init": true,
+          "name": "is_timeout"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "typed",
+            "type": "builtins.object"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "status_code"
+        },
+        {
+          "default": {
+            "kind": "typed",
+            "type": "builtins.object"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "error_code"
+        },
+        {
+          "default": {
+            "kind": "typed",
+            "type": "builtins.object"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "typed",
+            "type": "builtins.object"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "request_id"
+        },
+        {
+          "default": {
+            "kind": "typed",
+            "type": "builtins.object"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "retry_after"
+        },
+        {
+          "default": {
+            "kind": "typed",
+            "type": "builtins.object"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "is_abort"
+        },
+        {
+          "default": {
+            "kind": "typed",
+            "type": "builtins.object"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "is_network_error"
+        },
+        {
+          "default": {
+            "kind": "typed",
+            "type": "builtins.object"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "is_timeout"
         }
       ]
     },
@@ -1355,6 +4001,731 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "prompt_cache_options"
+        }
+      ]
+    },
+    "ModelTracing": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "VAR_POSITIONAL",
+          "name": "values"
+        }
+      ]
+    },
+    "MultiProvider": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "provider_map"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "openai_api_key"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "openai_base_url"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "openai_client"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "openai_organization"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "openai_project"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "openai_use_responses"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "openai_use_responses_websocket"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "openai_strict_feature_validation"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "openai_websocket_base_url"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "alias"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "openai_prefix_mode"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "error"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "unknown_prefix_mode"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "openai_agent_registration"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "openai_responses_websocket_options"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "openai_buffer_streamed_tool_calls"
+        }
+      ]
+    },
+    "OpenAIAgentRegistrationConfig": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "harness_id"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "harness_id"
+        }
+      ]
+    },
+    "OpenAIChatCompletionsModel": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "openai_client"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "should_replay_reasoning_content"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "strict_feature_validation"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "buffer_streamed_tool_calls"
+        }
+      ]
+    },
+    "OpenAIConversationsSession": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "conversation_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "openai_client"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "session_settings"
+        }
+      ]
+    },
+    "OpenAIProvider": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "api_key"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "base_url"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "websocket_base_url"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "openai_client"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "organization"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "project"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "use_responses"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "use_responses_websocket"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "strict_feature_validation"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "agent_registration"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "responses_websocket_options"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "buffer_streamed_tool_calls"
+        }
+      ]
+    },
+    "OpenAIResponsesCompactionAwareSession": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "VAR_POSITIONAL",
+          "name": "args"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "VAR_KEYWORD",
+          "name": "kwargs"
+        }
+      ]
+    },
+    "OpenAIResponsesCompactionSession": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "session_id"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "underlying_session"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "client"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "gpt-4.1"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "model"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "auto"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "compaction_mode"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "should_trigger_compaction"
+        }
+      ]
+    },
+    "OpenAIResponsesModel": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "openai_client"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "model_is_explicit"
+        }
+      ]
+    },
+    "OpenAIResponsesWSModel": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "openai_client"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "model_is_explicit"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "websocket_options"
+        }
+      ]
+    },
+    "OutputGuardrail": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "guardrail_function"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "name"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "guardrail_function"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        }
+      ]
+    },
+    "OutputGuardrailResult": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "guardrail"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent_output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "guardrail"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent_output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        }
+      ]
+    },
+    "OutputGuardrailTripwireTriggered": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "guardrail_result"
+        }
+      ]
+    },
+    "ProgrammaticToolCallingTool": {
+      "dataclass_fields": [],
+      "parameters": []
+    },
+    "RawResponsesStreamEvent": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "data"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "raw_response_event"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "data"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "raw_response_event"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        }
+      ]
+    },
+    "ReasoningItem": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "reasoning_item"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "reasoning_item"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        }
+      ]
+    },
+    "ResponseSpanData": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "response"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "usage"
+        }
+      ]
+    },
+    "ResponsesWebSocketSession": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "provider"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "run_config"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "provider"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "run_config"
         }
       ]
     },
@@ -1960,6 +5331,364 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "tool_input"
+        }
+      ]
+    },
+    "RunErrorData": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "new_items"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "history"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_responses"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "last_agent"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "new_items"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "history"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_responses"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "last_agent"
+        }
+      ]
+    },
+    "RunErrorDetails": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "new_items"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_responses"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "last_agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "context_wrapper"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "input_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output_guardrail_results"
+        },
+        {
+          "default": {
+            "factory": "builtins.list",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "tool_input_guardrail_results"
+        },
+        {
+          "default": {
+            "factory": "builtins.list",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "tool_output_guardrail_results"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "new_items"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_responses"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "last_agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "context_wrapper"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_input_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_output_guardrail_results"
+        }
+      ]
+    },
+    "RunErrorHandlerInput": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "error"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "run_data"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "error"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "run_data"
+        }
+      ]
+    },
+    "RunErrorHandlerResult": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "final_output"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "init": true,
+          "name": "include_in_history"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "final_output"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "include_in_history"
+        }
+      ]
+    },
+    "RunItemStreamEvent": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "run_item_stream_event"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "run_item_stream_event"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
         }
       ]
     },
@@ -2667,6 +6396,77 @@
         }
       ]
     },
+    "Runner": {
+      "dataclass_fields": [],
+      "parameters": []
+    },
+    "SQLiteSession": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "session_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": ":memory:"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "db_path"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "agent_sessions"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "sessions_table"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "agent_messages"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "messages_table"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "session_settings"
+        }
+      ]
+    },
+    "Session": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "VAR_POSITIONAL",
+          "name": "args"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "VAR_KEYWORD",
+          "name": "kwargs"
+        }
+      ]
+    },
+    "SessionABC": {
+      "dataclass_fields": [],
+      "parameters": []
+    },
     "SessionSettings": {
       "dataclass_fields": [
         {
@@ -2686,6 +6486,941 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "limit"
+        }
+      ]
+    },
+    "ShellActionRequest": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "commands"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "timeout_ms"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "max_output_length"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "commands"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "timeout_ms"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "max_output_length"
+        }
+      ]
+    },
+    "ShellCallData": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "call_id"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "action"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "status"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "raw"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "call_id"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "action"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "status"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw"
+        }
+      ]
+    },
+    "ShellCallOutcome": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "type"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "exit_code"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "exit_code"
+        }
+      ]
+    },
+    "ShellCommandOutput": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": ""
+          },
+          "init": true,
+          "name": "stdout"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": ""
+          },
+          "init": true,
+          "name": "stderr"
+        },
+        {
+          "default": {
+            "factory": "agents.tool.ShellCommandOutput.<lambda>",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "outcome"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "command"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "provider_data"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": ""
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "stdout"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": ""
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "stderr"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "outcome"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "command"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "provider_data"
+        }
+      ]
+    },
+    "ShellCommandRequest": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "ctx_wrapper"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "data"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx_wrapper"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "data"
+        }
+      ]
+    },
+    "ShellResult": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "max_output_length"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "provider_data"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "max_output_length"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "provider_data"
+        }
+      ]
+    },
+    "ShellTool": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "executor"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "shell"
+          },
+          "init": true,
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "init": true,
+          "name": "needs_approval"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "on_approval"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "environment"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "allowed_callers"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "executor"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "shell"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "needs_approval"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "on_approval"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "environment"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "allowed_callers"
+        }
+      ]
+    },
+    "Span": {
+      "dataclass_fields": [],
+      "parameters": []
+    },
+    "SpanData": {
+      "dataclass_fields": [],
+      "parameters": []
+    },
+    "SpeechGroupSpanData": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input"
+        }
+      ]
+    },
+    "SpeechSpanData": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "pcm"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output_format"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model_config"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "first_content_at"
+        }
+      ]
+    },
+    "TaskSpanData": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "usage"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "metadata"
+        }
+      ]
+    },
+    "ToolApprovalItem": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "tool_name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "tool_approval_item"
+          },
+          "init": true,
+          "name": "type"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "tool_namespace"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "tool_origin"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "tool_lookup_key"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "tool_approval_item"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_namespace"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_origin"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "_allow_bare_name_alias"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "tool_lookup_key"
+        }
+      ]
+    },
+    "ToolCallItem": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "tool_call_item"
+          },
+          "init": true,
+          "name": "type"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "description"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "title"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "tool_origin"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "tool_call_item"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "description"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "title"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_origin"
+        }
+      ]
+    },
+    "ToolCallOutputItem": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "tool_call_output_item"
+          },
+          "init": true,
+          "name": "type"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "tool_origin"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "custom_data"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "tool_call_output_item"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_origin"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "custom_data"
+        }
+      ]
+    },
+    "ToolErrorFormatterArgs": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "kind"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_type"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "call_id"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "default_message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "run_context"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "kind"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_type"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "call_id"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "default_message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "run_context"
         }
       ]
     },
@@ -2724,6 +7459,780 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "pre_approval_tool_input_guardrails"
+        }
+      ]
+    },
+    "ToolGuardrailFunctionOutput": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output_info"
+        },
+        {
+          "default": {
+            "factory": "agents.tool_guardrails.ToolGuardrailFunctionOutput.<lambda>",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "behavior"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output_info"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "behavior"
+        }
+      ]
+    },
+    "ToolInputGuardrail": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "guardrail_function"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "name"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "guardrail_function"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        }
+      ]
+    },
+    "ToolInputGuardrailData": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        }
+      ]
+    },
+    "ToolInputGuardrailResult": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "guardrail"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "guardrail"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        }
+      ]
+    },
+    "ToolInputGuardrailTripwireTriggered": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "guardrail"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        }
+      ]
+    },
+    "ToolOrigin": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "type"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "mcp_server_name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "agent_name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "agent_tool_name"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "mcp_server_name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent_name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent_tool_name"
+        }
+      ]
+    },
+    "ToolOriginType": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "VAR_POSITIONAL",
+          "name": "values"
+        }
+      ]
+    },
+    "ToolOutputFileContent": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": "file"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "type"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "file_data"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "file_url"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "file_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "filename"
+        }
+      ]
+    },
+    "ToolOutputGuardrail": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "guardrail_function"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "name"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "guardrail_function"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        }
+      ]
+    },
+    "ToolOutputGuardrailData": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        }
+      ]
+    },
+    "ToolOutputGuardrailResult": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "guardrail"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "guardrail"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        }
+      ]
+    },
+    "ToolOutputGuardrailTripwireTriggered": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "guardrail"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        }
+      ]
+    },
+    "ToolOutputImage": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": "image"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "type"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "image_url"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "file_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "detail"
+        }
+      ]
+    },
+    "ToolOutputText": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": "text"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "type"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "text"
+        }
+      ]
+    },
+    "ToolSearchCallItem": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "tool_search_call_item"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "tool_search_call_item"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        }
+      ]
+    },
+    "ToolSearchOutputItem": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "tool_search_output_item"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_item"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "tool_search_output_item"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        }
+      ]
+    },
+    "ToolSearchTool": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "description"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "execution"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "parameters"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "description"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "execution"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "parameters"
+        }
+      ]
+    },
+    "ToolTimeoutError": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "timeout_seconds"
+        }
+      ]
+    },
+    "ToolsToFinalOutputResult": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "is_final_output"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "final_output"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "is_final_output"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "final_output"
+        }
+      ]
+    },
+    "Trace": {
+      "dataclass_fields": [],
+      "parameters": []
+    },
+    "TracingProcessor": {
+      "dataclass_fields": [],
+      "parameters": []
+    },
+    "TranscriptionSpanData": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "pcm"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input_format"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model_config"
+        }
+      ]
+    },
+    "TurnSpanData": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "turn"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent_name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "usage"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "metadata"
         }
       ]
     },
@@ -2839,6 +8348,88 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "request_usage_entries"
+        }
+      ]
+    },
+    "UserError": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        }
+      ]
+    },
+    "WebSearchTool": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "user_location"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "filters"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "medium"
+          },
+          "init": true,
+          "name": "search_context_size"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "external_web_access"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "user_location"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "filters"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "medium"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "search_context_size"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "external_web_access"
         }
       ]
     }
