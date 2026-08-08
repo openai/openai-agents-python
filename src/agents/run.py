@@ -33,7 +33,8 @@ from .items import (
 )
 from .lifecycle import RunHooks
 from .logger import log_model_and_tool_action_warning, log_tool_action_warning, logger
-from .memory import Session
+from .memory import Session, is_openai_responses_compaction_aware_session
+from .memory.session import SessionInputCoverage
 from .result import RunResult, RunResultStreaming
 from .run_config import (
     DEFAULT_MAX_TURNS,
@@ -115,6 +116,7 @@ from .run_internal.session_persistence import (
     _session_get_items,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
+    prepare_input_with_session_and_metadata,
     reconcile_nested_history_owned_session_item_refs,
     resumed_turn_items,
     save_result_to_session,
@@ -541,6 +543,7 @@ class AgentRunner:
         # Track the most recent input batch we persisted so conversation-lock retries can rewind
         # exactly those items (and not the full history).
         last_saved_input_snapshot_for_rewind: list[TResponseInputItem] | None = None
+        input_coverage_for_compaction: SessionInputCoverage | None = None
 
         if is_resumed_state and run_state is not None:
             (
@@ -562,6 +565,9 @@ class AgentRunner:
             starting_input = run_state._original_input
             original_user_input = copy_input_items(run_state._original_input)
             prepared_input = normalize_resumed_input(original_user_input)
+            # A resumed run does not prepare its input from the session, so the window the
+            # original response saw is unknown. Auto compaction must preserve the store.
+            input_coverage_for_compaction = "transformed"
 
             context_wrapper = resolve_resumed_context(
                 run_state=run_state,
@@ -607,7 +613,8 @@ class AgentRunner:
                 (
                     prepared_input,
                     session_input_items_for_persistence,
-                ) = await prepare_input_with_session(
+                    prepared_input_coverage,
+                ) = await prepare_input_with_session_and_metadata(
                     raw_input,
                     session,
                     run_config.session_input_callback,
@@ -615,6 +622,14 @@ class AgentRunner:
                     reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                     wrapper=context_wrapper,
                 )
+                if session is not None and is_openai_responses_compaction_aware_session(session):
+                    input_coverage_for_compaction = prepared_input_coverage
+                    # Model input filters and sandbox preparation rewrite the effective input.
+                    if (
+                        run_config.call_model_input_filter is not None
+                        or run_config.sandbox is not None
+                    ):
+                        input_coverage_for_compaction = "transformed"
                 original_input_for_state = prepared_input
 
         # Check whether to enable OpenAI server-managed conversation
@@ -975,29 +990,24 @@ class AgentRunner:
                             original_input = turn_result.original_input
                             generated_items, turn_session_items = resumed_turn_items(turn_result)
                             session_items.extend(turn_session_items)
-                            if run_state is not None:
-                                if turn_result.nested_history_owned_items is not None:
-                                    run_state._nested_history_owned_session_item_refs = (
-                                        reconcile_nested_history_owned_session_item_refs(
-                                            session_items,
-                                            run_state._nested_history_owned_session_item_refs,
-                                            input_before_turn_rewrite,
-                                            turn_result.original_input,
-                                            turn_result.nested_history_owned_items,
-                                        )
+                            if turn_result.nested_history_owned_items is not None:
+                                run_state._nested_history_owned_session_item_refs = (
+                                    reconcile_nested_history_owned_session_item_refs(
+                                        session_items,
+                                        run_state._nested_history_owned_session_item_refs,
+                                        input_before_turn_rewrite,
+                                        turn_result.original_input,
+                                        turn_result.nested_history_owned_items,
                                     )
-                                update_run_state_after_resume(
-                                    run_state,
-                                    turn_result=turn_result,
-                                    generated_items=generated_items,
-                                    session_items=session_items,
                                 )
+                            update_run_state_after_resume(
+                                run_state,
+                                turn_result=turn_result,
+                                generated_items=generated_items,
+                                session_items=session_items,
+                            )
 
-                            if (
-                                session_persistence_enabled
-                                and turn_session_items
-                                and run_state is not None
-                            ):
+                            if session_persistence_enabled and turn_session_items:
                                 run_state._current_turn_persisted_item_count = (
                                     await save_resumed_turn_items(
                                         session=session,
@@ -1010,6 +1020,7 @@ class AgentRunner:
                                             run_state._reasoning_item_id_policy
                                         ),
                                         store=store_setting,
+                                        input_coverage=(input_coverage_for_compaction),
                                         wrapper=context_wrapper,
                                     )
                                 )
@@ -1126,6 +1137,7 @@ class AgentRunner:
                                         run_state,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
+                                        input_coverage=(input_coverage_for_compaction),
                                         wrapper=context_wrapper,
                                     )
                                 result._original_input = copy_input_items(original_input)
@@ -1453,6 +1465,11 @@ class AgentRunner:
                     tool_input_guardrail_results.extend(turn_result.tool_input_guardrail_results)
                     tool_output_guardrail_results.extend(turn_result.tool_output_guardrail_results)
 
+                    turn_input_coverage_for_compaction = (
+                        "transformed"
+                        if isinstance(turn_result.next_step, NextStepHandoff)
+                        else input_coverage_for_compaction
+                    )
                     items_to_save_turn = list(turn_session_items)
                     if not isinstance(turn_result.next_step, NextStepInterruption):
                         if session_persistence_enabled:
@@ -1504,6 +1521,7 @@ class AgentRunner:
                                             run_state._reasoning_item_id_policy
                                         ),
                                         store=store_setting,
+                                        input_coverage=(turn_input_coverage_for_compaction),
                                         wrapper=context_wrapper,
                                     )
                                     run_state._current_turn_persisted_item_count += saved_count
@@ -1515,6 +1533,7 @@ class AgentRunner:
                                         run_state,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
+                                        input_coverage=(turn_input_coverage_for_compaction),
                                         wrapper=context_wrapper,
                                     )
 
@@ -1542,6 +1561,7 @@ class AgentRunner:
                                     items=_retained_items_for_blocked_output(items_to_save_turn),
                                     response_id=turn_result.model_response.response_id,
                                     store=store_setting,
+                                    input_coverage=(turn_input_coverage_for_compaction),
                                     wrapper=context_wrapper,
                                 )
                                 raise
@@ -1556,6 +1576,7 @@ class AgentRunner:
                                     items=items_to_save_turn,
                                     response_id=turn_result.model_response.response_id,
                                     store=store_setting,
+                                    input_coverage=(turn_input_coverage_for_compaction),
                                     wrapper=context_wrapper,
                                 )
                                 raise
@@ -1568,6 +1589,7 @@ class AgentRunner:
                                 items=items_to_save_turn,
                                 response_id=turn_result.model_response.response_id,
                                 store=store_setting,
+                                input_coverage=(turn_input_coverage_for_compaction),
                                 wrapper=context_wrapper,
                             )
 
@@ -1617,6 +1639,7 @@ class AgentRunner:
                                         run_state,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
+                                        input_coverage=(turn_input_coverage_for_compaction),
                                         wrapper=context_wrapper,
                                     )
                             append_model_response_if_new(
@@ -1667,6 +1690,7 @@ class AgentRunner:
                             # Assign without type annotation to avoid redefinition error
                             starting_input = turn_result.original_input
                             original_input = turn_result.original_input
+                            input_coverage_for_compaction = "transformed"
                             current_span.finish(reset_current=True)
                             current_span = None
                             should_run_agent_start_hooks = True
@@ -1679,6 +1703,7 @@ class AgentRunner:
                                 items=session_items_for_turn(turn_result),
                                 response_id=turn_result.model_response.response_id,
                                 store=store_setting,
+                                input_coverage=(turn_input_coverage_for_compaction),
                                 wrapper=context_wrapper,
                             )
                             continue

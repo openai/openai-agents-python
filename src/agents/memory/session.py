@@ -106,6 +106,10 @@ class SessionABC(ABC):
         ...
 
 
+SessionInputCoverage = Literal["full", "limit_only", "transformed"]
+"""How a turn's prepared model input related to the full stored session history."""
+
+
 class OpenAIResponsesCompactionArgs(TypedDict, total=False):
     """Arguments for the run_compaction method."""
 
@@ -115,7 +119,9 @@ class OpenAIResponsesCompactionArgs(TypedDict, total=False):
     compaction_mode: Literal["previous_response_id", "input", "auto"]
     """How to provide history for compaction.
 
-    - "auto": Use input when the last response was not stored or no response ID is available.
+    - "auto": Use a response ID only when its input covered stored history; rebuild from the
+      full stored history when only a session limit truncated the input; skip compaction when
+      the input was transformed.
     - "previous_response_id": Use server-managed response history.
     - "input": Send locally stored session items as input.
     """
@@ -128,6 +134,29 @@ class OpenAIResponsesCompactionArgs(TypedDict, total=False):
 
     force: bool
     """Whether to force compaction even if the threshold is not met."""
+
+    input_coverage: SessionInputCoverage
+    """How this response's model input related to the full stored history.
+
+    - "full": The input included every stored item, so the response chain is a safe compaction
+      source.
+    - "limit_only": Only ``SessionSettings.limit`` truncated the input, so auto mode may rebuild
+      the compaction request from the full stored history.
+    - "transformed": A session input callback, model input filter, handoff rewrite, or resumed
+      run changed or hid the effective input, so auto mode skips compaction and preserves the
+      store.
+
+    Auto mode infers "full" or "limit_only" from the session when this key is omitted. A later
+    manual call that reuses the same processed response ID also reuses the recorded value unless
+    this key overrides it.
+    """
+
+    reasoning_item_id_policy: Literal["preserve", "omit"] | None
+    """How the run rewrites reasoning item IDs when replaying stored history.
+
+    A later manual call that reuses the same processed response ID also reuses this policy unless
+    this key overrides it.
+    """
 
 
 @runtime_checkable

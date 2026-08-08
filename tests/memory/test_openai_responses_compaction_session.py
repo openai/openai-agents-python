@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import warnings as warnings_module
 from types import SimpleNamespace
@@ -7,10 +8,11 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from openai.types.responses import ResponseOutputMessage
 
 import agents._debug as _debug
-from agents import Agent, Runner
-from agents.items import TResponseInputItem
+from agents import Agent, RunConfig, Runner, function_tool
+from agents.items import MessageOutputItem, RunItem, ToolCallOutputItem, TResponseInputItem
 from agents.memory import (
     OpenAIResponsesCompactionSession,
     Session,
@@ -23,12 +25,22 @@ from agents.memory.openai_responses_compaction_session import (
     is_openai_model_name,
     select_compaction_candidate_items,
 )
+from agents.run_config import SandboxRunConfig
 from agents.run_internal.items import (
     TOOL_CALL_SESSION_DESCRIPTION_KEY,
     TOOL_CALL_SESSION_TITLE_KEY,
 )
+from agents.run_internal.session_persistence import (
+    resolve_session_history_limit,
+    save_result_to_session,
+)
 from tests.fake_model import FakeModel
-from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
+from tests.test_responses import (
+    get_function_tool,
+    get_function_tool_call,
+    get_handoff_tool_call,
+    get_text_message,
+)
 from tests.utils.simple_session import SimpleListSession
 
 
@@ -95,6 +107,36 @@ class TestOpenAIResponsesCompactionSession:
         mock.pop_item = AsyncMock(return_value=None)
         mock.clear_session = AsyncMock()
         return mock
+
+    def assistant_history(self, count: int) -> list[TResponseInputItem]:
+        return [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": f"item-{i}"},
+            )
+            for i in range(count)
+        ]
+
+    def message_run_items(self, agent: Agent[Any], count: int = 1) -> list[RunItem]:
+        return [
+            MessageOutputItem(
+                agent=agent,
+                raw_item=cast(ResponseOutputMessage, get_text_message(f"new-{i}")),
+            )
+            for i in range(count)
+        ]
+
+    def tool_output_run_items(self, agent: Agent[Any]) -> list[RunItem]:
+        return [
+            ToolCallOutputItem(
+                agent=agent,
+                raw_item=cast(
+                    Any,
+                    {"type": "function_call_output", "call_id": "call-1", "output": "done"},
+                ),
+                output="done",
+            )
+        ]
 
     def test_init_validates_model(self) -> None:
         mock_session = self.create_mock_session()
@@ -390,7 +432,6 @@ class TestOpenAIResponsesCompactionSession:
 
     @pytest.mark.asyncio
     async def test_run_compaction_auto_uses_input_when_last_response_unstored(self) -> None:
-        mock_session = self.create_mock_session()
         items: list[TResponseInputItem] = [
             cast(TResponseInputItem, {"type": "message", "role": "user", "content": "hello"}),
             cast(
@@ -398,7 +439,7 @@ class TestOpenAIResponsesCompactionSession:
                 {"type": "message", "role": "assistant", "content": "world"},
             ),
         ]
-        mock_session.get_items.return_value = items
+        underlying = SimpleListSession(history=items)
 
         mock_compact_response = MagicMock()
         mock_compact_response.output = [
@@ -414,7 +455,7 @@ class TestOpenAIResponsesCompactionSession:
 
         session = OpenAIResponsesCompactionSession(
             session_id="test",
-            underlying_session=mock_session,
+            underlying_session=underlying,
             client=mock_client,
             compaction_mode="auto",
         )
@@ -604,6 +645,351 @@ class TestOpenAIResponsesCompactionSession:
         assert await failing_session.get_items(limit=10) == history
         assert failing_session.clear_calls == 2
         assert failing_session.add_calls == 2
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_compacts_full_history_when_session_limit_applies(
+        self,
+    ) -> None:
+        """Compaction must summarize the full stored history, not the limited read window."""
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": f"item-{i}"})
+            for i in range(6)
+        ]
+        compacted_items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "compacted"},
+            )
+        ]
+
+        class LimitedSession(SimpleListSession):
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.session_settings = SessionSettings(limit=2)
+
+            async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+                if limit is None and self.session_settings is not None:
+                    limit = self.session_settings.limit
+                return await super().get_items(limit)
+
+        underlying = LimitedSession(history=history)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = compacted_items
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        await session.run_compaction({"force": True})
+
+        mock_client.responses.compact.assert_called_once()
+        call_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert call_kwargs.get("input") == history
+        assert await underlying.get_items(limit=10) == compacted_items
+
+    @pytest.mark.asyncio
+    async def test_decision_hook_counts_full_history_when_session_limit_applies(self) -> None:
+        """The decision hook counts candidate items, so a backend limit must not hide them."""
+        history: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": f"item-{i}"},
+            )
+            for i in range(DEFAULT_COMPACTION_THRESHOLD + 2)
+        ]
+
+        class LimitedSession(SimpleListSession):
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.session_settings = SessionSettings(limit=2)
+
+            async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+                if limit is None and self.session_settings is not None:
+                    limit = self.session_settings.limit
+                return await super().get_items(limit)
+
+        underlying = LimitedSession(history=history)
+        observed: dict[str, int] = {}
+
+        def should_trigger_compaction(context: dict[str, Any]) -> bool:
+            observed["candidates"] = len(context["compaction_candidate_items"])
+            observed["session_items"] = len(context["session_items"])
+            return False
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=MagicMock(),
+            compaction_mode="input",
+            should_trigger_compaction=should_trigger_compaction,
+        )
+
+        await session.run_compaction()
+
+        assert observed["session_items"] == len(history)
+        assert observed["candidates"] >= DEFAULT_COMPACTION_THRESHOLD
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_auto_falls_back_to_input_when_history_truncated(
+        self,
+    ) -> None:
+        history = self.assistant_history(DEFAULT_COMPACTION_THRESHOLD + 2)
+
+        class LimitedSession(SimpleListSession):
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.session_settings = SessionSettings(limit=3)
+
+            async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+                if limit is None and self.session_settings is not None:
+                    limit = self.session_settings.limit
+                return await super().get_items(limit)
+
+        underlying = LimitedSession(history=history)
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "message", "role": "assistant", "content": "summary"}
+        ]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="auto",
+        )
+
+        await session.run_compaction({"response_id": "resp-limited", "store": True})
+
+        mock_client.responses.compact.assert_called_once()
+        compact_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in compact_kwargs
+        assert compact_kwargs["input"] == history
+
+    def test_history_limit_ignores_an_unrelated_delegate_attribute(self) -> None:
+        """Only the compaction wrapper delegates its window; a lookalike attribute must not."""
+
+        class Delegate(SimpleListSession):
+            def __init__(self) -> None:
+                super().__init__(history=[])
+                self.session_settings = SessionSettings(limit=3)
+
+        class LookalikeSession(SimpleListSession):
+            def __init__(self) -> None:
+                super().__init__(history=[])
+                self.underlying_session = Delegate()
+
+        assert resolve_session_history_limit(LookalikeSession(), None) is None
+
+        wrapper = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=Delegate(),
+            client=MagicMock(),
+        )
+        assert resolve_session_history_limit(wrapper, None) == 3
+
+        wrapper.session_settings = SessionSettings(limit=7)
+        assert resolve_session_history_limit(wrapper, None) == 7
+        wrapper.underlying_session.session_settings = SessionSettings(limit=11)
+        assert resolve_session_history_limit(wrapper, None) == 11
+
+    @pytest.mark.asyncio
+    async def test_a_read_that_exactly_fills_the_window_is_not_treated_as_covered(self) -> None:
+        """Compaction falls back to local input when the window is exactly full."""
+        history = self.assistant_history(3)
+        underlying = SimpleListSession(history=history)
+        underlying.session_settings = SessionSettings(limit=len(history))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+        )
+
+        await session.run_compaction({"response_id": "resp-exact", "force": True})
+
+        compact_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in compact_kwargs
+        assert "input" in compact_kwargs
+
+    @pytest.mark.asyncio
+    async def test_unknown_coverage_is_never_published_as_covered(self) -> None:
+        """An attempt that never proved coverage must not let a later call reuse the id."""
+        underlying = SimpleListSession(history=self.assistant_history(12))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        # Explicit input mode never resolves coverage, so it stays unknown.
+        await session.run_compaction({"response_id": "resp-unknown", "force": True})
+
+        context = session._last_processed_response_context
+        assert context is not None
+        assert context["input_coverage"] == "transformed"
+
+    @pytest.mark.asyncio
+    async def test_compaction_honors_underlying_session_limit(self) -> None:
+        history = self.assistant_history(DEFAULT_COMPACTION_THRESHOLD + 2)
+
+        class LimitedSession(SimpleListSession):
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.session_settings = SessionSettings(limit=3)
+
+            async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+                if limit is None and self.session_settings is not None:
+                    limit = self.session_settings.limit
+                return await super().get_items(limit)
+
+        underlying = LimitedSession(history=history)
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "message", "role": "assistant", "content": "summary"}
+        ]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _context: True,
+        )
+        agent = Agent(name="assistant", model=FakeModel())
+
+        await save_result_to_session(
+            session,
+            [],
+            self.message_run_items(agent),
+            None,
+            response_id="resp-underlying-limited",
+            store=True,
+            input_coverage="limit_only",
+        )
+
+        mock_client.responses.compact.assert_called_once()
+        compact_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in compact_kwargs
+        assert len(compact_kwargs["input"]) >= len(history)
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_keeps_response_id_attempt_local(self) -> None:
+        history = self.assistant_history(DEFAULT_COMPACTION_THRESHOLD + 2)
+        underlying = SimpleListSession(history=history)
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "message", "role": "assistant", "content": "summary"}
+        ]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+        )
+
+        first_call_parked = asyncio.Event()
+        release_first_call = asyncio.Event()
+        real_ensure = session._ensure_compaction_candidates
+        gate = {"parked": False}
+
+        async def gated_ensure() -> Any:
+            if not gate["parked"]:
+                gate["parked"] = True
+                first_call_parked.set()
+                await release_first_call.wait()
+            return await real_ensure()
+
+        session._ensure_compaction_candidates = gated_ensure  # type: ignore[method-assign]
+
+        first_task = asyncio.create_task(
+            session.run_compaction(
+                {
+                    "response_id": "resp-covered",
+                    "force": True,
+                    "input_coverage": "full",
+                }
+            )
+        )
+        await first_call_parked.wait()
+
+        await session.run_compaction({"force": True})
+        release_first_call.set()
+        await first_task
+
+        calls = mock_client.responses.compact.call_args_list
+        input_calls = [call for call in calls if "input" in call.kwargs]
+        previous_ids = [
+            call.kwargs["previous_response_id"]
+            for call in calls
+            if "previous_response_id" in call.kwargs
+        ]
+        assert len(input_calls) == 1
+        assert len(input_calls[0].kwargs["input"]) == len(history)
+        assert previous_ids == ["resp-covered"]
+
+    @pytest.mark.asyncio
+    async def test_compaction_reload_candidates_after_interleaved_add_during_replace(
+        self,
+    ) -> None:
+        history = self.assistant_history(DEFAULT_COMPACTION_THRESHOLD + 2)
+        interleaved_item = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "B-NEW"},
+        )
+        underlying = SimpleListSession(history=history)
+        compacted = [
+            SimpleNamespace(
+                output=[{"type": "message", "role": "assistant", "content": "summary-1"}]
+            ),
+            SimpleNamespace(
+                output=[{"type": "message", "role": "assistant", "content": "summary-2"}]
+            ),
+        ]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(side_effect=compacted)
+
+        class InterleavingCompactionSession(OpenAIResponsesCompactionSession):
+            async def _replace_underlying_session_items(
+                self,
+                *,
+                output_items: list[TResponseInputItem],
+                previous_items: list[TResponseInputItem],
+            ) -> None:
+                await super()._replace_underlying_session_items(
+                    output_items=output_items,
+                    previous_items=previous_items,
+                )
+                await self.underlying_session.add_items([interleaved_item])
+
+        session = InterleavingCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        await session.run_compaction({"force": True})
+        await session.run_compaction({"force": True})
+
+        second_input = mock_client.responses.compact.call_args_list[1].kwargs["input"]
+        assert interleaved_item in second_input
 
     @pytest.mark.asyncio
     async def test_run_compaction_does_not_restore_when_clear_fails_without_mutation(
@@ -1055,6 +1441,1039 @@ class TestOpenAIResponsesCompactionSession:
         mock_client.responses.compact.assert_awaited_once()
         items = await session.get_items()
         assert any(isinstance(item, dict) and item.get("type") == "compaction" for item in items)
+
+    @pytest.mark.asyncio
+    async def test_runner_compaction_reuses_previous_response_id_when_pre_save_history_fits(
+        self,
+    ) -> None:
+        underlying = SimpleListSession(history=self.assistant_history(5))
+        compacted = SimpleNamespace(
+            output=[{"type": "compaction", "encrypted_content": "enc"}],
+        )
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=compacted)
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+        model = FakeModel(initial_output=[get_text_message("ok")])
+        agent = Agent(name="assistant", model=model)
+
+        await Runner.run(
+            agent,
+            "hello",
+            session=session,
+            run_config=RunConfig(session_settings=SessionSettings(limit=6)),
+        )
+
+        mock_client.responses.compact.assert_awaited_once()
+        compact_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert compact_kwargs.get("previous_response_id") == "resp-789"
+        assert "input" not in compact_kwargs
+
+    @pytest.mark.asyncio
+    async def test_runner_compaction_callback_filtered_history_skips_auto_compaction(
+        self,
+    ) -> None:
+        """A callback-excluded sentinel must never reach responses.compact or compacted state."""
+        sentinel = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "sentinel-not-for-the-model"},
+        )
+        history = [*self.assistant_history(5), sentinel]
+        underlying = SimpleListSession(history=history)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(
+                output=[{"type": "compaction", "encrypted_content": "enc"}]
+            )
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+        model = FakeModel(initial_output=[get_text_message("ok")])
+        agent = Agent(name="assistant", model=model)
+
+        await Runner.run(
+            agent,
+            "hello",
+            session=session,
+            run_config=RunConfig(session_input_callback=lambda _history, new_items: new_items),
+        )
+
+        mock_client.responses.compact.assert_not_awaited()
+        stored = await underlying.get_items()
+        assert sentinel in stored
+
+    @pytest.mark.asyncio
+    async def test_runner_compaction_call_model_filter_skips_auto_compaction(
+        self,
+    ) -> None:
+        """A filter-excluded sentinel must never reach responses.compact or compacted state."""
+        sentinel = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "sentinel-not-for-the-model"},
+        )
+        history = [*self.assistant_history(5), sentinel]
+        underlying = SimpleListSession(history=history)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(
+                output=[{"type": "compaction", "encrypted_content": "enc"}]
+            )
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+        model = FakeModel(initial_output=[get_text_message("ok")])
+        agent = Agent(name="assistant", model=model)
+
+        def drop_history(data: Any) -> Any:
+            data.model_data.input = data.model_data.input[-1:]
+            return data.model_data
+
+        await Runner.run(
+            agent,
+            "hello",
+            session=session,
+            run_config=RunConfig(call_model_input_filter=drop_history),
+        )
+
+        mock_client.responses.compact.assert_not_awaited()
+        stored = await underlying.get_items()
+        assert sentinel in stored
+
+    @pytest.mark.asyncio
+    async def test_runner_handoff_turn_skips_auto_compaction(self) -> None:
+        """A handoff rewrites the effective input, so auto compaction preserves the store."""
+        history = self.assistant_history(5)
+        underlying = SimpleListSession(history=list(history))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(
+                output=[{"type": "compaction", "encrypted_content": "enc"}]
+            )
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+        model = FakeModel()
+        specialist = Agent(name="specialist", model=model)
+        triage = Agent(name="triage", model=model, handoffs=[specialist])
+        model.add_multiple_turn_outputs(
+            [
+                [get_handoff_tool_call(specialist)],
+                [get_text_message("done")],
+            ]
+        )
+
+        result = await Runner.run(triage, "hello", session=session)
+
+        assert result.final_output == "done"
+        mock_client.responses.compact.assert_not_awaited()
+        stored = await underlying.get_items()
+        for item in history:
+            assert item in stored
+
+    @pytest.mark.asyncio
+    async def test_transformed_input_skips_auto_compaction_even_when_forced(self) -> None:
+        """The skip is a safety decision, so force must not override it."""
+        history = self.assistant_history(12)
+        underlying = SimpleListSession(history=list(history))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+        )
+
+        await session.run_compaction(
+            {"response_id": "resp-transformed", "input_coverage": "transformed", "force": True}
+        )
+
+        mock_client.responses.compact.assert_not_awaited()
+        assert await underlying.get_items() == history
+
+    @pytest.mark.asyncio
+    async def test_runner_sandbox_config_skips_auto_compaction(self) -> None:
+        """Sandbox preparation may rewrite the model input, so auto compaction preserves."""
+        history = self.assistant_history(5)
+        underlying = SimpleListSession(history=list(history))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "encrypted_content": "e"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+        model = FakeModel(initial_output=[get_text_message("ok")])
+        agent = Agent(name="assistant", model=model)
+
+        await Runner.run(
+            agent,
+            "hello",
+            session=session,
+            run_config=RunConfig(sandbox=SandboxRunConfig()),
+        )
+
+        mock_client.responses.compact.assert_not_awaited()
+        stored = await underlying.get_items()
+        for item in history:
+            assert item in stored
+
+    @pytest.mark.asyncio
+    async def test_runner_compaction_underlying_limit_falls_back_to_input(
+        self,
+    ) -> None:
+        history = self.assistant_history(DEFAULT_COMPACTION_THRESHOLD + 2)
+
+        class LimitedSession(SimpleListSession):
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.session_settings = SessionSettings(limit=3)
+
+            async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+                if limit is None and self.session_settings is not None:
+                    limit = self.session_settings.limit
+                return await super().get_items(limit)
+
+        underlying = LimitedSession(history=history)
+        compacted = SimpleNamespace(
+            output=[{"type": "compaction", "encrypted_content": "enc"}],
+        )
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=compacted)
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+        model = FakeModel(initial_output=[get_text_message("ok")])
+        agent = Agent(name="assistant", model=model)
+
+        await Runner.run(agent, "hello", session=session)
+
+        mock_client.responses.compact.assert_awaited_once()
+        compact_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in compact_kwargs
+        assert len(compact_kwargs["input"]) >= len(history)
+
+    @pytest.mark.asyncio
+    async def test_runner_does_not_probe_non_compaction_session_above_limit(self) -> None:
+        class StrictLimitSession(SimpleListSession):
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.requested_limits: list[int | None] = []
+
+            async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+                self.requested_limits.append(limit)
+                if limit is not None and limit > 100:
+                    raise RuntimeError(f"limit too high: {limit}")
+                return await super().get_items(limit)
+
+        session = StrictLimitSession(history=self.assistant_history(5))
+        model = FakeModel(initial_output=[get_text_message("ok")])
+        agent = Agent(name="assistant", model=model)
+
+        await Runner.run(
+            agent,
+            "hello",
+            session=session,
+            run_config=RunConfig(session_settings=SessionSettings(limit=100)),
+        )
+
+        assert 101 not in session.requested_limits
+
+    @pytest.mark.asyncio
+    async def test_runner_resumed_compaction_skips_and_preserves_the_store(self) -> None:
+        """A resumed run's original input window is unknown, so auto compaction must not act."""
+
+        async def approval_tool() -> str:
+            return "tool_result"
+
+        tool = function_tool(approval_tool, name_override="approval_tool", needs_approval=True)
+        history = self.assistant_history(5)
+        underlying = SimpleListSession(history=history)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(
+                output=[{"type": "compaction", "encrypted_content": "enc"}]
+            )
+        )
+        trigger = {"enabled": False}
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: trigger["enabled"],
+        )
+        model = FakeModel()
+        model.add_multiple_turn_outputs(
+            [
+                [get_function_tool_call("approval_tool", "{}", call_id="call-resume")],
+                [get_text_message("done")],
+            ]
+        )
+        agent = Agent(name="assistant", model=model, tools=[tool])
+
+        first = await Runner.run(agent, "hello", session=session)
+        assert first.interruptions
+        state = first.to_state()
+        state.approve(first.interruptions[0])
+
+        # Arm the hook only for the resumed run so the assertion isolates resume behavior.
+        trigger["enabled"] = True
+        resumed = await Runner.run(agent, state, session=session)
+
+        assert resumed.final_output == "done"
+        mock_client.responses.compact.assert_not_awaited()
+        stored = await underlying.get_items()
+        for item in history:
+            assert item in stored
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "call_type",
+        ["function_call", "custom_tool_call", "shell_call", "apply_patch_call"],
+    )
+    async def test_auto_input_fallback_defers_with_pending_tool_call(self, call_type: str) -> None:
+        """Do not replace history while an approval call is waiting for its output."""
+        pending_call = cast(
+            TResponseInputItem,
+            {
+                "type": call_type,
+                "call_id": "call-pending",
+            },
+        )
+        underlying = SimpleListSession(
+            history=self.assistant_history(3) + [pending_call],
+        )
+        underlying.session_settings = SessionSettings(limit=4)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+
+        await session.run_compaction({"response_id": "resp-pending"})
+
+        mock_client.responses.compact.assert_not_called()
+        assert await underlying.get_items() == self.assistant_history(3) + [pending_call]
+
+    @pytest.mark.asyncio
+    async def test_auto_input_fallback_defers_with_pending_anonymous_tool_search(self) -> None:
+        """An anonymous tool_search call without its output must defer, not be replaced."""
+        pending_search = cast(TResponseInputItem, {"type": "tool_search_call"})
+        history = self.assistant_history(3) + [pending_search]
+        underlying = SimpleListSession(history=list(history))
+        underlying.session_settings = SessionSettings(limit=4)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+
+        await session.run_compaction({"response_id": "resp-search"})
+
+        mock_client.responses.compact.assert_not_called()
+        assert await underlying.get_items() == history
+
+    @pytest.mark.asyncio
+    async def test_auto_input_fallback_compacts_with_matched_anonymous_tool_search(self) -> None:
+        """A positionally matched anonymous tool_search pair is not pending."""
+        matched_pair = [
+            cast(TResponseInputItem, {"type": "tool_search_call"}),
+            cast(TResponseInputItem, {"type": "tool_search_output", "output": "found"}),
+        ]
+        underlying = SimpleListSession(history=self.assistant_history(3) + matched_pair)
+        underlying.session_settings = SessionSettings(limit=4)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+
+        await session.run_compaction({"response_id": "resp-search"})
+
+        mock_client.responses.compact.assert_awaited_once()
+        assert "input" in mock_client.responses.compact.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_transformed_tool_output_turn_supersedes_an_older_covered_context(self) -> None:
+        """A transformed deferring turn must not leave an older covered context reusable."""
+        underlying = SimpleListSession(history=self.assistant_history(2))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: False,
+        )
+
+        # Attempt 1 declines and publishes covered context for resp-1.
+        await session.run_compaction({"response_id": "resp-1", "input_coverage": "full"})
+
+        # A transformed tool-output turn defers through the runner save path.
+        agent = Agent(name="assistant", model=FakeModel())
+        await save_result_to_session(
+            session,
+            [],
+            self.tool_output_run_items(agent),
+            None,
+            response_id="resp-2",
+            store=True,
+            input_coverage="transformed",
+        )
+
+        await session.run_compaction({"force": True})
+
+        # The manual force resolves from resp-2's transformed context: it rebuilds from
+        # the full store instead of reusing resp-1's chain.
+        retry_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in retry_kwargs
+        assert "input" in retry_kwargs
+
+    @pytest.mark.asyncio
+    async def test_store_false_auto_input_is_sanitized_under_a_limit(self) -> None:
+        """The auto store=False resolution replays stored history, so it must sanitize."""
+        stale = cast(TResponseInputItem, {"type": "reasoning", "id": "rs_stale", "summary": []})
+        underlying = SimpleListSession(history=[stale, *self.assistant_history(11)])
+        underlying.session_settings = SessionSettings(limit=2)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+        )
+
+        await session.run_compaction(
+            {
+                "response_id": "resp-unstored",
+                "store": False,
+                "force": True,
+                "reasoning_item_id_policy": "omit",
+            }
+        )
+
+        sent = mock_client.responses.compact.call_args.kwargs["input"]
+        reasoning = [item for item in sent if item.get("type") == "reasoning"]
+        assert reasoning == [{"type": "reasoning", "summary": []}]
+
+    @pytest.mark.asyncio
+    async def test_store_false_auto_input_defers_with_pending_tool_call(self) -> None:
+        """The sanitized store=False path inherits the pending-call deferral."""
+        pending_call = cast(
+            TResponseInputItem, {"type": "function_call", "call_id": "call-pending"}
+        )
+        history = self.assistant_history(3) + [pending_call]
+        underlying = SimpleListSession(history=list(history))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+
+        await session.run_compaction({"response_id": "resp-unstored", "store": False})
+
+        mock_client.responses.compact.assert_not_called()
+        assert await underlying.get_items() == history
+
+    @pytest.mark.asyncio
+    async def test_store_false_deferral_supersedes_an_older_covered_context(self) -> None:
+        """A manual store=False deferral must not leave an older covered context reusable."""
+        underlying = SimpleListSession(history=self.assistant_history(2))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+
+        # Attempt 1 completes and publishes covered context for resp-1.
+        await session.run_compaction({"response_id": "resp-1", "input_coverage": "full"})
+        mock_client.responses.compact.reset_mock()
+
+        pending_call = cast(
+            TResponseInputItem, {"type": "function_call", "call_id": "call-pending"}
+        )
+        await session.add_items(self.assistant_history(3) + [pending_call])
+
+        # A manual store=False attempt defers on the pending call without metadata.
+        await session.run_compaction({"response_id": "resp-2", "store": False})
+        mock_client.responses.compact.assert_not_called()
+
+        await session.run_compaction({"force": True})
+
+        # The force resolves from resp-2's deferral context, never resp-1's chain: it
+        # re-defers on the still-pending call instead of compacting.
+        mock_client.responses.compact.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_forced_compaction_is_remembered_when_a_pending_call_defers_it(self) -> None:
+        """A manual force blocked by a pending call must arm the deferral, not vanish."""
+        pending_call = cast(
+            TResponseInputItem, {"type": "function_call", "call_id": "call-pending"}
+        )
+        underlying = SimpleListSession(history=self.assistant_history(3) + [pending_call])
+        underlying.session_settings = SessionSettings(limit=4)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: False,
+        )
+
+        await session.run_compaction({"response_id": "resp-forced", "force": True})
+
+        mock_client.responses.compact.assert_not_called()
+        assert session._get_deferred_compaction_response_id() == "resp-forced"
+
+    @pytest.mark.asyncio
+    async def test_covered_tool_output_deferral_forces_input_rebuild(self) -> None:
+        """A deferring turn's tool outputs are not on its response chain, so no reuse."""
+        underlying = SimpleListSession(history=self.assistant_history(2))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+        agent = Agent(name="assistant", model=FakeModel())
+
+        await save_result_to_session(
+            session,
+            [],
+            self.tool_output_run_items(agent),
+            None,
+            response_id="resp-2",
+            store=True,
+            input_coverage="full",
+        )
+        mock_client.responses.compact.assert_not_called()
+
+        await session.run_compaction({"force": True})
+
+        retry_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in retry_kwargs
+        assert any(
+            isinstance(item, dict) and item.get("type") == "function_call_output"
+            for item in retry_kwargs["input"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_pending_call_deferral_publishes_its_coverage(self) -> None:
+        """A manual force after a deferral must not reuse an older covered context."""
+        underlying = SimpleListSession(history=self.assistant_history(2))
+        underlying.session_settings = SessionSettings(limit=4)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: False,
+        )
+
+        # Attempt 1 declines below the limit and publishes covered context for resp-1.
+        await session.run_compaction({"response_id": "resp-1", "input_coverage": "full"})
+
+        pending_call = cast(
+            TResponseInputItem, {"type": "function_call", "call_id": "call-pending"}
+        )
+        await session.add_items(self.assistant_history(3) + [pending_call])
+        stored_before = await underlying.get_items(limit=100)
+
+        # Attempt 2 hits the limit-only fallback but defers on the pending call.
+        await session.run_compaction({"response_id": "resp-2"})
+        mock_client.responses.compact.assert_not_called()
+
+        # The manual force must resolve from resp-2's deferral, not resp-1's coverage.
+        await session.run_compaction({"force": True})
+
+        mock_client.responses.compact.assert_not_called()
+        assert await underlying.get_items(limit=100) == stored_before
+
+    @pytest.mark.asyncio
+    async def test_legacy_compaction_aware_session_receives_legacy_args(self) -> None:
+        """Third-party compaction-aware sessions must not receive the new metadata keys."""
+        received_args: list[dict[str, Any]] = []
+        deferred_calls: list[tuple[str, bool | None]] = []
+
+        class LegacyCompactionSession(SimpleListSession):
+            async def run_compaction(self, args: dict[str, Any] | None = None) -> None:
+                received_args.append(dict(args or {}))
+
+            async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
+                deferred_calls.append((response_id, store))
+
+        session = LegacyCompactionSession()
+        assert is_openai_responses_compaction_aware_session(session)
+        agent = Agent(name="assistant", model=FakeModel())
+
+        await save_result_to_session(
+            session,
+            [],
+            self.message_run_items(agent),
+            None,
+            response_id="resp-legacy",
+            store=True,
+            input_coverage="limit_only",
+        )
+
+        assert received_args == [{"response_id": "resp-legacy", "force": False, "store": True}]
+
+        # A tool-output turn defers through the released v0.19.4 call shape.
+        await save_result_to_session(
+            session,
+            [],
+            self.tool_output_run_items(agent),
+            None,
+            response_id="resp-legacy-defer",
+            store=True,
+            input_coverage="limit_only",
+        )
+
+        assert deferred_calls == [("resp-legacy-defer", True)]
+
+    @pytest.mark.asyncio
+    async def test_resumed_compaction_skips_on_a_fresh_wrapper(self) -> None:
+        """A wrapper built only for the resumed run has no memory of the original window."""
+        history = self.assistant_history(DEFAULT_COMPACTION_THRESHOLD + 2)
+        trigger = {"enabled": False}
+
+        def build_session(underlying: SimpleListSession, client: MagicMock) -> Any:
+            return OpenAIResponsesCompactionSession(
+                session_id="demo",
+                underlying_session=underlying,
+                client=client,
+                should_trigger_compaction=lambda _ctx: trigger["enabled"],
+            )
+
+        underlying = SimpleListSession(history=history)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+
+        async def approval_tool() -> str:
+            return "tool_result"
+
+        tool = function_tool(approval_tool, name_override="approval_tool", needs_approval=True)
+        model = FakeModel()
+        model.add_multiple_turn_outputs(
+            [
+                [get_function_tool_call("approval_tool", "{}", call_id="call-fresh")],
+                [get_text_message("done")],
+            ]
+        )
+        agent = Agent(name="assistant", model=model, tools=[tool])
+
+        first = await Runner.run(agent, "hello", session=build_session(underlying, mock_client))
+        assert first.interruptions
+        state = first.to_state()
+        state.approve(first.interruptions[0])
+
+        # The resumed run gets a wrapper that never prepared input for the original response.
+        trigger["enabled"] = True
+        resumed = await Runner.run(agent, state, session=build_session(underlying, mock_client))
+
+        assert resumed.final_output == "done"
+        mock_client.responses.compact.assert_not_awaited()
+        stored = await underlying.get_items()
+        for item in history:
+            assert item in stored
+
+    @pytest.mark.asyncio
+    async def test_manual_compaction_reuses_the_last_processed_response_id(self) -> None:
+        """A manual call reuses the last id the session saw, even when the hook declined it."""
+        underlying = SimpleListSession(history=self.assistant_history(12))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda _ctx: False,
+        )
+
+        await session.run_compaction({"response_id": "resp-first"})
+        mock_client.responses.compact.assert_not_called()
+
+        await session.run_compaction({"force": True})
+
+        assert mock_client.responses.compact.call_args.kwargs["previous_response_id"] == (
+            "resp-first"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("explicit_response_id", [False, True])
+    async def test_manual_compaction_reuses_the_last_processed_response_context(
+        self,
+        explicit_response_id: bool,
+    ) -> None:
+        """A reused response id keeps the replay context from its completed attempt."""
+        stale = cast(TResponseInputItem, {"type": "reasoning", "id": "rs_stale", "summary": []})
+        history = [stale, *self.assistant_history(11)]
+        underlying = SimpleListSession(history=history)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: False,
+        )
+
+        await session.run_compaction(
+            {
+                "response_id": "resp-filtered",
+                "input_coverage": "limit_only",
+                "reasoning_item_id_policy": "omit",
+            }
+        )
+        mock_client.responses.compact.assert_not_called()
+
+        if explicit_response_id:
+            await session.run_compaction({"response_id": "resp-filtered", "force": True})
+        else:
+            await session.run_compaction({"force": True})
+
+        compact_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in compact_kwargs
+        reasoning = [item for item in compact_kwargs["input"] if item.get("type") == "reasoning"]
+        assert reasoning == [{"type": "reasoning", "summary": []}]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("explicit_response_id", [False, True])
+    async def test_manual_compaction_reuses_inferred_history_coverage(
+        self,
+        explicit_response_id: bool,
+    ) -> None:
+        """A session change cannot reverse the coverage resolved for a processed response."""
+
+        class LimitedSession(SimpleListSession):
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.session_settings = SessionSettings(limit=2)
+
+            async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+                if limit is None and self.session_settings is not None:
+                    limit = self.session_settings.limit
+                return await super().get_items(limit)
+
+        underlying = LimitedSession(history=self.assistant_history(12))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: False,
+        )
+
+        await session.run_compaction({"response_id": "resp-limited"})
+        mock_client.responses.compact.assert_not_called()
+
+        underlying.session_settings = SessionSettings()
+        if explicit_response_id:
+            await session.run_compaction({"response_id": "resp-limited", "force": True})
+        else:
+            await session.run_compaction({"force": True})
+
+        compact_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in compact_kwargs
+        assert "input" in compact_kwargs
+
+    @pytest.mark.asyncio
+    async def test_manual_compaction_ignores_an_in_flight_response_id(self) -> None:
+        """An id is only reusable once its own attempt finished, not while it is compacting."""
+        underlying = SimpleListSession(history=self.assistant_history(12))
+        compacting = asyncio.Event()
+        release = asyncio.Event()
+
+        seen: list[dict[str, Any]] = []
+
+        async def parked_compact(**kwargs: Any) -> Any:
+            seen.append(kwargs)
+            if len(seen) == 1:
+                compacting.set()
+                await release.wait()
+            return SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = parked_compact
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        parked = asyncio.create_task(
+            session.run_compaction({"response_id": "resp-inflight", "force": True})
+        )
+        try:
+            await compacting.wait()
+            with pytest.raises(ValueError, match="requires a response_id"):
+                await asyncio.wait_for(session.run_compaction({"force": True}), timeout=1)
+        finally:
+            release.set()
+            await parked
+
+        # Once it finished, the same id becomes reusable by a manual call.
+        await session.run_compaction({"force": True})
+        assert seen[-1]["previous_response_id"] == "resp-inflight"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_attempt_does_not_suppress_a_slower_successful_one(self) -> None:
+        """A newer attempt failing must not stop an older one from publishing its id."""
+        underlying = SimpleListSession(history=self.assistant_history(12))
+        started = asyncio.Event()
+        release = asyncio.Event()
+        seen: list[dict[str, Any]] = []
+
+        async def compact(**kwargs: Any) -> Any:
+            seen.append(kwargs)
+            if len(seen) == 1:
+                started.set()
+                await release.wait()
+            elif len(seen) == 2:
+                raise RuntimeError("compact failed")
+            return SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = compact
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        slow = asyncio.create_task(session.run_compaction({"response_id": "slow", "force": True}))
+        try:
+            await started.wait()
+            with pytest.raises(RuntimeError, match="compact failed"):
+                await session.run_compaction({"response_id": "fast", "force": True})
+        finally:
+            release.set()
+            await slow
+
+        await session.run_compaction({"force": True})
+        assert seen[-1]["previous_response_id"] == "slow"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_attempt_supersedes_an_older_covered_context(self) -> None:
+        """A manual retry after a failed attempt must not reuse an older covered response."""
+        underlying = SimpleListSession(history=self.assistant_history(2))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(side_effect=RuntimeError("compact failed"))
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: False,
+        )
+
+        # Attempt 1 declines and publishes covered context for resp-1.
+        await session.run_compaction({"response_id": "resp-1", "input_coverage": "full"})
+
+        await session.add_items(self.assistant_history(3))
+        with pytest.raises(RuntimeError, match="compact failed"):
+            await session.run_compaction(
+                {"response_id": "resp-2", "input_coverage": "full", "force": True}
+            )
+
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        await session.run_compaction({"force": True})
+
+        # The retry must rebuild from the full store, never reuse resp-1's chain.
+        retry_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in retry_kwargs
+        assert len(retry_kwargs["input"]) == 5
+
+    @pytest.mark.asyncio
+    async def test_a_raising_decision_hook_supersedes_an_older_covered_context(self) -> None:
+        """An attempt aborted before compacting must not leave an older context reusable."""
+        underlying = SimpleListSession(history=self.assistant_history(2))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        hook = {"raise": False}
+
+        def should_trigger(_ctx: dict[str, Any]) -> bool:
+            if hook["raise"]:
+                raise RuntimeError("hook failed")
+            return False
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=should_trigger,
+        )
+
+        # Attempt 1 declines and publishes covered context for resp-1.
+        await session.run_compaction({"response_id": "resp-1", "input_coverage": "full"})
+
+        await session.add_items(self.assistant_history(3))
+        hook["raise"] = True
+        with pytest.raises(RuntimeError, match="hook failed"):
+            await session.run_compaction({"response_id": "resp-2", "input_coverage": "full"})
+
+        hook["raise"] = False
+        await session.run_compaction({"force": True})
+
+        retry_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in retry_kwargs
+        assert len(retry_kwargs["input"]) == 5
+
+    @pytest.mark.asyncio
+    async def test_input_fallback_applies_the_reasoning_item_id_policy(self) -> None:
+        """Runner compaction must not reintroduce ids the model request omitted."""
+        stale = cast(TResponseInputItem, {"type": "reasoning", "id": "rs_stale", "summary": []})
+        history = [stale, *self.assistant_history(11)]
+        underlying = SimpleListSession(history=history)
+        underlying.session_settings = SessionSettings(limit=2)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+        )
+        model = FakeModel(initial_output=[get_text_message("ok")])
+        agent = Agent(name="assistant", model=model)
+
+        await Runner.run(
+            agent,
+            "hello",
+            session=session,
+            run_config=RunConfig(reasoning_item_id_policy="omit"),
+        )
+
+        mock_client.responses.compact.assert_awaited_once()
+        sent = mock_client.responses.compact.call_args.kwargs["input"]
+        reasoning = [item for item in sent if item.get("type") == "reasoning"]
+        assert reasoning == [{"type": "reasoning", "summary": []}]
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_validates_response_id_before_reading_history(self) -> None:
+        """An unusable request must fail before the session is read."""
+        underlying = SimpleListSession(history=self.assistant_history(4))
+        reads: list[Any] = []
+        real_get_items = underlying.get_items
+
+        async def counting_get_items(limit: int | None = None) -> Any:
+            reads.append(limit)
+            return await real_get_items(limit)
+
+        underlying.get_items = counting_get_items  # type: ignore[method-assign]
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=MagicMock(),
+            compaction_mode="previous_response_id",
+        )
+
+        with pytest.raises(ValueError, match="requires a response_id"):
+            await session.run_compaction({"force": True})
+
+        assert reads == []
+
+    @pytest.mark.asyncio
+    async def test_explicit_previous_response_id_keeps_the_id_under_a_limit(self) -> None:
+        """The auto fallback must not change an explicitly requested compaction mode."""
+        underlying = SimpleListSession(history=self.assistant_history(12))
+        underlying.session_settings = SessionSettings(limit=2)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        await session.run_compaction({"response_id": "resp-explicit", "force": True})
+
+        compact_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert compact_kwargs.get("previous_response_id") == "resp-explicit"
+        assert "input" not in compact_kwargs
 
     @pytest.mark.asyncio
     async def test_compaction_skips_when_tool_outputs_present(self) -> None:
