@@ -92,7 +92,8 @@ async def with_ephemeral_mounts_removed(
         )
         caller_cancelled = caller_cancelled or restore_cancelled
     if detach_transition_ambiguous and restore_error is None:
-        terminal_error = await _terminate_ambiguous_mount_session(session)
+        terminal_error, terminal_cancelled = await _terminate_ambiguous_mount_session(session)
+        caller_cancelled = caller_cancelled or terminal_cancelled
         if terminal_error is not None and detach_error is not None:
             detach_error.context["terminal_cleanup_failed"] = True
 
@@ -167,7 +168,8 @@ async def _restore_detached_mounts_settled(
                 assert isinstance(additional_errors, list)
                 additional_errors.append(workspace_archive_error_summary(current_error))
     if restore_error is not None:
-        terminal_error = await _terminate_ambiguous_mount_session(session)
+        terminal_error, terminal_cancelled = await _terminate_ambiguous_mount_session(session)
+        caller_cancelled = caller_cancelled or terminal_cancelled
         if terminal_error is not None:
             restore_error.context["terminal_cleanup_failed"] = True
     return restore_error, caller_cancelled
@@ -188,16 +190,18 @@ async def _settle_mount_transition(
         finally:
             _MOUNT_TRANSITION_OWNER.reset(owner_token)
 
-    task = asyncio.create_task(run_registered_transition())
+    task = asyncio.create_task(
+        run_registered_transition(),
+        name="agents.mount_transition",
+    )
+    completion = asyncio.create_task(asyncio.wait((task,)))
     caller_cancelled = False
-    while not task.done():
+    while not completion.done():
         try:
-            await asyncio.shield(task)
+            await asyncio.shield(completion)
         except asyncio.CancelledError:
-            if not task.cancelled():
-                caller_cancelled = True
-        except Exception:
-            break
+            caller_cancelled = True
+    completion.result()
     try:
         task.result()
     except BaseException as exc:
@@ -213,12 +217,11 @@ def current_task_owns_mount_transition(session: BaseSandboxSession) -> bool:
 
 async def _terminate_ambiguous_mount_session(
     session: BaseSandboxSession,
-) -> BaseException | None:
-    terminal_error, _caller_cancelled = await _settle_mount_transition(
+) -> tuple[BaseException | None, bool]:
+    return await _settle_mount_transition(
         session,
         session._terminate_ambiguous_mount_transition(),
     )
-    return terminal_error
 
 
 def _mount_transition_error(

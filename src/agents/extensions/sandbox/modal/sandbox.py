@@ -58,6 +58,12 @@ from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
+from ....sandbox.session.mount_lifecycle import (
+    _mount_transition_error,
+    _restore_detached_mounts_settled,
+    _settle_mount_transition,
+    _terminate_ambiguous_mount_session,
+)
 from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -1412,6 +1418,8 @@ class ModalSandboxSession(BaseSandboxSession):
         self._modal_snapshot_ephemeral_backup = None
         self._modal_snapshot_ephemeral_backup_path = None
         detached_mounts: list[tuple[Mount, Path]] = []
+        caller_cancelled = False
+        teardown_transition_ambiguous = False
 
         async def restore_ephemeral_paths() -> WorkspaceArchiveReadError | None:
             backup_path = self._modal_snapshot_ephemeral_backup_path
@@ -1439,34 +1447,13 @@ class ModalSandboxSession(BaseSandboxSession):
                 )
             return None
 
-        async def restore_detached_mounts() -> WorkspaceArchiveReadError | None:
-            remount_error: WorkspaceArchiveReadError | None = None
-            for mount_entry, mount_path in reversed(detached_mounts):
-                try:
-                    await mount_entry.mount_strategy.restore_after_snapshot(
-                        mount_entry,
-                        self,
-                        mount_path,
-                    )
-                except Exception as e:
-                    current_error = WorkspaceArchiveReadError(path=error_root, cause=e)
-                    if remount_error is None:
-                        remount_error = current_error
-                    else:
-                        additional_remount_errors = remount_error.context.setdefault(
-                            "additional_remount_errors", []
-                        )
-                        assert isinstance(additional_remount_errors, list)
-                        additional_remount_errors.append(
-                            {
-                                "message": current_error.message,
-                                "cause_type": type(e).__name__,
-                                "cause": str(e),
-                            }
-                        )
-            return remount_error
+        async def restore_ephemeral_paths_or_raise() -> None:
+            restore_error = await restore_ephemeral_paths()
+            if restore_error is not None:
+                raise restore_error
 
         snapshot_error: WorkspaceArchiveReadError | None = None
+        cleanup_error: WorkspaceArchiveReadError | None = None
         snapshot_id: str | None = None
         try:
             if skip_abs:
@@ -1513,24 +1500,40 @@ class ModalSandboxSession(BaseSandboxSession):
                     )
 
             for mount_entry, mount_path in self._snapshot_directory_mount_targets_to_restore(root):
-                await mount_entry.mount_strategy.teardown_for_snapshot(
-                    mount_entry,
+                transition_error, transition_cancelled = await _settle_mount_transition(
                     self,
-                    mount_path,
+                    mount_entry.mount_strategy.teardown_for_snapshot(
+                        mount_entry,
+                        self,
+                        mount_path,
+                    ),
                 )
+                caller_cancelled = caller_cancelled or transition_cancelled
+                if transition_error is not None:
+                    snapshot_error = WorkspaceArchiveReadError(
+                        path=error_root,
+                        cause=transition_error,
+                    )
+                    teardown_transition_ambiguous = True
+                    break
                 detached_mounts.append((mount_entry, mount_path))
+                if caller_cancelled:
+                    break
 
-            snapshot_sandbox = await self._refresh_sandbox_handle_for_snapshot()
-            snap_coro = snapshot_sandbox.snapshot_directory.aio(root.as_posix())
-            if self.state.snapshot_filesystem_timeout_s is None:
-                snap = await snap_coro
-            else:
-                snap = await asyncio.wait_for(
-                    snap_coro, timeout=self.state.snapshot_filesystem_timeout_s
+            if snapshot_error is None and not caller_cancelled:
+                snapshot_sandbox = await self._refresh_sandbox_handle_for_snapshot()
+                snap_coro = snapshot_sandbox.snapshot_directory.aio(root.as_posix())
+                if self.state.snapshot_filesystem_timeout_s is None:
+                    snap = await snap_coro
+                else:
+                    snap = await asyncio.wait_for(
+                        snap_coro, timeout=self.state.snapshot_filesystem_timeout_s
+                    )
+                snapshot_id, snapshot_error = self._extract_modal_snapshot_id(
+                    snap=snap, root=root, snapshot_kind="snapshot_directory"
                 )
-            snapshot_id, snapshot_error = self._extract_modal_snapshot_id(
-                snap=snap, root=root, snapshot_kind="snapshot_directory"
-            )
+        except asyncio.CancelledError:
+            caller_cancelled = True
         except WorkspaceArchiveReadError as e:
             snapshot_error = e
         except Exception as e:
@@ -1538,8 +1541,34 @@ class ModalSandboxSession(BaseSandboxSession):
                 path=error_root, context={"reason": "snapshot_directory_failed"}, cause=e
             )
         finally:
-            remount_error = await restore_detached_mounts()
-            restore_error = await restore_ephemeral_paths()
+            remount_result, remount_cancelled = await _restore_detached_mounts_settled(
+                self,
+                detached_mounts,
+                error_path=error_root,
+                error_cls=WorkspaceArchiveReadError,
+            )
+            remount_error = cast(WorkspaceArchiveReadError | None, remount_result)
+            caller_cancelled = caller_cancelled or remount_cancelled
+
+            restore_error: WorkspaceArchiveReadError | None
+            if remount_error is None:
+                restore_transition_error, restore_cancelled = await _settle_mount_transition(
+                    self,
+                    restore_ephemeral_paths_or_raise(),
+                )
+                caller_cancelled = caller_cancelled or restore_cancelled
+                if isinstance(restore_transition_error, WorkspaceArchiveReadError):
+                    restore_error = restore_transition_error
+                elif restore_transition_error is not None:
+                    restore_error = WorkspaceArchiveReadError(
+                        path=error_root,
+                        cause=restore_transition_error,
+                    )
+                else:
+                    restore_error = None
+            else:
+                restore_error = None
+
             cleanup_error = remount_error
             if restore_error is not None:
                 if cleanup_error is None:
@@ -1566,7 +1595,23 @@ class ModalSandboxSession(BaseSandboxSession):
                     cleanup_error.context["snapshot_error_before_restore_corruption"] = {
                         "message": snapshot_error.message
                     }
-                raise cleanup_error
+
+            if teardown_transition_ambiguous and remount_error is None:
+                termination_error, termination_cancelled = await _terminate_ambiguous_mount_session(
+                    self
+                )
+                caller_cancelled = caller_cancelled or termination_cancelled
+                if termination_error is not None and not caller_cancelled:
+                    cleanup_error = cleanup_error or WorkspaceArchiveReadError(
+                        path=error_root,
+                        context={"reason": "snapshot_directory_terminal_cleanup_failed"},
+                        cause=termination_error,
+                    )
+
+        if caller_cancelled:
+            raise asyncio.CancelledError() from None
+        if cleanup_error is not None:
+            raise cleanup_error
 
         if snapshot_error is not None:
             raise snapshot_error
@@ -1823,21 +1868,49 @@ class ModalSandboxSession(BaseSandboxSession):
         sandbox = self._sandbox
 
         async def _run_restore() -> None:
+            caller_cancelled = False
+            transition_error: BaseException | None = None
             image = modal.Image.from_id(snapshot_id)
-            await self._call_modal(
-                sandbox.mount_image,
-                root.as_posix(),
-                image,
-                call_timeout=self.state.snapshot_filesystem_restore_timeout_s,
+            image_error, image_cancelled = await _settle_mount_transition(
+                self,
+                self._call_modal(
+                    sandbox.mount_image,
+                    root.as_posix(),
+                    image,
+                    call_timeout=self.state.snapshot_filesystem_restore_timeout_s,
+                ),
             )
-            for mount_entry, mount_path in reversed(
-                self._snapshot_directory_mount_targets_to_restore(root)
-            ):
-                await mount_entry.mount_strategy.restore_after_snapshot(
-                    mount_entry,
+            caller_cancelled = image_cancelled
+            if image_error is not None:
+                if isinstance(image_error, asyncio.CancelledError):
+                    transition_error = _mount_transition_error(
+                        WorkspaceArchiveWriteError,
+                        error_path=root,
+                        transition_error=image_error,
+                        reason="mount_image_cancelled",
+                    )
+                else:
+                    transition_error = image_error
+                (
+                    _termination_error,
+                    termination_cancelled,
+                ) = await _terminate_ambiguous_mount_session(self)
+                caller_cancelled = caller_cancelled or termination_cancelled
+            else:
+                remount_error, remount_cancelled = await _restore_detached_mounts_settled(
                     self,
-                    mount_path,
+                    self._snapshot_directory_mount_targets_to_restore(root),
+                    error_path=root,
+                    error_cls=WorkspaceArchiveWriteError,
                 )
+                caller_cancelled = caller_cancelled or remount_cancelled
+                if remount_error is not None:
+                    transition_error = remount_error
+
+            if caller_cancelled:
+                raise asyncio.CancelledError() from None
+            if transition_error is not None:
+                raise transition_error
 
         try:
             await asyncio.wait_for(
