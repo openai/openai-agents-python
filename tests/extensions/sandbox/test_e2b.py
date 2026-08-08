@@ -544,6 +544,18 @@ class _RestorableSnapshot(SnapshotBase):
         return True
 
 
+@pytest.fixture(autouse=True)
+def _trust_recording_mounts_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agents.sandbox import _mount_security
+
+    original = _mount_security._mount_class_is_trusted
+    monkeypatch.setattr(
+        _mount_security,
+        "_mount_class_is_trusted",
+        lambda mount: isinstance(mount, _RecordingMount) or original(mount),
+    )
+
+
 class _RecordingMount(Mount):
     type: str = "recording_mount"
     mount_strategy: InContainerMountStrategy = Field(
@@ -1336,6 +1348,7 @@ async def test_e2b_resume_reuses_paused_timeout_lifecycle_sandbox(
         auto_resume=True,
         pause_on_exit=False,
     )
+    state._mark_provider_identity_trusted()
 
     resumed = await client.resume(state)
 
@@ -1389,6 +1402,7 @@ async def test_e2b_resume_reuses_live_kill_timeout_sandbox(
         auto_resume=True,
         pause_on_exit=False,
     )
+    state._mark_provider_identity_trusted()
 
     resumed = await client.resume(state)
 
@@ -1481,6 +1495,7 @@ async def test_e2b_resume_recreates_dead_kill_timeout_sandbox_and_preserves_mcp(
         pause_on_exit=False,
         mcp={"exa": {"apiKey": "exa-key"}},
     )
+    state._mark_provider_identity_trusted()
 
     resumed = await client.resume(state)
 

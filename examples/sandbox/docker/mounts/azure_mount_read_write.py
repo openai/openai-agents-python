@@ -11,9 +11,6 @@ if __package__ is None or __package__ == "":
 from agents.sandbox.entries import (
     AzureBlobMount,
     DockerVolumeMountStrategy,
-    FuseMountPattern,
-    InContainerMountStrategy,
-    RcloneMountPattern,
 )
 from examples.sandbox.docker.mounts.mount_smoke import (
     MountSmokeCase,
@@ -40,32 +37,6 @@ def _mount_cases() -> list[MountSmokeCase]:
                 identity_client_id=identity_client_id,
                 account_key=account_key,
                 mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
-                read_only=False,
-            ),
-        ),
-        MountSmokeCase(
-            name="in_container/rclone",
-            mount_dir="azure-in-container-rclone",
-            mount=AzureBlobMount(
-                account=account,
-                container=container,
-                endpoint=endpoint,
-                identity_client_id=identity_client_id,
-                account_key=account_key,
-                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
-                read_only=False,
-            ),
-        ),
-        MountSmokeCase(
-            name="in_container/fuse",
-            mount_dir="azure-in-container-fuse",
-            mount=AzureBlobMount(
-                account=account,
-                container=container,
-                endpoint=endpoint,
-                identity_client_id=identity_client_id,
-                account_key=account_key,
-                mount_strategy=InContainerMountStrategy(pattern=FuseMountPattern()),
                 read_only=False,
             ),
         ),

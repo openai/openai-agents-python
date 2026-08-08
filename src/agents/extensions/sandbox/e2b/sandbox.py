@@ -35,6 +35,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, Field
 
 from ....logger import log_tool_action_warning
+from ....sandbox._mount_security import redact_mount_error_data
 from ....sandbox.entries import Mount
 from ....sandbox.errors import (
     ExecNonZeroError,
@@ -1685,6 +1686,7 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
         )
         self._dependencies = dependencies
 
+    @redact_mount_error_data
     async def create(
         self,
         *,
@@ -1695,6 +1697,7 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
         if options is None:
             raise ValueError("E2BSandboxClient.create requires options")
         manifest = manifest if manifest is not None else Manifest()
+        self._validate_manifest_for_create(manifest)
 
         sandbox_type = _coerce_sandbox_type(options.sandbox_type)
 
@@ -1757,6 +1760,7 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
             mcp=options.mcp,
             exposed_ports=options.exposed_ports,
         )
+        state._mark_provider_identity_trusted()
         inner = E2BSandboxSession.from_state(state, sandbox=sandbox)
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
@@ -1766,6 +1770,7 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
             raise TypeError("E2BSandboxClient.delete expects an E2BSandboxSession")
         return session
 
+    @redact_mount_error_data
     async def resume(
         self,
         state: SandboxSessionState,
@@ -1785,21 +1790,37 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
 
         sandbox: object
         reconnected = False
-        try:
-            # `_cls_connect` is the current async entrypoint for re-attaching to a sandbox id.
-            sandbox = await _sandbox_connect(
-                SandboxClass,
-                sandbox_id=state.sandbox_id,
-                timeout=state.sandbox_timeout,
-            )
-            if not state.pause_on_exit and not preserves_timeout_paused_state:
-                is_running = await _sandbox_is_running(
-                    sandbox, request_timeout=state.timeouts.keepalive_s
+        if state.provider_identity_trusted:
+            try:
+                # `_cls_connect` is the current async entrypoint for re-attaching to a sandbox id.
+                sandbox = await _sandbox_connect(
+                    SandboxClass,
+                    sandbox_id=state.sandbox_id,
+                    timeout=state.sandbox_timeout,
                 )
-                if not is_running:
-                    raise RuntimeError("sandbox_not_running")
-            reconnected = True
-        except Exception:
+                if not state.pause_on_exit and not preserves_timeout_paused_state:
+                    is_running = await _sandbox_is_running(
+                        sandbox, request_timeout=state.timeouts.keepalive_s
+                    )
+                    if not is_running:
+                        raise RuntimeError("sandbox_not_running")
+                reconnected = True
+            except Exception:
+                sandbox = await _sandbox_create(
+                    SandboxClass,
+                    template=state.template,
+                    timeout=state.sandbox_timeout,
+                    metadata=state.metadata,
+                    envs=envs,
+                    secure=state.secure,
+                    allow_internet_access=state.allow_internet_access,
+                    network=network_config,
+                    lifecycle=_e2b_lifecycle(state.on_timeout, auto_resume=state.auto_resume),
+                    mcp=state.mcp,
+                )
+        else:
+            state.session_id = uuid.uuid4()
+            state.workspace_root_ready = False
             sandbox = await _sandbox_create(
                 SandboxClass,
                 template=state.template,
@@ -1812,8 +1833,10 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
                 lifecycle=_e2b_lifecycle(state.on_timeout, auto_resume=state.auto_resume),
                 mcp=state.mcp,
             )
+        if not reconnected:
             state.sandbox_id = str(_sandbox_id(sandbox))
             state.workspace_root_ready = False
+            state._mark_provider_identity_trusted()
 
         inner = E2BSandboxSession.from_state(state, sandbox=sandbox)
         inner._set_start_state_preserved(reconnected, system=reconnected)

@@ -34,6 +34,11 @@ from modal.config import config as modal_config
 from modal.container_process import ContainerProcess
 
 from ....logger import log_tool_action_warning
+from ....sandbox._mount_security import (
+    _manifest_has_configured_mount_authority,
+    _mark_mount_validation_error,
+    redact_mount_error_data,
+)
 from ....sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 from ....sandbox.entries import Mount
 from ....sandbox.errors import (
@@ -1246,6 +1251,7 @@ class ModalSandboxSession(BaseSandboxSession):
         except Exception:
             return False
 
+    @redact_mount_error_data
     async def persist_workspace(self) -> io.IOBase:
         if self.state.workspace_persistence == _WORKSPACE_PERSISTENCE_SNAPSHOT_FILESYSTEM:
             return await self._persist_workspace_via_snapshot_filesystem()
@@ -1253,6 +1259,7 @@ class ModalSandboxSession(BaseSandboxSession):
             return await self._persist_workspace_via_snapshot_directory()
         return await self._persist_workspace_via_tar()
 
+    @redact_mount_error_data
     async def hydrate_workspace(self, data: io.IOBase) -> None:
         if self.state.workspace_persistence == _WORKSPACE_PERSISTENCE_SNAPSHOT_FILESYSTEM:
             return await self._hydrate_workspace_via_snapshot_filesystem(data)
@@ -1978,6 +1985,7 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
                     },
                 )
 
+    @redact_mount_error_data
     async def create(
         self,
         *,
@@ -2005,6 +2013,7 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
         if options is None:
             raise ValueError("ModalSandboxClient.create requires options with app_name")
         manifest = manifest if manifest is not None else Manifest()
+        self._validate_manifest_for_create(manifest)
         app_name = options.app_name
         if not app_name:
             raise ValueError("ModalSandboxClient.create requires a valid app_name")
@@ -2138,6 +2147,7 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
             sandbox=session_sandbox,
         )
         await inner._ensure_sandbox()
+        state._mark_provider_identity_trusted()
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     async def delete(self, session: SandboxSession) -> SandboxSession:
@@ -2173,6 +2183,7 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
 
         return session
 
+    @redact_mount_error_data
     async def resume(
         self,
         state: SandboxSessionState,
@@ -2180,11 +2191,33 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
         if not isinstance(state, ModalSandboxSessionState):
             raise TypeError("ModalSandboxClient.resume expects a ModalSandboxSessionState")
         state.assert_path_grants_rebound()
+        if _manifest_has_configured_mount_authority(state.manifest):
+            error = MountConfigError(
+                message=(
+                    "Modal sandbox sessions with protected volume configuration cannot "
+                    "be resumed; create a new session so the volume is created from the "
+                    "current trusted configuration"
+                ),
+                context={"backend": "modal"},
+            )
+            _mark_mount_validation_error(error)
+            raise error
+        if state.mount_authority_rebound or not state.provider_identity_trusted:
+            state.sandbox_id = None
+            state.session_id = uuid.uuid4()
+            state.workspace_root_ready = False
         inner = ModalSandboxSession.from_state(state)
         reconnected = await inner._ensure_sandbox()
+        state._mark_provider_identity_trusted()
         if reconnected:
             inner._set_start_state_preserved(True)
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
-        return self._deserialize_session_state_payload(payload, ModalSandboxSessionState)
+        state = cast(
+            ModalSandboxSessionState,
+            self._deserialize_session_state_payload(payload, ModalSandboxSessionState),
+        )
+        state.sandbox_id = None
+        state.workspace_root_ready = False
+        return state

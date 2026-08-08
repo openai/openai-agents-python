@@ -3,10 +3,9 @@ Mount strategies for Blaxel sandboxes.
 
 Two strategies are provided:
 
-* **BlaxelCloudBucketMountStrategy** -- mounts S3, R2, and GCS buckets via
-  FUSE tools (``s3fs``, ``gcsfuse``) executed inside the sandbox.  Credentials
-  are written to ephemeral temp files, referenced by the FUSE tool, and deleted
-  immediately after the mount succeeds.
+* **BlaxelCloudBucketMountStrategy** -- mounts credentialless S3, R2, and GCS
+  buckets via FUSE tools (``s3fs``, ``gcsfuse``) executed inside the sandbox.
+  Authenticated mounts require an external or provider-native mount strategy.
 
 * **BlaxelDriveMountStrategy** -- mounts Blaxel Drives (persistent network
   volumes) into the sandbox using the sandbox ``drives`` API
@@ -27,6 +26,10 @@ from typing import Any, Literal
 
 from .... import _debug
 from ....logger import log_tool_action_warning
+from ....sandbox._mount_security import (
+    redact_mount_error_data,
+    validate_mount_activation_credential_boundary,
+)
 from ....sandbox.entries import GCSMount, Mount, R2Mount, S3Mount
 from ....sandbox.entries.mounts.base import MountStrategyBase
 from ....sandbox.errors import MountConfigError
@@ -74,6 +77,7 @@ class BlaxelCloudBucketMountStrategy(MountStrategyBase):
     def validate_mount(self, mount: Mount) -> None:
         _build_mount_config(mount, mount_path="/validate")
 
+    @redact_mount_error_data
     async def activate(
         self,
         mount: Mount,
@@ -81,6 +85,11 @@ class BlaxelCloudBucketMountStrategy(MountStrategyBase):
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
+        validate_mount_activation_credential_boundary(
+            mount,
+            self,
+            provider_backend_id="blaxel",
+        )
         _assert_blaxel_session(session)
         _ = base_dir
         mount_path = mount._resolve_mount_path(session, dest)
@@ -110,12 +119,18 @@ class BlaxelCloudBucketMountStrategy(MountStrategyBase):
         _ = mount
         await _unmount_bucket(session, sandbox_path_str(path))
 
+    @redact_mount_error_data
     async def restore_after_snapshot(
         self,
         mount: Mount,
         session: BaseSandboxSession,
         path: Path,
     ) -> None:
+        validate_mount_activation_credential_boundary(
+            mount,
+            self,
+            provider_backend_id="blaxel",
+        )
         _assert_blaxel_session(session)
         config = _build_mount_config(mount, mount_path=sandbox_path_str(path))
         await _mount_bucket(session, config)

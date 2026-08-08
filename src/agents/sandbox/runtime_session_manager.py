@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Generic, cast
 
 from ..agent import Agent
+from ..exceptions import _raise_data_redacted_error
 from ..run_config import SandboxArchiveLimits, SandboxConcurrencyLimits, SandboxRunConfig
 from ..run_context import TContext
 from ..run_state import (
@@ -17,6 +18,13 @@ from ..run_state import (
     _build_agent_identity_keys_by_id,
 )
 from ..tracing import custom_span, get_current_trace
+from ._mount_security import (
+    _manifest_has_configured_mount_authority,
+    _replace_mount_operation_error,
+    _validate_manifest_mount_provenance,
+    redact_mount_error_data,
+    validate_manifest_mount_credential_boundaries,
+)
 from .capabilities import Capability
 from .entries import BaseEntry, Dir, Mount, resolve_workspace_path
 from .manifest import Manifest
@@ -67,6 +75,7 @@ class _SandboxSessionResources:
         await self._session.start()
         self._started = True
 
+    @redact_mount_error_data
     async def cleanup(self) -> None:
         if not self._owns_session:
             return
@@ -194,6 +203,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         self._acquired_agents[agent_id] = agent
         self._ensure_resume_key(agent)
 
+    @redact_mount_error_data
     async def ensure_session(
         self,
         *,
@@ -232,7 +242,6 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         resources = self._resources_by_agent.get(self._current_agent_id)
         if resources is None:
             return existing_payload
-
         client = self._resolve_client()
         current_agent = self._acquired_agents.get(self._current_agent_id)
         if current_agent is None:
@@ -293,15 +302,11 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                 concurrency_limits=concurrency_limits,
                 archive_limits=archive_limits,
             )
-            running = await sandbox_config.session.running()
-            manifest_update = self._process_live_session_manifest(
+            manifest_update = await self._process_live_session_manifest(
                 agent=agent,
                 capabilities=capabilities,
                 session=sandbox_config.session,
-                running=running,
             )
-            if manifest_update.processed_manifest is not None:
-                await sandbox_config.session._validate_manifest_application()
             if manifest_update.entries_to_apply:
                 await sandbox_config.session._apply_entry_batch(
                     manifest_update.entries_to_apply,
@@ -339,6 +344,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                 capabilities=capabilities,
                 session_state=explicit_state,
                 trusted_manifest=self._resolve_trusted_resume_manifest(agent=agent),
+                provider_backend_id=client.backend_id,
             )
             span_cm = (
                 custom_span(
@@ -545,22 +551,36 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
     ) -> Manifest | None:
         if manifest is None:
             return None
+        _validate_manifest_mount_provenance(manifest)
         processed_manifest = SandboxRuntimeSessionManager._manifest_with_run_as_user(
             manifest.model_copy(deep=True),
             run_as_user,
         )
         for capability in capabilities:
-            processed_manifest = capability.process_manifest(processed_manifest)
+            safe_error: RuntimeError | None = None
+            try:
+                processed_manifest = capability.process_manifest(processed_manifest)
+            except Exception as error:
+                if not _manifest_has_configured_mount_authority(processed_manifest):
+                    raise
+                safe_error = _replace_mount_operation_error(error)
+
+            if safe_error is not None:
+                capabilities = []
+                capability = cast(Any, None)
+                manifest = None
+                processed_manifest = cast(Any, None)
+                run_as_user = None
+                _raise_data_redacted_error(safe_error)
         return processed_manifest
 
     @classmethod
-    def _process_live_session_manifest(
+    async def _process_live_session_manifest(
         cls,
         *,
         agent: SandboxAgent[TContext],
         capabilities: list[Capability],
         session: BaseSandboxSession,
-        running: bool,
     ) -> _LiveSessionManifestUpdate:
         current_manifest = session.state.manifest
         processed_manifest = cls._process_manifest(
@@ -569,11 +589,29 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             run_as_user=cls._agent_run_as_user(agent),
         )
         if processed_manifest is None or processed_manifest == current_manifest:
+            validate_manifest_mount_credential_boundaries(
+                current_manifest,
+                provider_backend_id=session.state.type,
+            )
+            running = await session.running()
+            await session._validate_manifest_application(
+                manifest=current_manifest,
+                session_running=running,
+            )
             return _LiveSessionManifestUpdate(processed_manifest=None, entries_to_apply=[])
 
         cls._validate_live_session_host_path_grants(
             current_manifest=current_manifest,
             processed_manifest=processed_manifest,
+        )
+        validate_manifest_mount_credential_boundaries(
+            processed_manifest,
+            provider_backend_id=session.state.type,
+        )
+        running = await session.running()
+        await session._validate_manifest_application(
+            manifest=processed_manifest,
+            session_running=running,
         )
 
         entries_to_apply: list[tuple[Path, BaseEntry]] = []
@@ -775,6 +813,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         capabilities: list[Capability],
         session_state: SandboxSessionState,
         trusted_manifest: Manifest | None,
+        provider_backend_id: str,
     ) -> SandboxSessionState:
         resume_manifest = session_state.manifest
         if session_state.path_grants_require_rebind and trusted_manifest is not None:
@@ -793,7 +832,18 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         if processed_manifest is None:
             return session_state
         processed_state = session_state.model_copy(update={"manifest": processed_manifest})
-        return processed_state.rebind_persisted_path_grants(processed_manifest)
+        processed_state = processed_state.rebind_persisted_path_grants(processed_manifest)
+        if not processed_state.mount_authority_redacted:
+            return processed_state
+        processed_trusted_manifest = cls._process_manifest(
+            capabilities,
+            trusted_manifest,
+            run_as_user=cls._agent_run_as_user(agent),
+        )
+        return processed_state.rebind_persisted_mount_authority(
+            processed_trusted_manifest,
+            provider_backend_id=provider_backend_id,
+        )
 
     @staticmethod
     def _agent_run_as_user(agent: SandboxAgent[Any]) -> User | None:

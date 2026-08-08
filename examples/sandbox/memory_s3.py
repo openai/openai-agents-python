@@ -18,7 +18,7 @@ from agents.sandbox import (
     SandboxRunConfig,
 )
 from agents.sandbox.capabilities import Filesystem, Memory, Shell
-from agents.sandbox.entries import File, InContainerMountStrategy, RcloneMountPattern, S3Mount
+from agents.sandbox.entries import DockerVolumeMountStrategy, File, S3Mount
 from agents.sandbox.sandboxes.docker import (
     DockerSandboxClient,
     DockerSandboxClientOptions,
@@ -146,7 +146,7 @@ def _build_manifest(
                 prefix=config.prefix,
                 region=config.region,
                 endpoint_url=config.endpoint_url,
-                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+                mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
                 read_only=False,
             ),
         }
