@@ -177,6 +177,54 @@ async def test_async_sqlite_session_get_items_limit_skips_corrupt_newest_rows():
         await session.close()
 
 
+async def test_async_sqlite_session_get_items_skips_non_string_rows():
+    """get_items skips legacy non-string rows instead of raising TypeError.
+
+    ``pop_item`` and the other backends skip rows whose ``json.loads`` raises ``TypeError``
+    (for example a ``NULL`` ``message_data`` left by an older schema or external tooling that
+    the session is pointed at). ``get_items`` only caught ``json.JSONDecodeError``, so a single
+    such row raised ``TypeError`` and failed the whole read. This exercises both the unlimited
+    and the limited (window-expanding) decode paths.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "async_get_items_non_string.db"
+
+        # Simulate a legacy / externally-created messages table whose ``message_data`` column is
+        # nullable, holding a NULL row among valid rows. ``CREATE TABLE IF NOT EXISTS`` in the
+        # session leaves this schema in place.
+        with sqlite3.connect(db_path) as raw:
+            raw.execute(
+                "CREATE TABLE agent_messages ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " session_id TEXT NOT NULL,"
+                " message_data TEXT,"
+                " created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+            )
+            raw.execute(
+                "INSERT INTO agent_messages (session_id, message_data) VALUES (?, ?)",
+                ("legacy", json.dumps({"role": "user", "content": "valid 0"})),
+            )
+            raw.execute(
+                "INSERT INTO agent_messages (session_id, message_data) VALUES (?, ?)",
+                ("legacy", None),
+            )
+            raw.execute(
+                "INSERT INTO agent_messages (session_id, message_data) VALUES (?, ?)",
+                ("legacy", json.dumps({"role": "assistant", "content": "valid 1"})),
+            )
+            raw.commit()
+
+        session = AsyncSQLiteSession("legacy", db_path)
+        try:
+            all_items = await session.get_items()
+            assert [item.get("content") for item in all_items] == ["valid 0", "valid 1"]
+
+            limited = await session.get_items(limit=1)
+            assert [item.get("content") for item in limited] == ["valid 1"]
+        finally:
+            await session.close()
+
+
 async def test_async_sqlite_session_session_settings_default():
     """Test that session_settings defaults to empty SessionSettings."""
     session = AsyncSQLiteSession("async_default_settings")

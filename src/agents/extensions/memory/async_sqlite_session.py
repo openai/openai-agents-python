@@ -244,7 +244,9 @@ class AsyncSQLiteSession(SessionABC):
                 try:
                     item = json.loads(message_data)
                     items.append(item)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, TypeError):
+                    # Skip corrupted or malformed entries, including legacy non-string values,
+                    # matching pop_item and the other session backends.
                     continue
             return items
 
