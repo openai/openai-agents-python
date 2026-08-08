@@ -1209,7 +1209,10 @@ class RunState(Generic[TContext, TAgent]):
             serialized_output = item.output
             try:
                 if hasattr(serialized_output, "model_dump"):
-                    serialized_output = serialized_output.model_dump(exclude_unset=True)
+                    # ``output`` is the tool's actual return value, not a wire item, so keep
+                    # fields left at their defaults. ``exclude_unset`` would drop them and make
+                    # the restored ``.output`` disagree with the full model-facing ``raw_item``.
+                    serialized_output = serialized_output.model_dump(mode="json")
                 elif dataclasses.is_dataclass(serialized_output):
                     serialized_output = dataclasses.asdict(serialized_output)  # type: ignore[arg-type]
                 serialized_output = _ensure_json_compatible(serialized_output)
