@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from openai import AsyncOpenAI
@@ -252,25 +253,75 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         output_items: list[TResponseInputItem],
         previous_items: list[TResponseInputItem],
     ) -> None:
+        # Treat clear → add as one replacement transaction. Exception failures already
+        # restore previous history; CancelledError must do the same because it is a
+        # BaseException and would otherwise leave an empty session after a successful clear.
+        cleared = False
         try:
             await self.underlying_session.clear_session()
-        except Exception as clear_error:
-            await self._restore_underlying_session_items_after_failed_clear(
-                previous_items, clear_error
+            cleared = True
+            if output_items:
+                await self.underlying_session.add_items(output_items)
+        except Exception as error:
+            await self._recover_from_failed_replacement(
+                previous_items=previous_items,
+                error=error,
+                cleared=cleared,
+                shield_restore=False,
+            )
+            raise
+        except asyncio.CancelledError as error:
+            await self._recover_from_failed_replacement(
+                previous_items=previous_items,
+                error=error,
+                cleared=cleared,
+                # Shield so a second cancel during restore cannot skip the rewrite.
+                shield_restore=True,
             )
             raise
 
+    async def _recover_from_failed_replacement(
+        self,
+        *,
+        previous_items: list[TResponseInputItem],
+        error: BaseException,
+        cleared: bool,
+        shield_restore: bool,
+    ) -> None:
+        if not cleared:
+            restore = self._restore_underlying_session_items_after_failed_clear(
+                previous_items, error
+            )
+        else:
+            restore = self._restore_underlying_session_items(previous_items, error)
+        if shield_restore:
+            await self._await_restore_despite_cancellation(restore)
+        else:
+            await restore
+
+    async def _await_restore_despite_cancellation(self, restore: Awaitable[None]) -> None:
+        """Await restore even when the current task keeps receiving cancellation.
+
+        ``asyncio.shield`` alone is not enough: a second ``task.cancel()`` makes
+        ``await asyncio.shield(restore)`` raise immediately while restore is still
+        running. Keep re-awaiting the shielded task until it settles, then
+        re-raise ``CancelledError`` so callers still observe cancellation.
+        """
+        restore_task = asyncio.ensure_future(restore)
         try:
-            if output_items:
-                await self.underlying_session.add_items(output_items)
-        except Exception as replacement_error:
-            await self._restore_underlying_session_items(previous_items, replacement_error)
+            await asyncio.shield(restore_task)
+        except asyncio.CancelledError:
+            while not restore_task.done():
+                try:
+                    await asyncio.shield(restore_task)
+                except asyncio.CancelledError:
+                    continue
             raise
 
     async def _restore_underlying_session_items_after_failed_clear(
         self,
         previous_items: list[TResponseInputItem],
-        clear_error: Exception,
+        clear_error: BaseException,
     ) -> None:
         try:
             current_items = await self._get_all_underlying_session_items()
@@ -292,7 +343,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     async def _restore_underlying_session_items(
         self,
         previous_items: list[TResponseInputItem],
-        replacement_error: Exception,
+        replacement_error: BaseException,
         *,
         clear_existing_items: bool = True,
     ) -> None:
