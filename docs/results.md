@@ -177,10 +177,10 @@ Python does not expose a separate streamed `completed` promise or `error` proper
 
 Each [`ModelResponse`][agents.items.ModelResponse] also exposes two diagnostics that apply to that individual model call:
 
--   [`request_id`][agents.items.ModelResponse.request_id] is the transport request ID when the model SDK provides one. For OpenAI API calls, this is the server-generated `x-request-id`; log it in production so you can correlate failures with OpenAI support.
--   [`raw_usage`][agents.items.ModelResponse.raw_usage] is an opt-in, JSON-compatible snapshot of the provider's usage payload before the Agents SDK normalizes it. Enable it with `ModelSettings(preserve_raw_usage=True)`; see [Preserving provider usage payloads](usage.md#preserving-provider-usage-payloads).
+-   [`request_id`][agents.items.ModelResponse.request_id] is the transport request ID when the underlying model client returns one. For OpenAI API calls, `request_id` contains the server-generated `x-request-id`. Log `request_id` in production so you can correlate failures with OpenAI support.
+-   [`raw_usage`][agents.items.ModelResponse.raw_usage] is an opt-in, JSON-compatible snapshot of the provider's usage payload before the Agents SDK normalizes the payload. Enable `raw_usage` with `ModelSettings(preserve_raw_usage=True)`; see [Preserving provider usage payloads](usage.md#preserving-provider-usage-payloads).
 
-Both values can be `None`, so handle them as optional diagnostics rather than conversation state.
+`ModelResponse.request_id` and `ModelResponse.raw_usage` can each be `None`, so handle these values as optional diagnostics rather than conversation state.
 
 ### Guardrail results
 

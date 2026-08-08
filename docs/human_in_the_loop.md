@@ -52,7 +52,7 @@ agent = Agent(
 
 Sticky decisions created with `always_approve=True` or `always_reject=True` are stored in the run state, so they survive `state.to_string()` / `RunState.from_string(...)` and `state.to_json()` / `RunState.from_json(...)` when you resume the same paused run later.
 
-For hosted MCP approvals, a sticky tool identity is the combination of `server_label` and tool name. Approving `lookup_account` on one hosted MCP server does not approve a tool with the same name on another server. A hosted MCP approval request must include both non-empty identity fields before the SDK can persist an always-approve or always-reject decision.
+For approval requests from [`HostedMCPTool`][agents.tool.HostedMCPTool], the Agents SDK identifies a sticky tool decision by the combination of `server_label` and tool name. An always-approve decision for `lookup_account` on one hosted MCP server does not approve a tool with the same name on another server. The Agents SDK persists an always-approve or always-reject decision only when the hosted MCP approval request includes both non-empty identity fields.
 
 You do not need to resolve every pending approval in the same pass. `interruptions` can contain a mix of regular function tools, hosted MCP approvals, and nested `Agent.as_tool()` approvals. If you rerun after approving or rejecting only some items, those resolved calls can continue while unresolved ones remain in `interruptions` and pause the run again.
 

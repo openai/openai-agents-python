@@ -23,7 +23,7 @@ Start with the simplest path that fits your setup:
 
 For most OpenAI-only apps, the recommended path is to use string model names with the default OpenAI provider and stay on the Responses model path.
 
-When you don't specify a model when initializing an `Agent`, the default model will be used. The default is currently [`gpt-5.6-luna`](https://developers.openai.com/api/docs/models/gpt-5.6-luna) with `reasoning.effort="none"` and `verbosity="low"` for cost-sensitive, high-volume agent workflows. For frontier capability, explicitly set your agents to `gpt-5.6-sol` while keeping appropriate `model_settings` for your workload.
+When an [`Agent`][agents.agent.Agent] does not specify a model, the Agents SDK uses [`gpt-5.6-luna`](https://developers.openai.com/api/docs/models/gpt-5.6-luna) with `reasoning.effort="none"` and `verbosity="low"` by default for cost-sensitive, high-volume agent workflows. Applications that need frontier capability can explicitly set `model="gpt-5.6-sol"` and choose `model_settings` that are appropriate for the workload.
 
 If you want to switch to other models like `gpt-5.6-sol`, there are two ways to configure your agents.
 

@@ -685,7 +685,7 @@ result = await Runner.run(
 
 ### Accessing run context from a custom session
 
-A custom session can use the active [`RunContextWrapper`][agents.run_context.RunContextWrapper] for tenant routing, authorization, or other app-specific storage decisions. To opt in, add an explicitly named, keyword-compatible `wrapper` parameter to all four history methods:
+The Agents SDK can pass the active [`RunContextWrapper`][agents.run_context.RunContextWrapper] to a custom session for tenant routing, authorization, or other app-specific storage decisions. For the Agents SDK to pass the wrapper, add an explicitly named, keyword-compatible `wrapper` parameter to all four history methods:
 
 ```python
 from typing import Any
@@ -722,7 +722,7 @@ class ContextAwareSession:
     ) -> None: ...
 ```
 
-The opt-in is all-or-none: the SDK passes the wrapper only when `get_items`, `add_items`, `pop_item`, and `clear_session` all declare `wrapper`. A generic `**kwargs` parameter does not opt in. Existing session implementations keep their released call shape and continue to work without changes.
+The Agents SDK enables this integration only when `get_items`, `add_items`, `pop_item`, and `clear_session` all declare `wrapper`. A generic `**kwargs` parameter does not satisfy this signature check. Existing session implementations that omit `wrapper` keep their released call shape and continue to work without changes.
 
 ## Community session implementations
 

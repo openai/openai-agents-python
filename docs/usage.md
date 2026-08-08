@@ -52,7 +52,7 @@ for i, request in enumerate(result.context_wrapper.usage.request_usage_entries):
 
 ## Preserving provider usage payloads
 
-The normalized [`Usage`][agents.usage.Usage] fields give you consistent totals across model providers. If you also need provider-specific usage fields or need to distinguish an omitted field from a provider-reported zero, opt in to preserving the original usage payload with [`ModelSettings.preserve_raw_usage`][agents.model_settings.ModelSettings.preserve_raw_usage]:
+The Agents SDK normalizes provider usage into [`Usage`][agents.usage.Usage] fields that provide consistent totals across model providers. Set [`ModelSettings.preserve_raw_usage`][agents.model_settings.ModelSettings.preserve_raw_usage] to `True` when an application must retain provider-specific usage fields or distinguish an omitted field from a provider-reported zero:
 
 ```python
 from agents import Agent, ModelSettings, Runner
@@ -67,9 +67,9 @@ for response in result.raw_responses:
     print(response.raw_usage)
 ```
 
-Each [`ModelResponse.raw_usage`][agents.items.ModelResponse.raw_usage] value is a detached, JSON-compatible snapshot of the provider payload for that model call. It is not aggregated across the run. The value remains `None` when preservation is disabled, the provider returns no usage payload, or an upstream adapter has already discarded the original field-presence information.
+The Agents SDK stores each [`ModelResponse.raw_usage`][agents.items.ModelResponse.raw_usage] value as a detached, JSON-compatible snapshot of the provider payload for that model call. The Agents SDK does not aggregate `raw_usage` across the run. The value remains `None` when preservation is disabled, the provider returns no usage payload, or an upstream adapter has already discarded the original field-presence information.
 
-`preserve_raw_usage` only preserves usage that reaches the model adapter; it does not ask a provider to return usage. For streaming Chat Completions providers that require an explicit usage request, also set `ModelSettings(include_usage=True)`.
+`preserve_raw_usage` preserves only a usage payload that reaches the model adapter; the setting does not request usage from the provider. When a streaming Chat Completions provider requires an explicit usage request, also set `ModelSettings(include_usage=True)`.
 
 ## Accessing usage with sessions
 
