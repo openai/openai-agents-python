@@ -866,3 +866,56 @@ def test_typeless_definition_with_shaping_keywords_is_registered():
                 "properties": {"f": {"$ref": "#/$defs/Base"}},
             }
         )
+
+
+def test_allof_shaped_definition_is_classified_after_normalization():
+    # The converter merges a single-entry allOf onto the definition, so classifying the raw
+    # shape would call a strictable definition free-form.
+    result = ensure_strict_json_schema(
+        {
+            "$defs": {
+                "Base": {"type": "object", "allOf": [{"properties": {"a": {"type": "string"}}}]}
+            },
+            "type": "object",
+            "properties": {"f": {"$ref": "#/$defs/Base"}},
+        }
+    )
+
+    base = result["$defs"]["Base"]
+    assert base["properties"] == {"a": {"type": "string"}}
+    assert base["additionalProperties"] is False
+
+
+def test_ref_shaped_definition_is_classified_after_normalization():
+    # Same for a definition whose properties arrive through a `$ref` sibling.
+    result = ensure_strict_json_schema(
+        {
+            "$defs": {
+                "Base": {"type": "object", "$ref": "#/$defs/S", "description": "d"},
+                "S": {"type": "object", "properties": {"a": {"type": "string"}}},
+            },
+            "type": "object",
+            "properties": {"f": {"$ref": "#/$defs/Base"}},
+        }
+    )
+
+    assert result["$defs"]["Base"]["properties"] == {"a": {"type": "string"}}
+
+
+def test_singular_example_annotation_is_not_read_as_a_schema():
+    # OpenAPI's singular `example` has no validation effect, so an object literal under it
+    # must not be mistaken for a nested free-form schema.
+    result = ensure_strict_json_schema(
+        {
+            "$defs": {
+                "D": {
+                    "type": "object",
+                    "properties": {"tag": {"type": "string", "example": {"type": "object"}}},
+                }
+            },
+            "type": "object",
+            "properties": {"f": {"$ref": "#/$defs/D"}},
+        }
+    )
+
+    assert result["$defs"]["D"]["additionalProperties"] is False

@@ -205,7 +205,7 @@ _DEFINITION_CONTAINER_KEYS = ("$defs", "definitions")
 
 # Keywords whose values are data literals, not schemas. A literal such as
 # `{"const": {"type": "object"}}` must never have its value mistaken for a schema node.
-_LITERAL_VALUE_KEYWORDS = frozenset({"const", "default", "enum", "examples"})
+_LITERAL_VALUE_KEYWORDS = frozenset({"const", "default", "enum", "example", "examples"})
 
 
 def _iter_schema_nodes(root: object, *, limit: int) -> list[dict[str, object]]:
@@ -239,6 +239,36 @@ def _node_is_unshaped_ref(node: dict[str, object]) -> bool:
     return isinstance(node.get("$ref"), str) and not _siblings_supply_the_shape(
         {key: value for key, value in node.items() if key != "$ref"}
     )
+
+
+def _effective_definition_view(
+    entry: dict[str, object], *, root: dict[str, object]
+) -> dict[str, object]:
+    """What a definition will look like once the converter's normalizations run.
+
+    The walk merges a single-entry `allOf` onto its node and inlines a `$ref` that has
+    siblings, so classifying the raw shape would call definitions free-form that end up
+    perfectly strictable. This mirrors those merges on a copy, without mutating anything.
+    """
+    view = dict(entry)
+    for _ in range(_MAX_SCHEMA_NODES):
+        all_of = view.get("allOf")
+        if is_list(all_of) and len(all_of) == 1 and is_dict(all_of[0]):
+            branch = all_of[0]
+            view.pop("allOf")
+            view = {**view, **branch}
+            continue
+        ref = view.get("$ref")
+        if isinstance(ref, str) and has_more_than_n_keys(view, 1):
+            target = _resolve_ref_chain(ref, root=root)
+            if not is_dict(target):
+                break
+            view.pop("$ref")
+            # Sibling keys take priority over the referenced schema, as in the real merge.
+            view = {**target, **view}
+            continue
+        break
+    return view
 
 
 def _precompute_definition_registries(root: dict[str, object], budget: _NodeBudget) -> None:
@@ -284,7 +314,8 @@ def _precompute_definition_registries(root: dict[str, object], budget: _NodeBudg
                 stack.extend(interior_node)
         interior_nodes[id(entry)] = interior
 
-        if _is_unclosable_object(entry):
+        entry_view = _effective_definition_view(entry, root=root)
+        if "$ref" not in entry_view and _is_unclosable_object(entry_view):
             budget.free_form_definition_ids.add(id(entry))
         for node in interior:
             if _is_unclosable_object(node):
@@ -308,7 +339,8 @@ def _precompute_definition_registries(root: dict[str, object], budget: _NodeBudg
             entry_id = id(entry)
             if entry_id in budget.tainted_definition_ids:
                 continue
-            root_ref = entry.get("$ref")
+            entry_view = _effective_definition_view(entry, root=root)
+            root_ref = entry_view.get("$ref")
             if isinstance(root_ref, str) and entry_id not in budget.free_form_definition_ids:
                 target = _resolve_ref_chain(root_ref, root=root)
                 if target is not None:
@@ -318,7 +350,7 @@ def _precompute_definition_registries(root: dict[str, object], budget: _NodeBudg
                         changed = True
                         continue
                     if id(target) in budget.free_form_definition_ids and _node_is_unshaped_ref(
-                        entry
+                        entry_view
                     ):
                         budget.free_form_definition_ids.add(entry_id)
                         changed = True
@@ -360,10 +392,8 @@ def _ensure_strict_json_schema(
     defs = json_schema.get("$defs")
     if is_dict(defs):
         for def_name, def_schema in defs.items():
-            if is_dict(def_schema) and _is_unclosable_object(def_schema):
-                # Remember it before the walk below closes it, so a `$ref` that points here
-                # can be handled rather than silently narrowed to the empty object.
-                budget.free_form_definition_ids.add(id(def_schema))
+            # Classification comes from the precomputed registries, which read the
+            # untouched tree and account for the merges this walk is about to perform.
             budget.definition_stack.append(id(def_schema))
             try:
                 _ensure_strict_json_schema(
@@ -379,10 +409,8 @@ def _ensure_strict_json_schema(
     definitions = json_schema.get("definitions")
     if is_dict(definitions):
         for definition_name, definition_schema in definitions.items():
-            if is_dict(definition_schema) and _is_unclosable_object(definition_schema):
-                # Remember it before the walk below closes it, so a `$ref` that points here
-                # can be handled rather than silently narrowed to the empty object.
-                budget.free_form_definition_ids.add(id(definition_schema))
+            # Classification comes from the precomputed registries, which read the
+            # untouched tree and account for the merges this walk is about to perform.
             budget.definition_stack.append(id(definition_schema))
             try:
                 _ensure_strict_json_schema(

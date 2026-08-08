@@ -583,6 +583,14 @@ class MCPUtil:
                         "strict conversion did not produce an object root for this MCP schema"
                     )
                 if "properties" not in converted:
+                    stale_required = converted.get("required")
+                    if isinstance(stale_required, list) and stale_required:
+                        # The root requires keys it never declares. Restoring the empty
+                        # properties shim would serve a strict schema whose required names
+                        # are all forbidden, so serve the original non-strict instead.
+                        raise UserError(
+                            "strict conversion left required names with no declared properties"
+                        )
                     # Restore the shape the OpenAI spec wants. Only reachable when the root was
                     # already closed by the server, e.g. ``additionalProperties: false``.
                     converted["properties"] = {}

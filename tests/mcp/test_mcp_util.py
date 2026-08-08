@@ -2478,3 +2478,22 @@ async def test_typeless_but_closed_root_is_normalized_to_a_strict_envelope():
     assert function_tool.params_json_schema["type"] == "object"
     assert function_tool.params_json_schema["properties"] == {}
     assert function_tool.params_json_schema["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_closed_root_with_undeclared_required_falls_back():
+    """Restoring the properties shim must not manufacture an unsatisfiable strict schema.
+
+    The root is closed but requires a key it never declares. Serving it strict would forbid
+    the very key it requires, so the original is served non-strict instead.
+    """
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="t",
+        inputSchema={"type": "object", "additionalProperties": False, "required": ["a"]},
+    )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema["required"] == ["a"]
