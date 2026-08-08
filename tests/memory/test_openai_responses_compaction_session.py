@@ -1753,6 +1753,128 @@ class TestOpenAIResponsesCompactionSession:
         assert await underlying.get_items() == self.assistant_history(3) + [pending_call]
 
     @pytest.mark.asyncio
+    async def test_auto_input_fallback_defers_with_pending_anonymous_tool_search(self) -> None:
+        """An anonymous tool_search call without its output must defer, not be replaced."""
+        pending_search = cast(TResponseInputItem, {"type": "tool_search_call"})
+        history = self.assistant_history(3) + [pending_search]
+        underlying = SimpleListSession(history=list(history))
+        underlying.session_settings = SessionSettings(limit=4)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+
+        await session.run_compaction({"response_id": "resp-search"})
+
+        mock_client.responses.compact.assert_not_called()
+        assert await underlying.get_items() == history
+
+    @pytest.mark.asyncio
+    async def test_auto_input_fallback_compacts_with_matched_anonymous_tool_search(self) -> None:
+        """A positionally matched anonymous tool_search pair is not pending."""
+        matched_pair = [
+            cast(TResponseInputItem, {"type": "tool_search_call"}),
+            cast(TResponseInputItem, {"type": "tool_search_output", "output": "found"}),
+        ]
+        underlying = SimpleListSession(history=self.assistant_history(3) + matched_pair)
+        underlying.session_settings = SessionSettings(limit=4)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+
+        await session.run_compaction({"response_id": "resp-search"})
+
+        mock_client.responses.compact.assert_awaited_once()
+        assert "input" in mock_client.responses.compact.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_transformed_tool_output_turn_supersedes_an_older_covered_context(self) -> None:
+        """A transformed deferring turn must not leave an older covered context reusable."""
+        underlying = SimpleListSession(history=self.assistant_history(2))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: False,
+        )
+
+        # Attempt 1 declines and publishes covered context for resp-1.
+        await session.run_compaction({"response_id": "resp-1", "input_coverage": "full"})
+
+        # A transformed tool-output turn defers through the runner save path.
+        agent = Agent(name="assistant", model=FakeModel())
+        await save_result_to_session(
+            session,
+            [],
+            self.tool_output_run_items(agent),
+            None,
+            response_id="resp-2",
+            store=True,
+            input_coverage="transformed",
+        )
+
+        await session.run_compaction({"force": True})
+
+        # The manual force resolves from resp-2's transformed context: it rebuilds from
+        # the full store instead of reusing resp-1's chain.
+        retry_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in retry_kwargs
+        assert "input" in retry_kwargs
+
+    @pytest.mark.asyncio
+    async def test_covered_tool_output_deferral_forces_input_rebuild(self) -> None:
+        """A deferring turn's tool outputs are not on its response chain, so no reuse."""
+        underlying = SimpleListSession(history=self.assistant_history(2))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+        agent = Agent(name="assistant", model=FakeModel())
+
+        await save_result_to_session(
+            session,
+            [],
+            self.tool_output_run_items(agent),
+            None,
+            response_id="resp-2",
+            store=True,
+            input_coverage="full",
+        )
+        mock_client.responses.compact.assert_not_called()
+
+        await session.run_compaction({"force": True})
+
+        retry_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in retry_kwargs
+        assert any(
+            isinstance(item, dict) and item.get("type") == "function_call_output"
+            for item in retry_kwargs["input"]
+        )
+
+    @pytest.mark.asyncio
     async def test_pending_call_deferral_publishes_its_coverage(self) -> None:
         """A manual force after a deferral must not reuse an older covered context."""
         underlying = SimpleListSession(history=self.assistant_history(2))

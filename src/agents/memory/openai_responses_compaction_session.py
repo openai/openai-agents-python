@@ -272,16 +272,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                     used_auto_input_fallback = True
 
             if used_auto_input_fallback and has_pending_tool_calls(session_items):
-                # Sanitization would drop the pending call as an orphan, so defer. Publish
-                # this attempt's coverage first: a later manual force must not reuse an
-                # older context.
-                self._publish_response_context(
-                    response_id, input_coverage, reasoning_item_id_policy
-                )
+                # Sanitization would drop the pending call as an orphan, so defer. The
+                # deferral publishes this attempt's coverage so a later manual force
+                # cannot reuse an older context.
                 await self._defer_compaction(
                     response_id or "",
                     store=store,
                     input_coverage=input_coverage,
+                    reasoning_item_id_policy=reasoning_item_id_policy,
                 )
                 return
 
@@ -456,7 +454,18 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         response_id: str,
         store: bool | None = None,
         input_coverage: SessionInputCoverage | None = None,
+        reasoning_item_id_policy: Literal["preserve", "omit"] | None = None,
     ) -> None:
+        if input_coverage is not None:
+            # A deferring turn ends its compaction attempt here, so its context must
+            # supersede any older covered context a manual force could otherwise reuse.
+            # A deferral also means the store just gained items outside this response's
+            # server-side chain, so "full" coverage no longer holds for reuse.
+            self._publish_response_context(
+                response_id,
+                "transformed" if input_coverage == "full" else input_coverage,
+                reasoning_item_id_policy,
+            )
         if self._deferred_response_id is not None:
             return
         mode = self.compaction_mode

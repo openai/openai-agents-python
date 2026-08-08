@@ -289,16 +289,18 @@ def _drop_reasoning_items_preceding_dropped_calls(
 def has_pending_tool_calls(items: list[TResponseInputItem]) -> bool:
     """Return whether stored history contains a tool call without its matching output."""
     completed_call_ids = _completed_call_ids_by_type(items)
-    for item in items:
+    matched_anonymous_tool_search_calls = _matched_anonymous_tool_search_call_indexes(items)
+    for index, item in enumerate(items):
         if not isinstance(item, dict):
             continue
         item_type = item.get("type")
+        if not isinstance(item_type, str) or item_type not in _TOOL_CALL_TO_OUTPUT_TYPE:
+            continue
         call_id = item.get("call_id")
-        if (
-            not isinstance(item_type, str)
-            or item_type not in _TOOL_CALL_TO_OUTPUT_TYPE
-            or not isinstance(call_id, str)
-        ):
+        if not isinstance(call_id, str):
+            # Anonymous tool_search calls pair positionally, mirroring orphan dropping.
+            if item_type == "tool_search_call" and index not in matched_anonymous_tool_search_calls:
+                return True
             continue
         output_type = _TOOL_CALL_TO_OUTPUT_TYPE[item_type]
         if call_id not in completed_call_ids[output_type]:

@@ -598,6 +598,7 @@ async def save_result_to_session(
                 defer_kwargs: dict[str, Any] = {"store": store}
                 if getattr(session, "_supports_compaction_metadata", False):
                     defer_kwargs["input_coverage"] = resolved_input_coverage
+                    defer_kwargs["reasoning_item_id_policy"] = resolved_reasoning_item_id_policy
                 await _call_session_method(
                     defer_compaction,
                     response_id,
