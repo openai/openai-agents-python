@@ -135,6 +135,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._response_id: str | None = None
         self._deferred_response_id: str | None = None
         self._last_unstored_response_id: str | None = None
+        # Serialize wrapper mutations against compaction snapshot/replace/restore so a
+        # cancellation rollback cannot rewrite past a newer concurrent write.
+        self._mutation_lock = asyncio.Lock()
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -224,21 +227,21 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             _normalize_compaction_output_items(compacted.output or [])
         )
 
-        previous_items = await self._get_all_underlying_session_items()
-        await self._replace_underlying_session_items(
-            output_items=output_items,
-            previous_items=previous_items,
-        )
-
-        self._compaction_candidate_items = select_compaction_candidate_items(output_items)
-        self._session_items = output_items
+        async with self._mutation_lock:
+            previous_items = await self._get_all_underlying_session_items()
+            await self._replace_underlying_session_items(
+                output_items=output_items,
+                previous_items=previous_items,
+            )
+            self._compaction_candidate_items = select_compaction_candidate_items(output_items)
+            self._session_items = output_items
 
         logger.debug(
             "compact: done for %s (mode=%s, output=%s, candidates=%s)",
             self._response_id,
             resolved_mode,
             len(output_items),
-            len(self._compaction_candidate_items),
+            len(self._compaction_candidate_items or []),
         )
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
@@ -393,27 +396,30 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._deferred_response_id = None
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
-        await self.underlying_session.add_items(items)
-        if self._compaction_candidate_items is not None:
-            new_items = _normalize_compaction_session_items(items)
-            new_candidates = select_compaction_candidate_items(new_items)
-            if new_candidates:
-                self._compaction_candidate_items.extend(new_candidates)
-        if self._session_items is not None:
-            self._session_items.extend(_normalize_compaction_session_items(items))
+        async with self._mutation_lock:
+            await self.underlying_session.add_items(items)
+            if self._compaction_candidate_items is not None:
+                new_items = _normalize_compaction_session_items(items)
+                new_candidates = select_compaction_candidate_items(new_items)
+                if new_candidates:
+                    self._compaction_candidate_items.extend(new_candidates)
+            if self._session_items is not None:
+                self._session_items.extend(_normalize_compaction_session_items(items))
 
     async def pop_item(self) -> TResponseInputItem | None:
-        popped = await self.underlying_session.pop_item()
-        if popped:
-            self._compaction_candidate_items = None
-            self._session_items = None
-        return popped
+        async with self._mutation_lock:
+            popped = await self.underlying_session.pop_item()
+            if popped:
+                self._compaction_candidate_items = None
+                self._session_items = None
+            return popped
 
     async def clear_session(self) -> None:
-        await self.underlying_session.clear_session()
-        self._compaction_candidate_items = []
-        self._session_items = []
-        self._deferred_response_id = None
+        async with self._mutation_lock:
+            await self.underlying_session.clear_session()
+            self._compaction_candidate_items = []
+            self._session_items = []
+            self._deferred_response_id = None
 
     async def _ensure_compaction_candidates(
         self,

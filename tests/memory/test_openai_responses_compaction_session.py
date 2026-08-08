@@ -16,6 +16,7 @@ from agents.memory import (
     OpenAIResponsesCompactionSession,
     Session,
     SessionSettings,
+    SQLiteSession,
     is_openai_responses_compaction_aware_session,
 )
 from agents.memory.openai_responses_compaction_session import (
@@ -733,6 +734,93 @@ class TestOpenAIResponsesCompactionSession:
         assert failing_session.snapshot() == history
         assert failing_session.clear_calls == 2
         assert failing_session.add_calls == 2
+
+    @pytest.mark.asyncio
+    async def test_cancel_restore_waits_for_mutation_lock_before_newer_writes(
+        self, tmp_path
+    ) -> None:
+        """Newer wrapper writes must wait out cancel-restore and survive chronologically."""
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "original"}),
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "reply"},
+            ),
+        ]
+        newer_item: TResponseInputItem = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "user", "content": "newer-after-cancel"},
+        )
+        compacted_items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "compacted"},
+            )
+        ]
+
+        class GatedSQLiteSession(SQLiteSession):
+            def __init__(self, session_id: str, db_path: str) -> None:
+                super().__init__(session_id, db_path)
+                self.add_calls = 0
+                self.clear_calls = 0
+                self.cancel_replacement_add = False
+                self.restore_clear_started = asyncio.Event()
+                self.allow_restore_clear = asyncio.Event()
+
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                self.add_calls += 1
+                if self.cancel_replacement_add and self.add_calls == 1:
+                    raise asyncio.CancelledError()
+                await super().add_items(items)
+
+            async def clear_session(self) -> None:
+                self.clear_calls += 1
+                if self.clear_calls == 2:
+                    self.restore_clear_started.set()
+                    await self.allow_restore_clear.wait()
+                await super().clear_session()
+
+        underlying = GatedSQLiteSession("lock-test", str(tmp_path / "compaction_lock.db"))
+        await underlying.add_items(history)
+        underlying.add_calls = 0
+        underlying.clear_calls = 0
+        underlying.cancel_replacement_add = True
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = compacted_items
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="lock-test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+        )
+        # Warm wrapper caches so later add_items updates _session_items in place.
+        await session._ensure_compaction_candidates()
+
+        compaction_task = asyncio.create_task(session.run_compaction({"force": True}))
+        await underlying.restore_clear_started.wait()
+
+        newer_write = asyncio.create_task(session.add_items([newer_item]))
+        await asyncio.sleep(0)
+        assert not newer_write.done()
+        assert underlying.clear_calls == 2
+        assert not underlying.allow_restore_clear.is_set()
+
+        underlying.allow_restore_clear.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await compaction_task
+        await newer_write
+
+        stored = await session.get_items()
+        assert stored == [*history, newer_item]
+        assert session._session_items == [*history, newer_item]
+        assert underlying.clear_calls == 2
+        # 1) cancelled replacement add, 2) restore rewrite, 3) newer wrapper write.
+        assert underlying.add_calls == 3
 
     @pytest.mark.asyncio
     async def test_run_compaction_restores_full_history_when_session_limit_applies(
