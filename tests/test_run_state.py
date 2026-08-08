@@ -3118,6 +3118,49 @@ class TestSerializationRoundTrip:
         assert isinstance(restored_item, ToolCallOutputItem)
         assert restored_item.custom_data == {"ui": {"kind": "chart"}, "ids": ["a", "b"]}
 
+    async def test_pydantic_tool_output_preserves_default_fields(self):
+        """A structured tool output's default-valued fields must survive RunState roundtrips.
+
+        ``ToolCallOutputItem.output`` holds the tool's actual return value. Serializing it with
+        ``exclude_unset`` drops fields left at their defaults, so a resumed run would expose an
+        incomplete ``.output`` that disagrees with the full model-facing ``raw_item`` payload.
+        """
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="ItemAgent")
+        state = make_state(agent, context=context, original_input="test", max_turns=5)
+
+        class WeatherReport(BaseModel):
+            temperature: int
+            unit: str = "celsius"
+            humidity: int | None = None
+
+        # Only ``temperature`` is set explicitly; ``unit`` and ``humidity`` keep their defaults.
+        output = WeatherReport(temperature=20)
+        raw_tool_output = {
+            "type": "function_call_output",
+            "call_id": "call_weather",
+            "output": '{"temperature":20,"unit":"celsius","humidity":null}',
+        }
+        state._generated_items.append(
+            ToolCallOutputItem(agent=agent, raw_item=raw_tool_output, output=output)
+        )
+
+        json_data = state.to_json()
+        assert json_data["generated_items"][0]["output"] == {
+            "temperature": 20,
+            "unit": "celsius",
+            "humidity": None,
+        }
+
+        new_state = await RunState.from_json(agent, json_data)
+        restored_item = new_state._generated_items[0]
+        assert isinstance(restored_item, ToolCallOutputItem)
+        assert restored_item.output == {
+            "temperature": 20,
+            "unit": "celsius",
+            "humidity": None,
+        }
+
     async def test_serializes_original_input_with_function_call_output(self):
         """Test that original_input with function_call_output items is preserved."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
