@@ -5,6 +5,7 @@ import importlib
 import inspect
 import json
 from collections.abc import Callable
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, cast
 
@@ -60,6 +61,68 @@ def _dataclass_field_contract(value: object) -> list[dict[str, object]]:
             }
         )
     return result
+
+
+def _constructor_contract(value: Callable[..., Any]) -> dict[str, list[dict[str, object]]]:
+    return {
+        "parameters": _parameter_contract(value),
+        "dataclass_fields": _dataclass_field_contract(value),
+    }
+
+
+def build_released_api_contract(
+    contract: dict[str, Any],
+    *,
+    baseline: str,
+    baseline_commit: str,
+    agents_module: Any | None = None,
+) -> dict[str, Any]:
+    """Build the next rolling release contract from the current public surface."""
+    agents = agents_module or importlib.import_module("agents")
+    current_exports = list(agents.__all__)
+    if not all(isinstance(name, str) for name in current_exports):
+        raise ValueError("agents.__all__ must contain only strings")
+    if len(current_exports) != len(set(current_exports)):
+        raise ValueError("agents.__all__ must not contain duplicate exports")
+
+    missing_bindings = [name for name in current_exports if not hasattr(agents, name)]
+    if missing_bindings:
+        raise ValueError(f"agents.__all__ contains missing bindings: {missing_bindings!r}")
+
+    released_export_order = list(contract["required_top_level_exports"])
+    released_exports = set(released_export_order)
+    current_export_names = set(current_exports)
+    ordered_exports = [name for name in released_export_order if name in current_export_names]
+    ordered_exports.extend(name for name in current_exports if name not in released_exports)
+    tracked_constructors = set(contract["constructors"])
+    constructors: dict[str, Any] = {}
+    for name in ordered_exports:
+        value = getattr(agents, name)
+        should_track = name in tracked_constructors
+        if not should_track and name not in released_exports and inspect.isclass(value):
+            try:
+                inspect.signature(value)
+            except (TypeError, ValueError):
+                continue
+            should_track = True
+        if should_track:
+            constructors[name] = _constructor_contract(value)
+
+    updated = deepcopy(contract)
+    updated["baseline"] = baseline
+    updated["required_top_level_exports"] = ordered_exports
+    updated["constructors"] = constructors
+
+    surface_keys = (
+        "canonical_imports",
+        "constructors",
+        "public_modules",
+        "required_top_level_exports",
+    )
+    surface_changed = any(updated[key] != contract[key] for key in surface_keys)
+    if baseline != contract["baseline"] or surface_changed:
+        updated["baseline_commit"] = baseline_commit
+    return updated
 
 
 def _validate_parameter_contract(

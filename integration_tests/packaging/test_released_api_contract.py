@@ -1,3 +1,4 @@
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -12,10 +13,10 @@ pytestmark = pytest.mark.packaging
 CONTRACT = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "released_api_contract.json"
 
 
-def test_installed_distribution_preserves_v0194_public_api_contract() -> None:
+def test_installed_distribution_preserves_released_public_api_contract() -> None:
     contract = load_api_contract(CONTRACT)
-    assert contract["baseline"] == "v0.19.4"
-    assert contract["baseline_commit"] == "92aa1b905306d7f5a130d911061c44cddeaa6e20"
+    assert contract["baseline"] == f"v{version('openai-agents')}"
+    assert len(contract["baseline_commit"]) == 40
 
     errors = validate_released_api_contract(contract)
 

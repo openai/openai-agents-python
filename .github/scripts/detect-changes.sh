@@ -46,7 +46,7 @@ changed_files=$(git diff --name-only "$base_sha" "$head_sha" || true)
 
 case "$mode" in
   code)
-    pattern='^(src/|tests/|integration_tests/|examples/|\.github/scripts/(detect-changes\.sh|run_integration_tests\.py)$|\.github/workflows/tests\.yml$|pyproject.toml$|uv.lock$|Makefile$)'
+    pattern='^(src/|tests/|integration_tests/|examples/|\.github/scripts/(detect-changes\.sh|run_integration_tests\.py|update_released_api_contract\.py)$|\.github/workflows/tests\.yml$|pyproject.toml$|uv.lock$|Makefile$)'
     ;;
   docs)
     pattern='^(docs/|mkdocs.yml$)'

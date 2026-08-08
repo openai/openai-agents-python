@@ -73,4 +73,5 @@ def test_code_change_detection_includes_packaged_contract_inputs() -> None:
     assert "integration_tests/" in detector
     assert "detect-changes\\.sh" in detector
     assert "run_integration_tests\\.py" in detector
+    assert "update_released_api_contract\\.py" in detector
     assert "\\.github/workflows/tests\\.yml" in detector

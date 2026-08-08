@@ -1,5 +1,7 @@
 from dataclasses import dataclass
+from importlib.metadata import version
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -7,6 +9,7 @@ import pytest
 from integration_tests._contract_support import (
     _parameter_contract,
     _validate_parameter_contract,
+    build_released_api_contract,
     load_api_contract,
     validate_released_api_contract,
 )
@@ -14,10 +17,10 @@ from integration_tests._contract_support import (
 CONTRACT = Path(__file__).parent / "fixtures" / "released_api_contract.json"
 
 
-def test_current_source_preserves_v0194_public_api_contract() -> None:
+def test_current_source_preserves_released_public_api_contract() -> None:
     contract = load_api_contract(CONTRACT)
-    assert contract["baseline"] == "v0.19.4"
-    assert contract["baseline_commit"] == "92aa1b905306d7f5a130d911061c44cddeaa6e20"
+    assert contract["baseline"] == f"v{version('openai-agents')}"
+    assert len(contract["baseline_commit"]) == 40
 
     errors = validate_released_api_contract(contract)
 
@@ -107,3 +110,86 @@ def test_public_api_contract_rejects_required_dataclass_suffix(
         "ContractExample.required_suffix added a required parameter",
         "ContractExample.required_suffix added a required dataclass field",
     ]
+
+
+def test_release_contract_update_freezes_new_exports_and_classes() -> None:
+    @dataclass
+    class Existing:
+        value: str
+        optional: int = 1
+
+    @dataclass
+    class NewPublic:
+        name: str
+        enabled: bool = True
+
+    def new_helper() -> None:
+        return None
+
+    agents_module = SimpleNamespace(
+        __all__=["new_helper", "Existing", "NewPublic"],
+        Existing=Existing,
+        new_helper=new_helper,
+        NewPublic=NewPublic,
+    )
+    contract: dict[str, Any] = {
+        "baseline": "v0.19.4",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": ["Existing"],
+        "public_modules": ["agents"],
+        "canonical_imports": [],
+        "constructors": {
+            "Existing": {
+                "parameters": _parameter_contract(Existing),
+                "dataclass_fields": [],
+            }
+        },
+    }
+
+    updated = build_released_api_contract(
+        contract,
+        baseline="v0.20.0",
+        baseline_commit="b" * 40,
+        agents_module=agents_module,
+    )
+
+    assert updated["baseline"] == "v0.20.0"
+    assert updated["baseline_commit"] == "b" * 40
+    assert updated["required_top_level_exports"] == ["Existing", "new_helper", "NewPublic"]
+    assert set(updated["constructors"]) == {"Existing", "NewPublic"}
+    assert [
+        field["name"] for field in updated["constructors"]["NewPublic"]["dataclass_fields"]
+    ] == [
+        "name",
+        "enabled",
+    ]
+    assert updated["public_modules"] == ["agents"]
+    assert updated["canonical_imports"] == []
+
+    unchanged = build_released_api_contract(
+        updated,
+        baseline="v0.20.0",
+        baseline_commit="c" * 40,
+        agents_module=agents_module,
+    )
+    assert unchanged["baseline_commit"] == "b" * 40
+
+
+def test_release_contract_update_rejects_duplicate_exports() -> None:
+    agents_module = SimpleNamespace(__all__=["Duplicate", "Duplicate"], Duplicate=object())
+    contract: dict[str, Any] = {
+        "baseline": "v0.19.4",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": [],
+        "public_modules": [],
+        "canonical_imports": [],
+        "constructors": {},
+    }
+
+    with pytest.raises(ValueError, match="must not contain duplicate exports"):
+        build_released_api_contract(
+            contract,
+            baseline="v0.20.0",
+            baseline_commit="b" * 40,
+            agents_module=agents_module,
+        )

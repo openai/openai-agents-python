@@ -6,6 +6,16 @@ sync:
 update-rclone-pin:
 	uv run python .github/scripts/update_rclone_pin.py --cooldown-days $(or $(RCLONE_COOLDOWN_DAYS),7) $(if $(RCLONE_VERSION),--version $(RCLONE_VERSION))
 
+.PHONY: update-released-api-contract
+update-released-api-contract:
+	@test -n "$(VERSION)" || (echo "VERSION is required, for example VERSION=0.20.0" >&2; exit 2)
+	uv run python .github/scripts/update_released_api_contract.py --version "$(VERSION)"
+
+.PHONY: check-released-api-contract
+check-released-api-contract:
+	@test -n "$(VERSION)" || (echo "VERSION is required, for example VERSION=0.20.0" >&2; exit 2)
+	uv run python .github/scripts/update_released_api_contract.py --version "$(VERSION)" --check
+
 .PHONY: format
 format: 
 	uv run ruff format
