@@ -47,7 +47,7 @@ from openai.types.responses import (
 from openai.types.responses.response_input_item_param import FunctionCallOutput
 
 from agents.agent_output import AgentOutputSchema
-from agents.exceptions import UserError
+from agents.exceptions import AgentsException, UserError
 from agents.items import TResponseInputItem
 from agents.models.chatcmpl_converter import Converter
 from agents.models.fake_id import FAKE_RESPONSES_ID
@@ -72,6 +72,27 @@ def test_message_to_output_items_with_text_only():
     text_part = cast(ResponseOutputText, message_item.content[0])
     assert text_part.type == "output_text"
     assert text_part.text == "Hello"
+
+
+def test_message_to_output_items_rejects_audio():
+    """
+    Audio output is unsupported by the Chat Completions converter, and the failure
+    must be loud so callers do not receive a silently truncated message.
+    """
+    msg = ChatCompletionMessage.model_validate(
+        {
+            "role": "assistant",
+            "content": None,
+            "audio": {
+                "id": "audio-1",
+                "data": "AAA=",
+                "expires_at": 1,
+                "transcript": "hi",
+            },
+        }
+    )
+    with pytest.raises(AgentsException, match="Audio is not currently supported"):
+        Converter.message_to_output_items(msg)
 
 
 def test_message_to_output_items_keeps_url_citation_annotations():

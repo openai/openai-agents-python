@@ -35,7 +35,7 @@ from openai.types.responses import (
 )
 
 from agents import Agent, Runner, function_tool, trace
-from agents.exceptions import ModelBehaviorError, UserError
+from agents.exceptions import AgentsException, ModelBehaviorError, UserError
 from agents.model_settings import ModelSettings
 from agents.models.chatcmpl_converter import Converter
 from agents.models.chatcmpl_stream_handler import (
@@ -783,6 +783,26 @@ def test_finish_reasoning_summary_part_clears_invalid_active_index() -> None:
 
 
 @pytest.mark.asyncio
+async def test_audio_delta_raises_like_the_sync_path() -> None:
+    """Audio output must fail loudly on the streamed path, matching the sync converter."""
+    chunk = _annotated_chunk({"content": "partial", "audio": {"id": "audio-1", "transcript": "hi"}})
+
+    with pytest.raises(AgentsException, match="Audio is not currently supported"):
+        await _collect_handler_events(chunk)
+
+
+@pytest.mark.asyncio
+async def test_buffered_audio_only_delta_raises_instead_of_completing_empty() -> None:
+    """Tool-call buffering must not swallow an audio-only delta into a silent empty run."""
+    audio_chunk = _annotated_chunk({"audio": {"id": "audio-1", "transcript": "hi"}})
+
+    buffered = ChatCmplStreamHandler.buffer_tool_call_stream(_completion_stream(audio_chunk))
+    with pytest.raises(AgentsException, match="Audio is not currently supported"):
+        async for _ in ChatCmplStreamHandler.handle_stream(_empty_response(), cast(Any, buffered)):
+            pass
+
+
+@pytest.mark.asyncio
 async def test_buffer_tool_call_stream_preserves_empty_choice_chunks() -> None:
     chunk = ChatCompletionChunk(
         id="chunk-id",
@@ -842,6 +862,7 @@ async def test_buffer_tool_call_stream_keeps_passthrough_index_passthrough() -> 
         (ChoiceDelta.model_construct(reasoning_content="summary"), True),
         (ChoiceDelta.model_construct(reasoning="scratchpad"), True),
         (ChoiceDelta.model_construct(thinking_blocks=[{"thinking": "hidden"}]), True),
+        (ChoiceDelta.model_construct(audio={"id": "audio-1"}), True),
     ],
 )
 def test_stream_handler_detects_passthrough_delta_shapes(

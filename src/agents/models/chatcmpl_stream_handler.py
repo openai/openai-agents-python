@@ -48,7 +48,7 @@ from openai.types.responses.response_reasoning_text_done_event import (
 )
 from openai.types.responses.response_usage import OutputTokensDetails
 
-from ..exceptions import ModelBehaviorError, UserError
+from ..exceptions import AgentsException, ModelBehaviorError, UserError
 from ..items import TResponseStreamEvent
 from ..logger import logger
 from ..usage import (
@@ -297,6 +297,9 @@ class ChatCmplStreamHandler:
             return True
 
         if getattr(delta, "annotations", None):
+            return True
+
+        if getattr(delta, "audio", None):
             return True
 
         return False
@@ -672,6 +675,11 @@ class ChatCmplStreamHandler:
 
             delta = choice.delta
             choice_logprobs = choice.logprobs
+
+            if getattr(delta, "audio", None):
+                # The sync converter rejects audio output; a silent empty stream would
+                # diverge from that released behavior.
+                raise AgentsException("Audio is not currently supported")
 
             # Handle thinking blocks from Anthropic (for preserving signatures)
             if hasattr(delta, "thinking_blocks") and delta.thinking_blocks:
