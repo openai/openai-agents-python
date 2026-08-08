@@ -795,7 +795,11 @@ async def start_streaming(
             else:
                 if session is not None and is_openai_responses_compaction_aware_session(session):
                     input_coverage_for_compaction = prepared_input_coverage
-                    if run_config.call_model_input_filter is not None:
+                    # Model input filters and sandbox preparation rewrite the effective input.
+                    if (
+                        run_config.call_model_input_filter is not None
+                        or run_config.sandbox is not None
+                    ):
                         input_coverage_for_compaction = "transformed"
                 session_input_items_for_persistence = session_items_snapshot
                 streamed_result._original_input_for_persistence = session_items_snapshot

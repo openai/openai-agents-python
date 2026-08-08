@@ -25,6 +25,7 @@ from agents.memory.openai_responses_compaction_session import (
     is_openai_model_name,
     select_compaction_candidate_items,
 )
+from agents.run_config import SandboxRunConfig
 from agents.run_internal.items import (
     TOOL_CALL_SESSION_DESCRIPTION_KEY,
     TOOL_CALL_SESSION_TITLE_KEY,
@@ -1606,6 +1607,36 @@ class TestOpenAIResponsesCompactionSession:
 
         mock_client.responses.compact.assert_not_awaited()
         assert await underlying.get_items() == history
+
+    @pytest.mark.asyncio
+    async def test_runner_sandbox_config_skips_auto_compaction(self) -> None:
+        """Sandbox preparation may rewrite the model input, so auto compaction preserves."""
+        history = self.assistant_history(5)
+        underlying = SimpleListSession(history=list(history))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "encrypted_content": "e"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+        model = FakeModel(initial_output=[get_text_message("ok")])
+        agent = Agent(name="assistant", model=model)
+
+        await Runner.run(
+            agent,
+            "hello",
+            session=session,
+            run_config=RunConfig(sandbox=SandboxRunConfig()),
+        )
+
+        mock_client.responses.compact.assert_not_awaited()
+        stored = await underlying.get_items()
+        for item in history:
+            assert item in stored
 
     @pytest.mark.asyncio
     async def test_runner_compaction_underlying_limit_falls_back_to_input(

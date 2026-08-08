@@ -624,7 +624,11 @@ class AgentRunner:
                 )
                 if session is not None and is_openai_responses_compaction_aware_session(session):
                     input_coverage_for_compaction = prepared_input_coverage
-                    if run_config.call_model_input_filter is not None:
+                    # Model input filters and sandbox preparation rewrite the effective input.
+                    if (
+                        run_config.call_model_input_filter is not None
+                        or run_config.sandbox is not None
+                    ):
                         input_coverage_for_compaction = "transformed"
                 original_input_for_state = prepared_input
 
