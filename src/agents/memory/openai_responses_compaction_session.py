@@ -125,7 +125,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self.model = model
         self.compaction_mode = compaction_mode
         self.should_trigger_compaction = (
-            should_trigger_compaction or default_should_trigger_compaction
+            should_trigger_compaction
+            if should_trigger_compaction is not None
+            else default_should_trigger_compaction
         )
 
         # cache for incremental candidate tracking

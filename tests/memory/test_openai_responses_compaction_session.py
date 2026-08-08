@@ -157,6 +157,43 @@ class TestOpenAIResponsesCompactionSession:
             await session.run_compaction()
 
     @pytest.mark.asyncio
+    async def test_run_compaction_honors_falsey_decision_hook(self) -> None:
+        class FalseyDecisionHook:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def __bool__(self) -> bool:
+                return False
+
+            def __call__(self, context: dict[str, Any]) -> bool:
+                self.calls += 1
+                return False
+
+        items = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": f"message {index}"},
+            )
+            for index in range(DEFAULT_COMPACTION_THRESHOLD)
+        ]
+        underlying = SimpleListSession(history=items)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+        decision_hook = FalseyDecisionHook()
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+            should_trigger_compaction=decision_hook,
+        )
+
+        await session.run_compaction()
+
+        assert decision_hook.calls == 1
+        mock_client.responses.compact.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_run_compaction_input_mode_without_response_id(self) -> None:
         mock_session = self.create_mock_session()
         items: list[TResponseInputItem] = [
