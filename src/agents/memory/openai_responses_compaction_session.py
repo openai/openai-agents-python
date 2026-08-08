@@ -256,9 +256,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         output_items: list[TResponseInputItem],
         previous_items: list[TResponseInputItem],
     ) -> None:
-        # Treat clear → add as one replacement transaction. Exception failures already
-        # restore previous history; CancelledError must do the same because it is a
-        # BaseException and would otherwise leave an empty session after a successful clear.
+        # Treat clear → add as one replacement transaction. Exception and CancelledError
+        # both restore previous history, and restore settlement is always drained so a
+        # cancel during restore cannot leave an empty session.
         cleared = False
         try:
             await self.underlying_session.clear_session()
@@ -270,7 +270,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 previous_items=previous_items,
                 error=error,
                 cleared=cleared,
-                shield_restore=False,
             )
             raise
         except asyncio.CancelledError as error:
@@ -278,8 +277,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 previous_items=previous_items,
                 error=error,
                 cleared=cleared,
-                # Shield so a second cancel during restore cannot skip the rewrite.
-                shield_restore=True,
             )
             raise
 
@@ -289,7 +286,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         previous_items: list[TResponseInputItem],
         error: BaseException,
         cleared: bool,
-        shield_restore: bool,
     ) -> None:
         if not cleared:
             restore = self._restore_underlying_session_items_after_failed_clear(
@@ -297,10 +293,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             )
         else:
             restore = self._restore_underlying_session_items(previous_items, error)
-        if shield_restore:
-            await self._await_restore_despite_cancellation(restore)
-        else:
-            await restore
+        await self._await_restore_despite_cancellation(restore)
 
     async def _await_restore_despite_cancellation(self, restore: Awaitable[None]) -> None:
         """Await restore even when the current task keeps receiving cancellation.
@@ -319,6 +312,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                     await asyncio.shield(restore_task)
                 except asyncio.CancelledError:
                     continue
+            # Retrieve the restore outcome so a failed restore does not warn about an
+            # unretrieved task exception after we re-raise cancellation.
+            _ = restore_task.exception() if not restore_task.cancelled() else None
             raise
 
     async def _restore_underlying_session_items_after_failed_clear(
