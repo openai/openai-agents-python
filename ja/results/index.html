@@ -1,0 +1,2122 @@
+
+<!doctype html>
+<html lang="ja" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+      
+        <link rel="prev" href="../handoffs/">
+      
+      
+        <link rel="next" href="../human_in_the_loop/">
+      
+      
+      <link rel="icon" href="../../images/favicon-platform.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.6.16">
+    
+    
+      
+        <title>実行結果 - OpenAI Agents SDK</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.7e37652d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.06af60db.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+    
+  </head>
+  
+  
+    
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#_1" class="md-skip">
+          コンテンツにスキップ
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="ヘッダー">
+    <a href="../" title="OpenAI Agents SDK" class="md-header__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            OpenAI Agents SDK
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              実行結果
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+    
+    
+    
+      <div class="md-header__option">
+  <div class="md-select">
+    
+    <button class="md-header__button md-icon" aria-label="言語切り替え">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m12.87 15.07-2.54-2.51.03-.03A17.5 17.5 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2zm-2.62 7 1.62-4.33L19.12 17z"/></svg>
+    </button>
+    <div class="md-select__inner">
+      <ul class="md-select__list">
+        
+          <li class="md-select__item">
+            <a href="../../results/" hreflang="en" class="md-select__link">
+              English
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="./" hreflang="ja" class="md-select__link">
+              日本語
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../ko/results/" hreflang="ko" class="md-select__link">
+              한국어
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../zh/results/" hreflang="zh" class="md-select__link">
+              简体中文
+            </a>
+          </li>
+        
+      </ul>
+    </div>
+  </div>
+</div>
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="検索" placeholder="検索" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="検索">
+        
+        <button type="reset" class="md-search__icon md-icon" title="クリア" aria-label="クリア" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            検索を初期化
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/openai/openai-agents-python" title="リポジトリへ" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="ナビゲーション" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../" title="OpenAI Agents SDK" class="md-nav__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    OpenAI Agents SDK
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/openai/openai-agents-python" title="リポジトリへ" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    はじめに
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    クイックスタート
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    設定
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    ドキュメント
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            ドキュメント
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェント
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_2" id="__nav_4_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Sandbox エージェント
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_2">
+            <span class="md-nav__icon md-icon"></span>
+            Sandbox エージェント
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    クイックスタート
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    概念
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Sandbox クライアント
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェントメモリ
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_3" id="__nav_4_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    リアルタイムエージェント
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_3">
+            <span class="md-nav__icon md-icon"></span>
+            リアルタイムエージェント
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    クイックスタート
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    リアルタイムエージェントガイド
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_4" id="__nav_4_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    音声エージェント
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_4">
+            <span class="md-nav__icon md-icon"></span>
+            音声エージェント
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    クイックスタート
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/pipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    パイプラインとワークフロー
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    トレーシング
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../models/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    モデル
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ツール
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guardrails/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ガードレール
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../running_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェントの実行
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ストリーミング
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multi_agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェントオーケストレーション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handoffs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ハンドオフ
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    実行結果
+    
+  </span>
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    実行結果
+    
+  </span>
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="目次">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目次
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      適切な実行結果インターフェースの選択
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      最終出力
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      入力、次ターンの履歴、新規項目
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="入力、次ターンの履歴、新規項目">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      新規項目
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      会話の続行または再開
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="会話の続行または再開">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      次ターンのエージェント
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      中断と実行状態
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_9" class="md-nav__link">
+    <span class="md-ellipsis">
+      サーバー管理による継続
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_10" class="md-nav__link">
+    <span class="md-ellipsis">
+      ツールとしてのエージェントのメタデータ
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_11" class="md-nav__link">
+    <span class="md-ellipsis">
+      ストリーミングのライフサイクルと診断
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="ストリーミングのライフサイクルと診断">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#raw" class="md-nav__link">
+    <span class="md-ellipsis">
+      Raw レスポンス
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_12" class="md-nav__link">
+    <span class="md-ellipsis">
+      ガードレールの実行結果
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_13" class="md-nav__link">
+    <span class="md-ellipsis">
+      コンテキストと使用量
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../human_in_the_loop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ヒューマン・イン・ザ・ループ
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_14" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_14" id="__nav_4_14_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    セッション
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_14_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_14">
+            <span class="md-nav__icon md-icon"></span>
+            セッション
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    セッション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/sqlalchemy_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    SQLAlchemy セッション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/advanced_sqlite_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    高度な SQLite セッション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/encrypted_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    暗号化セッション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../context/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    コンテキスト管理
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    使用量
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Model context protocol (MCP)
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    トレーシング
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../visualization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェントの可視化
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../repl/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    REPL ユーティリティ
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    コード例
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../release/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    リリースプロセス／変更履歴
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="目次">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目次
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      適切な実行結果インターフェースの選択
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      最終出力
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      入力、次ターンの履歴、新規項目
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="入力、次ターンの履歴、新規項目">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      新規項目
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      会話の続行または再開
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="会話の続行または再開">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      次ターンのエージェント
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      中断と実行状態
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_9" class="md-nav__link">
+    <span class="md-ellipsis">
+      サーバー管理による継続
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_10" class="md-nav__link">
+    <span class="md-ellipsis">
+      ツールとしてのエージェントのメタデータ
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_11" class="md-nav__link">
+    <span class="md-ellipsis">
+      ストリーミングのライフサイクルと診断
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="ストリーミングのライフサイクルと診断">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#raw" class="md-nav__link">
+    <span class="md-ellipsis">
+      Raw レスポンス
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_12" class="md-nav__link">
+    <span class="md-ellipsis">
+      ガードレールの実行結果
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_13" class="md-nav__link">
+    <span class="md-ellipsis">
+      コンテキストと使用量
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="_1">実行結果</h1>
+<p><code>Runner.run</code> メソッドを呼び出すと、次の 2 種類の実行結果のいずれかを受け取ります。</p>
+<ul>
+<li><code>Runner.run(...)</code> または <code>Runner.run_sync(...)</code> から返される <a class="autorefs autorefs-internal" title="RunResult
+
+
+  
+      dataclass
+  " href="../../ref/result/#agents.result.RunResult"><code>RunResult</code></a></li>
+<li><code>Runner.run_streamed(...)</code> から返される <a class="autorefs autorefs-internal" title="RunResultStreaming
+
+
+  
+      dataclass
+  " href="../../ref/result/#agents.result.RunResultStreaming"><code>RunResultStreaming</code></a></li>
+</ul>
+<p>どちらも <a class="autorefs autorefs-internal" title="RunResultBase
+
+
+  
+      dataclass
+  " href="../../ref/result/#agents.result.RunResultBase"><code>RunResultBase</code></a> を継承しており、<code>final_output</code>、<code>new_items</code>、<code>last_agent</code>、<code>raw_responses</code>、<code>to_state()</code> などの共通の実行結果インターフェースを公開します。</p>
+<p><code>RunResultStreaming</code> には、<a class="autorefs autorefs-internal" title="stream_events
+
+
+  
+      async
+  " href="../../ref/result/#agents.result.RunResultStreaming.stream_events"><code>stream_events()</code></a>、<a class="autorefs autorefs-internal" title="current_agent
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultStreaming.current_agent"><code>current_agent</code></a>、<a class="autorefs autorefs-internal" title="is_complete
+
+
+  
+      class-attribute
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultStreaming.is_complete"><code>is_complete</code></a>、<a class="autorefs autorefs-internal" title="cancel" href="../../ref/result/#agents.result.RunResultStreaming.cancel"><code>cancel(...)</code></a> など、ストリーミング固有の制御機能が追加されています。</p>
+<h2 id="_2">適切な実行結果インターフェースの選択</h2>
+<p>ほとんどのアプリケーションでは、少数の実行結果プロパティまたはヘルパーのみが必要です。</p>
+<table>
+<thead>
+<tr>
+<th>必要なもの</th>
+<th>使用するもの</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ユーザーに表示する最終回答</td>
+<td><code>final_output</code></td>
+</tr>
+<tr>
+<td>ローカルの完全なトランスクリプトを含む、再実行可能な次ターンの入力リスト</td>
+<td><code>to_input_list()</code></td>
+</tr>
+<tr>
+<td>エージェント、ツール、ハンドオフ、承認のメタデータを含む詳細な実行項目</td>
+<td><code>new_items</code></td>
+</tr>
+<tr>
+<td>通常、次のユーザーターンを処理するエージェント</td>
+<td><code>last_agent</code></td>
+</tr>
+<tr>
+<td><code>previous_response_id</code> を使用した OpenAI Responses API のチェーン</td>
+<td><code>last_response_id</code></td>
+</tr>
+<tr>
+<td>保留中の承認と再開可能なスナップショット</td>
+<td><code>interruptions</code> と <code>to_state()</code></td>
+</tr>
+<tr>
+<td>現在のネストされた <code>Agent.as_tool()</code> 呼び出しに関するメタデータ</td>
+<td><code>agent_tool_invocation</code></td>
+</tr>
+<tr>
+<td>raw モデル呼び出しまたはガードレールの診断</td>
+<td><code>raw_responses</code> とガードレールの実行結果配列</td>
+</tr>
+</tbody>
+</table>
+<h2 id="_3">最終出力</h2>
+<p><a class="autorefs autorefs-internal" title="final_output
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.final_output"><code>final_output</code></a> プロパティには、最後に実行されたエージェントの最終出力が格納されます。これは次のいずれかです。</p>
+<ul>
+<li>最後のエージェントに <code>output_type</code> が定義されていなかった場合は <code>str</code></li>
+<li>最後のエージェントに出力型が定義されていた場合は、<code>last_agent.output_type</code> 型のオブジェクト</li>
+<li>承認待ちの中断で一時停止した場合など、最終出力が生成される前に実行が停止した場合は <code>None</code></li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><code>final_output</code> の型は <code>Any</code> です。ハンドオフによって実行を完了するエージェントが変わる可能性があるため、SDK は考えられる出力型の完全な集合を静的に把握できません。</p>
+</div>
+<p>ストリーミングモードでは、ストリームの処理が完了するまで <code>final_output</code> は <code>None</code> のままです。イベントごとのフローについては、<a href="../streaming/">ストリーミング</a>を参照してください。</p>
+<h2 id="_4">入力、次ターンの履歴、新規項目</h2>
+<p>これらのインターフェースは、それぞれ異なる目的に対応します。</p>
+<table>
+<thead>
+<tr>
+<th>プロパティまたはヘルパー</th>
+<th>格納される内容</th>
+<th>最適な用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a class="autorefs autorefs-internal" title="input
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.input"><code>input</code></a></td>
+<td>この実行セグメントの基本入力。ハンドオフ入力フィルターが履歴を書き換えた場合は、実行の続行に使用されたフィルター済みの入力が反映されます。</td>
+<td>この実行で実際に使用された入力の監査</td>
+</tr>
+<tr>
+<td><a class="autorefs autorefs-internal" title="to_input_list" href="../../ref/result/#agents.result.RunResultBase.to_input_list"><code>to_input_list()</code></a></td>
+<td>実行を入力項目として表したもの。デフォルトの <code>mode="preserve_all"</code> では、<code>new_items</code> から変換された履歴が維持されます。ただし、SDK デフォルトのネストされたハンドオフ履歴へすでに移された同一のセッション項目は、再度追加されません。<code>mode="normalized"</code> では、ハンドオフのフィルタリングによってモデル履歴が書き換えられた場合、正規の継続入力が優先されます。</td>
+<td>手動のチャットループ、クライアント管理の会話状態、プレーンな項目履歴の確認</td>
+</tr>
+<tr>
+<td><a class="autorefs autorefs-internal" title="new_items
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.new_items"><code>new_items</code></a></td>
+<td>エージェント、ツール、ハンドオフ、承認のメタデータを含む詳細な <a class="autorefs autorefs-internal" title="RunItem
+
+
+  
+      module-attribute
+  " href="../../ref/items/#agents.items.RunItem"><code>RunItem</code></a> ラッパー。</td>
+<td>ログ、UI、監査、デバッグ</td>
+</tr>
+<tr>
+<td><a class="autorefs autorefs-internal" title="raw_responses
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.raw_responses"><code>raw_responses</code></a></td>
+<td>実行中の各モデル呼び出しから得られた raw <a class="autorefs autorefs-internal" title="ModelResponse" href="../../ref/items/#agents.items.ModelResponse"><code>ModelResponse</code></a> オブジェクト。</td>
+<td>プロバイダーレベルの診断または raw レスポンスの確認</td>
+</tr>
+</tbody>
+</table>
+<p>実際には、次のように使い分けます。</p>
+<ul>
+<li>実行をプレーンな入力項目として確認する場合は、<code>to_input_list()</code> を使用します。</li>
+<li>ハンドオフのフィルタリングやネストされたハンドオフ履歴の書き換え後、次の <code>Runner.run(..., input=...)</code> 呼び出しに使用する正規のローカル入力が必要な場合は、<code>to_input_list(mode="normalized")</code> を使用します。</li>
+<li>SDK に履歴の読み込みと保存を任せる場合は、<a href="../sessions/"><code>session=...</code></a> を使用します。</li>
+<li><code>conversation_id</code> または <code>previous_response_id</code> を使って OpenAI のサーバー管理状態を使用している場合、通常は <code>to_input_list()</code> を再送せず、新しいユーザー入力のみを渡して保存済みの ID を再利用します。</li>
+<li>ログ、UI、監査のために変換済みの完全な履歴が必要な場合は、デフォルトモードの <code>to_input_list()</code> または <code>new_items</code> を使用します。</li>
+</ul>
+<p>SDK デフォルトのネストされたハンドオフ履歴でメッセージ項目がそのまま保持される場合、Sessions、<code>RunState</code>、<code>to_input_list()</code> は、内容で重複排除するのではなく、所有対象となる個々の出現を追跡します。個別に発生した同一のメッセージは別々のものとして維持され、すでに所有されている出現のみが再度追加されないように処理されます。</p>
+<p>JavaScript SDK とは異なり、Python ではモデル形式の差分のみを表す独立した <code>output</code> プロパティは公開されていません。SDK のメタデータが必要な場合は <code>new_items</code> を使用し、raw モデルペイロードが必要な場合は <code>raw_responses</code> を確認してください。</p>
+<p>コンピュータツールの再実行では、raw Responses ペイロードの形式が使用されます。プレビューモデルの <code>computer_call</code> 項目は単一の <code>action</code> を保持しますが、<code>gpt-5.5</code> のコンピュータ呼び出しはバッチ化された <code>actions[]</code> を保持できます。<a class="autorefs autorefs-internal" title="to_input_list" href="../../ref/result/#agents.result.RunResultBase.to_input_list"><code>to_input_list()</code></a> と <a class="autorefs autorefs-internal" title="RunState
+
+
+  
+      dataclass
+  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a> は、モデルが生成した形式をそのまま維持するため、手動の再実行、一時停止と再開のフロー、保存済みトランスクリプトは、プレビュー版と GA 版の両方のコンピュータツール呼び出しで引き続き機能します。ローカルでの実行結果は、引き続き <code>new_items</code> 内の <code>computer_call_output</code> 項目として表示されます。</p>
+<h3 id="_5">新規項目</h3>
+<p><a class="autorefs autorefs-internal" title="new_items
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.new_items"><code>new_items</code></a> を使用すると、実行中に起きたことを最も詳細に確認できます。一般的な項目型は次のとおりです。</p>
+<ul>
+<li>アシスタントメッセージを表す <a class="autorefs autorefs-internal" title="MessageOutputItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.MessageOutputItem"><code>MessageOutputItem</code></a></li>
+<li>推論項目を表す <a class="autorefs autorefs-internal" title="ReasoningItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.ReasoningItem"><code>ReasoningItem</code></a></li>
+<li>Responses のツール検索リクエストと読み込まれたツール検索結果を表す <a class="autorefs autorefs-internal" title="ToolSearchCallItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.ToolSearchCallItem"><code>ToolSearchCallItem</code></a> と <a class="autorefs autorefs-internal" title="ToolSearchOutputItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.ToolSearchOutputItem"><code>ToolSearchOutputItem</code></a></li>
+<li>ツール呼び出しとその実行結果を表す <a class="autorefs autorefs-internal" title="ToolCallItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.ToolCallItem"><code>ToolCallItem</code></a> と <a class="autorefs autorefs-internal" title="ToolCallOutputItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.ToolCallOutputItem"><code>ToolCallOutputItem</code></a></li>
+<li>承認のために一時停止したツール呼び出しを表す <a class="autorefs autorefs-internal" title="ToolApprovalItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.ToolApprovalItem"><code>ToolApprovalItem</code></a></li>
+<li>ホスト型 MCP の承認とツールカタログを表す <a class="autorefs autorefs-internal" title="MCPApprovalRequestItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.MCPApprovalRequestItem"><code>MCPApprovalRequestItem</code></a>、<a class="autorefs autorefs-internal" title="MCPApprovalResponseItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.MCPApprovalResponseItem"><code>MCPApprovalResponseItem</code></a>、<a class="autorefs autorefs-internal" title="MCPListToolsItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.MCPListToolsItem"><code>MCPListToolsItem</code></a></li>
+<li>ハンドオフリクエストと完了した転送を表す <a class="autorefs autorefs-internal" title="HandoffCallItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.HandoffCallItem"><code>HandoffCallItem</code></a> と <a class="autorefs autorefs-internal" title="HandoffOutputItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.HandoffOutputItem"><code>HandoffOutputItem</code></a></li>
+</ul>
+<p>エージェントとの関連付け、ツール出力、ハンドオフ境界、承認境界が必要な場合は、<code>to_input_list()</code> ではなく <code>new_items</code> を選択してください。</p>
+<p>ホスト型ツール検索を使用する場合、モデルが生成した検索リクエストを確認するには <code>ToolSearchCallItem.raw_item</code> を、該当ターンで読み込まれた名前空間、関数、ホスト型 MCP サーバーを確認するには <code>ToolSearchOutputItem.raw_item</code> を調べます。</p>
+<p>プログラムによるツール呼び出し (Programmatic Tool Calling) では、生成された <code>program</code> は <code>ToolCallItem</code> であり、そのプログラムが所有する通常の子ツール呼び出しも <code>ToolCallItem</code> エントリです。また、対応する <code>program_output</code> は <code>ToolCallOutputItem</code> です。プログラムが所有するホスト型 MCP の <code>mcp_approval_request</code> 項目と <code>mcp_list_tools</code> 項目は例外で、それぞれ <code>MCPApprovalRequestItem</code> エントリと <code>MCPListToolsItem</code> エントリになります。</p>
+<p>raw 項目には、型付きの Responses オブジェクトまたはマッピングを使用できます。特に、プログラムが所有する shell 呼び出しと apply-patch 呼び出しではマッピングが使用されます。マッピングでも安全な次の検査パターンを使用してください。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">collections.abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">Mapping</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="k">def</span><span class="w"> </span><span class="nf">raw_field</span><span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="n">name</span><span class="p">):</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    <span class="n">raw_item</span> <span class="o">=</span> <span class="n">item</span><span class="o">.</span><span class="n">raw_item</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">raw_item</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">):</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>        <span class="k">return</span> <span class="n">raw_item</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="k">return</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">raw_item</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="n">raw_type</span> <span class="o">=</span> <span class="n">raw_field</span><span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="s2">&quot;type&quot;</span><span class="p">)</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="n">caller</span> <span class="o">=</span> <span class="n">raw_field</span><span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="s2">&quot;caller&quot;</span><span class="p">)</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="n">caller_id</span> <span class="o">=</span> <span class="p">(</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="n">caller</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;caller_id&quot;</span><span class="p">)</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">caller</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">)</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>    <span class="k">else</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">caller</span><span class="p">,</span> <span class="s2">&quot;caller_id&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>プログラムが所有する子呼び出しでは、<code>caller</code> の型は <code>program</code> で、<code>caller_id</code> は親プログラムの呼び出しを識別します。</p>
+<h2 id="_6">会話の続行または再開</h2>
+<h3 id="_7">次ターンのエージェント</h3>
+<p><a class="autorefs autorefs-internal" title="last_agent
+
+
+  
+      abstractmethod
+      property
+  " href="../../ref/result/#agents.result.RunResultBase.last_agent"><code>last_agent</code></a> には、最後に実行されたエージェントが格納されます。多くの場合、ハンドオフ後の次のユーザーターンで再利用するエージェントとして最適です。</p>
+<p>ストリーミングモードでは、実行の進行に合わせて <a class="autorefs autorefs-internal" title="current_agent
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultStreaming.current_agent"><code>RunResultStreaming.current_agent</code></a> が更新されるため、ストリームが完了する前にハンドオフを確認できます。</p>
+<h3 id="_8">中断と実行状態</h3>
+<p>ツールに承認が必要な場合、保留中の承認は <a class="autorefs autorefs-internal" title="interruptions
+
+
+  
+      class-attribute
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResult.interruptions"><code>RunResult.interruptions</code></a> または <a class="autorefs autorefs-internal" title="interruptions
+
+
+  
+      class-attribute
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultStreaming.interruptions"><code>RunResultStreaming.interruptions</code></a> で公開されます。これには、直接使用されたツール、ハンドオフ後に到達したツール、ネストされた <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> の実行によって発生した承認が含まれる場合があります。</p>
+<p><a class="autorefs autorefs-internal" title="to_state" href="../../ref/result/#agents.result.RunResult.to_state"><code>to_state()</code></a> を呼び出して再開可能な <a class="autorefs autorefs-internal" title="RunState
+
+
+  
+      dataclass
+  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a> を取得し、保留中の項目を承認または拒否してから、<code>Runner.run(...)</code> または <code>Runner.run_streamed(...)</code> で再開します。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span> <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Use tools when needed.&quot;</span><span class="p">)</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Delete temp files that are no longer needed.&quot;</span><span class="p">)</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">interruptions</span><span class="p">:</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>    <span class="n">state</span> <span class="o">=</span> <span class="n">result</span><span class="o">.</span><span class="n">to_state</span><span class="p">()</span>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    <span class="k">for</span> <span class="n">interruption</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">interruptions</span><span class="p">:</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>        <span class="n">state</span><span class="o">.</span><span class="n">approve</span><span class="p">(</span><span class="n">interruption</span><span class="p">)</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="n">state</span><span class="p">)</span>
+</span></code></pre></div>
+<p>ストリーミング実行では、まず <a class="autorefs autorefs-internal" title="stream_events
+
+
+  
+      async
+  " href="../../ref/result/#agents.result.RunResultStreaming.stream_events"><code>stream_events()</code></a> の消費を完了し、その後で <code>result.interruptions</code> を確認して <code>result.to_state()</code> から再開します。承認フローの全体については、<a href="../human_in_the_loop/">Human-in-the-loop</a>を参照してください。</p>
+<h3 id="_9">サーバー管理による継続</h3>
+<p><a class="autorefs autorefs-internal" title="last_response_id
+
+
+  
+      property
+  " href="../../ref/result/#agents.result.RunResultBase.last_response_id"><code>last_response_id</code></a> は、実行で得られた最新のモデルレスポンス ID です。OpenAI Responses API のチェーンを継続する場合は、次のターンで <code>previous_response_id</code> として渡します。</p>
+<p>すでに <code>to_input_list()</code>、<code>session</code>、<code>conversation_id</code> を使用して会話を継続している場合、通常は <code>last_response_id</code> は必要ありません。複数ステップの実行に含まれるすべてのモデルレスポンスが必要な場合は、代わりに <code>raw_responses</code> を確認してください。</p>
+<h2 id="_10">ツールとしてのエージェントのメタデータ</h2>
+<p>ネストされた <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> の実行から実行結果が返された場合、<a class="autorefs autorefs-internal" title="agent_tool_invocation
+
+
+  
+      property
+  " href="../../ref/result/#agents.result.RunResultBase.agent_tool_invocation"><code>agent_tool_invocation</code></a> は外側のツール呼び出しに関する不変のメタデータを公開します。</p>
+<ul>
+<li><code>tool_name</code></li>
+<li><code>tool_call_id</code></li>
+<li><code>tool_arguments</code></li>
+</ul>
+<p>通常のトップレベル実行では、<code>agent_tool_invocation</code> は <code>None</code> です。</p>
+<p>これは特に <code>custom_output_extractor</code> 内で役立ちます。ネストされた実行結果を後処理する際に、外側のツール名、呼び出し ID、raw 引数が必要になる場合があるためです。関連する <code>Agent.as_tool()</code> のパターンについては、<a href="../tools/">ツール</a>を参照してください。</p>
+<p>そのネストされた実行の解析済み構造化入力も必要な場合は、<code>context_wrapper.tool_input</code> を参照してください。これは <a class="autorefs autorefs-internal" title="RunState
+
+
+  
+      dataclass
+  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a> がネストされたツール入力として汎用的にシリアライズするフィールドです。一方、<code>agent_tool_invocation</code> は現在のネストされた呼び出しに対する実行結果のライブアクセサーです。</p>
+<h2 id="_11">ストリーミングのライフサイクルと診断</h2>
+<p><a class="autorefs autorefs-internal" title="RunResultStreaming
+
+
+  
+      dataclass
+  " href="../../ref/result/#agents.result.RunResultStreaming"><code>RunResultStreaming</code></a> は前述の実行結果インターフェースを継承し、さらにストリーミング固有の次の制御機能を追加します。</p>
+<ul>
+<li>意味レベルのストリームイベントを消費するための <a class="autorefs autorefs-internal" title="stream_events
+
+
+  
+      async
+  " href="../../ref/result/#agents.result.RunResultStreaming.stream_events"><code>stream_events()</code></a></li>
+<li>実行中にアクティブなエージェントを追跡するための <a class="autorefs autorefs-internal" title="current_agent
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultStreaming.current_agent"><code>current_agent</code></a></li>
+<li>ストリーミング実行が完全に終了したかどうかを確認するための <a class="autorefs autorefs-internal" title="is_complete
+
+
+  
+      class-attribute
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultStreaming.is_complete"><code>is_complete</code></a></li>
+<li>実行を即座に、または現在のターンの完了後に停止するための <a class="autorefs autorefs-internal" title="cancel" href="../../ref/result/#agents.result.RunResultStreaming.cancel"><code>cancel(...)</code></a></li>
+</ul>
+<p>非同期イテレーターが終了するまで <code>stream_events()</code> を消費し続けてください。そのイテレーターが終了するまでストリーミング実行は完了していません。また、最後の可視トークンが到着した後も、<code>final_output</code>、<code>interruptions</code>、<code>raw_responses</code> などの要約プロパティや、セッション永続化の副作用が確定処理中である可能性があります。</p>
+<p><code>cancel()</code> を呼び出した場合も、キャンセルとクリーンアップが正しく完了するよう、<code>stream_events()</code> を引き続き消費してください。</p>
+<p>Python では、ストリーミング用の独立した <code>completed</code> Promise や <code>error</code> プロパティは公開されていません。ストリーミングの終端エラーは <code>stream_events()</code> から例外が送出されることで通知され、<code>is_complete</code> は実行が終端状態に達したかどうかを示します。</p>
+<h3 id="raw">Raw レスポンス</h3>
+<p><a class="autorefs autorefs-internal" title="raw_responses
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.raw_responses"><code>raw_responses</code></a> には、実行中に収集された raw モデルレスポンスが格納されます。複数ステップの実行では、ハンドオフやモデル、ツール、モデルの反復サイクルなどにより、複数のレスポンスが生成されることがあります。</p>
+<p><a class="autorefs autorefs-internal" title="last_response_id
+
+
+  
+      property
+  " href="../../ref/result/#agents.result.RunResultBase.last_response_id"><code>last_response_id</code></a> は、<code>raw_responses</code> の最後のエントリに含まれる ID にすぎません。</p>
+<h3 id="_12">ガードレールの実行結果</h3>
+<p>エージェントレベルのガードレールは、<a class="autorefs autorefs-internal" title="input_guardrail_results
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.input_guardrail_results"><code>input_guardrail_results</code></a> と <a class="autorefs autorefs-internal" title="output_guardrail_results
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.output_guardrail_results"><code>output_guardrail_results</code></a> として公開されます。</p>
+<p>ツールのガードレールは、<a class="autorefs autorefs-internal" title="tool_input_guardrail_results
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.tool_input_guardrail_results"><code>tool_input_guardrail_results</code></a> と <a class="autorefs autorefs-internal" title="tool_output_guardrail_results
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.tool_output_guardrail_results"><code>tool_output_guardrail_results</code></a> として個別に公開されます。</p>
+<p>これらの配列には実行全体の情報が蓄積されるため、判断内容のログ記録、追加のガードレールメタデータの保存、実行がブロックされた理由のデバッグに役立ちます。</p>
+<h3 id="_13">コンテキストと使用量</h3>
+<p><a class="autorefs autorefs-internal" title="context_wrapper
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.context_wrapper"><code>context_wrapper</code></a> は、アプリケーションのコンテキストと、承認、使用量、ネストされた <code>tool_input</code> など、SDK が管理するランタイムメタデータをまとめて公開します。</p>
+<p>使用量は <code>context_wrapper.usage</code> で追跡されます。ストリーミング実行では、ストリームの最後のチャンクが処理されるまで使用量の合計値の反映が遅れる場合があります。ラッパーの完全な形式と永続化に関する注意事項については、<a href="../context/">コンテキスト管理</a>を参照してください。</p>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      <script id="__config" type="application/json">{"base": "../..", "features": ["content.code.copy", "content.code.select", "navigation.path", "navigation.sections", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.d50fe291.min.js", "tags": null, "translations": {"clipboard.copied": "\u30b3\u30d4\u30fc\u3057\u307e\u3057\u305f", "clipboard.copy": "\u30af\u30ea\u30c3\u30d7\u30dc\u30fc\u30c9\u3078\u30b3\u30d4\u30fc", "search.result.more.one": "\u3053\u306e\u30da\u30fc\u30b8\u5185\u306b\u3082\u30461\u4ef6\u898b\u3064\u304b\u308a\u307e\u3057\u305f", "search.result.more.other": "\u3053\u306e\u30da\u30fc\u30b8\u5185\u306b\u3042\u3068#\u4ef6\u898b\u3064\u304b\u308a\u307e\u3057\u305f", "search.result.none": "\u4f55\u3082\u898b\u3064\u304b\u308a\u307e\u305b\u3093\u3067\u3057\u305f", "search.result.one": "1\u4ef6\u898b\u3064\u304b\u308a\u307e\u3057\u305f", "search.result.other": "#\u4ef6\u898b\u3064\u304b\u308a\u307e\u3057\u305f", "search.result.placeholder": "\u691c\u7d22\u30ad\u30fc\u30ef\u30fc\u30c9\u3092\u5165\u529b\u3057\u3066\u304f\u3060\u3055\u3044", "search.result.term.missing": "\u691c\u7d22\u306b\u542b\u307e\u308c\u306a\u3044", "select.version": "\u30d0\u30fc\u30b8\u30e7\u30f3\u5207\u308a\u66ff\u3048"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.50899def.min.js"></script>
+      
+    
+  </body>
+</html>
