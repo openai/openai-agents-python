@@ -536,6 +536,7 @@ class MCPUtil:
             failure_error_function
         )
         schema, is_strict = copy.deepcopy(tool_input_schema(tool)), False
+        input_schema_is_empty = schema == {}
 
         # MCP spec doesn't require the inputSchema to have `properties`, but OpenAI spec does.
         if "properties" not in schema:
@@ -548,7 +549,10 @@ class MCPUtil:
             # non-strict. Convert a separate copy so the non-strict fallback keeps
             # the original schema intact.
             try:
-                schema = ensure_strict_json_schema(copy.deepcopy(schema))
+                schema = ensure_strict_json_schema(
+                    copy.deepcopy(schema),
+                    _reject_open_objects=not input_schema_is_empty,
+                )
                 is_strict = True
             except Exception as e:
                 if _debug.DONT_LOG_TOOL_DATA:

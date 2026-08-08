@@ -1,3 +1,5 @@
+import copy
+
 import pytest
 
 from agents.exceptions import UserError
@@ -43,6 +45,38 @@ def test_object_without_additional_properties():
     assert result["required"] == ["a"]
     # The inner property remains unchanged (no additionalProperties is added for non-object types)
     assert result["properties"]["a"] == {"type": "string"}
+
+
+def test_open_object_rejection_is_opt_in():
+    schema = {"type": "object", "properties": {}}
+
+    result = ensure_strict_json_schema(schema.copy())
+
+    assert result["additionalProperties"] is False
+    with pytest.raises(UserError, match="permits undeclared properties"):
+        ensure_strict_json_schema(schema.copy(), _reject_open_objects=True)
+
+
+@pytest.mark.parametrize(
+    ("ref", "definitions"),
+    [
+        ("#/$defs/value", {"value": {"type": "string"}}),
+        ("#/$defs/a%20b", {"a b": {"type": "string"}}),
+    ],
+    ids=["ordinary", "percent-encoded"],
+)
+def test_open_object_rejection_rejects_preserved_pure_refs(ref, definitions):
+    schema = {
+        "$defs": definitions,
+        "type": "object",
+        "properties": {"value": {"$ref": ref}},
+    }
+
+    default_result = ensure_strict_json_schema(copy.deepcopy(schema))
+
+    assert default_result["properties"]["value"] == {"$ref": ref}
+    with pytest.raises(UserError, match="reference whose target was not validated"):
+        ensure_strict_json_schema(copy.deepcopy(schema), _reject_open_objects=True)
 
 
 def test_typeless_root_is_normalized_to_object():
