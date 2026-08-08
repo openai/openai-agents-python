@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import warnings as warnings_module
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from agents.memory import (
     OpenAIResponsesCompactionSession,
     Session,
     SessionSettings,
+    SQLiteSession,
     is_openai_responses_compaction_aware_session,
 )
 from agents.memory.openai_responses_compaction_session import (
@@ -594,6 +596,369 @@ class TestOpenAIResponsesCompactionSession:
         assert await failing_session.get_items() == history
         assert failing_session.clear_calls == 2
         assert failing_session.add_calls == 2
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_restores_history_when_replacement_add_is_cancelled(
+        self,
+    ) -> None:
+        """CancelledError after clear must restore history (BaseException, not Exception)."""
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "original"}),
+            cast(
+                TResponseInputItem,
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "lookup",
+                    "arguments": "{}",
+                    TOOL_CALL_SESSION_DESCRIPTION_KEY: "Lookup private records.",
+                },
+            ),
+        ]
+        compacted_items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "compacted"},
+            )
+        ]
+
+        class CancelOnReplacementAddSession(SimpleListSession):
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.add_calls = 0
+                self.clear_calls = 0
+
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                self.add_calls += 1
+                if self.add_calls == 1:
+                    raise asyncio.CancelledError()
+                await super().add_items(items)
+
+            async def clear_session(self) -> None:
+                self.clear_calls += 1
+                await super().clear_session()
+
+        failing_session = CancelOnReplacementAddSession(history=history)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = compacted_items
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=failing_session,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await session.run_compaction({"force": True})
+
+        assert await failing_session.get_items() == history
+        assert failing_session.clear_calls == 2
+        assert failing_session.add_calls == 2
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_restores_history_when_clear_is_cancelled_after_mutation(
+        self,
+    ) -> None:
+        """CancelledError after a mutating clear must restore without a second destructive clear."""
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "original"}),
+        ]
+        compacted_items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "compacted"},
+            )
+        ]
+
+        class CancelAfterMutatingClearSession(SimpleListSession):
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.add_calls = 0
+                self.clear_calls = 0
+
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                self.add_calls += 1
+                await super().add_items(items)
+
+            async def clear_session(self) -> None:
+                self.clear_calls += 1
+                await super().clear_session()
+                raise asyncio.CancelledError()
+
+        failing_session = CancelAfterMutatingClearSession(history=history)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = compacted_items
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=failing_session,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await session.run_compaction({"force": True})
+
+        assert await failing_session.get_items() == history
+        assert failing_session.clear_calls == 1
+        assert failing_session.add_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_restores_history_when_cancelled_again_during_restore(
+        self,
+    ) -> None:
+        """A second cancel during restore must still finish rewriting previous history."""
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "original"}),
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "reply"}),
+        ]
+        compacted_items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "compacted"},
+            )
+        ]
+
+        class CancelThenGateRestoreSession(SimpleListSession):
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.add_calls = 0
+                self.clear_calls = 0
+                self.restore_add_started = asyncio.Event()
+                self.allow_restore_add = asyncio.Event()
+
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                self.add_calls += 1
+                if self.add_calls == 1:
+                    raise asyncio.CancelledError()
+                # Second add is the restore rewrite after clear.
+                self.restore_add_started.set()
+                await self.allow_restore_add.wait()
+                await super().add_items(items)
+
+            async def clear_session(self) -> None:
+                self.clear_calls += 1
+                await super().clear_session()
+
+            def snapshot(self) -> list[TResponseInputItem]:
+                return list(self._items)
+
+        failing_session = CancelThenGateRestoreSession(history=history)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = compacted_items
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=failing_session,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        compaction_task = asyncio.create_task(session.run_compaction({"force": True}))
+        await failing_session.restore_add_started.wait()
+        # Deliver a second cancel while restore add is still blocked on the gate.
+        compaction_task.cancel()
+        await asyncio.sleep(0)
+        assert not failing_session.allow_restore_add.is_set()
+        assert failing_session.snapshot() == []
+
+        failing_session.allow_restore_add.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await compaction_task
+
+        # History must already be restored when CancelledError surfaces — not later
+        # via an orphaned background rewrite after the await returns.
+        assert failing_session.snapshot() == history
+        assert failing_session.clear_calls == 2
+        assert failing_session.add_calls == 2
+
+    @pytest.mark.asyncio
+    async def test_cancel_restore_waits_for_mutation_lock_before_newer_writes(
+        self, tmp_path
+    ) -> None:
+        """Newer wrapper writes must wait out cancel-restore and survive chronologically."""
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "original"}),
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "reply"},
+            ),
+        ]
+        newer_item: TResponseInputItem = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "user", "content": "newer-after-cancel"},
+        )
+        compacted_items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "compacted"},
+            )
+        ]
+
+        class GatedSQLiteSession(SQLiteSession):
+            def __init__(self, session_id: str, db_path: str) -> None:
+                super().__init__(session_id, db_path)
+                self.add_calls = 0
+                self.clear_calls = 0
+                self.cancel_replacement_add = False
+                self.restore_clear_started = asyncio.Event()
+                self.allow_restore_clear = asyncio.Event()
+
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                self.add_calls += 1
+                if self.cancel_replacement_add and self.add_calls == 1:
+                    raise asyncio.CancelledError()
+                await super().add_items(items)
+
+            async def clear_session(self) -> None:
+                self.clear_calls += 1
+                if self.clear_calls == 2:
+                    self.restore_clear_started.set()
+                    await self.allow_restore_clear.wait()
+                await super().clear_session()
+
+        underlying = GatedSQLiteSession("lock-test", str(tmp_path / "compaction_lock.db"))
+        await underlying.add_items(history)
+        underlying.add_calls = 0
+        underlying.clear_calls = 0
+        underlying.cancel_replacement_add = True
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = compacted_items
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="lock-test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+        )
+        # Warm wrapper caches so later add_items updates _session_items in place.
+        await session._ensure_compaction_candidates()
+
+        compaction_task = asyncio.create_task(session.run_compaction({"force": True}))
+        await underlying.restore_clear_started.wait()
+
+        newer_write = asyncio.create_task(session.add_items([newer_item]))
+        await asyncio.sleep(0)
+        assert not newer_write.done()
+        assert underlying.clear_calls == 2
+        assert not underlying.allow_restore_clear.is_set()
+
+        underlying.allow_restore_clear.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await compaction_task
+        await newer_write
+
+        stored = await session.get_items()
+        assert stored == [*history, newer_item]
+        assert session._session_items == [*history, newer_item]
+        assert underlying.clear_calls == 2
+        # 1) cancelled replacement add, 2) restore rewrite, 3) newer wrapper write.
+        assert underlying.add_calls == 3
+
+    @pytest.mark.asyncio
+    async def test_exception_restore_drains_when_compaction_is_cancelled(self, tmp_path) -> None:
+        """Cancel during Exception-path restore must still finish rewriting history."""
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "original"}),
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "reply"},
+            ),
+        ]
+        compacted_items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "compacted"},
+            )
+        ]
+
+        class ExceptionThenGateRestoreSQLiteSession(SQLiteSession):
+            def __init__(self, session_id: str, db_path: str) -> None:
+                super().__init__(session_id, db_path)
+                self.add_calls = 0
+                self.clear_calls = 0
+                self.fail_replacement_add = False
+                self.restore_add_started = asyncio.Event()
+                self.allow_restore_add = asyncio.Event()
+                self.restore_tasks_seen: list[asyncio.Task[Any]] = []
+
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                self.add_calls += 1
+                if self.fail_replacement_add and self.add_calls == 1:
+                    raise RuntimeError("replacement failed")
+                if self.fail_replacement_add and self.add_calls == 2:
+                    current = asyncio.current_task()
+                    if current is not None:
+                        self.restore_tasks_seen.append(current)
+                    self.restore_add_started.set()
+                    await self.allow_restore_add.wait()
+                await super().add_items(items)
+
+            async def clear_session(self) -> None:
+                self.clear_calls += 1
+                await super().clear_session()
+
+        underlying = ExceptionThenGateRestoreSQLiteSession(
+            "exception-cancel-restore", str(tmp_path / "exception_cancel_restore.db")
+        )
+        await underlying.add_items(history)
+        underlying.add_calls = 0
+        underlying.clear_calls = 0
+        underlying.fail_replacement_add = True
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = compacted_items
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="exception-cancel-restore",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+        )
+        await session._ensure_compaction_candidates()
+        warmed_items = list(session._session_items or [])
+
+        compaction_task = asyncio.create_task(session.run_compaction({"force": True}))
+        await underlying.restore_add_started.wait()
+
+        compaction_task.cancel()
+        await asyncio.sleep(0)
+        assert not compaction_task.done()
+        assert not underlying.allow_restore_add.is_set()
+        assert await underlying.get_items() == []
+
+        underlying.allow_restore_add.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await compaction_task
+
+        stored = await session.get_items()
+        assert stored == history
+        assert session._session_items == warmed_items
+        assert not session._mutation_lock.locked()
+        assert underlying.clear_calls == 2
+        assert underlying.add_calls == 2
+        assert all(task.done() for task in underlying.restore_tasks_seen)
 
     @pytest.mark.asyncio
     async def test_run_compaction_restores_full_history_when_session_limit_applies(
