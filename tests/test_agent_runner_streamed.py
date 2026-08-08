@@ -2706,28 +2706,72 @@ async def test_streaming_resume_persists_tool_outputs_on_run_again():
 
 
 @pytest.mark.asyncio
-async def test_streaming_resume_compaction_falls_back_to_input():
-    """Resumed streaming runs should not infer full-history coverage from the session."""
+async def test_streaming_filtered_input_skips_auto_compaction():
+    """A filter-excluded sentinel must never reach responses.compact in streaming runs."""
+    sentinel = cast(
+        TResponseInputItem,
+        {"type": "message", "role": "assistant", "content": "sentinel-not-for-the-model"},
+    )
+    history = [
+        cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": f"m{i}"})
+        for i in range(5)
+    ]
+    underlying = SimpleListSession(history=[*history, sentinel])
+    mock_client = MagicMock()
+    mock_client.responses.compact = AsyncMock(
+        return_value=SimpleNamespace(output=[{"type": "compaction", "encrypted_content": "enc"}])
+    )
+    session = OpenAIResponsesCompactionSession(
+        session_id="demo",
+        underlying_session=underlying,
+        client=mock_client,
+        should_trigger_compaction=lambda _ctx: True,
+    )
+    model, agent = make_model_and_agent(name="test")
+    model.add_multiple_turn_outputs([[get_text_message("done")]])
+
+    def drop_history(data: Any) -> Any:
+        data.model_data.input = data.model_data.input[-1:]
+        return data.model_data
+
+    result = Runner.run_streamed(
+        agent,
+        input="hello",
+        session=session,
+        run_config=RunConfig(call_model_input_filter=drop_history),
+    )
+    await consume_stream(result)
+
+    assert result.final_output == "done"
+    mock_client.responses.compact.assert_not_awaited()
+    stored = await underlying.get_items()
+    assert sentinel in stored
+
+
+@pytest.mark.asyncio
+async def test_streaming_resume_compaction_skips_and_preserves_the_store():
+    """A resumed streaming run's input window is unknown, so auto compaction must not act."""
 
     async def test_tool() -> str:
         return "tool_result"
 
     tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
     model, agent = make_model_and_agent(name="test", tools=[tool])
-    underlying = SimpleListSession(
-        history=[
-            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": f"m{i}"})
-            for i in range(5)
-        ]
-    )
-    compacted = SimpleNamespace(output=[{"type": "compaction", "encrypted_content": "enc"}])
+    history = [
+        cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": f"m{i}"})
+        for i in range(5)
+    ]
+    underlying = SimpleListSession(history=list(history))
     mock_client = MagicMock()
-    mock_client.responses.compact = AsyncMock(return_value=compacted)
+    mock_client.responses.compact = AsyncMock(
+        return_value=SimpleNamespace(output=[{"type": "compaction", "encrypted_content": "enc"}])
+    )
+    trigger = {"enabled": False}
     session = OpenAIResponsesCompactionSession(
         session_id="demo",
         underlying_session=underlying,
         client=mock_client,
-        should_trigger_compaction=lambda _ctx: True,
+        should_trigger_compaction=lambda _ctx: trigger["enabled"],
     )
 
     queue_function_call_and_text(
@@ -2743,14 +2787,16 @@ async def test_streaming_resume_compaction_falls_back_to_input():
     state = first.to_state()
     state.approve(first.interruptions[0])
 
+    # Arm the hook only for the resumed run so the assertion isolates resume behavior.
+    trigger["enabled"] = True
     resumed = Runner.run_streamed(agent, state, session=session)
     await consume_stream(resumed)
 
     assert resumed.final_output == "done"
-    assert mock_client.responses.compact.call_count >= 1
-    compact_kwargs = mock_client.responses.compact.call_args.kwargs
-    assert "previous_response_id" not in compact_kwargs
-    assert "input" in compact_kwargs
+    mock_client.responses.compact.assert_not_awaited()
+    stored = await underlying.get_items()
+    for item in history:
+        assert item in stored
 
 
 @pytest.mark.asyncio
@@ -2792,7 +2838,7 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
         response_id: str | None,
         reasoning_item_id_policy: str | None = None,
         store: bool | None = None,
-        input_covered_full_history: bool | None = None,
+        input_coverage: str | None = None,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> int:
         observed_counts.append(persisted_count)
@@ -2803,7 +2849,7 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
             response_id=response_id,
             reasoning_item_id_policy=reasoning_item_id_policy,
             store=store,
-            input_covered_full_history=input_covered_full_history,
+            input_coverage=input_coverage,
             wrapper=wrapper,
         )
         return int(result)

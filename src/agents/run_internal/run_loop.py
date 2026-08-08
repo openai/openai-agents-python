@@ -55,6 +55,7 @@ from ..logger import (
     logger,
 )
 from ..memory import Session, is_openai_responses_compaction_aware_session
+from ..memory.session import SessionInputCoverage
 from ..models._response_terminal import (
     response_error_event_failure_error,
     response_terminal_failure_error,
@@ -350,7 +351,7 @@ async def _save_resumed_stream_items(
     items: list[RunItem],
     response_id: str | None,
     store: bool | None = None,
-    input_covered_full_history: bool | None = None,
+    input_coverage: SessionInputCoverage | None = None,
 ) -> None:
     if not await _should_persist_stream_items(
         session=session,
@@ -365,7 +366,7 @@ async def _save_resumed_stream_items(
         response_id=response_id,
         reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
         store=store,
-        input_covered_full_history=input_covered_full_history,
+        input_coverage=input_coverage,
         wrapper=streamed_result.context_wrapper,
     )
     if run_state is not None:
@@ -384,7 +385,7 @@ async def _save_stream_items(
     response_id: str | None,
     update_persisted_count: bool,
     store: bool | None = None,
-    input_covered_full_history: bool | None = None,
+    input_coverage: SessionInputCoverage | None = None,
 ) -> None:
     if not await _should_persist_stream_items(
         session=session,
@@ -399,7 +400,7 @@ async def _save_stream_items(
         run_state,
         response_id=response_id,
         store=store,
-        input_covered_full_history=input_covered_full_history,
+        input_coverage=input_coverage,
         wrapper=streamed_result.context_wrapper,
     )
     if update_persisted_count and streamed_result._state is not None:
@@ -728,7 +729,7 @@ async def start_streaming(
 
         pending_server_items: list[RunItem] | None = None
         session_input_items_for_persistence: list[TResponseInputItem] | None = None
-        input_covered_full_history_for_compaction: bool | None = None
+        input_coverage_for_compaction: SessionInputCoverage | None = None
 
         if is_resumed_state and server_conversation_tracker is not None and run_state is not None:
             session_items: list[TResponseInputItem] | None = None
@@ -769,13 +770,13 @@ async def start_streaming(
             streamed_result._original_input_for_persistence = []
             streamed_result._stream_input_persisted = True
             # See the non-streaming path: a resumed run's original input window is unknown.
-            input_covered_full_history_for_compaction = False
+            input_coverage_for_compaction = "transformed"
         else:
             server_manages_conversation = server_conversation_tracker is not None
             (
                 prepared_input,
                 session_items_snapshot,
-                prepared_input_covered_full_history,
+                prepared_input_coverage,
             ) = await prepare_input_with_session_and_metadata(
                 starting_input,
                 session,
@@ -793,9 +794,9 @@ async def start_streaming(
                 streamed_result._stream_input_persisted = True
             else:
                 if session is not None and is_openai_responses_compaction_aware_session(session):
-                    input_covered_full_history_for_compaction = prepared_input_covered_full_history
+                    input_coverage_for_compaction = prepared_input_coverage
                     if run_config.call_model_input_filter is not None:
-                        input_covered_full_history_for_compaction = False
+                        input_coverage_for_compaction = "transformed"
                 session_input_items_for_persistence = session_items_snapshot
                 streamed_result._original_input_for_persistence = session_items_snapshot
 
@@ -810,7 +811,7 @@ async def start_streaming(
                 items=items,
                 response_id=response_id,
                 store=store_setting,
-                input_covered_full_history=input_covered_full_history_for_compaction,
+                input_coverage=input_coverage_for_compaction,
             )
 
         async def _save_stream_items_with_count(
@@ -825,7 +826,7 @@ async def start_streaming(
                 response_id=response_id,
                 update_persisted_count=True,
                 store=store_setting,
-                input_covered_full_history=input_covered_full_history_for_compaction,
+                input_coverage=input_coverage_for_compaction,
             )
 
         async def _save_stream_items_without_count(
@@ -840,7 +841,7 @@ async def start_streaming(
                 response_id=response_id,
                 update_persisted_count=False,
                 store=store_setting,
-                input_covered_full_history=input_covered_full_history_for_compaction,
+                input_coverage=input_coverage_for_compaction,
             )
     except BaseException:
         if current_task_span:
@@ -1328,7 +1329,7 @@ async def start_streaming(
                     server_conversation_tracker.track_server_items(turn_result.model_response)
 
                 if isinstance(turn_result.next_step, NextStepHandoff):
-                    input_covered_full_history_for_compaction = False
+                    input_coverage_for_compaction = "transformed"
                     await _save_stream_items_without_count(
                         turn_session_items,
                         turn_result.model_response.response_id,

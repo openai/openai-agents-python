@@ -13,6 +13,7 @@ from ..exceptions import UserError
 from ..guardrail import InputGuardrailResult
 from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
 from ..memory import Session
+from ..memory.session import SessionInputCoverage
 from ..models.openai_agent_registration import add_openai_harness_id_to_metadata
 from ..result import RunResult
 from ..run_config import RunConfig
@@ -494,7 +495,7 @@ async def save_turn_items_if_needed(
     items: list[RunItem],
     response_id: str | None,
     store: bool | None = None,
-    input_covered_full_history: bool | None = None,
+    input_coverage: SessionInputCoverage | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     """Persist turn items when persistence is enabled and guardrails allow it."""
@@ -511,7 +512,7 @@ async def save_turn_items_if_needed(
         run_state,
         response_id=response_id,
         store=store,
-        input_covered_full_history=input_covered_full_history,
+        input_coverage=input_coverage,
         wrapper=wrapper,
     )
 
@@ -525,7 +526,7 @@ async def save_final_turn_items_after_guardrails(
     items: list[RunItem],
     response_id: str | None,
     store: bool | None = None,
-    input_covered_full_history: bool | None = None,
+    input_coverage: SessionInputCoverage | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     """Persist deferred final-turn items without skipping a partially persisted resumed turn."""
@@ -541,7 +542,7 @@ async def save_final_turn_items_after_guardrails(
             response_id=response_id,
             reasoning_item_id_policy=run_state._reasoning_item_id_policy,
             store=store,
-            input_covered_full_history=input_covered_full_history,
+            input_coverage=input_coverage,
             wrapper=wrapper,
         )
         return
@@ -552,7 +553,7 @@ async def save_final_turn_items_after_guardrails(
         run_state,
         response_id=response_id,
         store=store,
-        input_covered_full_history=input_covered_full_history,
+        input_coverage=input_coverage,
         wrapper=wrapper,
     )
 

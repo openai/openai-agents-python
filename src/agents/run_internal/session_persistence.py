@@ -29,7 +29,7 @@ from ..memory import (
     is_openai_responses_compaction_aware_session,
 )
 from ..memory.openai_conversations_session import OpenAIConversationsSession
-from ..memory.session import _call_session_method, _get_session_wrapper
+from ..memory.session import SessionInputCoverage, _call_session_method, _get_session_wrapper
 from ..models.fake_id import FAKE_RESPONSES_ID
 from ..run_context import RunContextWrapper
 from ..run_state import RunState
@@ -260,8 +260,8 @@ async def prepare_input_with_session_and_metadata(
     preserve_dropped_new_items: bool = False,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
-) -> tuple[str | list[TResponseInputItem], list[TResponseInputItem], bool | None]:
-    """Prepare model input and report whether it proves full session-history coverage."""
+) -> tuple[str | list[TResponseInputItem], list[TResponseInputItem], SessionInputCoverage | None]:
+    """Prepare model input and classify how it relates to the full stored session history."""
 
     if session is None:
         return input, [], None
@@ -275,16 +275,17 @@ async def prepare_input_with_session_and_metadata(
         )
     else:
         history = await _session_get_items(session, wrapper=wrapper)
-    if not include_history_in_prepared_input:
-        input_covered_full_history = False
-    elif session_input_callback is not None:
-        input_covered_full_history = False
+    input_coverage: SessionInputCoverage
+    if not include_history_in_prepared_input or session_input_callback is not None:
+        # The effective model input was rewritten or does not carry the session view at all.
+        input_coverage = "transformed"
     elif input_history_limit is None:
-        input_covered_full_history = True
+        input_coverage = "full"
+    elif len(history) < input_history_limit:
+        input_coverage = "full"
     else:
-        # A read that exactly fills the window cannot prove nothing older exists, so it counts
-        # as not covered. Compaction then rebuilds from the full history instead of guessing.
-        input_covered_full_history = len(history) < input_history_limit
+        # An exactly filled window cannot prove nothing older exists.
+        input_coverage = "limit_only"
 
     is_openai_conversation_session = isinstance(session, OpenAIConversationsSession)
     converted_history = [
@@ -404,7 +405,7 @@ async def prepare_input_with_session_and_metadata(
     return (
         deduplicated,
         normalize_input_items_for_api(appended_as_inputs),
-        input_covered_full_history,
+        input_coverage,
     )
 
 
@@ -482,7 +483,7 @@ async def save_result_to_session(
     response_id: str | None = None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
-    input_covered_full_history: bool | None = None,
+    input_coverage: SessionInputCoverage | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> int:
     """
@@ -588,15 +589,20 @@ async def save_result_to_session(
         has_local_tool_outputs = any(
             isinstance(item, ToolCallOutputItem | HandoffOutputItem) for item in new_items
         )
+        resolved_input_coverage: SessionInputCoverage = (
+            input_coverage if input_coverage is not None else "transformed"
+        )
         if has_local_tool_outputs:
             defer_compaction = getattr(session, "_defer_compaction", None)
             if callable(defer_compaction):
+                defer_kwargs: dict[str, Any] = {"store": store}
+                if getattr(session, "_supports_compaction_metadata", False):
+                    defer_kwargs["input_coverage"] = resolved_input_coverage
                 await _call_session_method(
                     defer_compaction,
                     response_id,
-                    store=store,
-                    input_covered_full_history=input_covered_full_history,
                     wrapper=wrapper,
+                    **defer_kwargs,
                 )
             logger.debug(
                 "skip: deferring compaction for response %s due to local tool outputs",
@@ -620,7 +626,7 @@ async def save_result_to_session(
             "force": force_compaction,
         }
         if getattr(session, "_supports_compaction_metadata", False):
-            compaction_args["input_covered_full_history"] = input_covered_full_history
+            compaction_args["input_coverage"] = resolved_input_coverage
             compaction_args["reasoning_item_id_policy"] = resolved_reasoning_item_id_policy
         if store is not None:
             compaction_args["store"] = store
@@ -641,7 +647,7 @@ async def save_resumed_turn_items(
     response_id: str | None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
-    input_covered_full_history: bool | None = None,
+    input_coverage: SessionInputCoverage | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> int:
     """Persist resumed turn items and return the updated persisted count."""
@@ -655,7 +661,7 @@ async def save_resumed_turn_items(
         response_id=response_id,
         reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
-        input_covered_full_history=input_covered_full_history,
+        input_coverage=input_coverage,
         wrapper=wrapper,
     )
     return persisted_count + saved_count

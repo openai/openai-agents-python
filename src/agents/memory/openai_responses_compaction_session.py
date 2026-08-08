@@ -19,6 +19,7 @@ from .session import (
     OpenAIResponsesCompactionArgs,
     OpenAIResponsesCompactionAwareSession,
     SessionABC,
+    SessionInputCoverage,
 )
 from .session_settings import SessionSettings
 
@@ -112,8 +113,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             model: Model to use for responses.compact. Defaults to "gpt-4.1". Must be an
                 OpenAI model name (gpt-*, o*, or ft:gpt-*).
             compaction_mode: Controls how the compaction request provides conversation
-                history. "auto" (default) uses a response ID only when it is usable and
-                its model input covered the full stored history; otherwise it uses input.
+                history. "auto" (default) uses a response ID only when its model input
+                covered the full stored history, rebuilds from the full stored history when
+                only a session limit truncated the input, and skips compaction when the
+                input was transformed by callbacks, filters, handoffs, or resume.
             should_trigger_compaction: Custom decision hook. Defaults to triggering when
                 10+ compaction candidates exist.
         """
@@ -157,6 +160,22 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     def session_settings(self, value: SessionSettings | None) -> None:
         self.underlying_session.session_settings = value
 
+    def _publish_response_context(
+        self,
+        response_id: str | None,
+        input_coverage: SessionInputCoverage | None,
+        reasoning_item_id_policy: Literal["preserve", "omit"] | None,
+    ) -> None:
+        if not response_id:
+            return
+        self._last_processed_response_context = {
+            "response_id": response_id,
+            # Never-established coverage publishes as "transformed" so a later call cannot
+            # treat a response this attempt never proved safe as a compaction source.
+            "input_coverage": input_coverage if input_coverage is not None else "transformed",
+            "reasoning_item_id_policy": reasoning_item_id_policy,
+        }
+
     def _resolve_compaction_mode_for_response(
         self,
         *,
@@ -188,11 +207,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 response_id = reused_response_context["response_id"]
         requested_mode = args.get("compaction_mode") if args else None
         mode = requested_mode or self.compaction_mode
-        input_covered_full_history = (
-            args.get("input_covered_full_history")
-            if args and "input_covered_full_history" in args
+        args_input_coverage = (
+            args.get("input_coverage") if args and "input_coverage" in args else None
+        )
+        input_coverage = (
+            args_input_coverage
+            if args_input_coverage is not None
             else (
-                reused_response_context.get("input_covered_full_history")
+                reused_response_context.get("input_coverage")
                 if reused_response_context is not None
                 else None
             )
@@ -228,97 +250,104 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 "when using previous_response_id compaction."
             )
 
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
-
-        used_auto_input_fallback = False
-        if mode == "auto" and resolved_mode == "previous_response_id":
-            input_covered_full_history = await self._input_covers_history(
-                input_covered_full_history
-            )
-            if not input_covered_full_history:
-                resolved_mode = "input"
-                used_auto_input_fallback = True
-
-        if used_auto_input_fallback and has_pending_tool_calls(session_items):
-            # An interrupted approval turn still needs its call paired with a later output.
-            # Replacing history now would sanitize that pending call as an orphan and make
-            # resume persist an output without its originating call.
-            await self._defer_compaction(
-                response_id or "",
-                store=store,
-                input_covered_full_history=input_covered_full_history,
+        if mode == "auto" and args_input_coverage == "transformed":
+            # A transformed turn has no faithful compaction source, so preserve the store.
+            # Only caller-reported coverage skips; manual calls keep released behavior.
+            self._publish_response_context(response_id, "transformed", reasoning_item_id_policy)
+            logger.debug(
+                "skip: transformed model input for %s; auto compaction preserves the store",
+                response_id,
             )
             return
 
-        force = args.get("force", False) if args else False
-        should_compact = force or self.should_trigger_compaction(
-            {
-                "response_id": response_id,
-                "compaction_mode": resolved_mode,
-                "compaction_candidate_items": compaction_candidate_items,
-                "session_items": session_items,
-            }
-        )
+        try:
+            compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
 
-        if not should_compact:
-            # An attempt publishes only once it ends, so an in-flight or failed one cannot.
-            if response_id:
-                self._last_processed_response_context = {
+            used_auto_input_fallback = False
+            if mode == "auto" and resolved_mode == "previous_response_id":
+                input_coverage = await self._infer_input_coverage(input_coverage)
+                if input_coverage != "full":
+                    # An unproven response ID must never be reused as a compaction source.
+                    resolved_mode = "input"
+                    used_auto_input_fallback = True
+
+            if used_auto_input_fallback and has_pending_tool_calls(session_items):
+                # Sanitization would drop the pending call as an orphan, so defer. Publish
+                # this attempt's coverage first: a later manual force must not reuse an
+                # older context.
+                self._publish_response_context(
+                    response_id, input_coverage, reasoning_item_id_policy
+                )
+                await self._defer_compaction(
+                    response_id or "",
+                    store=store,
+                    input_coverage=input_coverage,
+                )
+                return
+
+            force = args.get("force", False) if args else False
+            should_compact = force or self.should_trigger_compaction(
+                {
                     "response_id": response_id,
-                    # Unknown coverage is published as False: a later call must not assume a
-                    # response matched the store when this attempt never proved it.
-                    "input_covered_full_history": bool(input_covered_full_history),
-                    "reasoning_item_id_policy": reasoning_item_id_policy,
+                    "compaction_mode": resolved_mode,
+                    "compaction_candidate_items": compaction_candidate_items,
+                    "session_items": session_items,
                 }
+            )
+
+            if not should_compact:
+                self._publish_response_context(
+                    response_id, input_coverage, reasoning_item_id_policy
+                )
+                logger.debug(
+                    "skip: decision hook declined compaction for %s (mode=%s)",
+                    response_id,
+                    resolved_mode,
+                )
+                return
+
+            self._deferred_response_id = None
             logger.debug(
-                "skip: decision hook declined compaction for %s (mode=%s)",
+                "compact: start for %s using %s (mode=%s)",
                 response_id,
+                self.model,
                 resolved_mode,
             )
-            return
 
-        self._deferred_response_id = None
-        logger.debug(
-            "compact: start for %s using %s (mode=%s)",
-            response_id,
-            self.model,
-            resolved_mode,
-        )
-
-        compact_kwargs: dict[str, Any] = {"model": self.model}
-        if resolved_mode == "previous_response_id":
-            compact_kwargs["previous_response_id"] = response_id
-        else:
-            if used_auto_input_fallback:
-                # Replayed history must reach the API the way a model request would, so it
-                # cannot reintroduce items the successful turn deliberately dropped.
-                compact_kwargs["input"] = sanitize_replayed_input_items(
-                    session_items, reasoning_item_id_policy
-                )
+            compact_kwargs: dict[str, Any] = {"model": self.model}
+            if resolved_mode == "previous_response_id":
+                compact_kwargs["previous_response_id"] = response_id
             else:
-                # Preserve the released explicit input-mode behavior.
-                compact_kwargs["input"] = session_items
+                if used_auto_input_fallback:
+                    # Replayed history must reach the API the way a model request would, so
+                    # it cannot reintroduce items the successful turn deliberately dropped.
+                    compact_kwargs["input"] = sanitize_replayed_input_items(
+                        session_items, reasoning_item_id_policy
+                    )
+                else:
+                    # Preserve the released explicit input-mode behavior.
+                    compact_kwargs["input"] = session_items
 
-        compacted = await self.client.responses.compact(**compact_kwargs)
+            compacted = await self.client.responses.compact(**compact_kwargs)
 
-        output_items = _strip_orphaned_assistant_ids(
-            _normalize_compaction_output_items(compacted.output or [])
-        )
+            output_items = _strip_orphaned_assistant_ids(
+                _normalize_compaction_output_items(compacted.output or [])
+            )
 
-        previous_items = await self._get_all_underlying_session_items()
-        await self._replace_underlying_session_items(
-            output_items=output_items,
-            previous_items=previous_items,
-        )
+            previous_items = await self._get_all_underlying_session_items()
+            await self._replace_underlying_session_items(
+                output_items=output_items,
+                previous_items=previous_items,
+            )
+        except BaseException:
+            # An aborted attempt still supersedes any older covered context a manual retry
+            # could reuse; its unproven coverage then forces the input fallback.
+            self._publish_response_context(response_id, "transformed", reasoning_item_id_policy)
+            raise
 
         self._compaction_candidate_items = None
         self._session_items = None
-        if response_id:
-            self._last_processed_response_context = {
-                "response_id": response_id,
-                "input_covered_full_history": bool(input_covered_full_history),
-                "reasoning_item_id_policy": reasoning_item_id_policy,
-            }
+        self._publish_response_context(response_id, input_coverage, reasoning_item_id_policy)
 
         logger.debug(
             "compact: done for %s (mode=%s, output=%s, candidates=%s)",
@@ -344,13 +373,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         # A window filled exactly to its limit may have older items outside the view.
         return len(prepared_view) < limit
 
-    async def _input_covers_history(
+    async def _infer_input_coverage(
         self,
-        input_covered_full_history: bool | None,
-    ) -> bool:
-        if input_covered_full_history is not None:
-            return input_covered_full_history
-        return await self._underlying_view_covers_history()
+        input_coverage: SessionInputCoverage | None,
+    ) -> SessionInputCoverage:
+        if input_coverage is not None:
+            return input_coverage
+        # Without turn metadata the only detectable shortfall source is the session limit.
+        return "full" if await self._underlying_view_covers_history() else "limit_only"
 
     async def _replace_underlying_session_items(
         self,
@@ -425,11 +455,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self,
         response_id: str,
         store: bool | None = None,
-        input_covered_full_history: bool | None = None,
+        input_coverage: SessionInputCoverage | None = None,
     ) -> None:
         if self._deferred_response_id is not None:
             return
         mode = self.compaction_mode
+        if mode == "auto" and input_coverage == "transformed":
+            # A transformed turn must not schedule a later forced compaction either.
+            return
         resolved_mode = self._resolve_compaction_mode_for_response(
             response_id=response_id,
             store=store,
@@ -439,7 +472,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if (
             mode == "auto"
             and resolved_mode == "previous_response_id"
-            and not await self._input_covers_history(input_covered_full_history)
+            and await self._infer_input_coverage(input_coverage) == "limit_only"
         ):
             resolved_mode = "input"
         should_compact = self.should_trigger_compaction(
