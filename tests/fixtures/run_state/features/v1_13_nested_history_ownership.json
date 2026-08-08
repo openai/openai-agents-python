@@ -1,0 +1,120 @@
+{
+  "$schemaVersion": "1.13",
+  "auto_previous_response_id": false,
+  "context": {
+    "approvals": {},
+    "context": {},
+    "context_meta": {
+      "omitted": false,
+      "original_type": "mapping",
+      "requires_deserializer": false,
+      "serialized_via": "mapping"
+    },
+    "usage": {
+      "input_tokens": 0,
+      "input_tokens_details": [
+        {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        }
+      ],
+      "output_tokens": 0,
+      "output_tokens_details": [
+        {
+          "reasoning_tokens": 0
+        }
+      ],
+      "request_usage_entries": [],
+      "requests": 0,
+      "total_tokens": 0
+    }
+  },
+  "conversation_id": null,
+  "current_agent": {
+    "name": "compat-agent"
+  },
+  "current_step": null,
+  "current_turn": 0,
+  "current_turn_persisted_item_count": 0,
+  "generated_items": [
+    {
+      "agent": {
+        "name": "compat-agent"
+      },
+      "raw_item": {
+        "content": [
+          {
+            "annotations": [],
+            "text": "owned history",
+            "type": "output_text"
+          }
+        ],
+        "id": "owned-message",
+        "role": "assistant",
+        "status": "completed",
+        "type": "message"
+      },
+      "type": "message_output_item"
+    }
+  ],
+  "generated_prompt_cache_key": null,
+  "generated_session_item_indexes": [
+    0
+  ],
+  "input_guardrail_results": [],
+  "last_model_response": null,
+  "last_processed_response": null,
+  "max_turns": 10,
+  "model_responses": [],
+  "nested_history_owned_session_item_refs": [
+    {
+      "digest": "64239013ae7c72683ac8cc61af7c8fe421c6f24d12b77beeef4a37b72141194d",
+      "index": 0,
+      "input_index": 0
+    }
+  ],
+  "no_active_agent_run": true,
+  "original_input": [
+    {
+      "content": [
+        {
+          "annotations": [],
+          "text": "owned history",
+          "type": "output_text"
+        }
+      ],
+      "id": "owned-message",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "output_guardrail_results": [],
+  "previous_response_id": null,
+  "reasoning_item_id_policy": null,
+  "session_items": [
+    {
+      "agent": {
+        "name": "compat-agent"
+      },
+      "raw_item": {
+        "content": [
+          {
+            "annotations": [],
+            "text": "owned history",
+            "type": "output_text"
+          }
+        ],
+        "id": "owned-message",
+        "role": "assistant",
+        "status": "completed",
+        "type": "message"
+      },
+      "type": "message_output_item"
+    }
+  ],
+  "tool_input_guardrail_results": [],
+  "tool_output_guardrail_results": [],
+  "tool_use_tracker": {},
+  "trace": null
+}

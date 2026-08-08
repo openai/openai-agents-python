@@ -92,6 +92,10 @@ integration-tests-manual:
 integration-tests-packaging:
 	uv run python .github/scripts/run_integration_tests.py --profile packaging
 
+.PHONY: integration-tests-security
+integration-tests-security:
+	uv run python .github/scripts/run_integration_tests.py --profile security
+
 .PHONY: integration-tests-mcp-v1
 integration-tests-mcp-v1:
 	uv run python .github/scripts/run_integration_tests.py --profile mcp-v1

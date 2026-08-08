@@ -1,0 +1,3114 @@
+{
+  "baseline": "v0.19.4",
+  "baseline_commit": "92aa1b905306d7f5a130d911061c44cddeaa6e20",
+  "canonical_imports": [
+    {
+      "canonical_module": "agents",
+      "canonical_name": "Agent",
+      "module": "agents.agent",
+      "name": "Agent"
+    },
+    {
+      "canonical_module": "agents",
+      "canonical_name": "function_tool",
+      "module": "agents.decorators",
+      "name": "function_tool"
+    },
+    {
+      "canonical_module": "agents",
+      "canonical_name": "function_tool",
+      "module": "agents.decorators",
+      "name": "tool"
+    },
+    {
+      "canonical_module": "agents",
+      "canonical_name": "input_guardrail",
+      "module": "agents.guardrail",
+      "name": "input_guardrail"
+    },
+    {
+      "canonical_module": "agents",
+      "canonical_name": "handoff",
+      "module": "agents.handoffs",
+      "name": "handoff"
+    },
+    {
+      "canonical_module": "agents",
+      "canonical_name": "SQLiteSession",
+      "module": "agents.memory",
+      "name": "SQLiteSession"
+    },
+    {
+      "canonical_module": "agents",
+      "canonical_name": "SQLiteSession",
+      "module": "agents.memory.sqlite_session",
+      "name": "SQLiteSession"
+    },
+    {
+      "canonical_module": "agents",
+      "canonical_name": "ModelSettings",
+      "module": "agents.model_settings",
+      "name": "ModelSettings"
+    },
+    {
+      "canonical_module": "agents",
+      "canonical_name": "ResponsesWebSocketSession",
+      "module": "agents.responses_websocket_session",
+      "name": "ResponsesWebSocketSession"
+    },
+    {
+      "canonical_module": "agents",
+      "canonical_name": "RetryDecision",
+      "module": "agents.retry",
+      "name": "RetryDecision"
+    },
+    {
+      "canonical_module": "agents",
+      "canonical_name": "RetryPolicyContext",
+      "module": "agents.retry",
+      "name": "RetryPolicyContext"
+    },
+    {
+      "canonical_module": "agents",
+      "canonical_name": "Runner",
+      "module": "agents.run",
+      "name": "Runner"
+    },
+    {
+      "canonical_module": "agents",
+      "canonical_name": "RunConfig",
+      "module": "agents.run_config",
+      "name": "RunConfig"
+    },
+    {
+      "canonical_module": "agents",
+      "canonical_name": "FunctionTool",
+      "module": "agents.tool",
+      "name": "FunctionTool"
+    },
+    {
+      "canonical_module": "agents",
+      "canonical_name": "function_tool",
+      "module": "agents.tool",
+      "name": "function_tool"
+    },
+    {
+      "canonical_module": "agents",
+      "canonical_name": "tool_input_guardrail",
+      "module": "agents.tool_guardrails",
+      "name": "tool_input_guardrail"
+    },
+    {
+      "canonical_module": "agents",
+      "canonical_name": "TracingProcessor",
+      "module": "agents.tracing",
+      "name": "TracingProcessor"
+    }
+  ],
+  "constructors": {
+    "Agent": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "handoff_description"
+        },
+        {
+          "default": {
+            "factory": "builtins.list",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "tools"
+        },
+        {
+          "default": {
+            "factory": "builtins.list",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "mcp_servers"
+        },
+        {
+          "default": {
+            "factory": "agents.agent.AgentBase.<lambda>",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "mcp_config"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "instructions"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "prompt"
+        },
+        {
+          "default": {
+            "factory": "builtins.list",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "handoffs"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "model"
+        },
+        {
+          "default": {
+            "factory": "agents.models.default_models.get_default_model_settings",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "model_settings"
+        },
+        {
+          "default": {
+            "factory": "builtins.list",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "input_guardrails"
+        },
+        {
+          "default": {
+            "factory": "builtins.list",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "output_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "output_type"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "hooks"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "run_llm_again"
+          },
+          "init": true,
+          "name": "tool_use_behavior"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "init": true,
+          "name": "reset_tool_choice"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "handoff_description"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tools"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "mcp_servers"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "mcp_config"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "instructions"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "prompt"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "handoffs"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model_settings"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input_guardrails"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output_type"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "hooks"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "run_llm_again"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_use_behavior"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "reset_tool_choice"
+        }
+      ]
+    },
+    "AgentHookContext": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "context"
+        },
+        {
+          "default": {
+            "factory": "agents.usage.Usage",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "usage"
+        },
+        {
+          "default": {
+            "factory": "builtins.list",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "turn_input"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "tool_input"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "context"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "usage"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "turn_input"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_approvals"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_input"
+        }
+      ]
+    },
+    "FunctionTool": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "description"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "params_json_schema"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "on_invoke_tool"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "init": true,
+          "name": "strict_json_schema"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "init": true,
+          "name": "is_enabled"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "tool_input_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "tool_output_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "init": true,
+          "name": "needs_approval"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "timeout_seconds"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "error_as_result"
+          },
+          "init": true,
+          "name": "timeout_behavior"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "timeout_error_function"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "init": true,
+          "name": "defer_loading"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "custom_data_extractor"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "allowed_callers"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "output_json_schema"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "description"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "params_json_schema"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "on_invoke_tool"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "strict_json_schema"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "is_enabled"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_input_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_output_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "needs_approval"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "timeout_seconds"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "error_as_result"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "timeout_behavior"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "timeout_error_function"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "defer_loading"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "custom_data_extractor"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "allowed_callers"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "output_json_schema"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "_output_type_adapter"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "_failure_error_function"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "_use_default_failure_error_function"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "_is_agent_tool"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "_agent_tool_default_identity"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "_is_codex_tool"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "_agent_instance"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "_tool_namespace"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "_tool_namespace_description"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "_mcp_title"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "_tool_origin"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "_emit_tool_origin"
+        }
+      ]
+    },
+    "Handoff": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_description"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "input_json_schema"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "on_invoke_handoff"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent_name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "input_filter"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "nest_handoff_history"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "init": true,
+          "name": "strict_json_schema"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "init": true,
+          "name": "is_enabled"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_description"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input_json_schema"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "on_invoke_handoff"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent_name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input_filter"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "nest_handoff_history"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "strict_json_schema"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": true
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "is_enabled"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "_default_tool_identity"
+        }
+      ]
+    },
+    "ModelRetrySettings": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "max_retries"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "backoff"
+        },
+        {
+          "default": {
+            "kind": "typed",
+            "type": "pydantic.fields.FieldInfo"
+          },
+          "init": true,
+          "name": "policy"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "max_retries"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "backoff"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "policy"
+        }
+      ]
+    },
+    "ModelSettings": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "temperature"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "top_p"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "frequency_penalty"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "presence_penalty"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "tool_choice"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "parallel_tool_calls"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "truncation"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "max_tokens"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "reasoning"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "verbosity"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "metadata"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "store"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "prompt_cache_retention"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "include_usage"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "response_include"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "top_logprobs"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "extra_query"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "extra_body"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "extra_headers"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "extra_args"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "retry"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "context_management"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "prompt_cache_options"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "temperature"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "top_p"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "frequency_penalty"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "presence_penalty"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_choice"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "parallel_tool_calls"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "truncation"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "max_tokens"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "reasoning"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "verbosity"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "metadata"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "store"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "prompt_cache_retention"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "include_usage"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "response_include"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "top_logprobs"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "extra_query"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "extra_body"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "extra_headers"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "extra_args"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "retry"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "context_management"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "prompt_cache_options"
+        }
+      ]
+    },
+    "RetryDecision": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "retry"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "delay"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "reason"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "retry"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "delay"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "reason"
+        }
+      ]
+    },
+    "RetryPolicyContext": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "error"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "attempt"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "max_retries"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "stream"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "normalized"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "provider_advice"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "error"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "attempt"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "max_retries"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "stream"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "normalized"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "provider_advice"
+        }
+      ]
+    },
+    "RunConfig": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "model"
+        },
+        {
+          "default": {
+            "factory": "agents.models.multi_provider.MultiProvider",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "model_provider"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "model_settings"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "handoff_input_filter"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "init": true,
+          "name": "nest_handoff_history"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "handoff_history_mapper"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "input_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "output_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "init": true,
+          "name": "tracing_disabled"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "tracing"
+        },
+        {
+          "default": {
+            "factory": "agents.run_config._default_trace_include_sensitive_data",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "trace_include_sensitive_data"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "Agent workflow"
+          },
+          "init": true,
+          "name": "workflow_name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "trace_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "group_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "trace_metadata"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "session_input_callback"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "call_model_input_filter"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "tool_error_formatter"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "session_settings"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "reasoning_item_id_policy"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "sandbox"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "tool_execution"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "raise_error"
+          },
+          "init": true,
+          "name": "tool_not_found_behavior"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "warn"
+          },
+          "init": true,
+          "name": "tool_name_collision_policy"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model_provider"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model_settings"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "handoff_input_filter"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "nest_handoff_history"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "handoff_history_mapper"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tracing_disabled"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tracing"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "trace_include_sensitive_data"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "Agent workflow"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "workflow_name"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "trace_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "group_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "trace_metadata"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "session_input_callback"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "call_model_input_filter"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_error_formatter"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "session_settings"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "reasoning_item_id_policy"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "sandbox"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_execution"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "raise_error"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_not_found_behavior"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "warn"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_name_collision_policy"
+        }
+      ]
+    },
+    "RunContextWrapper": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "context"
+        },
+        {
+          "default": {
+            "factory": "agents.usage.Usage",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "usage"
+        },
+        {
+          "default": {
+            "factory": "builtins.list",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "turn_input"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "tool_input"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "context"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "usage"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "turn_input"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_approvals"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_input"
+        }
+      ]
+    },
+    "RunResult": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "new_items"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_responses"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "final_output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "input_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_input_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_output_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "context_wrapper"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": 10
+          },
+          "init": true,
+          "name": "max_turns"
+        },
+        {
+          "default": {
+            "factory": "builtins.list",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "interruptions"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "new_items"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_responses"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "final_output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_input_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_output_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "context_wrapper"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_last_agent"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_last_processed_response"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_tool_use_tracker_snapshot"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": 0
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_current_turn_persisted_item_count"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": 0
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_current_turn"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_model_input_items"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_original_input"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_conversation_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_previous_response_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_auto_previous_response_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": 10
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "max_turns"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "interruptions"
+        }
+      ]
+    },
+    "RunResultStreaming": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "new_items"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "raw_responses"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "final_output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "input_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_input_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tool_output_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "context_wrapper"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "current_agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "current_turn"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "max_turns"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "trace"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "init": true,
+          "name": "is_complete"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "run_loop_task"
+        },
+        {
+          "default": {
+            "factory": "builtins.list",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "interruptions"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "new_items"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_responses"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "final_output"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_input_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool_output_guardrail_results"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "context_wrapper"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "current_agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "current_turn"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "max_turns"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_current_agent_output_schema"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "trace"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "is_complete"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_model_input_items"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_event_queue"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_input_guardrail_queue"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "run_loop_task"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_input_guardrails_task"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_triggered_input_guardrail_result"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_output_guardrails_task"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_stored_exception"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": "none"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_cancel_mode"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_last_processed_response"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "interruptions"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_waiting_on_event_queue"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": 0
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_current_turn_persisted_item_count"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_stream_input_persisted"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_original_input_for_persistence"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_max_turns_handled"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_original_input"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_tool_use_tracker_snapshot"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_state"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_conversation_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_previous_response_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_auto_previous_response_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "_run_impl_task"
+        }
+      ]
+    },
+    "RunState": {
+      "dataclass_fields": [],
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "context"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "original_input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "starting_agent"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": 10
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "max_turns"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "conversation_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "previous_response_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "auto_previous_response_id"
+        }
+      ]
+    },
+    "SessionSettings": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "limit"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "limit"
+        }
+      ]
+    },
+    "ToolExecutionConfig": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "init": true,
+          "name": "max_function_tool_concurrency"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "init": true,
+          "name": "pre_approval_tool_input_guardrails"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "max_function_tool_concurrency"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "pre_approval_tool_input_guardrails"
+        }
+      ]
+    },
+    "Usage": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": 0
+          },
+          "init": true,
+          "name": "requests"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": 0
+          },
+          "init": true,
+          "name": "input_tokens"
+        },
+        {
+          "default": {
+            "factory": "agents.usage._make_input_tokens_details",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "input_tokens_details"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": 0
+          },
+          "init": true,
+          "name": "output_tokens"
+        },
+        {
+          "default": {
+            "factory": "agents.usage.Usage.<lambda>",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "output_tokens_details"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": 0
+          },
+          "init": true,
+          "name": "total_tokens"
+        },
+        {
+          "default": {
+            "factory": "builtins.list",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "request_usage_entries"
+        }
+      ],
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "value": 0
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "requests"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": 0
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input_tokens"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input_tokens_details"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": 0
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output_tokens"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output_tokens_details"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "value": 0
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "total_tokens"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "request_usage_entries"
+        }
+      ]
+    }
+  },
+  "public_modules": [
+    "agents",
+    "agents.agent",
+    "agents.decorators",
+    "agents.guardrail",
+    "agents.handoffs",
+    "agents.memory",
+    "agents.model_settings",
+    "agents.models.openai_chatcompletions",
+    "agents.models.openai_responses",
+    "agents.realtime",
+    "agents.responses_websocket_session",
+    "agents.retry",
+    "agents.run",
+    "agents.run_config",
+    "agents.tool",
+    "agents.tool_guardrails",
+    "agents.tracing"
+  ],
+  "required_top_level_exports": [
+    "Agent",
+    "AgentBase",
+    "AgentToolStreamEvent",
+    "StopAtTools",
+    "ToolsToFinalOutputFunction",
+    "ToolsToFinalOutputResult",
+    "default_handoff_history_mapper",
+    "get_conversation_history_wrappers",
+    "nest_handoff_history",
+    "reset_conversation_history_wrappers",
+    "set_conversation_history_wrappers",
+    "Runner",
+    "apply_diff",
+    "run_demo_loop",
+    "Model",
+    "ModelProvider",
+    "ModelTracing",
+    "ModelSettings",
+    "ModelRetryAdvice",
+    "ModelRetryAdviceRequest",
+    "ModelRetryBackoffSettings",
+    "ModelRetryNormalizedError",
+    "ModelRetrySettings",
+    "RetryDecision",
+    "RetryPolicy",
+    "RetryPolicyContext",
+    "retry_policies",
+    "OpenAIChatCompletionsModel",
+    "MultiProvider",
+    "OpenAIProvider",
+    "OpenAIAgentRegistrationConfig",
+    "OpenAIResponsesModel",
+    "OpenAIResponsesWSModel",
+    "AgentOutputSchema",
+    "AgentOutputSchemaBase",
+    "Computer",
+    "AsyncComputer",
+    "Environment",
+    "Button",
+    "AgentsException",
+    "InputGuardrailTripwireTriggered",
+    "OutputGuardrailTripwireTriggered",
+    "ToolInputGuardrailTripwireTriggered",
+    "ToolOutputGuardrailTripwireTriggered",
+    "DynamicPromptFunction",
+    "GenerateDynamicPromptData",
+    "Prompt",
+    "MaxTurnsExceeded",
+    "MCPToolCancellationError",
+    "ModelBehaviorError",
+    "ModelRefusalError",
+    "ToolTimeoutError",
+    "UserError",
+    "InputGuardrail",
+    "InputGuardrailResult",
+    "OutputGuardrail",
+    "OutputGuardrailResult",
+    "GuardrailFunctionOutput",
+    "input_guardrail",
+    "output_guardrail",
+    "ToolInputGuardrail",
+    "ToolOutputGuardrail",
+    "ToolGuardrailFunctionOutput",
+    "ToolInputGuardrailData",
+    "ToolInputGuardrailResult",
+    "ToolOutputGuardrailData",
+    "ToolOutputGuardrailResult",
+    "tool_input_guardrail",
+    "tool_output_guardrail",
+    "handoff",
+    "Handoff",
+    "HandoffInputData",
+    "HandoffInputFilter",
+    "TResponseInputItem",
+    "MessageOutputItem",
+    "ModelResponse",
+    "RunItem",
+    "HandoffCallItem",
+    "HandoffOutputItem",
+    "ToolApprovalItem",
+    "MCPApprovalRequestItem",
+    "MCPApprovalResponseItem",
+    "MCPListToolsItem",
+    "ToolCallItem",
+    "ToolCallOutputItem",
+    "ToolSearchCallItem",
+    "ToolSearchOutputItem",
+    "ToolOrigin",
+    "ToolOriginType",
+    "ReasoningItem",
+    "ItemHelpers",
+    "RunHooks",
+    "AgentHooks",
+    "Session",
+    "SessionABC",
+    "SessionSettings",
+    "SQLiteSession",
+    "OpenAIConversationsSession",
+    "OpenAIResponsesCompactionSession",
+    "OpenAIResponsesCompactionArgs",
+    "OpenAIResponsesCompactionAwareSession",
+    "is_openai_responses_compaction_aware_session",
+    "CompactionItem",
+    "AgentHookContext",
+    "RunContextWrapper",
+    "TContext",
+    "RunErrorDetails",
+    "RunErrorData",
+    "RunErrorHandler",
+    "RunErrorHandlerInput",
+    "RunErrorHandlerResult",
+    "RunErrorHandlers",
+    "AgentToolInvocation",
+    "RunResult",
+    "RunResultStreaming",
+    "ResponsesWebSocketSession",
+    "RunConfig",
+    "ToolNameCollisionPolicy",
+    "ReasoningItemIdPolicy",
+    "ToolExecutionConfig",
+    "ToolErrorFormatter",
+    "ToolErrorFormatterArgs",
+    "ToolNotFoundBehavior",
+    "RunState",
+    "RawResponsesStreamEvent",
+    "RunItemStreamEvent",
+    "AgentUpdatedStreamEvent",
+    "StreamEvent",
+    "FunctionTool",
+    "FunctionToolCustomDataContext",
+    "FunctionToolCustomDataExtractor",
+    "FunctionToolResult",
+    "ComputerTool",
+    "ComputerToolCustomDataContext",
+    "ComputerToolCustomDataExtractor",
+    "ComputerProvider",
+    "CustomTool",
+    "CustomToolCustomDataContext",
+    "CustomToolCustomDataExtractor",
+    "FileSearchTool",
+    "CodeInterpreterTool",
+    "ImageGenerationTool",
+    "LocalShellCommandRequest",
+    "LocalShellExecutor",
+    "LocalShellTool",
+    "ShellActionRequest",
+    "ShellCallData",
+    "ShellCallOutcome",
+    "ShellCommandOutput",
+    "ShellCommandRequest",
+    "ShellToolLocalSkill",
+    "ShellToolSkillReference",
+    "ShellToolInlineSkillSource",
+    "ShellToolInlineSkill",
+    "ShellToolContainerSkill",
+    "ShellToolContainerNetworkPolicyDomainSecret",
+    "ShellToolContainerNetworkPolicyAllowlist",
+    "ShellToolContainerNetworkPolicyDisabled",
+    "ShellToolContainerNetworkPolicy",
+    "ShellToolLocalEnvironment",
+    "ShellToolContainerAutoEnvironment",
+    "ShellToolContainerReferenceEnvironment",
+    "ShellToolHostedEnvironment",
+    "ShellToolEnvironment",
+    "ShellExecutor",
+    "ShellResult",
+    "ShellTool",
+    "ApplyPatchEditor",
+    "ApplyPatchOperation",
+    "ApplyPatchResult",
+    "ApplyPatchTool",
+    "ApplyPatchToolCustomDataContext",
+    "ApplyPatchToolCustomDataExtractor",
+    "ProgrammaticToolCallingTool",
+    "Tool",
+    "ToolCaller",
+    "WebSearchTool",
+    "HostedMCPTool",
+    "MCPToolApprovalFunction",
+    "MCPToolApprovalRequest",
+    "MCPToolApprovalFunctionResult",
+    "ToolOutputText",
+    "ToolOutputTextDict",
+    "ToolOutputImage",
+    "ToolOutputImageDict",
+    "ToolOutputFileContent",
+    "ToolOutputFileContentDict",
+    "ToolSearchTool",
+    "function_tool",
+    "tool_namespace",
+    "resolve_computer",
+    "dispose_resolved_computers",
+    "Usage",
+    "add_trace_processor",
+    "agent_span",
+    "custom_span",
+    "flush_traces",
+    "function_span",
+    "generation_span",
+    "get_current_span",
+    "get_current_trace",
+    "guardrail_span",
+    "handoff_span",
+    "response_span",
+    "set_trace_processors",
+    "set_trace_provider",
+    "set_tracing_disabled",
+    "speech_group_span",
+    "transcription_span",
+    "speech_span",
+    "mcp_tools_span",
+    "task_span",
+    "trace",
+    "turn_span",
+    "Trace",
+    "TracingProcessor",
+    "SpanError",
+    "Span",
+    "SpanData",
+    "AgentSpanData",
+    "CustomSpanData",
+    "FunctionSpanData",
+    "GenerationSpanData",
+    "GuardrailSpanData",
+    "HandoffSpanData",
+    "SpeechGroupSpanData",
+    "SpeechSpanData",
+    "MCPListToolsSpanData",
+    "ResponseSpanData",
+    "TaskSpanData",
+    "TranscriptionSpanData",
+    "TurnSpanData",
+    "set_default_openai_key",
+    "set_default_openai_client",
+    "set_default_openai_api",
+    "set_default_openai_responses_transport",
+    "OpenAIResponsesWebSocketOptions",
+    "set_default_openai_harness",
+    "set_default_openai_agent_registration",
+    "responses_websocket_session",
+    "set_tracing_export_api_key",
+    "enable_verbose_stdout_logging",
+    "gen_trace_id",
+    "gen_span_id",
+    "default_tool_error_function",
+    "sandbox",
+    "__version__"
+  ]
+}

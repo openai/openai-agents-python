@@ -20,9 +20,16 @@ pytestmark = pytest.mark.core
 
 
 @pytest.mark.parametrize("approved", [False, True], ids=["rejected", "approved"])
-@pytest.mark.parametrize("streaming", [False, True], ids=["nonstreaming", "streaming"])
+@pytest.mark.parametrize(
+    ("initial_streaming", "resume_streaming"),
+    [(False, True), (True, False)],
+    ids=["nonstreaming-to-streaming", "streaming-to-nonstreaming"],
+)
 async def test_tool_approval_survives_serialized_state_and_resume(
-    integration_model: str, approved: bool, streaming: bool
+    integration_model: str,
+    approved: bool,
+    initial_streaming: bool,
+    resume_streaming: bool,
 ) -> None:
     calls: list[str] = []
 
@@ -46,7 +53,7 @@ async def test_tool_approval_survives_serialized_state_and_resume(
     first: RunResult | RunResultStreaming
     resumed: RunResult | RunResultStreaming
 
-    if streaming:
+    if initial_streaming:
         first_stream = Runner.run_streamed(agent, "Perform the deployment.", run_config=config)
         async for _event in first_stream.stream_events():
             pass
@@ -66,7 +73,7 @@ async def test_tool_approval_survives_serialized_state_and_resume(
     else:
         restored.reject(restored_interruption, rejection_message="The operator rejected deploy.")
 
-    if streaming:
+    if resume_streaming:
         resumed_stream = Runner.run_streamed(agent, restored, run_config=config)
         async for _event in resumed_stream.stream_events():
             pass

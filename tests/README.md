@@ -43,6 +43,8 @@ make tests-parallel
 
 Compare test counts, skips, warnings, assertions, and lifecycle coverage as well as elapsed time. Full-suite wall-clock results depend on host load and worker scheduling, so treat repeated focused measurements as the stronger evidence for an individual optimization. Run the repository's required verification stack after the final test changes.
 
+Release compatibility contracts that inspect the current checkout belong in `tests/` when they are deterministic and in-process. Keep their combined serial focused runtime below 1.5 seconds and each case below 100 milliseconds in normal conditions. Tests that build or install distributions, isolate imports in new interpreters, access the network, start containers, or require external services belong in `integration_tests/` instead. The released API manifest permits compatible suffix additions. Historical `RunState` fixtures must be produced by the recorded historical writer rather than by editing a current payload's schema version; the corpus README documents the explicit canonical-reader exception for schema versions that never had a corresponding writer.
+
 ## Snapshots
 
 We use [inline-snapshots](https://15r10nk.github.io/inline-snapshot/latest/) for some tests. If your code adds new snapshot tests or breaks existing ones, you can fix/create them. After fixing/creating snapshots, run `make tests` again to verify the tests pass.
