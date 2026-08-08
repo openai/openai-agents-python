@@ -263,15 +263,17 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         try:
             compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
 
-            used_auto_input_fallback = False
             if mode == "auto" and resolved_mode == "previous_response_id":
                 input_coverage = await self._infer_input_coverage(input_coverage)
                 if input_coverage != "full":
                     # An unproven response ID must never be reused as a compaction source.
                     resolved_mode = "input"
-                    used_auto_input_fallback = True
 
-            if used_auto_input_fallback and has_pending_tool_calls(session_items):
+            # Every auto-resolved input request replays stored history, including the
+            # released store=False resolution; explicit input mode stays caller-owned.
+            auto_input_replay = mode == "auto" and resolved_mode == "input"
+
+            if auto_input_replay and has_pending_tool_calls(session_items):
                 # Sanitization would drop the pending call as an orphan, so defer. The
                 # deferral publishes this attempt's coverage so a later manual force
                 # cannot reuse an older context.
@@ -316,7 +318,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             if resolved_mode == "previous_response_id":
                 compact_kwargs["previous_response_id"] = response_id
             else:
-                if used_auto_input_fallback:
+                if auto_input_replay:
                     # Replayed history must reach the API the way a model request would, so
                     # it cannot reintroduce items the successful turn deliberately dropped.
                     compact_kwargs["input"] = sanitize_replayed_input_items(
@@ -456,16 +458,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         input_coverage: SessionInputCoverage | None = None,
         reasoning_item_id_policy: Literal["preserve", "omit"] | None = None,
     ) -> None:
-        if input_coverage is not None:
-            # A deferring turn ends its compaction attempt here, so its context must
-            # supersede any older covered context a manual force could otherwise reuse.
-            # A deferral also means the store just gained items outside this response's
-            # server-side chain, so "full" coverage no longer holds for reuse.
-            self._publish_response_context(
-                response_id,
-                "transformed" if input_coverage == "full" else input_coverage,
-                reasoning_item_id_policy,
-            )
+        # A deferring turn ends its compaction attempt here, so its context must supersede
+        # any older covered context a manual force could otherwise reuse. Deferral also
+        # means the store holds items outside this response's chain, so "full" is downgraded.
+        self._publish_response_context(
+            response_id,
+            "transformed" if input_coverage == "full" else input_coverage,
+            reasoning_item_id_policy,
+        )
         if self._deferred_response_id is not None:
             return
         mode = self.compaction_mode

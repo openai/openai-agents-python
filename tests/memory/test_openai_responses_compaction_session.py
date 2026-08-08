@@ -1839,6 +1839,93 @@ class TestOpenAIResponsesCompactionSession:
         assert "input" in retry_kwargs
 
     @pytest.mark.asyncio
+    async def test_store_false_auto_input_is_sanitized_under_a_limit(self) -> None:
+        """The auto store=False resolution replays stored history, so it must sanitize."""
+        stale = cast(TResponseInputItem, {"type": "reasoning", "id": "rs_stale", "summary": []})
+        underlying = SimpleListSession(history=[stale, *self.assistant_history(11)])
+        underlying.session_settings = SessionSettings(limit=2)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+        )
+
+        await session.run_compaction(
+            {
+                "response_id": "resp-unstored",
+                "store": False,
+                "force": True,
+                "reasoning_item_id_policy": "omit",
+            }
+        )
+
+        sent = mock_client.responses.compact.call_args.kwargs["input"]
+        reasoning = [item for item in sent if item.get("type") == "reasoning"]
+        assert reasoning == [{"type": "reasoning", "summary": []}]
+
+    @pytest.mark.asyncio
+    async def test_store_false_auto_input_defers_with_pending_tool_call(self) -> None:
+        """The sanitized store=False path inherits the pending-call deferral."""
+        pending_call = cast(
+            TResponseInputItem, {"type": "function_call", "call_id": "call-pending"}
+        )
+        history = self.assistant_history(3) + [pending_call]
+        underlying = SimpleListSession(history=list(history))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+
+        await session.run_compaction({"response_id": "resp-unstored", "store": False})
+
+        mock_client.responses.compact.assert_not_called()
+        assert await underlying.get_items() == history
+
+    @pytest.mark.asyncio
+    async def test_store_false_deferral_supersedes_an_older_covered_context(self) -> None:
+        """A manual store=False deferral must not leave an older covered context reusable."""
+        underlying = SimpleListSession(history=self.assistant_history(2))
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[{"type": "compaction", "summary": "s"}])
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: True,
+        )
+
+        # Attempt 1 completes and publishes covered context for resp-1.
+        await session.run_compaction({"response_id": "resp-1", "input_coverage": "full"})
+        mock_client.responses.compact.reset_mock()
+
+        pending_call = cast(
+            TResponseInputItem, {"type": "function_call", "call_id": "call-pending"}
+        )
+        await session.add_items(self.assistant_history(3) + [pending_call])
+
+        # A manual store=False attempt defers on the pending call without metadata.
+        await session.run_compaction({"response_id": "resp-2", "store": False})
+        mock_client.responses.compact.assert_not_called()
+
+        await session.run_compaction({"force": True})
+
+        # The force resolves from resp-2's deferral context, never resp-1's chain: it
+        # re-defers on the still-pending call instead of compacting.
+        mock_client.responses.compact.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_covered_tool_output_deferral_forces_input_rebuild(self) -> None:
         """A deferring turn's tool outputs are not on its response chain, so no reuse."""
         underlying = SimpleListSession(history=self.assistant_history(2))
