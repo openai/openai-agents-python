@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from enum import Enum
 from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,6 +56,19 @@ def test_constructor_contract_allows_optional_suffixes_only() -> None:
     assert _validate_parameter_contract(
         "Example", released_contract, _parameter_contract(incompatible)
     ) == ["Example.required added a required parameter"]
+
+
+def test_enum_constructor_contract_uses_member_lookup_signature() -> None:
+    class ReleasedEnum(Enum):
+        VALUE = "value"
+
+    assert _parameter_contract(ReleasedEnum) == [
+        {
+            "name": "value",
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "default": {"kind": "required"},
+        }
+    ]
 
 
 def test_public_api_contract_requires_real_export_bindings(

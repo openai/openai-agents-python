@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import enum
 import importlib
 import inspect
 import json
@@ -28,13 +29,16 @@ def _default_contract(value: object) -> dict[str, object]:
 
 
 def _parameter_contract(value: Callable[..., Any]) -> list[dict[str, object]]:
+    parameters = list(inspect.signature(value).parameters.values())
+    if inspect.isclass(value) and issubclass(value, enum.Enum):
+        parameters = list(inspect.signature(value.__new__).parameters.values())[1:]
     return [
         {
             "name": parameter.name,
             "kind": parameter.kind.name,
             "default": _default_contract(parameter.default),
         }
-        for parameter in inspect.signature(value).parameters.values()
+        for parameter in parameters
     ]
 
 
