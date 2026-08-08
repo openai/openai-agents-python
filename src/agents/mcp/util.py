@@ -238,19 +238,14 @@ def create_static_tool_filter(
 
 
 def _is_strict_object_root(schema: dict[str, Any]) -> bool:
-    """Whether a converted schema is the closed object envelope a strict tool needs.
-
-    A root that never declared its type but is already closed still describes an object, so it
-    is normalized here rather than rejected.
-    """
+    """Whether a converted schema is the closed object envelope a strict tool needs."""
     if schema.get("additionalProperties") is not False:
         return False
     declared_type = schema.get("type")
-    if declared_type is None:
-        schema["type"] = "object"
-        return True
-    return declared_type == "object" or (
-        isinstance(declared_type, list) and "object" in declared_type
+    return (
+        declared_type is None
+        or declared_type == "object"
+        or (isinstance(declared_type, list) and "object" in declared_type)
     )
 
 
@@ -575,6 +570,11 @@ class MCPUtil:
                 strict_source.pop("properties", None)
             try:
                 converted = ensure_strict_json_schema(strict_source)
+                if _is_strict_object_root(converted) and converted.get("type") is None:
+                    # A root that never declared its type but is already closed still
+                    # describes an object; normalize it explicitly here, on the copy this
+                    # branch owns, rather than inside the predicate.
+                    converted["type"] = "object"
                 if not _is_strict_object_root(converted):
                     # Without the shim a root that never declared its type converts to something
                     # that is not a strict object envelope. Serve the original instead of

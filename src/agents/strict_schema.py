@@ -126,7 +126,14 @@ _CONTENT_SHAPING_KEYWORDS = frozenset(
 def _is_unclosable_object(json_schema: dict[str, object]) -> bool:
     """Whether closing this object with ``additionalProperties: false`` would change meaning."""
     typ = json_schema.get("type")
-    is_object = typ == "object" or (is_list(typ) and "object" in typ)
+    declared_properties = json_schema.get("properties")
+    # A typeless schema with a properties map is normalized to an object by the conversion
+    # walk, so the precomputed registries must see it the same way.
+    is_object = (
+        typ == "object"
+        or (is_list(typ) and "object" in typ)
+        or (typ is None and is_dict(declared_properties))
+    )
     if not is_object or "additionalProperties" in json_schema:
         return False
     if _allows_only_the_empty_object(json_schema):
@@ -196,6 +203,10 @@ def _resolves_to_free_form_definition(
 
 _DEFINITION_CONTAINER_KEYS = ("$defs", "definitions")
 
+# Keywords whose values are data literals, not schemas. A literal such as
+# `{"const": {"type": "object"}}` must never have its value mistaken for a schema node.
+_LITERAL_VALUE_KEYWORDS = frozenset({"const", "default", "enum", "examples"})
+
 
 def _iter_schema_nodes(root: object, *, limit: int) -> list[dict[str, object]]:
     """Every dict node in the tree, cycle-safe and bounded like the conversion itself."""
@@ -217,7 +228,7 @@ def _iter_schema_nodes(root: object, *, limit: int) -> list[dict[str, object]]:
             )
         if is_dict(node):
             nodes.append(node)
-            stack.extend(node.values())
+            stack.extend(value for key, value in node.items() if key not in _LITERAL_VALUE_KEYWORDS)
         elif is_list(node):
             stack.extend(node)
     return nodes
@@ -252,7 +263,9 @@ def _precompute_definition_registries(root: dict[str, object], budget: _NodeBudg
         # shape this definition's value, so they are excluded from its interior.
         interior: list[dict[str, object]] = []
         stack: list[object] = [
-            value for key, value in entry.items() if key not in _DEFINITION_CONTAINER_KEYS
+            value
+            for key, value in entry.items()
+            if key not in _DEFINITION_CONTAINER_KEYS and key not in _LITERAL_VALUE_KEYWORDS
         ]
         seen: set[int] = set()
         while stack:
@@ -265,7 +278,7 @@ def _precompute_definition_registries(root: dict[str, object], budget: _NodeBudg
                 stack.extend(
                     value
                     for key, value in interior_node.items()
-                    if key not in _DEFINITION_CONTAINER_KEYS
+                    if key not in _DEFINITION_CONTAINER_KEYS and key not in _LITERAL_VALUE_KEYWORDS
                 )
             elif is_list(interior_node):
                 stack.extend(interior_node)
@@ -402,21 +415,31 @@ def _ensure_strict_json_schema(
     # object types
     # { 'type': 'object', 'properties': { 'a':  {...} } }
     if is_dict(properties):
-        declared_required = json_schema.get("required")
-        if (
-            "$ref" not in json_schema
-            and is_list(declared_required)
-            and any(name not in properties for name in declared_required)
-        ):
-            # The object requires keys it never declares, so their values are unconstrained.
-            # Strict mode needs required to be a subset of properties with everything else
-            # forbidden, so conversion would silently drop the requirement and forbid the key.
-            if in_definitions:
-                if budget.definition_stack:
-                    budget.tainted_definition_ids.add(budget.definition_stack[-1])
-            else:
-                raise UserError(_FREE_FORM_OBJECT_ERROR)
-        json_schema["required"] = list(properties.keys())
+        all_of_value = json_schema.get("allOf")
+        merge_is_pending = "$ref" in json_schema or (
+            is_list(all_of_value) and len(all_of_value) == 1
+        )
+        if merge_is_pending:
+            # A `$ref` or single-entry `allOf` merge will land more properties on this node
+            # and re-enter, so required handling must wait for the merged shape. Overwriting
+            # now would also destroy the original `required` before it can be judged.
+            pass
+        else:
+            declared_required = json_schema.get("required")
+            if is_list(declared_required) and any(
+                name not in properties for name in declared_required
+            ):
+                # The object requires keys it never declares, so their values are
+                # unconstrained. Strict mode needs required to be a subset of properties with
+                # everything else forbidden, so conversion would silently drop the requirement
+                # and forbid the key.
+                if in_definitions:
+                    if budget.definition_stack:
+                        budget.tainted_definition_ids.add(budget.definition_stack[-1])
+                else:
+                    raise UserError(_FREE_FORM_OBJECT_ERROR)
+        if not merge_is_pending:
+            json_schema["required"] = list(properties.keys())
         json_schema["properties"] = {
             key: _ensure_strict_json_schema(
                 prop_schema,

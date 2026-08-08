@@ -785,3 +785,84 @@ def test_alias_to_a_shaped_target_converts_in_either_order():
     )
 
     assert result["$defs"]["Inner"]["additionalProperties"] is False
+
+
+@pytest.mark.parametrize(
+    "literal_keyword",
+    [
+        {"const": {"type": "object"}},
+        {"enum": [{"type": "object"}]},
+        {"default": {"type": "object"}},
+    ],
+    ids=["const", "enum", "default"],
+)
+def test_literal_values_inside_definitions_are_not_mistaken_for_schemas(literal_keyword):
+    # `{"type": "object"}` here is a data value, not a schema node, so it must not taint the
+    # definition that contains it.
+    result = ensure_strict_json_schema(
+        {
+            "$defs": {
+                "D": {
+                    # `tag` is a bare literal node: no type, no properties, just the value.
+                    "type": "object",
+                    "properties": {"tag": literal_keyword},
+                }
+            },
+            "type": "object",
+            "properties": {"f": {"$ref": "#/$defs/D"}},
+        }
+    )
+
+    assert result["$defs"]["D"]["additionalProperties"] is False
+
+
+def test_required_supplied_by_a_single_allof_branch_still_converts():
+    # The merge lands the branch's properties on this node and re-enters, so the
+    # required-subset judgment has to wait for the merged shape.
+    result = ensure_strict_json_schema(
+        {
+            "type": "object",
+            "properties": {
+                "f": {
+                    "type": "object",
+                    "properties": {},
+                    "required": ["a"],
+                    "allOf": [{"properties": {"a": {"type": "string"}}}],
+                }
+            },
+        }
+    )
+
+    field = result["properties"]["f"]
+    assert field["required"] == ["a"]
+    assert field["properties"] == {"a": {"type": "string"}}
+
+
+def test_required_not_supplied_by_the_branch_is_still_rejected():
+    with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
+        ensure_strict_json_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "f": {
+                        "type": "object",
+                        "properties": {},
+                        "required": ["a"],
+                        "allOf": [{"properties": {"b": {"type": "string"}}}],
+                    }
+                },
+            }
+        )
+
+
+def test_typeless_definition_with_shaping_keywords_is_registered():
+    # The conversion walk normalizes typeless-with-properties to an object, so the
+    # precomputed registries must classify it the same way.
+    with pytest.raises(UserError, match="Strict JSON schemas cannot express"):
+        ensure_strict_json_schema(
+            {
+                "$defs": {"Base": {"properties": {}, "propertyNames": {"pattern": "^x"}}},
+                "type": "object",
+                "properties": {"f": {"$ref": "#/$defs/Base"}},
+            }
+        )
