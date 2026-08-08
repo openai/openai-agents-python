@@ -163,9 +163,20 @@ def _ensure_strict_json_schema(
     one_of = json_schema.get("oneOf")
     if is_list(one_of):
         existing_any_of = json_schema.get("anyOf", [])
-        if not is_list(existing_any_of):
-            existing_any_of = []
-        json_schema["anyOf"] = existing_any_of + [
+        if is_list(existing_any_of) and existing_any_of:
+            # `anyOf` and `oneOf` on the same node are two constraints that must BOTH hold.
+            # Folding them into a single `anyOf` turns the conjunction into a union, so values
+            # that either constraint rejects become accepted: with anyOf [string, integer] and
+            # oneOf [string, boolean], the merge accepts 5 and true, both of which the
+            # original schema rejects. That cannot be expressed in strict mode, so fail the
+            # way other inexpressible schemas do, letting callers that can degrade (such as
+            # MCP tool conversion) fall back to serving the schema as non-strict.
+            raise UserError(
+                "Strict JSON schemas cannot express a schema that constrains the same value "
+                "with both anyOf and oneOf. Combine the two constraints into a single union, "
+                "or update the function or output tool to not use a strict schema."
+            )
+        json_schema["anyOf"] = [
             _ensure_strict_json_schema(
                 variant, path=(*path, "oneOf", str(i)), root=root, budget=budget
             )

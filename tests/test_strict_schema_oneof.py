@@ -1,8 +1,10 @@
 from typing import Annotated, Literal
 
+import pytest
 from pydantic import BaseModel, Field
 
 from agents.agent_output import AgentOutputSchema
+from agents.exceptions import UserError
 from agents.strict_schema import ensure_strict_json_schema
 
 
@@ -132,7 +134,11 @@ def test_discriminated_union_with_pydantic():
     assert "discriminator" in items_schema
 
 
-def test_oneof_merged_with_existing_anyof():
+def test_oneof_alongside_anyof_is_rejected_rather_than_merged():
+    # `anyOf` and `oneOf` on one node are two constraints that must BOTH hold. The previous
+    # expectation merged them into a single union, which widens the schema: this very value
+    # schema accepts nothing at all (a string fails the oneOf, an integer fails the anyOf),
+    # yet the merged form accepted strings, integers and booleans alike.
     schema = {
         "type": "object",
         "properties": {
@@ -143,23 +149,8 @@ def test_oneof_merged_with_existing_anyof():
         },
     }
 
-    result = ensure_strict_json_schema(schema)
-
-    expected = {
-        "type": "object",
-        "properties": {
-            "value": {
-                "anyOf": [
-                    {"type": "string"},
-                    {"type": "integer"},
-                    {"type": "boolean"},
-                ]
-            }
-        },
-        "additionalProperties": False,
-        "required": ["value"],
-    }
-    assert result == expected
+    with pytest.raises(UserError, match="both anyOf and oneOf"):
+        ensure_strict_json_schema(schema)
 
 
 def test_discriminator_preserved():

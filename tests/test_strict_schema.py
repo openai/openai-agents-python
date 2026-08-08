@@ -362,3 +362,47 @@ def test_ref_expansion_bomb_is_rejected():
     }
     with pytest.raises(UserError):
         ensure_strict_json_schema(schema)
+
+
+def test_anyof_and_oneof_on_the_same_node_are_rejected_not_merged():
+    # These are two constraints that must BOTH hold. Folding them into a single anyOf turns
+    # the conjunction into a union: with anyOf [string, integer] and oneOf [string, boolean],
+    # the merged schema accepts 5 and true, both of which the original rejects.
+    with pytest.raises(UserError, match="both anyOf and oneOf"):
+        ensure_strict_json_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "f": {
+                        "anyOf": [{"type": "string"}, {"type": "integer"}],
+                        "oneOf": [{"type": "string"}, {"type": "boolean"}],
+                    }
+                },
+            }
+        )
+
+
+def test_oneof_alone_still_converts_to_anyof():
+    # Without a competing anyOf, the documented discriminated-union conversion is unchanged.
+    result = ensure_strict_json_schema(
+        {
+            "type": "object",
+            "properties": {"f": {"oneOf": [{"type": "string"}, {"type": "boolean"}]}},
+        }
+    )
+
+    field = result["properties"]["f"]
+    assert "oneOf" not in field
+    assert field["anyOf"] == [{"type": "string"}, {"type": "boolean"}]
+
+
+def test_oneof_with_an_empty_anyof_list_still_converts():
+    # An empty anyOf constrains nothing, so replacing it keeps the original meaning.
+    result = ensure_strict_json_schema(
+        {
+            "type": "object",
+            "properties": {"f": {"anyOf": [], "oneOf": [{"type": "string"}]}},
+        }
+    )
+
+    assert result["properties"]["f"]["anyOf"] == [{"type": "string"}]
