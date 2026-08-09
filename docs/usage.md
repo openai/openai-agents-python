@@ -71,6 +71,8 @@ The Agents SDK stores each [`ModelResponse.raw_usage`][agents.items.ModelRespons
 
 `preserve_raw_usage` preserves only a usage payload that reaches the model adapter; the setting does not request usage from the provider. When a streaming Chat Completions provider requires an explicit usage request, also set `ModelSettings(include_usage=True)`.
 
+`LitellmModel` does not currently populate `ModelResponse.raw_usage` in either streaming or non-streaming runs, so `preserve_raw_usage=True` has no effect with that adapter. Continue to use the normalized [`Usage`][agents.usage.Usage] fields when using `LitellmModel`, or choose an adapter that supports raw usage preservation when provider-specific field presence is required.
+
 ## Accessing usage with sessions
 
 When you use a `Session` (e.g., `SQLiteSession`), each call to `Runner.run(...)` returns usage for that specific run. Sessions maintain conversation history for context, but each run's usage is independent.

@@ -123,7 +123,17 @@ The mount tables describe which storage types each backend can execute. A check 
 
 Credentialless `rclone` mounts are limited to S3, GCS, R2, and Azure Blob. An in-container Box mount requires a non-interactive authentication source and the acknowledgement that matches that source. `FuseMountPattern` requires broad acknowledgement because `blobfuse2` discovers ambient Azure authority, even when no inline credential is configured. `S3FilesMountPattern` likewise requires broad acknowledgement because `mount.s3files` uses ambient IAM authority. These requirements also apply when Docker is the backend; the check marks below indicate that Docker can execute the mount after the applicable authority boundary is satisfied.
 
-Call `Manifest.with_in_container_mount_credential_exposure_acknowledged()` for mount-scoped values such as inline access keys. Call `Manifest.with_in_container_mount_broad_credential_exposure_acknowledged()` for broader authority such as managed or workload identity and external credential files. A mount that uses both authority classes requires both acknowledgements. Each method returns a copied `Manifest`; use the returned value. The acknowledgements are runtime-only, are not serialized, and permit the helper to receive credentials without confining credential use to the mounted path. Prefer an external or provider-native strategy when available, and otherwise use sandbox-scoped, short-lived, least-privilege credentials.
+For a mount entry named `"data"`, retain the copied `Manifest` returned by the acknowledgement that matches the configured authority:
+
+```python
+# Mount-scoped values such as inline access keys.
+manifest = manifest.with_in_container_mount_credential_exposure_acknowledged("data")
+
+# Broader authority such as managed or workload identity and external credential files.
+manifest = manifest.with_in_container_mount_broad_credential_exposure_acknowledged("data")
+```
+
+Pass every exact mount path that needs the acknowledgement. A mount that uses both authority classes requires both acknowledgements. The acknowledgements are runtime-only, are not serialized, and permit the helper to receive credentials without confining credential use to the mounted path. Prefer an external or provider-native strategy when available, and otherwise use sandbox-scoped, short-lived, least-privilege credentials.
 
 `VercelSandboxClientOptions(allow_s3_credential_exposure=True)` remains a compatibility option for create-time Vercel S3 mounts with inline mount-scoped credentials. It does not authorize broad credential authority.
 
