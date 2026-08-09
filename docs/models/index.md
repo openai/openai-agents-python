@@ -23,7 +23,7 @@ Start with the simplest path that fits your setup:
 
 For most OpenAI-only apps, the recommended path is to use string model names with the default OpenAI provider and stay on the Responses model path.
 
-When you don't specify a model when initializing an `Agent`, the default model will be used. The default is currently [`gpt-5.4-mini`](https://developers.openai.com/api/docs/models/gpt-5.4-mini) with `reasoning.effort="none"` and `verbosity="low"` for low-latency agent workflows. If you have access, we recommend setting your agents to `gpt-5.6-sol` for higher quality while keeping explicit `model_settings`.
+When you don't specify a model when initializing an `Agent`, the default model will be used. The default is currently `gpt-5.6-luna` with `reasoning.effort="none"` and `verbosity="low"` for low-latency agent workflows. If you have access, we recommend setting your agents to `gpt-5.6-sol` for higher quality while keeping explicit `model_settings`.
 
 If you want to switch to other models like `gpt-5.6-sol`, there are two ways to configure your agents.
 
