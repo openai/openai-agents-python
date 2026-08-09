@@ -271,6 +271,67 @@ def test_exact_path_acknowledgement_allows_supported_mount_scoped_credentials() 
         )
 
 
+@pytest.mark.parametrize(
+    ("credentials", "invalid_fields"),
+    [
+        ({"access_key_id": "access-key"}, ("secret_access_key",)),
+        ({"secret_access_key": "secret-key"}, ("access_key_id",)),
+        (
+            {"session_token": "session-token"},
+            ("access_key_id", "secret_access_key"),
+        ),
+        (
+            {"access_key_id": "access-key", "secret_access_key": ""},
+            ("secret_access_key",),
+        ),
+        (
+            {"access_key_id": " ", "secret_access_key": "secret-key"},
+            ("access_key_id",),
+        ),
+        (
+            {
+                "access_key_id": "access-key",
+                "secret_access_key": "secret-key",
+                "session_token": " ",
+            },
+            ("session_token",),
+        ),
+    ],
+)
+def test_acknowledgement_rejects_incomplete_in_container_s3_credentials(
+    credentials: dict[str, str],
+    invalid_fields: tuple[str, ...],
+) -> None:
+    manifest = Manifest(
+        entries={
+            "data": S3Mount(
+                bucket="example-bucket",
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+                **cast(Any, credentials),
+            )
+        }
+    ).with_in_container_mount_credential_exposure_acknowledged("data")
+
+    with pytest.raises(MountConfigError, match="require non-empty") as exc_info:
+        validate_manifest_mount_credential_boundaries(manifest)
+
+    assert exc_info.value.context["credential_fields"] == invalid_fields
+
+
+def test_incomplete_s3_credentials_remain_external_provider_configuration() -> None:
+    manifest = Manifest(
+        entries={
+            "data": S3Mount(
+                bucket="example-bucket",
+                access_key_id="access-key",
+                mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+            )
+        }
+    )
+
+    validate_manifest_mount_credential_boundaries(manifest, provider_backend_id="docker")
+
+
 def test_mount_credential_acknowledgement_is_not_a_path_prefix() -> None:
     mount = _s3_mount(
         strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),

@@ -873,6 +873,26 @@ def _invalid_required_authority_fields(
     return tuple(sorted(invalid))
 
 
+def _invalid_in_container_s3_credential_fields(mount: Mount) -> tuple[str, ...]:
+    values = {
+        field_name: getattr(mount, field_name, None)
+        for field_name in ("access_key_id", "secret_access_key", "session_token")
+    }
+    if all(value is None for value in values.values()):
+        return ()
+
+    invalid = {
+        field_name
+        for field_name, value in values.items()
+        if value is not None and (not isinstance(value, str) or not value.strip())
+    }
+    if not isinstance(values["access_key_id"], str) or not values["access_key_id"].strip():
+        invalid.add("access_key_id")
+    if not isinstance(values["secret_access_key"], str) or not values["secret_access_key"].strip():
+        invalid.add("secret_access_key")
+    return tuple(sorted(invalid))
+
+
 def _manifest_has_configured_mount_authority(manifest: Manifest) -> bool:
     pending = list(manifest.entries.values())
     while pending:
@@ -1198,6 +1218,23 @@ def _mount_boundary_error(
             context={
                 "mount_type": mount.type,
                 "configuration_fields": invalid_s3fs_fields,
+            },
+        )
+
+    invalid_s3_credential_fields = (
+        _invalid_in_container_s3_credential_fields(mount)
+        if executes_in_container and mount_type == "s3_mount"
+        else ()
+    )
+    if invalid_s3_credential_fields:
+        return MountConfigError(
+            message=(
+                "in-container S3 credentials require non-empty access_key_id and "
+                "secret_access_key values, and session_token requires that pair"
+            ),
+            context={
+                "mount_type": mount.type,
+                "credential_fields": invalid_s3_credential_fields,
             },
         )
 

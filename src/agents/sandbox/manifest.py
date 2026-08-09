@@ -371,6 +371,18 @@ class Manifest(BaseModel):
             broad=frozenset(broad),
         )
 
+    def _merge_mount_credential_exposure_policy(
+        self,
+        policy: _MountCredentialExposurePolicy,
+    ) -> _MountCredentialExposurePolicy:
+        current = self._mount_credential_exposure_policy
+        merged = _MountCredentialExposurePolicy(
+            mount_scoped=current.mount_scoped | policy.mount_scoped,
+            broad=current.broad | policy.broad,
+        )
+        self._mount_credential_exposure_policy = merged
+        return merged
+
     def _mount_credential_exposure_policy_key(
         self,
         value: str | PurePath,

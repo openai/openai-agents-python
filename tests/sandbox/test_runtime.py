@@ -43,7 +43,10 @@ from agents.sandbox import (
     SandboxRunConfig,
     User,
 )
-from agents.sandbox._mount_security import REDACTED_MOUNT_AUTHORITY_KEY
+from agents.sandbox._mount_security import (
+    REDACTED_MOUNT_AUTHORITY_KEY,
+    validate_manifest_mount_credential_boundaries,
+)
 from agents.sandbox.capabilities import (
     Capability,
     Compaction,
@@ -1129,6 +1132,53 @@ class _ManifestMutationCapability(Capability):
         self.process_calls += 1
         manifest.entries[self.rel_path] = File(content=self.content)
         return manifest
+
+
+class _ManifestReplacementCapability(Capability):
+    type: str = "manifest-replacement"
+
+    def __init__(self) -> None:
+        super().__init__(type="manifest-replacement")
+
+    def process_manifest(self, manifest: Manifest) -> Manifest:
+        return Manifest(
+            version=manifest.version,
+            root=manifest.root,
+            entries={**manifest.entries, "cap.txt": File(content=b"capability")},
+            environment=manifest.environment.model_copy(deep=True),
+            users=[user.model_copy(deep=True) for user in manifest.users],
+            groups=[group.model_copy(deep=True) for group in manifest.groups],
+            extra_path_grants=tuple(
+                grant.model_copy(deep=True) for grant in manifest.extra_path_grants
+            ),
+            remote_mount_command_allowlist=list(manifest.remote_mount_command_allowlist),
+        )
+
+
+def test_process_manifest_preserves_mount_acknowledgement_across_replacement() -> None:
+    manifest = Manifest(
+        entries={
+            "data": S3Mount(
+                bucket="example-bucket",
+                access_key_id="example-access-key",
+                secret_access_key="example-secret-key",
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            )
+        }
+    ).with_in_container_mount_credential_exposure_acknowledged("data")
+
+    processed = SandboxRuntimeSessionManager._process_manifest(
+        [_ManifestReplacementCapability()],
+        manifest,
+    )
+
+    assert processed is not None
+    assert processed.entries["cap.txt"] == File(content=b"capability")
+    validate_manifest_mount_credential_boundaries(processed)
+    assert processed._acknowledges_in_container_mount_credential_exposure(
+        "/workspace/data",
+        "mount_scoped",
+    )
 
 
 class _CredentialedMountCapability(Capability):

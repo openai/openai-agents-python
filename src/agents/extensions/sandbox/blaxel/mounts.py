@@ -16,12 +16,13 @@ Two strategies are provided:
 
 from __future__ import annotations
 
+import io
 import logging
 import shlex
 import uuid
 import warnings
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from .... import _debug
@@ -36,7 +37,7 @@ from ....sandbox.errors import MountConfigError
 from ....sandbox.materialization import MaterializedFile
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.types import FileMode, Permissions
-from ....sandbox.workspace_paths import sandbox_path_str
+from ....sandbox.workspace_paths import posix_path_as_path, sandbox_path_str
 
 logger = logging.getLogger(__name__)
 
@@ -300,52 +301,58 @@ async def _ensure_tool(session: BaseSandboxSession, tool: str) -> None:
     await _install_tool(session, tool)
 
 
+def _mount_credential_path(session: BaseSandboxSession, stem: str) -> Path:
+    root = PurePosixPath(session.state.manifest.root)
+    return posix_path_as_path(root / f".openai-agents-{stem}-{uuid.uuid4().hex[:8]}")
+
+
+async def _write_mount_credential_file(
+    session: BaseSandboxSession,
+    path: Path,
+    content: str,
+) -> None:
+    await session.write(path, io.BytesIO(content.encode()))
+    await _exec(session, f"chmod 600 {shlex.quote(sandbox_path_str(path))}")
+
+
 async def _mount_s3(session: BaseSandboxSession, config: BlaxelCloudBucketMountConfig) -> None:
     """Mount an S3 or R2 bucket using s3fs-fuse."""
     await _ensure_tool(session, "s3fs")
 
-    # Write credentials to a temp file.
-    cred_path = f"/tmp/s3fs-passwd-{uuid.uuid4().hex[:8]}"
-    if config.access_key_id and config.secret_access_key:
-        cred_content = f"{config.access_key_id}:{config.secret_access_key}"
-        if config.session_token:
-            cred_content += f":{config.session_token}"
-        await session.exec(
-            "sh",
-            "-c",
-            f"printf %s {shlex.quote(cred_content)} > {cred_path} && chmod 600 {cred_path}",
-        )
-    else:
-        cred_path = ""
-
-    # Build the s3fs command.
-    bucket = config.bucket
-    if config.prefix:
-        bucket = f"{config.bucket}:/{config.prefix.strip('/')}"
-    mount_path = shlex.quote(config.mount_path)
-
-    opts = ["allow_other", "nonempty"]
-    if cred_path:
-        opts.append(f"passwd_file={cred_path}")
-    else:
-        opts.append("public_bucket=1")
-
-    if config.endpoint_url:
-        opts.append(f"url={config.endpoint_url}")
-    elif config.region:
-        opts.append(f"url=https://s3.{config.region}.amazonaws.com")
-        opts.append(f"endpoint={config.region}")
-
-    if config.provider == "r2":
-        opts.append("sigv4")
-
-    if config.read_only:
-        opts.append("ro")
-
-    opts_str = ",".join(opts)
-    cmd = f"s3fs {shlex.quote(bucket)} {mount_path} -o {shlex.quote(opts_str)}"
-
+    cred_path: Path | None = None
     try:
+        if config.access_key_id and config.secret_access_key:
+            cred_path = _mount_credential_path(session, "s3fs-passwd")
+            cred_content = f"{config.access_key_id}:{config.secret_access_key}"
+            if config.session_token:
+                cred_content += f":{config.session_token}"
+            await _write_mount_credential_file(session, cred_path, cred_content)
+
+        bucket = config.bucket
+        if config.prefix:
+            bucket = f"{config.bucket}:/{config.prefix.strip('/')}"
+        mount_path = shlex.quote(config.mount_path)
+
+        opts = ["allow_other", "nonempty"]
+        if cred_path is not None:
+            opts.append(f"passwd_file={sandbox_path_str(cred_path)}")
+        else:
+            opts.append("public_bucket=1")
+
+        if config.endpoint_url:
+            opts.append(f"url={config.endpoint_url}")
+        elif config.region:
+            opts.append(f"url=https://s3.{config.region}.amazonaws.com")
+            opts.append(f"endpoint={config.region}")
+
+        if config.provider == "r2":
+            opts.append("sigv4")
+
+        if config.read_only:
+            opts.append("ro")
+
+        opts_str = ",".join(opts)
+        cmd = f"s3fs {shlex.quote(bucket)} {mount_path} -o {shlex.quote(opts_str)}"
         await _exec(session, f"mkdir -p {mount_path}")
         result = await _exec(session, cmd, timeout=60)
         if result.exit_code != 0:
@@ -355,45 +362,37 @@ async def _mount_s3(session: BaseSandboxSession, config: BlaxelCloudBucketMountC
                 context={"cmd": cmd, "exit_code": result.exit_code, "stderr": stderr},
             )
     finally:
-        # Clean up credentials file.
-        if cred_path:
-            await _exec(session, f"rm -f {cred_path}")
+        if cred_path is not None:
+            await _exec(session, f"rm -f {shlex.quote(sandbox_path_str(cred_path))}")
 
 
 async def _mount_gcs(session: BaseSandboxSession, config: BlaxelCloudBucketMountConfig) -> None:
     """Mount a GCS bucket using gcsfuse."""
     await _ensure_tool(session, "gcsfuse")
 
-    mount_path = shlex.quote(config.mount_path)
-    bucket = shlex.quote(config.bucket)
-
-    # Write service account key if provided.
-    key_path = ""
-    if config.service_account_key:
-        key_path = f"/tmp/gcs-creds-{uuid.uuid4().hex[:8]}.json"
-        await session.exec(
-            "sh",
-            "-c",
-            f"printf %s {shlex.quote(config.service_account_key)} "
-            f"> {key_path} && chmod 600 {key_path}",
-        )
-
-    opts: list[str] = []
-    if key_path:
-        opts.append(f"--key-file={key_path}")
-    else:
-        opts.append("--anonymous-access")
-
-    if config.read_only:
-        opts.append("-o ro")
-
-    if config.prefix:
-        opts.append(f"--only-dir={shlex.quote(config.prefix.strip('/'))}")
-
-    opts_str = " ".join(opts)
-    cmd = f"gcsfuse {opts_str} {bucket} {mount_path}"
-
+    key_path: Path | None = None
     try:
+        if config.service_account_key:
+            key_path = _mount_credential_path(session, "gcs-creds")
+            await _write_mount_credential_file(session, key_path, config.service_account_key)
+
+        mount_path = shlex.quote(config.mount_path)
+        bucket = shlex.quote(config.bucket)
+
+        opts: list[str] = []
+        if key_path is not None:
+            opts.append(f"--key-file={sandbox_path_str(key_path)}")
+        else:
+            opts.append("--anonymous-access")
+
+        if config.read_only:
+            opts.append("-o ro")
+
+        if config.prefix:
+            opts.append(f"--only-dir={shlex.quote(config.prefix.strip('/'))}")
+
+        opts_str = " ".join(opts)
+        cmd = f"gcsfuse {opts_str} {bucket} {mount_path}"
         await _exec(session, f"mkdir -p {mount_path}")
         result = await _exec(session, cmd, timeout=60)
         if result.exit_code != 0:
@@ -403,8 +402,8 @@ async def _mount_gcs(session: BaseSandboxSession, config: BlaxelCloudBucketMount
                 context={"cmd": cmd, "exit_code": result.exit_code, "stderr": stderr},
             )
     finally:
-        if key_path:
-            await _exec(session, f"rm -f {key_path}")
+        if key_path is not None:
+            await _exec(session, f"rm -f {shlex.quote(sandbox_path_str(key_path))}")
 
 
 async def _mount_bucket(session: BaseSandboxSession, config: BlaxelCloudBucketMountConfig) -> None:

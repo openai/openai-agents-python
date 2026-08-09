@@ -2861,14 +2861,23 @@ class _FakeMountSession:
 
     def __init__(self) -> None:
         self.exec_calls: list[tuple[tuple[str, ...], dict[str, float]]] = []
+        self.write_calls: list[tuple[Path, bytes]] = []
         self._next_results: list[_FakeExecResultForMount] = []
         self._default_result = _FakeExecResultForMount()
+        self.state = MagicMock()
+        self.state.manifest = Manifest()
 
     async def exec(self, *cmd: str, timeout: float = 120) -> _FakeExecResultForMount:
         self.exec_calls.append((cmd, {"timeout": timeout}))
         if self._next_results:
             return self._next_results.pop(0)
         return self._default_result
+
+    async def write(self, path: Path, data: io.IOBase, *, user: object = None) -> None:
+        _ = user
+        payload = data.read()
+        assert isinstance(payload, bytes)
+        self.write_calls.append((path, payload))
 
     class __class__:
         __name__ = "BlaxelSandboxSession"
@@ -3010,10 +3019,11 @@ class TestMountsModule:
         from agents.extensions.sandbox.blaxel.mounts import BlaxelCloudBucketMountConfig, _mount_s3
 
         session = _FakeMountSession()
+        secret_access_key = "s3-secret-command-sentinel"
         # Simulate: which s3fs succeeds.
         session._next_results = [
             _FakeExecResultForMount(exit_code=0, stdout=b"/usr/bin/s3fs"),  # which s3fs
-            _FakeExecResultForMount(exit_code=0),  # write cred file
+            _FakeExecResultForMount(exit_code=0),  # chmod cred file
             _FakeExecResultForMount(exit_code=0),  # mkdir
             _FakeExecResultForMount(exit_code=0),  # s3fs mount
             _FakeExecResultForMount(exit_code=0),  # rm cred file
@@ -3024,13 +3034,19 @@ class TestMountsModule:
             bucket="my-bucket",
             mount_path="/mnt/s3",
             access_key_id="AKID",
-            secret_access_key="SECRET",
+            secret_access_key=secret_access_key,
             region="us-east-1",
             prefix="data/",
             read_only=True,
         )
         await _mount_s3(session, config)  # type: ignore[arg-type]
         assert len(session.exec_calls) == 5
+        assert len(session.write_calls) == 1
+        credential_path, credential_payload = session.write_calls[0]
+        assert credential_path.parent == Path("/workspace")
+        assert credential_path.name.startswith(".openai-agents-s3fs-passwd-")
+        assert credential_payload == f"AKID:{secret_access_key}".encode()
+        assert secret_access_key not in repr(session.exec_calls)
 
     @pytest.mark.asyncio
     async def test_mount_s3_public_bucket(self) -> None:
@@ -3118,9 +3134,10 @@ class TestMountsModule:
         from agents.extensions.sandbox.blaxel.mounts import BlaxelCloudBucketMountConfig, _mount_gcs
 
         session = _FakeMountSession()
+        service_account_key = '{"private_key":"gcs-secret-command-sentinel"}'
         session._next_results = [
             _FakeExecResultForMount(exit_code=0),  # which gcsfuse
-            _FakeExecResultForMount(exit_code=0),  # write key
+            _FakeExecResultForMount(exit_code=0),  # chmod key
             _FakeExecResultForMount(exit_code=0),  # mkdir
             _FakeExecResultForMount(exit_code=0),  # gcsfuse mount
             _FakeExecResultForMount(exit_code=0),  # rm key
@@ -3130,11 +3147,17 @@ class TestMountsModule:
             provider="gcs",
             bucket="gcs-bucket",
             mount_path="/mnt/gcs",
-            service_account_key='{"type":"service_account"}',
+            service_account_key=service_account_key,
             read_only=True,
             prefix="data/",
         )
         await _mount_gcs(session, config)  # type: ignore[arg-type]
+        assert len(session.write_calls) == 1
+        credential_path, credential_payload = session.write_calls[0]
+        assert credential_path.parent == Path("/workspace")
+        assert credential_path.name.startswith(".openai-agents-gcs-creds-")
+        assert credential_payload == service_account_key.encode()
+        assert "gcs-secret-command-sentinel" not in repr(session.exec_calls)
 
     @pytest.mark.asyncio
     async def test_mount_gcs_anonymous(self) -> None:
