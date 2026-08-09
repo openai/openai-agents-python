@@ -98,6 +98,8 @@ class ModelRetryAdvice:
     replay_safety: str | None = None
     reason: str | None = None
     normalized: ModelRetryNormalizedError | None = None
+    response_started: bool = False
+    """Whether the provider had begun emitting the response when the failure occurred."""
 
 
 @dataclass
@@ -118,6 +120,13 @@ class RetryDecision:
     retry: bool
     delay: float | None = None
     reason: str | None = None
+    approve_unsafe_replay: bool = False
+    """Explicit application approval to replay a request the provider marked replay-unsafe.
+
+    This is deliberately separate from ``retry``: an ordinary ``RetryDecision(retry=True)``
+    never bypasses replay protection. Set this only for workloads where repeating
+    provider-side work that may already have happened is acceptable.
+    """
     _hard_veto: bool = field(default=False, init=False, repr=False, compare=False)
     _approves_replay: bool = field(default=False, init=False, repr=False, compare=False)
 
@@ -132,6 +141,22 @@ class RetryPolicyContext:
     stream: bool
     normalized: ModelRetryNormalizedError
     provider_advice: ModelRetryAdvice | None = None
+    response_started: bool = False
+    """Whether a response event had already arrived when the request failed."""
+    previous_response_id: str | None = None
+    conversation_id: str | None = None
+
+    @property
+    def replay_safety(self) -> str:
+        """Provider replay classification: ``"safe"``, ``"unsafe"`` or ``"unknown"``."""
+        if self.provider_advice is None or self.provider_advice.replay_safety is None:
+            return "unknown"
+        return self.provider_advice.replay_safety
+
+    @property
+    def stateful_request(self) -> bool:
+        """Whether the request carried ``previous_response_id`` or ``conversation_id``."""
+        return bool(self.previous_response_id or self.conversation_id)
 
 
 RetryPolicy: TypeAlias = Callable[[RetryPolicyContext], MaybeAwaitable[bool | RetryDecision]]

@@ -273,16 +273,26 @@ async def _evaluate_retry(
     replay_unsafe_request: bool,
     emitted_retry_unsafe_event: bool,
     provider_advice: ModelRetryAdvice | None,
+    previous_response_id: str | None = None,
+    conversation_id: str | None = None,
 ) -> RetryDecision:
     if attempt > max_retries:
         return RetryDecision(retry=False)
 
     normalized = _normalize_retry_error(error, provider_advice)
-    if (
-        normalized.is_abort
-        or emitted_retry_unsafe_event
-        or (provider_advice is not None and provider_advice.replay_safety == "unsafe")
-    ):
+    provider_marks_replay_unsafe = (
+        provider_advice is not None and provider_advice.replay_safety == "unsafe"
+    )
+    # Aborts, and failures that already emitted user-visible streamed output, are absolute
+    # vetoes. No application decision can make replaying those safe.
+    if normalized.is_abort or emitted_retry_unsafe_event:
+        return RetryDecision(
+            retry=False,
+            reason=provider_advice.reason if provider_advice is not None else None,
+        )
+    # A provider-unsafe streamed failure stays a veto too. Only the non-streamed path, where
+    # no partial model output has reached the application, consults the retry policy.
+    if provider_marks_replay_unsafe and stream:
         return RetryDecision(
             retry=False,
             reason=provider_advice.reason if provider_advice is not None else None,
@@ -300,6 +310,11 @@ async def _evaluate_retry(
             stream=stream,
             normalized=normalized,
             provider_advice=provider_advice,
+            response_started=(
+                provider_advice.response_started if provider_advice is not None else False
+            ),
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
         ),
     )
     if not decision.retry:
@@ -308,7 +323,11 @@ async def _evaluate_retry(
     provider_marks_replay_safe = (
         provider_advice is not None and provider_advice.replay_safety == "safe"
     )
-    if replay_unsafe_request and not decision._approves_replay and not provider_marks_replay_safe:
+    # `_approves_replay` is the provider-owned approval and `approve_unsafe_replay` the
+    # application-owned one. Both are explicit; an ordinary `retry=True` is neither.
+    approves_replay = decision._approves_replay or decision.approve_unsafe_replay
+    replay_unsafe = replay_unsafe_request or provider_marks_replay_unsafe
+    if replay_unsafe and not approves_replay and not provider_marks_replay_safe:
         return RetryDecision(
             retry=False,
             reason=decision.reason
@@ -496,6 +515,8 @@ async def get_response_with_retry(
                 replay_unsafe_request=stateful_request or replay_unsafe_request,
                 emitted_retry_unsafe_event=False,
                 provider_advice=provider_advice,
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
             )
             if not decision.retry:
                 raise
@@ -621,6 +642,8 @@ async def stream_response_with_retry(
                 replay_unsafe_request=stateful_request or replay_unsafe_request,
                 emitted_retry_unsafe_event=emitted_retry_unsafe_event,
                 provider_advice=provider_advice,
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
             )
             if not decision.retry:
                 raise

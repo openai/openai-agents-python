@@ -1034,11 +1034,13 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
         stateful_request = bool(request.previous_response_id or request.conversation_id)
         wrapped_replay_safety = _get_wrapped_websocket_replay_safety(request.error)
         if wrapped_replay_safety == "unsafe":
-            if stateful_request or _did_start_websocket_response(request.error):
+            response_started = _did_start_websocket_response(request.error)
+            if stateful_request or response_started:
                 return ModelRetryAdvice(
                     suggested=False,
                     replay_safety="unsafe",
                     reason=str(request.error),
+                    response_started=response_started,
                 )
             return ModelRetryAdvice(
                 suggested=True,
