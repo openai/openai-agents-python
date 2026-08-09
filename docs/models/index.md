@@ -590,7 +590,9 @@ def retry_policy(context: RetryPolicyContext) -> RetryDecision:
 
 An ordinary `RetryDecision(retry=True)` never lifts replay protection; the approval has to be explicit. `RetryPolicyContext` exposes `response_started`, `replay_safety`, `stateful_request`, `previous_response_id`, and `conversation_id` so the policy can scope the approval to the failure it actually intends to accept. Replaying a request whose provider-side work may already have run can repeat that work, so approve it only for workloads where that is acceptable.
 
-Stateful follow-up requests using `previous_response_id` or `conversation_id` are also treated more conservatively. For those requests, non-provider predicates such as `network_error()` or `http_status([500])` are not enough by themselves. The retry policy should include a replay-safe approval from the provider, typically via `retry_policies.provider_suggested()`.
+Stateful follow-up requests using `previous_response_id` or `conversation_id` — including those produced by `auto_previous_response_id=True` — are also treated more conservatively, because the follow-up depends on server-side state. For those requests, non-provider predicates such as `network_error()` or `http_status([500])` are not enough by themselves. The retry policy should include a replay-safe approval from the provider, typically via `retry_policies.provider_suggested()`.
+
+`approve_unsafe_replay` also applies to a stateful request, but only when provider advice marked replay as unsafe on a non-streamed failure. When replay safety is unknown, a stateful request stays blocked no matter what the policy returns: there is no provider-marked unsafe failure for the approval to be about.
 
 ##### Runner and agent merge behavior
 

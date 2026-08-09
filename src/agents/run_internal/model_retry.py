@@ -338,9 +338,13 @@ async def _evaluate_retry(
     # 2. A stateful request (`previous_response_id` / `conversation_id`, including the
     #    `auto_previous_response_id` case) fails closed by default because the follow-up
     #    depends on server-side state. It carries no application-local side effects, so an
-    #    explicit application approval can accept it, as can either provider signal.
+    #    application approval can accept it — but only for the provider-marked unsafe failure
+    #    this option is scoped to. When replay safety is unknown the request stays blocked:
+    #    there is no provider-unsafe failure for the approval to be about.
     if stateful_request and not (
-        decision._approves_replay or decision.approve_unsafe_replay or provider_marks_replay_safe
+        decision._approves_replay
+        or provider_marks_replay_safe
+        or (decision.approve_unsafe_replay and provider_marks_replay_unsafe)
     ):
         return RetryDecision(
             retry=False,

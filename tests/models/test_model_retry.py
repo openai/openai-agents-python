@@ -2697,3 +2697,34 @@ async def test_stateful_request_still_fails_closed_without_explicit_approval() -
         )
 
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unsafe_replay_approval_does_not_lift_a_stateful_request_with_unknown_safety() -> (
+    None
+):
+    calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        raise _connection_error()
+
+    def policy(_context: RetryPolicyContext) -> RetryDecision:
+        return RetryDecision(retry=True, approve_unsafe_replay=True)
+
+    # No provider advice, so replay safety is unknown rather than unsafe. The approval is
+    # scoped to provider-marked unsafe failures, so the stateful gate must stay closed.
+    with pytest.raises(APIConnectionError):
+        await get_response_with_retry(
+            get_response=get_response,
+            rewind=lambda: asyncio.sleep(0),
+            retry_settings=ModelRetrySettings(
+                max_retries=1, backoff={"initial_delay": 0}, policy=policy
+            ),
+            get_retry_advice=lambda _request: None,
+            previous_response_id="resp_1",
+            conversation_id=None,
+        )
+
+    assert calls == 1
