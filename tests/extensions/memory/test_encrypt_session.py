@@ -359,6 +359,24 @@ async def test_encrypted_session_get_items_limit(
     underlying_session.close()
 
 
+async def test_encrypted_session_get_items_session_settings_zero_limit(
+    encryption_key: str, underlying_session: SQLiteSession
+):
+    """Test that a zero session settings limit returns no history."""
+    underlying_session.session_settings = SessionSettings(limit=0)
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying_session,
+        encryption_key=encryption_key,
+    )
+    await session.add_items([{"role": "user", "content": "hidden history"}])
+
+    assert await session.get_items() == []
+    assert len(await underlying_session.get_items()) == 1
+
+    underlying_session.close()
+
+
 async def test_encrypted_session_get_items_limit_skips_invalid_latest_envelope(
     encryption_key: str, underlying_session: SQLiteSession
 ):

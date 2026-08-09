@@ -189,6 +189,8 @@ class EncryptedSession(SessionABC):
     ) -> list[TResponseInputItem]:
         wrapper = _get_session_wrapper(self.underlying_session, wrapper)
         effective_limit = resolve_session_limit(limit, self.session_settings)
+        if effective_limit == 0:
+            return []
         if effective_limit is not None and effective_limit > 0:
             window = effective_limit
             while True:
