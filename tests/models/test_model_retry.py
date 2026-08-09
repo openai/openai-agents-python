@@ -2639,3 +2639,61 @@ async def test_unsafe_replay_approval_survives_policy_combinators(combinator: st
 
     assert result.response_id == "resp"
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_unsafe_replay_approval_applies_to_a_stateful_request() -> None:
+    calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _connection_error("no close frame received or sent")
+        return ModelResponse(output=[get_text_message("ok")], usage=Usage(), response_id="resp")
+
+    def policy(_context: RetryPolicyContext) -> RetryDecision:
+        return RetryDecision(retry=True, approve_unsafe_replay=True)
+
+    # `auto_previous_response_id=True` produces exactly this shape: a stateful request
+    # that fails closed by default but carries no application-local side effects.
+    result = await get_response_with_retry(
+        get_response=get_response,
+        rewind=lambda: asyncio.sleep(0),
+        retry_settings=ModelRetrySettings(
+            max_retries=1, backoff={"initial_delay": 0}, policy=policy
+        ),
+        get_retry_advice=_ws_response_started_advice,
+        previous_response_id="resp_1",
+        conversation_id=None,
+    )
+
+    assert result.response_id == "resp"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_stateful_request_still_fails_closed_without_explicit_approval() -> None:
+    calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        raise _connection_error("no close frame received or sent")
+
+    def policy(_context: RetryPolicyContext) -> RetryDecision:
+        return RetryDecision(retry=True)
+
+    with pytest.raises(APIConnectionError):
+        await get_response_with_retry(
+            get_response=get_response,
+            rewind=lambda: asyncio.sleep(0),
+            retry_settings=ModelRetrySettings(
+                max_retries=1, backoff={"initial_delay": 0}, policy=policy
+            ),
+            get_retry_advice=_ws_response_started_advice,
+            previous_response_id=None,
+            conversation_id="conv_1",
+        )
+
+    assert calls == 1

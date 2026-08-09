@@ -498,7 +498,7 @@ english_agent = Agent(
 
 Retries are runtime-only and opt in. The SDK does not retry general model requests unless you set `ModelSettings(retry=...)` and your retry policy chooses to retry.
 
-On the Responses websocket transport, `retry_policies.provider_suggested()` recognizes pre-response overload frames and code-less `server_error` frames as retry suggestions. This does not enable retries by itself: you still need `ModelRetrySettings`, and the normal replay-safety checks still apply. If any response event has already arrived, the SDK does not replay the request.
+On the Responses websocket transport, `retry_policies.provider_suggested()` recognizes pre-response overload frames and code-less `server_error` frames as retry suggestions. This does not enable retries by itself: you still need `ModelRetrySettings`, and the normal replay-safety checks still apply. Once a response event has arrived, the SDK does not replay the request on its own; a non-streamed request can still be replayed if the retry policy explicitly approves it, as described under [Safety boundaries](#safety-boundaries).
 
 ```python
 from agents import Agent, ModelRetrySettings, ModelSettings, retry_policies
