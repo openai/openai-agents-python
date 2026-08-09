@@ -2634,7 +2634,14 @@ def _deserialize_tool_call_output_raw_item(
     if output_type == "function_call_output":
         return _FUNCTION_OUTPUT_ADAPTER.validate_python(normalized_raw_item)
     if output_type == "computer_call_output":
-        return _COMPUTER_OUTPUT_ADAPTER.validate_python(normalized_raw_item)
+        # ComputerCallOutput declares acknowledged_safety_checks as an Iterable, so pydantic
+        # validation wraps it in a lazy one-shot iterator. Convert it back to plain data so
+        # the restored state stays JSON-serializable and the acknowledged safety-check
+        # record survives repeated reads.
+        return cast(
+            ComputerCallOutput,
+            _to_dump_compatible(_COMPUTER_OUTPUT_ADAPTER.validate_python(normalized_raw_item)),
+        )
     if output_type == "local_shell_call_output":
         return _LOCAL_SHELL_OUTPUT_ADAPTER.validate_python(normalized_raw_item)
     if output_type == "program_output":

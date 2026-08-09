@@ -3087,6 +3087,44 @@ class TestSerializationRoundTrip:
         assert restored_item.raw_item == custom_tool_output
         assert restored_item.output == "custom result"
 
+    async def test_deserializes_computer_call_output_acknowledged_safety_checks(self):
+        """Acknowledged safety checks should survive repeated RunState roundtrips."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="ItemAgent")
+        state = make_state(agent, context=context, original_input="test", max_turns=5)
+
+        computer_tool_output = {
+            "type": "computer_call_output",
+            "call_id": "call_computer_1",
+            "output": {"type": "computer_screenshot", "image_url": "img"},
+            "acknowledged_safety_checks": [
+                {"id": "sc_1", "code": "malicious_instructions", "message": "confirm"}
+            ],
+        }
+        state._generated_items.append(
+            ToolCallOutputItem(
+                agent=agent,
+                raw_item=cast(Any, computer_tool_output),
+                output="done",
+            )
+        )
+
+        new_state = await RunState.from_json(agent, state.to_json())
+
+        restored_item = new_state._generated_items[0]
+        assert isinstance(restored_item, ToolCallOutputItem)
+        raw_item = cast("dict[str, Any]", restored_item.raw_item)
+        expected_checks = [{"id": "sc_1", "code": "malicious_instructions", "message": "confirm"}]
+        assert raw_item["acknowledged_safety_checks"] == expected_checks
+        # Reading the field twice must not exhaust it.
+        assert list(raw_item["acknowledged_safety_checks"]) == expected_checks
+
+        # A restored state must serialize again for repeated pause/resume cycles.
+        roundtripped = await RunState.from_string(agent, new_state.to_string())
+        raw_item_again = cast("dict[str, Any]", roundtripped._generated_items[0].raw_item)
+        assert raw_item_again["acknowledged_safety_checks"] == expected_checks
+        json.dumps(roundtripped.to_json())
+
     async def test_deserializes_tool_call_output_custom_data(self):
         """SDK-only tool output custom data should survive RunState roundtrips."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
