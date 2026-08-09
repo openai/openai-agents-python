@@ -573,6 +573,23 @@ Some failures are never retried automatically:
 - Requests where provider advice marks replay as unsafe.
 - Streamed runs after output has already started in a way that would make replay unsafe.
 
+Abort errors and streamed runs that already produced output are absolute: no retry policy can override them. Provider-marked replay unsafety on a non-streamed request is the one case an application can accept deliberately, by returning `approve_unsafe_replay=True` alongside `retry=True`:
+
+```python
+from agents.retry import RetryDecision, RetryPolicyContext
+
+def retry_policy(context: RetryPolicyContext) -> RetryDecision:
+    if context.attempt == 1 and not context.stream and context.response_started:
+        return RetryDecision(
+            retry=True,
+            approve_unsafe_replay=True,
+            reason="Approved one replay of a read-only model turn",
+        )
+    return RetryDecision(retry=False)
+```
+
+An ordinary `RetryDecision(retry=True)` never lifts replay protection; the approval has to be explicit. `RetryPolicyContext` exposes `response_started`, `replay_safety`, `stateful_request`, `previous_response_id`, and `conversation_id` so the policy can scope the approval to the failure it actually intends to accept. Replaying a request whose provider-side work may already have run can repeat that work, so approve it only for workloads where that is acceptable.
+
 Stateful follow-up requests using `previous_response_id` or `conversation_id` are also treated more conservatively. For those requests, non-provider predicates such as `network_error()` or `http_status([500])` are not enough by themselves. The retry policy should include a replay-safe approval from the provider, typically via `retry_policies.provider_suggested()`.
 
 ##### Runner and agent merge behavior

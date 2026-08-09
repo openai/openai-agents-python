@@ -2574,3 +2574,68 @@ async def test_provider_unsafe_replay_approval_is_ignored_for_streamed_requests(
             pass
 
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unsafe_replay_approval_does_not_replay_programmatic_tool_calling() -> None:
+    calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        raise _connection_error()
+
+    def policy(_context: RetryPolicyContext) -> RetryDecision:
+        return RetryDecision(retry=True, approve_unsafe_replay=True)
+
+    # `replay_unsafe_request` is the request-level veto the runner sets for
+    # Programmatic Tool Calling. Application approval must not lift it.
+    with pytest.raises(APIConnectionError):
+        await get_response_with_retry(
+            get_response=get_response,
+            rewind=lambda: asyncio.sleep(0),
+            retry_settings=ModelRetrySettings(
+                max_retries=1, backoff={"initial_delay": 0}, policy=policy
+            ),
+            get_retry_advice=lambda _request: None,
+            previous_response_id=None,
+            conversation_id=None,
+            replay_unsafe_request=True,
+        )
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("combinator", ["all", "any"])
+async def test_unsafe_replay_approval_survives_policy_combinators(combinator: str) -> None:
+    calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _connection_error("no close frame received or sent")
+        return ModelResponse(output=[get_text_message("ok")], usage=Usage(), response_id="resp")
+
+    def approving(_context: RetryPolicyContext) -> RetryDecision:
+        return RetryDecision(retry=True, approve_unsafe_replay=True)
+
+    def plain(_context: RetryPolicyContext) -> RetryDecision:
+        return RetryDecision(retry=True)
+
+    combined = getattr(retry_policies, combinator)(approving, plain)
+
+    result = await get_response_with_retry(
+        get_response=get_response,
+        rewind=lambda: asyncio.sleep(0),
+        retry_settings=ModelRetrySettings(
+            max_retries=1, backoff={"initial_delay": 0}, policy=combined
+        ),
+        get_retry_advice=_ws_response_started_advice,
+        previous_response_id=None,
+        conversation_id=None,
+    )
+
+    assert result.response_id == "resp"
+    assert calls == 2

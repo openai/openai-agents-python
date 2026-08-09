@@ -241,6 +241,7 @@ def _merge_positive_retry_decisions(
         retry=True,
         delay=existing.delay,
         reason=existing.reason,
+        approve_unsafe_replay=existing.approve_unsafe_replay or incoming.approve_unsafe_replay,
     )
     if existing._approves_replay:
         merged = _with_replay_safe_approval(merged)
@@ -336,6 +337,8 @@ class _RetryPolicies:
                     merged.delay = decision.delay
                 if decision.reason is not None:
                     merged.reason = decision.reason
+                if decision.approve_unsafe_replay:
+                    merged.approve_unsafe_replay = True
                 if decision._approves_replay:
                     merged = _with_replay_safe_approval(merged)
 

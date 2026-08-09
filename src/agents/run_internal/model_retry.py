@@ -323,11 +323,20 @@ async def _evaluate_retry(
     provider_marks_replay_safe = (
         provider_advice is not None and provider_advice.replay_safety == "safe"
     )
-    # `_approves_replay` is the provider-owned approval and `approve_unsafe_replay` the
-    # application-owned one. Both are explicit; an ordinary `retry=True` is neither.
-    approves_replay = decision._approves_replay or decision.approve_unsafe_replay
-    replay_unsafe = replay_unsafe_request or provider_marks_replay_unsafe
-    if replay_unsafe and not approves_replay and not provider_marks_replay_safe:
+    # A request-level replay veto (Programmatic Tool Calling, for example) covers
+    # application-local side effects that may already have run, which is outside what
+    # `approve_unsafe_replay` authorizes. Only the provider-owned approval lifts it.
+    if replay_unsafe_request and not decision._approves_replay and not provider_marks_replay_safe:
+        return RetryDecision(
+            retry=False,
+            reason=decision.reason
+            or (provider_advice.reason if provider_advice is not None else None),
+        )
+    # Provider-marked replay unsafety is the case `approve_unsafe_replay` exists for. Both
+    # approvals are explicit; an ordinary `retry=True` is neither.
+    if provider_marks_replay_unsafe and not (
+        decision._approves_replay or decision.approve_unsafe_replay
+    ):
         return RetryDecision(
             retry=False,
             reason=decision.reason
