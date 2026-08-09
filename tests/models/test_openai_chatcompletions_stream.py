@@ -803,6 +803,42 @@ async def test_buffered_audio_only_delta_raises_instead_of_completing_empty() ->
 
 
 @pytest.mark.asyncio
+async def test_buffered_degenerate_stream_still_announces_response_created() -> None:
+    """response.created must precede response.completed even when buffering drops every chunk."""
+    role_only = _chunk_with([Choice(index=0, delta=ChoiceDelta(role="assistant"))])
+    empty_finish = _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="stop")])
+
+    unbuffered_events = await _collect_handler_events(role_only, empty_finish)
+
+    buffered = ChatCmplStreamHandler.buffer_tool_call_stream(
+        _completion_stream(role_only, empty_finish)
+    )
+    buffered_events = [
+        event
+        async for event in ChatCmplStreamHandler.handle_stream(
+            _empty_response(), cast(Any, buffered)
+        )
+    ]
+
+    lifecycle = ["response.created", "response.completed"]
+    assert [event.type for event in unbuffered_events] == lifecycle
+    assert [event.type for event in buffered_events] == lifecycle
+    assert [event.sequence_number for event in buffered_events] == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_empty_stream_still_announces_response_created() -> None:
+    """A stream that ends without any chunk still describes a full response lifecycle."""
+    events = await _collect_handler_events()
+
+    assert [event.type for event in events] == ["response.created", "response.completed"]
+    assert [event.sequence_number for event in events] == [0, 1]
+    completed = events[-1]
+    assert isinstance(completed, ResponseCompletedEvent)
+    assert completed.response.output == []
+
+
+@pytest.mark.asyncio
 async def test_buffer_tool_call_stream_preserves_empty_choice_chunks() -> None:
     chunk = ChatCompletionChunk(
         id="chunk-id",

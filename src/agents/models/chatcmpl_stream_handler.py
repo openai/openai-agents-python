@@ -1094,6 +1094,16 @@ class ChatCmplStreamHandler:
                             sequence_number=sequence_number.get_and_increment(),
                         )
 
+        # A degenerate stream can end without any chunk reaching the handler (an empty
+        # provider stream, or buffering dropping every chunk), so the terminal events
+        # below must still be preceded by response.created.
+        if not state.started:
+            yield ResponseCreatedEvent(
+                response=response,
+                type="response.created",
+                sequence_number=sequence_number.get_and_increment(),
+            )
+
         # Content-filter refusal with no emitted output: synthesize a refusal so
         # the completed response carries a ResponseOutputRefusal rather than an
         # empty turn. Only when nothing else was produced (text / refusal / tool
