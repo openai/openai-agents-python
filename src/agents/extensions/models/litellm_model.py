@@ -576,7 +576,7 @@ class LitellmModel(Model):
             True
             if model_settings.parallel_tool_calls and tools and len(tools) > 0
             else False
-            if model_settings.parallel_tool_calls is False
+            if model_settings.parallel_tool_calls is False and (tools or handoffs)
             else None
         )
         tool_choice = Converter.convert_tool_choice(model_settings.tool_choice)

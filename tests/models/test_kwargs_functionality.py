@@ -11,7 +11,7 @@ from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.completion_usage import CompletionUsage
 
-from agents import Agent
+from agents import Agent, Handoff, Tool, function_tool, handoff
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.model_settings import ModelSettings
 from agents.models._retry_runtime import provider_managed_retries_disabled
@@ -67,6 +67,51 @@ async def test_litellm_kwargs_forwarded(monkeypatch):
 
     # Verify regular parameters are still passed
     assert captured["temperature"] == 0.5
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("capability", "expected_parallel_tool_calls"),
+    [("none", None), ("tool", False), ("handoff", False)],
+)
+async def test_litellm_parallel_tool_calls_requires_capability(
+    monkeypatch, capability: str, expected_parallel_tool_calls: bool | None
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_acompletion(model, messages=None, **kwargs):
+        captured.update(kwargs)
+        message = Message(role="assistant", content="test response")
+        choice = Choices(index=0, message=message)
+        return ModelResponse(choices=[choice], usage=Usage(0, 0, 0))
+
+    @function_tool
+    def lookup() -> str:
+        """Return a deterministic result."""
+        return "ok"
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    tools: list[Tool] = [lookup] if capability == "tool" else []
+    handoffs: list[Handoff] = [handoff(Agent(name="delegate"))] if capability == "handoff" else []
+
+    await LitellmModel(model="test-model").get_response(
+        system_instructions=None,
+        input="test input",
+        model_settings=ModelSettings(parallel_tool_calls=False),
+        tools=tools,
+        output_schema=None,
+        handoffs=handoffs,
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+    )
+
+    if capability == "none":
+        assert captured["tools"] is None
+    else:
+        assert captured["tools"] is not None
+    assert captured["parallel_tool_calls"] is expected_parallel_tool_calls
 
 
 @pytest.mark.allow_call_model_methods
