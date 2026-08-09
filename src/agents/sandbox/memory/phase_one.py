@@ -46,6 +46,9 @@ def render_phase_one_prompt(*, rollout_contents: str) -> str:
     payloads = [json.loads(line) for line in rollout_contents.splitlines() if line.strip()]
     if not payloads:
         raise ValueError("rollout_contents must contain at least one JSONL record")
+    for record_number, payload in enumerate(payloads, start=1):
+        if not isinstance(payload, dict):
+            raise ValueError(f"rollout record {record_number} must be a JSON object")
     payload = payloads[-1]
     if len(payloads) == 1:
         terminal_metadata: object = payload.get("terminal_metadata", {})

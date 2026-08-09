@@ -443,6 +443,23 @@ def test_render_phase_one_prompt_truncates_large_rollout_contents() -> None:
     assert "Do not assume the rendered rollout below is complete" in prompt
 
 
+@pytest.mark.parametrize(
+    "record",
+    ['"string"', '["list"]', "42", "true", "null"],
+    ids=["string", "list", "number", "boolean", "null"],
+)
+def test_render_phase_one_prompt_rejects_non_object_rollout_records(record: str) -> None:
+    with pytest.raises(ValueError, match=r"^rollout record 1 must be a JSON object$"):
+        render_phase_one_prompt(rollout_contents=record)
+
+
+def test_render_phase_one_prompt_rejects_non_object_final_rollout_record() -> None:
+    valid_record = json.dumps({"terminal_metadata": {"terminal_state": "completed"}})
+
+    with pytest.raises(ValueError, match=r"^rollout record 2 must be a JSON object$"):
+        render_phase_one_prompt(rollout_contents=f'{valid_record}\n["valid", "json"]')
+
+
 def test_sandbox_memory_input_preserves_empty_session_delta() -> None:
     assert (
         _sandbox_memory_input(
