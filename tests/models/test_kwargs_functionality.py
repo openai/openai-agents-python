@@ -11,13 +11,14 @@ from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.completion_usage import CompletionUsage
 
-from agents import Agent
+from agents import Agent, function_tool, handoff
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.model_settings import ModelSettings
 from agents.models._retry_runtime import provider_managed_retries_disabled
 from agents.models.interface import ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.retry import ModelRetryAdviceRequest, ModelRetrySettings
+from agents.tool import Tool
 
 
 @pytest.mark.allow_call_model_methods
@@ -67,6 +68,46 @@ async def test_litellm_kwargs_forwarded(monkeypatch):
 
     # Verify regular parameters are still passed
     assert captured["temperature"] == 0.5
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parallel_tool_calls", [True, False])
+@pytest.mark.parametrize("tool_source", ["none", "function", "handoff"])
+async def test_litellm_only_forwards_parallel_tool_calls_with_converted_tools(
+    monkeypatch, parallel_tool_calls: bool, tool_source: str
+):
+    captured: dict[str, object] = {}
+
+    async def fake_acompletion(model, messages=None, **kwargs):
+        captured.update(kwargs)
+        message = Message(role="assistant", content="test response")
+        return ModelResponse(choices=[Choices(index=0, message=message)], usage=Usage(0, 0, 0))
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+
+    tools: list[Tool] = (
+        [function_tool(lambda: "ok", name_override="test_tool")]
+        if tool_source == "function"
+        else []
+    )
+    handoffs = [handoff(Agent(name="handoff"))] if tool_source == "handoff" else []
+
+    await LitellmModel(model="test-model").get_response(
+        system_instructions=None,
+        input="test input",
+        model_settings=ModelSettings(parallel_tool_calls=parallel_tool_calls),
+        tools=tools,
+        output_schema=None,
+        handoffs=handoffs,
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+    )
+
+    expected_parallel_tool_calls = parallel_tool_calls if tool_source != "none" else None
+    assert captured["parallel_tool_calls"] is expected_parallel_tool_calls
+    assert (captured["tools"] is not None) is (tool_source != "none")
 
 
 @pytest.mark.allow_call_model_methods
