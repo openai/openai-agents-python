@@ -36,6 +36,8 @@ from agents import (
     OpenAIConversationsSession,
     OutputGuardrail,
     OutputGuardrailTripwireTriggered,
+    RetryDecision,
+    RetryPolicyContext,
     RunConfig,
     RunContextWrapper,
     Runner,
@@ -5037,6 +5039,55 @@ async def test_previous_response_id_retry_does_not_resend_initial_input_multi_tu
     assert isinstance(last_input, list)
     assert len(last_input) == 1
     assert last_input[0].get("type") == "function_call_output"
+
+
+@pytest.mark.asyncio
+async def test_auto_previous_response_id_retries_when_policy_approves_unsafe_replay():
+    seen: list[RetryPolicyContext] = []
+
+    class StatefulRetryUnsafeFakeModel(FakeModel):
+        def get_retry_advice(self, request):
+            if request.previous_response_id or request.conversation_id:
+                return ModelRetryAdvice(
+                    suggested=False,
+                    replay_safety="unsafe",
+                    response_started=True,
+                )
+            return None
+
+    def policy(context: RetryPolicyContext) -> RetryDecision:
+        seen.append(context)
+        return RetryDecision(retry=True, approve_unsafe_replay=True)
+
+    model = StatefulRetryUnsafeFakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("test_func", '{"arg": "foo"}')],
+            APIConnectionError(
+                message="connection closed after response processing started",
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(max_retries=1, policy=policy),
+        ),
+    )
+
+    result = await Runner.run(agent, input="user_message", auto_previous_response_id=True)
+
+    assert result.final_output == "done"
+    assert len(seen) == 1
+    assert seen[0].previous_response_id == "resp-789"
+    assert seen[0].conversation_id is None
+    assert seen[0].stateful_request is True
+    assert seen[0].response_started is True
+    assert seen[0].replay_safety == "unsafe"
 
 
 @pytest.mark.asyncio

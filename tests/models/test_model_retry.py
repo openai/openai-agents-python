@@ -2466,3 +2466,541 @@ async def test_stream_response_with_retry_closes_current_stream_when_consumer_st
     await outer_stream.aclose()
 
     assert stream.close_calls == 1
+
+
+def _ws_response_started_advice(request: ModelRetryAdviceRequest) -> ModelRetryAdvice:
+    """Advice matching the Responses WebSocket adapter after a response-started disconnect."""
+    return ModelRetryAdvice(
+        suggested=False,
+        replay_safety="unsafe",
+        reason=str(request.error),
+        response_started=True,
+    )
+
+
+def test_retry_policy_context_normalizes_unknown_provider_replay_safety() -> None:
+    context = RetryPolicyContext(
+        error=_connection_error(),
+        attempt=1,
+        max_retries=1,
+        stream=False,
+        normalized=ModelRetryNormalizedError(),
+        provider_advice=ModelRetryAdvice(replay_safety="conditional"),
+    )
+
+    assert context.replay_safety == "unknown"
+
+
+def test_provider_suggested_preserves_public_veto_for_unsafe_advice() -> None:
+    decision = retry_policies.provider_suggested()(
+        RetryPolicyContext(
+            error=_connection_error(),
+            attempt=1,
+            max_retries=1,
+            stream=False,
+            normalized=ModelRetryNormalizedError(is_network_error=True),
+            provider_advice=ModelRetryAdvice(
+                suggested=False,
+                replay_safety="unsafe",
+                reason="provider veto",
+            ),
+        )
+    )
+
+    assert isinstance(decision, RetryDecision)
+    assert decision.retry is False
+    assert decision.reason == "provider veto"
+
+
+@pytest.mark.asyncio
+async def test_provider_unsafe_replay_retries_when_policy_approves_explicitly() -> None:
+    calls = 0
+    seen: list[RetryPolicyContext] = []
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _connection_error("no close frame received or sent")
+        return ModelResponse(output=[get_text_message("ok")], usage=Usage(), response_id="resp")
+
+    def policy(context: RetryPolicyContext) -> RetryDecision:
+        seen.append(context)
+        return RetryDecision(
+            retry=True,
+            approve_unsafe_replay=True,
+            reason="Approved one replay of a read-only model turn",
+        )
+
+    result = await get_response_with_retry(
+        get_response=get_response,
+        rewind=lambda: asyncio.sleep(0),
+        retry_settings=ModelRetrySettings(
+            max_retries=1, backoff={"initial_delay": 0}, policy=policy
+        ),
+        get_retry_advice=_ws_response_started_advice,
+        previous_response_id=None,
+        conversation_id=None,
+    )
+
+    assert result.response_id == "resp"
+    assert calls == 2
+    # The policy must be able to scope its approval, so it needs the structured context.
+    assert len(seen) == 1
+    assert seen[0].stream is False
+    assert seen[0].response_started is True
+    assert seen[0].replay_safety == "unsafe"
+    assert seen[0].stateful_request is False
+
+
+@pytest.mark.asyncio
+async def test_provider_unsafe_replay_still_blocks_an_ordinary_retry_decision() -> None:
+    calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        raise _connection_error("no close frame received or sent")
+
+    def policy(_context: RetryPolicyContext) -> RetryDecision:
+        # No `approve_unsafe_replay`, so this must not bypass replay protection.
+        return RetryDecision(retry=True)
+
+    with pytest.raises(APIConnectionError):
+        await get_response_with_retry(
+            get_response=get_response,
+            rewind=lambda: asyncio.sleep(0),
+            retry_settings=ModelRetrySettings(
+                max_retries=1, backoff={"initial_delay": 0}, policy=policy
+            ),
+            get_retry_advice=_ws_response_started_advice,
+            previous_response_id=None,
+            conversation_id=None,
+        )
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_unsafe_replay_approval_is_ignored_for_streamed_requests() -> None:
+    calls = 0
+
+    async def get_stream() -> AsyncIterator[TResponseStreamEvent]:
+        nonlocal calls
+        calls += 1
+        raise _connection_error("no close frame received or sent")
+        yield  # pragma: no cover - generator marker
+
+    def policy(_context: RetryPolicyContext) -> RetryDecision:
+        return RetryDecision(retry=True, approve_unsafe_replay=True)
+
+    with pytest.raises(APIConnectionError):
+        async for _event in stream_response_with_retry(
+            get_stream=get_stream,
+            rewind=lambda: asyncio.sleep(0),
+            retry_settings=ModelRetrySettings(
+                max_retries=1, backoff={"initial_delay": 0}, policy=policy
+            ),
+            get_retry_advice=_ws_response_started_advice,
+            previous_response_id=None,
+            conversation_id=None,
+        ):
+            pass
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unsafe_replay_approval_does_not_replay_programmatic_tool_calling() -> None:
+    calls = 0
+    policy_calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        raise _connection_error()
+
+    def policy(_context: RetryPolicyContext) -> RetryDecision:
+        nonlocal policy_calls
+        policy_calls += 1
+        return RetryDecision(retry=True, approve_unsafe_replay=True)
+
+    # `replay_unsafe_request` is the request-level veto the runner sets for
+    # Programmatic Tool Calling. Application approval must not lift it.
+    with pytest.raises(APIConnectionError):
+        await get_response_with_retry(
+            get_response=get_response,
+            rewind=lambda: asyncio.sleep(0),
+            retry_settings=ModelRetrySettings(
+                max_retries=1, backoff={"initial_delay": 0}, policy=policy
+            ),
+            get_retry_advice=_ws_response_started_advice,
+            previous_response_id=None,
+            conversation_id=None,
+            replay_unsafe_request=True,
+        )
+
+    assert calls == 1
+    assert policy_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("combinator", ["all", "any"])
+@pytest.mark.parametrize("provider_first", [False, True])
+async def test_unsafe_replay_approval_resolves_provider_veto_in_policy_combinators(
+    combinator: str,
+    provider_first: bool,
+) -> None:
+    calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _connection_error("no close frame received or sent")
+        return ModelResponse(output=[get_text_message("ok")], usage=Usage(), response_id="resp")
+
+    def approving(_context: RetryPolicyContext) -> RetryDecision:
+        return RetryDecision(retry=True, approve_unsafe_replay=True)
+
+    provider_policy = retry_policies.provider_suggested()
+    policies = (provider_policy, approving) if provider_first else (approving, provider_policy)
+    combined = getattr(retry_policies, combinator)(*policies)
+
+    result = await get_response_with_retry(
+        get_response=get_response,
+        rewind=lambda: asyncio.sleep(0),
+        retry_settings=ModelRetrySettings(
+            max_retries=1, backoff={"initial_delay": 0}, policy=combined
+        ),
+        get_retry_advice=_ws_response_started_advice,
+        previous_response_id=None,
+        conversation_id=None,
+    )
+
+    assert result.response_id == "resp"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_provider_normalization_cannot_clear_raw_abort_veto() -> None:
+    class AbortError(Exception):
+        pass
+
+    calls = 0
+    policy_calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        raise AbortError("cancelled")
+
+    async def rewind() -> None:
+        raise AssertionError("An abort must not rewind state")
+
+    def policy(_context: RetryPolicyContext) -> RetryDecision:
+        nonlocal policy_calls
+        policy_calls += 1
+        return RetryDecision(retry=True, approve_unsafe_replay=True)
+
+    def get_retry_advice(_request: ModelRetryAdviceRequest) -> ModelRetryAdvice:
+        return ModelRetryAdvice(
+            suggested=False,
+            replay_safety="unsafe",
+            normalized=ModelRetryNormalizedError(is_abort=False),
+        )
+
+    with pytest.raises(AbortError, match="cancelled"):
+        await get_response_with_retry(
+            get_response=get_response,
+            rewind=rewind,
+            retry_settings=ModelRetrySettings(
+                max_retries=1,
+                backoff={"initial_delay": 0},
+                policy=policy,
+            ),
+            get_retry_advice=get_retry_advice,
+            previous_response_id=None,
+            conversation_id=None,
+        )
+
+    assert calls == 1
+    assert policy_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_policy_cannot_promote_unknown_provider_replay_safety() -> None:
+    calls = 0
+    policy_calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        raise _connection_error()
+
+    async def rewind() -> None:
+        raise AssertionError("Unknown replay safety must not rewind state")
+
+    def policy(context: RetryPolicyContext) -> RetryDecision:
+        nonlocal policy_calls
+        policy_calls += 1
+        assert context.provider_advice is not None
+        assert context.replay_safety == "unknown"
+        context.provider_advice.replay_safety = "safe"
+        return RetryDecision(retry=True)
+
+    with pytest.raises(APIConnectionError):
+        await get_response_with_retry(
+            get_response=get_response,
+            rewind=rewind,
+            retry_settings=ModelRetrySettings(
+                max_retries=1,
+                backoff={"initial_delay": 0},
+                policy=policy,
+            ),
+            get_retry_advice=lambda _request: ModelRetryAdvice(
+                suggested=True,
+                replay_safety="conditional",
+            ),
+            previous_response_id="resp_1",
+            conversation_id=None,
+        )
+
+    assert calls == 1
+    assert policy_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_policy_cannot_revoke_provider_safe_replay_evidence() -> None:
+    calls = 0
+    rewinds = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _connection_error()
+        return ModelResponse(output=[get_text_message("ok")], usage=Usage(), response_id="resp")
+
+    async def rewind() -> None:
+        nonlocal rewinds
+        rewinds += 1
+
+    def policy(context: RetryPolicyContext) -> RetryDecision:
+        assert context.provider_advice is not None
+        assert context.replay_safety == "safe"
+        context.provider_advice.replay_safety = "conditional"
+        return RetryDecision(retry=True)
+
+    result = await get_response_with_retry(
+        get_response=get_response,
+        rewind=rewind,
+        retry_settings=ModelRetrySettings(
+            max_retries=1,
+            backoff={"initial_delay": 0},
+            policy=policy,
+        ),
+        get_retry_advice=lambda _request: ModelRetryAdvice(
+            suggested=True,
+            replay_safety="safe",
+        ),
+        previous_response_id="resp_1",
+        conversation_id=None,
+    )
+
+    assert result.response_id == "resp"
+    assert calls == 2
+    assert rewinds == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("combinator", ["all", "any"])
+@pytest.mark.parametrize(
+    ("suggested", "initial_safety", "expected_context_safety"),
+    [
+        (False, "unsafe", "unsafe"),
+        (None, "conditional", "unknown"),
+    ],
+)
+async def test_composed_policy_cannot_mutate_provider_authority(
+    combinator: str,
+    suggested: bool | None,
+    initial_safety: str,
+    expected_context_safety: str,
+) -> None:
+    calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        raise _connection_error()
+
+    async def rewind() -> None:
+        raise AssertionError("Mutated provider authority must not rewind state")
+
+    def mutate_advice(context: RetryPolicyContext) -> RetryDecision:
+        assert context.provider_advice is not None
+        assert context.replay_safety == expected_context_safety
+        assert context.response_started is False
+        context.provider_advice.suggested = True
+        context.provider_advice.replay_safety = "safe"
+        context.provider_advice.response_started = True
+        assert context.replay_safety == expected_context_safety
+        assert context.response_started is False
+        return RetryDecision(retry=True)
+
+    policy = getattr(retry_policies, combinator)(
+        mutate_advice,
+        retry_policies.provider_suggested(),
+    )
+
+    with pytest.raises(APIConnectionError):
+        await get_response_with_retry(
+            get_response=get_response,
+            rewind=rewind,
+            retry_settings=ModelRetrySettings(
+                max_retries=1,
+                backoff={"initial_delay": 0},
+                policy=policy,
+            ),
+            get_retry_advice=lambda _request: ModelRetryAdvice(
+                suggested=suggested,
+                replay_safety=initial_safety,
+                response_started=False,
+            ),
+            previous_response_id="resp_1",
+            conversation_id=None,
+        )
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_composed_policy_cannot_mutate_provider_authority_for_ptc() -> None:
+    calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        raise _connection_error()
+
+    async def rewind() -> None:
+        raise AssertionError("Mutated provider authority must not rewind PTC state")
+
+    def mutate_advice(context: RetryPolicyContext) -> RetryDecision:
+        assert context.provider_advice is not None
+        context.provider_advice.suggested = True
+        context.provider_advice.replay_safety = "safe"
+        return RetryDecision(retry=True)
+
+    with pytest.raises(APIConnectionError):
+        await get_response_with_retry(
+            get_response=get_response,
+            rewind=rewind,
+            retry_settings=ModelRetrySettings(
+                max_retries=1,
+                backoff={"initial_delay": 0},
+                policy=retry_policies.all(
+                    mutate_advice,
+                    retry_policies.provider_suggested(),
+                ),
+            ),
+            get_retry_advice=lambda _request: ModelRetryAdvice(
+                suggested=None,
+                replay_safety="conditional",
+            ),
+            previous_response_id=None,
+            conversation_id=None,
+            replay_unsafe_request=True,
+        )
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unsafe_replay_approval_applies_to_a_stateful_request() -> None:
+    calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _connection_error("no close frame received or sent")
+        return ModelResponse(output=[get_text_message("ok")], usage=Usage(), response_id="resp")
+
+    def policy(_context: RetryPolicyContext) -> RetryDecision:
+        return RetryDecision(retry=True, approve_unsafe_replay=True)
+
+    # `auto_previous_response_id=True` produces exactly this shape: a stateful request
+    # that fails closed by default but carries no application-local side effects.
+    result = await get_response_with_retry(
+        get_response=get_response,
+        rewind=lambda: asyncio.sleep(0),
+        retry_settings=ModelRetrySettings(
+            max_retries=1, backoff={"initial_delay": 0}, policy=policy
+        ),
+        get_retry_advice=_ws_response_started_advice,
+        previous_response_id="resp_1",
+        conversation_id=None,
+    )
+
+    assert result.response_id == "resp"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_stateful_request_still_fails_closed_without_explicit_approval() -> None:
+    calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        raise _connection_error("no close frame received or sent")
+
+    def policy(_context: RetryPolicyContext) -> RetryDecision:
+        return RetryDecision(retry=True)
+
+    with pytest.raises(APIConnectionError):
+        await get_response_with_retry(
+            get_response=get_response,
+            rewind=lambda: asyncio.sleep(0),
+            retry_settings=ModelRetrySettings(
+                max_retries=1, backoff={"initial_delay": 0}, policy=policy
+            ),
+            get_retry_advice=_ws_response_started_advice,
+            previous_response_id=None,
+            conversation_id="conv_1",
+        )
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unsafe_replay_approval_does_not_lift_a_stateful_request_with_unknown_safety() -> (
+    None
+):
+    calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        raise _connection_error()
+
+    def policy(_context: RetryPolicyContext) -> RetryDecision:
+        return RetryDecision(retry=True, approve_unsafe_replay=True)
+
+    # No provider advice, so replay safety is unknown rather than unsafe. The approval is
+    # scoped to provider-marked unsafe failures, so the stateful gate must stay closed.
+    with pytest.raises(APIConnectionError):
+        await get_response_with_retry(
+            get_response=get_response,
+            rewind=lambda: asyncio.sleep(0),
+            retry_settings=ModelRetrySettings(
+                max_retries=1, backoff={"initial_delay": 0}, policy=policy
+            ),
+            get_retry_advice=lambda _request: None,
+            previous_response_id="resp_1",
+            conversation_id=None,
+        )
+
+    assert calls == 1

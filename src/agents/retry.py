@@ -98,6 +98,8 @@ class ModelRetryAdvice:
     replay_safety: str | None = None
     reason: str | None = None
     normalized: ModelRetryNormalizedError | None = None
+    response_started: bool = False
+    """Whether the provider had begun emitting the response when the failure occurred."""
 
 
 @dataclass
@@ -118,8 +120,23 @@ class RetryDecision:
     retry: bool
     delay: float | None = None
     reason: str | None = None
+    approve_unsafe_replay: bool = False
+    """Explicit application approval to replay a request the provider marked replay-unsafe.
+
+    This is deliberately separate from ``retry``: an ordinary ``RetryDecision(retry=True)``
+    never bypasses replay protection. Set this only for workloads where repeating
+    provider-side work that may already have happened is acceptable.
+    """
     _hard_veto: bool = field(default=False, init=False, repr=False, compare=False)
+    _delegable_replay_veto: bool = field(default=False, init=False, repr=False, compare=False)
     _approves_replay: bool = field(default=False, init=False, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class _ProviderRetryAuthority:
+    suggested: bool | None
+    replay_safety: str
+    response_started: bool
 
 
 @dataclass
@@ -132,6 +149,37 @@ class RetryPolicyContext:
     stream: bool
     normalized: ModelRetryNormalizedError
     provider_advice: ModelRetryAdvice | None = None
+    previous_response_id: str | None = None
+    conversation_id: str | None = None
+    _provider_authority: _ProviderRetryAuthority = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        advice = self.provider_advice
+        replay_safety = advice.replay_safety if advice is not None else None
+        self._provider_authority = _ProviderRetryAuthority(
+            suggested=advice.suggested if advice is not None else None,
+            replay_safety=(replay_safety if replay_safety in {"safe", "unsafe"} else "unknown"),
+            response_started=advice.response_started if advice is not None else False,
+        )
+
+    @property
+    def response_started(self) -> bool:
+        """Whether the provider had begun emitting the response when the failure occurred."""
+        return self._provider_authority.response_started
+
+    @property
+    def replay_safety(self) -> str:
+        """Provider replay classification: ``"safe"``, ``"unsafe"`` or ``"unknown"``."""
+        return self._provider_authority.replay_safety
+
+    @property
+    def stateful_request(self) -> bool:
+        """Whether the request carried ``previous_response_id`` or ``conversation_id``."""
+        return bool(self.previous_response_id or self.conversation_id)
 
 
 RetryPolicy: TypeAlias = Callable[[RetryPolicyContext], MaybeAwaitable[bool | RetryDecision]]
@@ -203,6 +251,12 @@ def _with_hard_veto(decision: RetryDecision) -> RetryDecision:
     return decision
 
 
+def _with_delegable_replay_veto(decision: RetryDecision) -> RetryDecision:
+    decision._hard_veto = True
+    decision._delegable_replay_veto = True
+    return decision
+
+
 def _with_replay_safe_approval(decision: RetryDecision) -> RetryDecision:
     decision._approves_replay = True
     return decision
@@ -216,6 +270,7 @@ def _merge_positive_retry_decisions(
         retry=True,
         delay=existing.delay,
         reason=existing.reason,
+        approve_unsafe_replay=existing.approve_unsafe_replay or incoming.approve_unsafe_replay,
     )
     if existing._approves_replay:
         merged = _with_replay_safe_approval(merged)
@@ -226,6 +281,24 @@ def _merge_positive_retry_decisions(
     if incoming._approves_replay:
         merged = _with_replay_safe_approval(merged)
     return merged
+
+
+def _resolve_delegable_replay_veto(
+    veto: RetryDecision,
+    approving: RetryDecision,
+) -> RetryDecision:
+    if not approving.retry or not approving.approve_unsafe_replay:
+        return veto
+
+    resolved = RetryDecision(
+        retry=True,
+        delay=approving.delay,
+        reason=approving.reason or veto.reason,
+        approve_unsafe_replay=True,
+    )
+    if approving._approves_replay:
+        resolved = _with_replay_safe_approval(resolved)
+    return resolved
 
 
 class _RetryPolicies:
@@ -241,13 +314,18 @@ class _RetryPolicies:
 
     def provider_suggested(self) -> RetryPolicy:
         def policy(context: RetryPolicyContext) -> bool | RetryDecision:
+            authority = context._provider_authority
             advice = context.provider_advice
-            if advice is None or advice.suggested is None:
+            reason = advice.reason if advice is not None else None
+            retry_after = advice.retry_after if advice is not None else None
+            if authority.suggested is None:
                 return False
-            if advice.suggested is False:
-                return _with_hard_veto(RetryDecision(retry=False, reason=advice.reason))
-            decision = RetryDecision(retry=True, delay=advice.retry_after, reason=advice.reason)
-            if advice.replay_safety == "safe":
+            if authority.suggested is False:
+                if authority.replay_safety == "unsafe":
+                    return _with_delegable_replay_veto(RetryDecision(retry=False, reason=reason))
+                return _with_hard_veto(RetryDecision(retry=False, reason=reason))
+            decision = RetryDecision(retry=True, delay=retry_after, reason=reason)
+            if authority.replay_safety == "safe":
                 return _with_replay_safe_approval(decision)
             return decision
 
@@ -301,9 +379,14 @@ class _RetryPolicies:
 
         async def policy(context: RetryPolicyContext) -> bool | RetryDecision:
             merged = RetryDecision(retry=True)
+            delegable_replay_veto: RetryDecision | None = None
             for predicate in policies:
                 decision = await _evaluate_policy(predicate, context)
                 if decision._hard_veto:
+                    if decision._delegable_replay_veto:
+                        if delegable_replay_veto is None:
+                            delegable_replay_veto = decision
+                        continue
                     return decision
                 if not decision.retry:
                     return decision
@@ -311,9 +394,13 @@ class _RetryPolicies:
                     merged.delay = decision.delay
                 if decision.reason is not None:
                     merged.reason = decision.reason
+                if decision.approve_unsafe_replay:
+                    merged.approve_unsafe_replay = True
                 if decision._approves_replay:
                     merged = _with_replay_safe_approval(merged)
 
+            if delegable_replay_veto is not None:
+                return _resolve_delegable_replay_veto(delegable_replay_veto, merged)
             return merged
 
         return _mark_retry_capabilities(
@@ -333,9 +420,14 @@ class _RetryPolicies:
         async def policy(context: RetryPolicyContext) -> bool | RetryDecision:
             first_positive: RetryDecision | None = None
             last_negative: RetryDecision | None = None
+            delegable_replay_veto: RetryDecision | None = None
             for predicate in policies:
                 decision = await _evaluate_policy(predicate, context)
                 if decision._hard_veto:
+                    if decision._delegable_replay_veto:
+                        if delegable_replay_veto is None:
+                            delegable_replay_veto = decision
+                        continue
                     return decision
                 if decision.retry:
                     if first_positive is None:
@@ -345,6 +437,13 @@ class _RetryPolicies:
                     continue
                 last_negative = decision
 
+            if delegable_replay_veto is not None:
+                if first_positive is None:
+                    return delegable_replay_veto
+                return _resolve_delegable_replay_veto(
+                    delegable_replay_veto,
+                    first_positive,
+                )
             if first_positive is not None:
                 return first_positive
             if last_negative is not None:

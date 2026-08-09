@@ -4289,3 +4289,45 @@ async def test_stream_response_lets_in_flight_close_finish_after_cancellation() 
     finally:
         release.set()
         task.cancel()
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_reports_response_started() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = _connection_closed_error("no close frame received or sent")
+    setattr(error, "_openai_agents_ws_replay_safety", "unsafe")  # noqa: B010
+    setattr(error, "_openai_agents_ws_response_started", True)  # noqa: B010
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+        )
+    )
+
+    assert advice is not None
+    assert advice.replay_safety == "unsafe"
+    # A retry policy needs this to tell a response-started disconnect apart from
+    # other replay-unsafe failures before approving a replay.
+    assert advice.response_started is True
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_reports_no_response_started_for_stateful_request() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = _connection_closed_error("no close frame received or sent")
+    setattr(error, "_openai_agents_ws_replay_safety", "unsafe")  # noqa: B010
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+            previous_response_id="resp_1",
+        )
+    )
+
+    assert advice is not None
+    assert advice.replay_safety == "unsafe"
+    assert advice.response_started is False
