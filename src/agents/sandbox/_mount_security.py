@@ -8,8 +8,8 @@ import re
 import traceback
 from collections.abc import Callable, Collection, Coroutine, Iterable, Mapping
 from functools import wraps
-from pathlib import PurePosixPath
-from typing import Any, NoReturn, ParamSpec, TypeVar, cast
+from pathlib import PurePath, PurePosixPath
+from typing import TYPE_CHECKING, Any, NoReturn, ParamSpec, TypeVar, cast
 from urllib.parse import urlsplit
 
 from ..exceptions import (
@@ -41,7 +41,9 @@ from .entries.mounts.patterns import (
     S3FilesMountPattern,
 )
 from .errors import MountConfigError
-from .manifest import Manifest
+
+if TYPE_CHECKING:
+    from .manifest import Manifest
 
 REDACTED_MOUNT_AUTHORITY_KEY = "__openai_agents_redacted_mount_authority"
 CREDENTIALLESS_MOUNT_AUTHORITY_KEY = "__openai_agents_credentialless_mount_authority"
@@ -52,7 +54,6 @@ CREDENTIALLESS_MOUNT_AUTHORITY_KEY = "__openai_agents_credentialless_mount_autho
 _AUTHORITY_FIELDS_BY_MOUNT_TYPE: dict[str, tuple[str, ...]] = {
     "azure_blob_mount": ("identity_client_id", "account_key"),
     "box_mount": (
-        "client_id",
         "client_secret",
         "access_token",
         "token",
@@ -251,9 +252,136 @@ _SERIALIZED_OPTIONS_CLASS_BY_PATTERN_TYPE = {
     "mountpoint": MountpointMountPattern.MountpointOptions,
     "s3files": S3FilesMountPattern.S3FilesOptions,
 }
-_TRUSTED_IN_CONTAINER_OPT_IN_FIELDS: dict[str, frozenset[str]] = {
-    "vercel_cloud_bucket": frozenset({"access_key_id", "secret_access_key", "session_token"}),
-}
+
+
+@dataclasses.dataclass(frozen=True)
+class _InContainerMountCredentialCapability:
+    strategy_types: frozenset[str]
+    mount_type: str
+    pattern_type: str | None
+    mount_scoped_fields: frozenset[str]
+    broad_fields: frozenset[str]
+    enables_broad_credential_discovery: bool = False
+    required_any_fields: frozenset[str] = frozenset()
+
+
+_RCLONE_STRATEGY_TYPES = frozenset(
+    {
+        "in_container",
+        "daytona_cloud_bucket",
+        "e2b_cloud_bucket",
+        "runloop_cloud_bucket",
+    }
+)
+_IN_CONTAINER_MOUNT_CREDENTIAL_CAPABILITIES: tuple[_InContainerMountCredentialCapability, ...] = (
+    _InContainerMountCredentialCapability(
+        strategy_types=_RCLONE_STRATEGY_TYPES,
+        mount_type="s3_mount",
+        pattern_type="rclone",
+        mount_scoped_fields=frozenset({"access_key_id", "secret_access_key", "session_token"}),
+        broad_fields=frozenset({"mount_strategy.pattern.config_file_path"}),
+    ),
+    _InContainerMountCredentialCapability(
+        strategy_types=_RCLONE_STRATEGY_TYPES,
+        mount_type="r2_mount",
+        pattern_type="rclone",
+        mount_scoped_fields=frozenset({"access_key_id", "secret_access_key"}),
+        broad_fields=frozenset({"mount_strategy.pattern.config_file_path"}),
+    ),
+    _InContainerMountCredentialCapability(
+        strategy_types=_RCLONE_STRATEGY_TYPES,
+        mount_type="gcs_mount",
+        pattern_type="rclone",
+        mount_scoped_fields=frozenset(
+            {
+                "access_id",
+                "secret_access_key",
+                "service_account_credentials",
+                "access_token",
+            }
+        ),
+        broad_fields=frozenset({"service_account_file", "mount_strategy.pattern.config_file_path"}),
+    ),
+    _InContainerMountCredentialCapability(
+        strategy_types=_RCLONE_STRATEGY_TYPES,
+        mount_type="azure_blob_mount",
+        pattern_type="rclone",
+        mount_scoped_fields=frozenset({"account_key"}),
+        broad_fields=frozenset({"identity_client_id", "mount_strategy.pattern.config_file_path"}),
+    ),
+    _InContainerMountCredentialCapability(
+        strategy_types=_RCLONE_STRATEGY_TYPES,
+        mount_type="box_mount",
+        pattern_type="rclone",
+        mount_scoped_fields=frozenset(
+            {"client_secret", "access_token", "token", "config_credentials"}
+        ),
+        broad_fields=frozenset({"box_config_file", "mount_strategy.pattern.config_file_path"}),
+        required_any_fields=frozenset(
+            {"access_token", "token", "config_credentials", "box_config_file"}
+        ),
+    ),
+    _InContainerMountCredentialCapability(
+        strategy_types=frozenset({"in_container"}),
+        mount_type="s3_mount",
+        pattern_type="mountpoint",
+        mount_scoped_fields=frozenset({"access_key_id", "secret_access_key", "session_token"}),
+        broad_fields=frozenset(),
+    ),
+    _InContainerMountCredentialCapability(
+        strategy_types=frozenset({"in_container"}),
+        mount_type="gcs_mount",
+        pattern_type="mountpoint",
+        mount_scoped_fields=frozenset({"access_id", "secret_access_key"}),
+        broad_fields=frozenset(),
+    ),
+    _InContainerMountCredentialCapability(
+        strategy_types=frozenset({"in_container"}),
+        mount_type="azure_blob_mount",
+        pattern_type="fuse",
+        mount_scoped_fields=frozenset({"account_key"}),
+        broad_fields=frozenset({"identity_client_id"}),
+        enables_broad_credential_discovery=True,
+    ),
+    _InContainerMountCredentialCapability(
+        strategy_types=frozenset({"in_container"}),
+        mount_type="s3_files_mount",
+        pattern_type="s3files",
+        mount_scoped_fields=frozenset(),
+        broad_fields=frozenset({"extra_options", "mount_strategy.pattern.options.extra_options"}),
+        enables_broad_credential_discovery=True,
+    ),
+    _InContainerMountCredentialCapability(
+        strategy_types=frozenset({"vercel_cloud_bucket"}),
+        mount_type="s3_mount",
+        pattern_type=None,
+        mount_scoped_fields=frozenset({"access_key_id", "secret_access_key", "session_token"}),
+        broad_fields=frozenset(),
+    ),
+    _InContainerMountCredentialCapability(
+        strategy_types=frozenset({"blaxel_cloud_bucket"}),
+        mount_type="s3_mount",
+        pattern_type=None,
+        mount_scoped_fields=frozenset({"access_key_id", "secret_access_key", "session_token"}),
+        broad_fields=frozenset(),
+    ),
+    _InContainerMountCredentialCapability(
+        strategy_types=frozenset({"blaxel_cloud_bucket"}),
+        mount_type="r2_mount",
+        pattern_type=None,
+        mount_scoped_fields=frozenset({"access_key_id", "secret_access_key"}),
+        broad_fields=frozenset(),
+    ),
+    _InContainerMountCredentialCapability(
+        strategy_types=frozenset({"blaxel_cloud_bucket"}),
+        mount_type="gcs_mount",
+        pattern_type=None,
+        mount_scoped_fields=frozenset(
+            {"access_id", "secret_access_key", "service_account_credentials"}
+        ),
+        broad_fields=frozenset(),
+    ),
+)
 _RCLONE_SAFE_FLAG_ARGS = frozenset({"allow-other"})
 _RCLONE_SAFE_VALUE_ARGS = frozenset({"buffer-size", "gid", "uid"})
 _SAFE_MOUNT_VALIDATION_MESSAGE_ATTR = "_agents_safe_mount_validation_message"
@@ -306,8 +434,12 @@ def redact_mount_error_data(
     return wrapper
 
 
-def redact_mount_error_data_sync(function: Callable[_P, _T]) -> Callable[_P, _T]:
-    """Replace marked validation failures after clearing payload-bearing sync frames."""
+def _redact_mount_error_data_sync(
+    function: Callable[_P, _T],
+    *,
+    preserve_value_error_type: bool,
+) -> Callable[_P, _T]:
+    """Replace validation failures after clearing payload-bearing sync frames."""
 
     @wraps(function)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _T:
@@ -324,6 +456,10 @@ def redact_mount_error_data_sync(function: Callable[_P, _T]) -> Callable[_P, _T]
                 error.__cause__ = None
                 error.__context__ = None
                 safe_error = error
+            elif preserve_value_error_type and call_has_authority and isinstance(error, ValueError):
+                discard_mount_source_exception(error)
+                safe_error = ValueError("sandbox mount validation failed")
+                _mark_error_data_redacted(safe_error)
             elif call_has_authority:
                 safe_error = _replace_mount_operation_error(error)
             else:
@@ -334,6 +470,20 @@ def redact_mount_error_data_sync(function: Callable[_P, _T]) -> Callable[_P, _T]
         _raise_data_redacted_error(safe_error)
 
     return wrapper
+
+
+def redact_mount_error_data_sync(function: Callable[_P, _T]) -> Callable[_P, _T]:
+    """Replace marked validation failures after clearing payload-bearing sync frames."""
+
+    return _redact_mount_error_data_sync(function, preserve_value_error_type=False)
+
+
+def redact_mount_validation_error_data_sync(
+    function: Callable[_P, _T],
+) -> Callable[_P, _T]:
+    """Redact sync mount validation failures while preserving `ValueError` compatibility."""
+
+    return _redact_mount_error_data_sync(function, preserve_value_error_type=True)
 
 
 def _replace_mount_error(error: MountConfigError) -> MountConfigError:
@@ -700,6 +850,29 @@ def _configured_mount_authority_fields(mount: Mount) -> tuple[str, ...]:
     return tuple(dict.fromkeys(fields))
 
 
+def _mount_has_usable_required_authority(
+    mount: Mount,
+    required_fields: Collection[str],
+) -> bool:
+    for field_name in required_fields:
+        value = getattr(mount, field_name, None)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
+def _invalid_required_authority_fields(
+    mount: Mount,
+    required_fields: Collection[str],
+) -> tuple[str, ...]:
+    invalid: list[str] = []
+    for field_name in required_fields:
+        value = getattr(mount, field_name, None)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            invalid.append(field_name)
+    return tuple(sorted(invalid))
+
+
 def _manifest_has_configured_mount_authority(manifest: Manifest) -> bool:
     pending = list(manifest.entries.values())
     while pending:
@@ -722,6 +895,10 @@ def _mount_has_or_may_hide_configured_authority(mount: Mount) -> bool:
     pattern = getattr(strategy, "pattern", None)
     if pattern is not None and not _pattern_class_is_trusted(pattern):
         return True
+    mount_type = _canonical_mount_type(type(mount)) or mount.type
+    capability = _in_container_mount_credential_capability(mount_type, strategy)
+    if capability is not None and capability.enables_broad_credential_discovery:
+        return True
     return bool(_configured_mount_authority_fields(mount))
 
 
@@ -729,6 +906,8 @@ def _call_has_configured_mount_authority(
     args: tuple[object, ...], kwargs: Mapping[str, object]
 ) -> bool:
     """Inspect only SDK call-boundary manifest owners."""
+
+    from .manifest import Manifest
 
     try:
         for value in (*args, *kwargs.values()):
@@ -913,137 +1092,282 @@ def _validate_manifest_mount_provenance(manifest: Manifest) -> None:
     _raise_data_redacted_error(error)
 
 
+def _resolved_in_container_pattern_type(strategy: MountStrategyBase) -> str | None:
+    pattern = getattr(strategy, "pattern", None)
+    pattern_type = getattr(pattern, "type", None)
+    return pattern_type if isinstance(pattern_type, str) else None
+
+
+def _in_container_mount_credential_capability(
+    mount_type: str,
+    strategy: MountStrategyBase,
+) -> _InContainerMountCredentialCapability | None:
+    return _in_container_mount_credential_capability_for_types(
+        mount_type,
+        strategy.type,
+        _resolved_in_container_pattern_type(strategy),
+    )
+
+
+def _in_container_mount_credential_capability_for_types(
+    mount_type: str,
+    strategy_type: str,
+    pattern_type: str | None,
+) -> _InContainerMountCredentialCapability | None:
+    return next(
+        (
+            capability
+            for capability in _IN_CONTAINER_MOUNT_CREDENTIAL_CAPABILITIES
+            if strategy_type in capability.strategy_types
+            and mount_type == capability.mount_type
+            and pattern_type == capability.pattern_type
+        ),
+        None,
+    )
+
+
+def _mount_boundary_error(
+    manifest: Manifest,
+    mount: Mount,
+    mount_path: str | PurePath,
+    *,
+    provider_backend_id: str | None,
+) -> MountConfigError | None:
+    mount_type = _canonical_mount_type(type(mount)) or mount.type
+    strategy = mount.mount_strategy
+    strategy_boundary, strategy_backend_id = _strategy_classification(strategy)
+    pattern = getattr(strategy, "pattern", None)
+    executes_in_container = strategy_boundary == "in_container"
+    if (
+        provider_backend_id is not None
+        and strategy_backend_id is not None
+        and strategy_backend_id != provider_backend_id
+    ):
+        return MountConfigError(
+            message=(
+                "docker-volume mounts are not supported by this sandbox backend"
+                if strategy.type == "docker_volume"
+                else "mount strategy is not supported by this sandbox backend"
+            ),
+            context={
+                "mount_type": mount.type,
+                "strategy_type": strategy.type,
+                "sandbox_backend": provider_backend_id,
+            },
+        )
+
+    for field_name in _AUTHORITY_FILE_FIELDS_BY_MOUNT_TYPE.get(mount_type, ()):
+        value = getattr(mount, field_name, None)
+        if isinstance(value, str) and value and _manifest_materializes_path(manifest, value):
+            return MountConfigError(
+                message=(
+                    "credential files stored in the manifest are not supported for cloud "
+                    "mounts; configure credentials outside the sandbox manifest"
+                ),
+                context={"mount_type": mount.type, "credential_field": field_name},
+            )
+    if (
+        isinstance(pattern, RcloneMountPattern)
+        and pattern.config_file_path is not None
+        and _manifest_materializes_path(manifest, pattern.config_file_path.as_posix())
+    ):
+        return MountConfigError(
+            message=(
+                "credential files stored in the manifest are not supported for cloud mounts; "
+                "configure credentials outside the sandbox manifest"
+            ),
+            context={
+                "mount_type": mount.type,
+                "credential_field": "mount_strategy.pattern.config_file_path",
+            },
+        )
+
+    invalid_rclone_fields = _configured_rclone_line_fields(mount, mount_type)
+    if executes_in_container and isinstance(pattern, RcloneMountPattern) and invalid_rclone_fields:
+        return MountConfigError(
+            message="cloud mount configuration values must not contain line breaks",
+            context={
+                "mount_type": mount.type,
+                "configuration_fields": invalid_rclone_fields,
+            },
+        )
+    invalid_s3fs_fields = _configured_blaxel_s3fs_option_fields(mount, mount_type)
+    if invalid_s3fs_fields:
+        return MountConfigError(
+            message="cloud mount configuration values must not contain s3fs option delimiters",
+            context={
+                "mount_type": mount.type,
+                "configuration_fields": invalid_s3fs_fields,
+            },
+        )
+
+    authority_fields = frozenset(_configured_mount_authority_fields(mount))
+    if strategy_boundary == "external":
+        return None
+
+    mount_scoped_acknowledged = manifest._acknowledges_in_container_mount_credential_exposure(
+        mount_path,
+        "mount_scoped",
+    )
+    broad_acknowledged = manifest._acknowledges_in_container_mount_credential_exposure(
+        mount_path,
+        "broad",
+    )
+    capability = _in_container_mount_credential_capability(mount_type, strategy)
+    requires_implicit_broad = bool(
+        capability is not None and capability.enables_broad_credential_discovery
+    )
+    invalid_required_fields = (
+        _invalid_required_authority_fields(mount, capability.required_any_fields)
+        if capability is not None
+        else ()
+    )
+    if invalid_required_fields:
+        return MountConfigError(
+            message="in-container mount authentication values must not be empty or whitespace-only",
+            context={
+                "mount_type": mount.type,
+                "credential_fields": invalid_required_fields,
+            },
+        )
+    if (
+        capability is not None
+        and capability.required_any_fields
+        and not _mount_has_usable_required_authority(mount, capability.required_any_fields)
+    ):
+        return MountConfigError(
+            message=(
+                "in-container Box mounts require a non-interactive authentication source; "
+                "configure a token, access token, or JWT credentials before activation"
+            ),
+            context={"mount_type": mount.type},
+        )
+    if (
+        not authority_fields
+        and not mount_scoped_acknowledged
+        and not broad_acknowledged
+        and not requires_implicit_broad
+    ):
+        return None
+    if capability is None:
+        return MountConfigError(
+            message=(
+                "credential-bearing in-container mounts require an SDK-supported strategy, "
+                "mount type, and pattern combination before exposure can be acknowledged; "
+                "use a credentialless helper or an external/provider-native mount strategy"
+            ),
+            context={
+                "mount_type": mount.type,
+                "strategy_type": strategy.type,
+                "pattern_type": _resolved_in_container_pattern_type(strategy),
+                "credential_fields": tuple(sorted(authority_fields)),
+            },
+        )
+
+    supported_fields = capability.mount_scoped_fields | capability.broad_fields
+    unsupported_fields = authority_fields - supported_fields
+    if unsupported_fields:
+        return MountConfigError(
+            message=(
+                "the selected in-container mount capability does not support exposing the "
+                "configured credential fields; use supported credentials, a credentialless "
+                "helper, or an external/provider-native mount strategy"
+            ),
+            context={
+                "mount_type": mount.type,
+                "strategy_type": strategy.type,
+                "credential_fields": tuple(sorted(unsupported_fields)),
+            },
+        )
+
+    supports_mount_scoped = bool(capability.mount_scoped_fields)
+    supports_broad = bool(capability.broad_fields or capability.enables_broad_credential_discovery)
+    if mount_scoped_acknowledged and not supports_mount_scoped:
+        return MountConfigError(
+            message=(
+                "the selected in-container mount capability does not support mount-scoped "
+                "credentials"
+            ),
+            context={"mount_type": mount.type, "strategy_type": strategy.type},
+        )
+    if broad_acknowledged and not supports_broad:
+        return MountConfigError(
+            message=(
+                "the selected in-container mount capability does not support broad credential "
+                "authority"
+            ),
+            context={"mount_type": mount.type, "strategy_type": strategy.type},
+        )
+
+    requires_mount_scoped = bool(authority_fields & capability.mount_scoped_fields)
+    requires_broad = bool(authority_fields & capability.broad_fields) or requires_implicit_broad
+    if requires_mount_scoped and not mount_scoped_acknowledged:
+        return MountConfigError(
+            message=(
+                "mount-scoped credentials cannot be exposed to a helper inside a "
+                "model-controlled sandbox by default; use a credentialless or "
+                "external/provider-native strategy, or explicitly acknowledge exposure for "
+                "this exact path with "
+                "Manifest.with_in_container_mount_credential_exposure_acknowledged()"
+            ),
+            context={
+                "mount_type": mount.type,
+                "credential_fields": tuple(
+                    sorted(authority_fields & capability.mount_scoped_fields)
+                ),
+            },
+        )
+    if requires_broad and not broad_acknowledged:
+        return MountConfigError(
+            message=(
+                "broad credential authority cannot be exposed to a helper inside a "
+                "model-controlled sandbox by default; use a credentialless or "
+                "external/provider-native strategy, or explicitly acknowledge broad exposure "
+                "for this exact path with "
+                "Manifest.with_in_container_mount_broad_credential_exposure_acknowledged()"
+            ),
+            context={
+                "mount_type": mount.type,
+                "credential_fields": tuple(sorted(authority_fields & capability.broad_fields)),
+            },
+        )
+    return None
+
+
 def _manifest_boundary_error(
     manifest: Manifest,
     *,
-    allowed_in_container_credential_strategy_types: frozenset[str],
     provider_backend_id: str | None,
 ) -> MountConfigError | None:
     provenance_error = _manifest_mount_provenance_error(manifest)
     if provenance_error is not None:
         return provenance_error
-    for mount, _mount_path in manifest.mount_targets():
-        mount_type = _canonical_mount_type(type(mount)) or mount.type
-        strategy = mount.mount_strategy
-        strategy_boundary, strategy_backend_id = _strategy_classification(strategy)
-        pattern = getattr(strategy, "pattern", None)
-        executes_in_container = strategy_boundary == "in_container"
-        if (
-            provider_backend_id is not None
-            and strategy_backend_id is not None
-            and strategy_backend_id != provider_backend_id
+    for mount, mount_path in manifest.mount_targets():
+        if error := _mount_boundary_error(
+            manifest,
+            mount,
+            PurePosixPath(mount_path.as_posix()),
+            provider_backend_id=provider_backend_id,
         ):
-            return MountConfigError(
-                message=(
-                    "docker-volume mounts are not supported by this sandbox backend"
-                    if strategy.type == "docker_volume"
-                    else "mount strategy is not supported by this sandbox backend"
-                ),
-                context={
-                    "mount_type": mount.type,
-                    "strategy_type": strategy.type,
-                    "sandbox_backend": provider_backend_id,
-                },
-            )
-
-        for field_name in _AUTHORITY_FILE_FIELDS_BY_MOUNT_TYPE.get(mount_type, ()):
-            value = getattr(mount, field_name, None)
-            if isinstance(value, str) and value and _manifest_materializes_path(manifest, value):
-                return MountConfigError(
-                    message=(
-                        "credential files stored in the manifest are not supported for cloud "
-                        "mounts; configure credentials outside the sandbox manifest"
-                    ),
-                    context={"mount_type": mount.type, "credential_field": field_name},
-                )
-
-        invalid_rclone_fields = _configured_rclone_line_fields(mount, mount_type)
-        if (
-            executes_in_container
-            and isinstance(pattern, RcloneMountPattern)
-            and invalid_rclone_fields
-        ):
-            return MountConfigError(
-                message="cloud mount configuration values must not contain line breaks",
-                context={
-                    "mount_type": mount.type,
-                    "configuration_fields": invalid_rclone_fields,
-                },
-            )
-        if executes_in_container and mount_type == "box_mount":
-            return MountConfigError(
-                message=(
-                    "Box mounts require credentials and are not supported by helpers that run "
-                    "inside the sandbox; use an external/provider-native mount strategy"
-                ),
-                context={"mount_type": mount.type, "strategy_type": strategy.type},
-            )
-        if executes_in_container and isinstance(pattern, FuseMountPattern):
-            return MountConfigError(
-                message=(
-                    "credentialless blobfuse mounts are not supported inside the sandbox; "
-                    "use RcloneMountPattern or an external/provider-native mount strategy"
-                ),
-                context={"mount_type": mount.type, "strategy_type": strategy.type},
-            )
-        if executes_in_container and isinstance(pattern, S3FilesMountPattern):
-            return MountConfigError(
-                message=(
-                    "S3 Files mounts are not supported inside the sandbox because the helper "
-                    "requires ambient IAM credentials; use an external/provider-native strategy"
-                ),
-                context={"mount_type": mount.type, "strategy_type": strategy.type},
-            )
-        invalid_s3fs_fields = _configured_blaxel_s3fs_option_fields(mount, mount_type)
-        if invalid_s3fs_fields:
-            return MountConfigError(
-                message="cloud mount configuration values must not contain s3fs option delimiters",
-                context={
-                    "mount_type": mount.type,
-                    "configuration_fields": invalid_s3fs_fields,
-                },
-            )
-
-        authority_fields = _configured_mount_authority_fields(mount)
-        trusted_opt_in_fields = _TRUSTED_IN_CONTAINER_OPT_IN_FIELDS.get(strategy.type, frozenset())
-        exact_trusted_opt_in = (
-            strategy_boundary == "in_container"
-            and strategy_backend_id is not None
-            and strategy_backend_id == provider_backend_id
-            and strategy.type in allowed_in_container_credential_strategy_types
-            and frozenset(authority_fields).issubset(trusted_opt_in_fields)
-        )
-        if authority_fields and strategy_boundary != "external" and not exact_trusted_opt_in:
-            return MountConfigError(
-                message=(
-                    "cloud credentials are not supported by a mount helper that runs inside "
-                    "the sandbox; use an external/provider-native mount strategy"
-                ),
-                context={"mount_type": mount.type, "credential_fields": authority_fields},
-            )
-
+            return error
     return None
 
 
 def validate_manifest_mount_credential_boundaries(
     manifest: Manifest,
     *,
-    allowed_in_container_credential_strategy_types: frozenset[str] = frozenset(),
     provider_backend_id: str | None = None,
 ) -> None:
     """Validate all mount authority before a sandbox or helper has side effects."""
 
     error = _manifest_boundary_error(
         manifest,
-        allowed_in_container_credential_strategy_types=(
-            allowed_in_container_credential_strategy_types
-        ),
         provider_backend_id=provider_backend_id,
     )
     if error is None:
         return
     _mark_mount_validation_error(error)
-    del manifest, allowed_in_container_credential_strategy_types
+    del manifest
     provider_backend_id = None
     _raise_data_redacted_error(error)
 
@@ -1052,20 +1376,39 @@ def validate_mount_activation_credential_boundary(
     mount: Mount,
     strategy: MountStrategyBase,
     *,
+    manifest: Manifest | None = None,
+    mount_path: str | PurePath | Callable[[], str | PurePath] | None = None,
     provider_backend_id: str | None = None,
 ) -> None:
     """Revalidate the strategy that is about to execute inside a sandbox."""
 
+    from .manifest import Manifest
+
     _validate_mount_provenance(mount, strategy)
     activation_mount = mount.model_copy(deep=True, update={"mount_strategy": strategy})
-    validate_manifest_mount_credential_boundaries(
-        Manifest(entries={"mount": activation_mount}),
+    activation_manifest = manifest or Manifest(entries={"mount": activation_mount})
+    resolved_mount_path = mount_path() if callable(mount_path) else mount_path
+    activation_path = resolved_mount_path or PurePosixPath(activation_manifest.root) / "mount"
+    error = _mount_boundary_error(
+        activation_manifest,
+        activation_mount,
+        activation_path,
         provider_backend_id=provider_backend_id,
     )
+    if error is None:
+        return
+    _mark_mount_validation_error(error)
+    del mount, strategy, activation_mount, activation_manifest
+    mount_path = None
+    resolved_mount_path = None
+    provider_backend_id = None
+    _raise_data_redacted_error(error)
 
 
 def sanitize_manifest_mount_authority(manifest: Manifest) -> tuple[Manifest, bool]:
     """Return a typed manifest whose durable form contains no mount authority."""
+
+    from .manifest import Manifest
 
     provenance_error = _manifest_mount_provenance_error(manifest)
     if provenance_error is not None:
@@ -1096,11 +1439,10 @@ def rebind_manifest_mount_authority(
     *,
     provider_backend_id: str,
 ) -> Manifest:
-    """Restore external live authority after exact credential-free topology matching."""
+    """Restore live authority after exact credential-free topology matching."""
 
     error = _manifest_boundary_error(
         trusted_manifest,
-        allowed_in_container_credential_strategy_types=frozenset(),
         provider_backend_id=provider_backend_id,
     )
     sanitized_persisted, _ = sanitize_manifest_mount_authority(persisted_manifest)
@@ -1128,7 +1470,7 @@ def rebind_manifest_mount_authority(
         error = MountConfigError(
             message=(
                 "sandbox mount configuration can be rebound only from a current trusted "
-                "external mount configuration with exactly matching credential-free topology"
+                "mount configuration with exactly matching credential-free topology"
             ),
             context={"sandbox_backend": provider_backend_id},
         )
@@ -1152,6 +1494,7 @@ def rebind_manifest_mount_authority(
     for path, entry in rebound.iter_entries():
         if isinstance(entry, Mount):
             entry.__dict__.update(trusted_entries[path.as_posix()].model_copy(deep=True).__dict__)
+    rebound._copy_mount_credential_exposure_policy_from(trusted_manifest)
     return rebound
 
 
@@ -1373,6 +1716,15 @@ def _sanitize_raw_mount(
     pattern_type = pattern.get("type")
     if not isinstance(pattern_type, str):
         pattern["type"] = None
+        redacted = True
+    capability = _in_container_mount_credential_capability_for_types(
+        mount_type,
+        strategy_type,
+        pattern_type if isinstance(pattern_type, str) else None,
+    )
+    if capability is not None and capability.enables_broad_credential_discovery:
+        # Runtime-only broad acknowledgement must be rebound after serialization even when the
+        # helper discovers ambient authority without an explicit credential field to redact.
         redacted = True
     serialized_pattern_class = (
         _SERIALIZED_PATTERN_CLASS_BY_TYPE.get(pattern_type)

@@ -736,7 +736,7 @@ async def test_sandbox_session_rejects_unsafe_manifest_before_workspace_persiste
     )
     session = SandboxSession(inner)
 
-    with pytest.raises(MountConfigError, match="cloud credentials are not supported") as exc:
+    with pytest.raises(MountConfigError, match="mount-scoped credentials cannot be exposed") as exc:
         if operation == "persist":
             await session.persist_workspace()
         else:
@@ -4108,7 +4108,7 @@ async def test_session_manager_rejects_unsafe_stopped_injected_session_manifest(
     )
 
     manager.acquire_agent(agent)
-    with pytest.raises(MountConfigError, match="cloud credentials are not supported"):
+    with pytest.raises(MountConfigError, match="mount-scoped credentials cannot be exposed"):
         await manager.ensure_session(
             agent=agent,
             capabilities=capabilities,
@@ -5369,7 +5369,7 @@ async def test_apply_manifest_rejects_mount_authority_before_materialization() -
         )
     )
 
-    with pytest.raises(MountConfigError, match="cloud credentials are not supported") as exc:
+    with pytest.raises(MountConfigError, match="mount-scoped credentials cannot be exposed") as exc:
         await session.apply_manifest()
 
     assert session.materialize_calls == 0
@@ -5396,7 +5396,7 @@ async def test_start_workspace_rejects_mount_authority_before_materialization() 
         )
     )
 
-    with pytest.raises(MountConfigError, match="cloud credentials are not supported"):
+    with pytest.raises(MountConfigError, match="mount-scoped credentials cannot be exposed"):
         await BaseSandboxSession.start(session)
 
     assert session.materialize_calls == 0
@@ -5476,7 +5476,7 @@ async def test_session_stop_rejects_mutated_unsafe_mount_before_snapshot_work() 
         )
     )
 
-    with pytest.raises(MountConfigError, match="cloud credentials are not supported"):
+    with pytest.raises(MountConfigError, match="mount-scoped credentials cannot be exposed"):
         await BaseSandboxSession.stop(session)
 
     assert session.persist_calls == 0

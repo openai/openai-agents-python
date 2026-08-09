@@ -92,6 +92,8 @@ class E2BCloudBucketMountStrategy(MountStrategyBase):
         validate_mount_activation_credential_boundary(
             mount,
             self,
+            manifest=getattr(getattr(session, "state", None), "manifest", None),
+            mount_path=lambda: mount._resolve_mount_path(session, dest),
             provider_backend_id="e2b",
         )
         _assert_e2b_session(session)
@@ -130,6 +132,8 @@ class E2BCloudBucketMountStrategy(MountStrategyBase):
         validate_mount_activation_credential_boundary(
             mount,
             self,
+            manifest=getattr(getattr(session, "state", None), "manifest", None),
+            mount_path=path,
             provider_backend_id="e2b",
         )
         _assert_e2b_session(session)

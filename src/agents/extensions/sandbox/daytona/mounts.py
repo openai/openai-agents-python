@@ -5,7 +5,7 @@ Provides ``DaytonaCloudBucketMountStrategy``, a wrapper around the generic
 the sandbox before delegating to :class:`RcloneMountPattern`.
 
 Supports credentialless S3, R2, GCS, and Azure Blob mounts through a single code path.
-Authenticated mounts require an external or provider-native mount strategy.
+Authenticated mounts require an exact-path runtime acknowledgement on the trusted manifest.
 """
 
 from __future__ import annotations
@@ -169,10 +169,11 @@ class DaytonaCloudBucketMountStrategy(MountStrategyBase):
     """Mount rclone-backed cloud storage in Daytona sandboxes.
 
     Wraps :class:`InContainerMountStrategy` with automatic ``rclone``
-    provisioning.  Use with rclone-backed provider mounts that support anonymous access
-    (``S3Mount``, ``R2Mount``, ``GCSMount``, ``AzureBlobMount``) and let the
-    generic framework handle anonymous config generation and mount execution. Explicit cloud
-    credentials are not supported because the delegated helper executes inside the sandbox.
+    provisioning. Use with rclone-backed provider mounts (``S3Mount``, ``R2Mount``,
+    ``GCSMount``, ``AzureBlobMount``) and let the generic framework handle config generation
+    and mount execution. Credential-bearing mounts require the applicable exact-path runtime
+    acknowledgement on the trusted manifest because the delegated helper executes inside the
+    sandbox.
 
     Usage::
 
@@ -206,6 +207,8 @@ class DaytonaCloudBucketMountStrategy(MountStrategyBase):
         validate_mount_activation_credential_boundary(
             mount,
             self,
+            manifest=getattr(getattr(session, "state", None), "manifest", None),
+            mount_path=lambda: mount._resolve_mount_path(session, dest),
             provider_backend_id="daytona",
         )
         _assert_daytona_session(session)
@@ -243,6 +246,8 @@ class DaytonaCloudBucketMountStrategy(MountStrategyBase):
         validate_mount_activation_credential_boundary(
             mount,
             self,
+            manifest=getattr(getattr(session, "state", None), "manifest", None),
+            mount_path=path,
             provider_backend_id="daytona",
         )
         _assert_daytona_session(session)

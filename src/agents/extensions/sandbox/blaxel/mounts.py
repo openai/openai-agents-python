@@ -3,9 +3,9 @@ Mount strategies for Blaxel sandboxes.
 
 Two strategies are provided:
 
-* **BlaxelCloudBucketMountStrategy** -- mounts credentialless S3, R2, and GCS
-  buckets via FUSE tools (``s3fs``, ``gcsfuse``) executed inside the sandbox.
-  Authenticated mounts require an external or provider-native mount strategy.
+* **BlaxelCloudBucketMountStrategy** -- mounts S3, R2, and GCS buckets via FUSE tools
+  (``s3fs``, ``gcsfuse``) executed inside the sandbox. Credential-bearing mounts require
+  an exact-path runtime acknowledgement on the trusted manifest.
 
 * **BlaxelDriveMountStrategy** -- mounts Blaxel Drives (persistent network
   volumes) into the sandbox using the sandbox ``drives`` API
@@ -88,6 +88,8 @@ class BlaxelCloudBucketMountStrategy(MountStrategyBase):
         validate_mount_activation_credential_boundary(
             mount,
             self,
+            manifest=getattr(getattr(session, "state", None), "manifest", None),
+            mount_path=lambda: mount._resolve_mount_path(session, dest),
             provider_backend_id="blaxel",
         )
         _assert_blaxel_session(session)
@@ -129,6 +131,8 @@ class BlaxelCloudBucketMountStrategy(MountStrategyBase):
         validate_mount_activation_credential_boundary(
             mount,
             self,
+            manifest=getattr(getattr(session, "state", None), "manifest", None),
+            mount_path=path,
             provider_backend_id="blaxel",
         )
         _assert_blaxel_session(session)

@@ -310,6 +310,30 @@ async def test_azure_blob_mount_builds_rclone_runtime_config_without_hidden_patt
 
 
 @pytest.mark.asyncio
+async def test_azure_blob_mount_enables_rclone_msi_for_managed_identity() -> None:
+    session = _MountConfigSession()
+    pattern = RcloneMountPattern()
+    mount = AzureBlobMount(
+        account="acct",
+        container="container",
+        identity_client_id="managed-identity-client-id",
+        mount_strategy=InContainerMountStrategy(pattern=pattern),
+    )
+
+    config = await mount.build_in_container_mount_config(
+        session,
+        pattern,
+        include_config_text=True,
+    )
+
+    assert isinstance(config, RcloneMountConfig)
+    assert config.config_text is not None
+    assert "use_msi = true" in config.config_text
+    assert "msi_client_id = managed-identity-client-id" in config.config_text
+    assert "use_msi = false" not in config.config_text
+
+
+@pytest.mark.asyncio
 async def test_box_mount_builds_rclone_runtime_config_with_box_auth_options() -> None:
     session_id = uuid.uuid4()
     pattern = RcloneMountPattern(config_file_path=Path("rclone.conf"))

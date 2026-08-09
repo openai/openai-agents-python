@@ -1,21 +1,25 @@
 import abc
 import inspect
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, ClassVar, Literal
 
 from pydantic import (
     BaseModel,
     Field,
+    PrivateAttr,
     SerializeAsAny,
     field_serializer,
     field_validator,
+    model_validator,
 )
 from pydantic_core import PydanticSerializationError
 from typing_extensions import assert_never
 
 from .._config_coercion import coerce_pydantic_config
 from ..util._asyncio_tasks import gather_with_cancel
+from ._mount_security import redact_mount_validation_error_data_sync
 from .entries import BaseEntry, Dir, Mount, resolve_workspace_path
 from .errors import InvalidManifestPathError
 from .manifest_render import render_manifest_description
@@ -47,6 +51,31 @@ DEFAULT_REMOTE_MOUNT_COMMAND_ALLOWLIST = [
     "mkdir",
     "rm",
 ]
+
+_MOUNT_CREDENTIAL_EXPOSURE_POLICY_KEYS = frozenset(
+    {
+        "in_container_mount_credential_exposure_allowed_paths",
+        "_in_container_mount_credential_exposure_allowed_paths",
+        "inContainerMountCredentialExposureAllowedPaths",
+        "_inContainerMountCredentialExposureAllowedPaths",
+        "in_container_mount_credential_exposure_acknowledged_paths",
+        "_in_container_mount_credential_exposure_acknowledged_paths",
+        "inContainerMountCredentialExposureAcknowledgedPaths",
+        "_inContainerMountCredentialExposureAcknowledgedPaths",
+        "in_container_mount_broad_credential_exposure_acknowledged_paths",
+        "_in_container_mount_broad_credential_exposure_acknowledged_paths",
+        "inContainerMountBroadCredentialExposureAcknowledgedPaths",
+        "_inContainerMountBroadCredentialExposureAcknowledgedPaths",
+        "mount_credential_exposure_policy",
+        "_mount_credential_exposure_policy",
+    }
+)
+
+
+@dataclass(frozen=True)
+class _MountCredentialExposurePolicy:
+    mount_scoped: frozenset[str] = frozenset()
+    broad: frozenset[str] = frozenset()
 
 
 EnvValueClass = type["EnvValue"]
@@ -225,6 +254,21 @@ class Manifest(BaseModel):
     remote_mount_command_allowlist: list[str] = Field(
         default_factory=lambda: list(DEFAULT_REMOTE_MOUNT_COMMAND_ALLOWLIST)
     )
+    _mount_credential_exposure_policy: _MountCredentialExposurePolicy = PrivateAttr(
+        default_factory=_MountCredentialExposurePolicy
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_mount_credential_exposure_policy_input(cls, value: object) -> object:
+        if isinstance(value, Mapping) and _MOUNT_CREDENTIAL_EXPOSURE_POLICY_KEYS.intersection(
+            value
+        ):
+            raise TypeError(
+                "In-container mount credential exposure must be configured on a trusted "
+                "Manifest instance, not in manifest input."
+            )
+        return value
 
     @field_validator("entries", mode="before")
     @classmethod
@@ -248,6 +292,141 @@ class Manifest(BaseModel):
         for _path, _artifact in self.iter_entries():
             pass
         return validated
+
+    @redact_mount_validation_error_data_sync
+    def with_in_container_mount_credential_exposure_acknowledged(
+        self, *mount_paths: str | PurePath
+    ) -> "Manifest":
+        """Acknowledge mount-scoped credential exposure for exact in-container mount paths.
+
+        This trusted application-side policy is runtime-only and is not serialized.
+        """
+
+        return self._with_mount_credential_exposure_acknowledged(
+            "mount_scoped",
+            mount_paths,
+        )
+
+    @redact_mount_validation_error_data_sync
+    def with_in_container_mount_broad_credential_exposure_acknowledged(
+        self, *mount_paths: str | PurePath
+    ) -> "Manifest":
+        """Acknowledge broad credential exposure for exact in-container mount paths.
+
+        Broad authority includes managed or workload identity and external credential files.
+        This trusted application-side policy is runtime-only and is not serialized.
+        """
+
+        return self._with_mount_credential_exposure_acknowledged(
+            "broad",
+            mount_paths,
+        )
+
+    def _with_mount_credential_exposure_acknowledged(
+        self,
+        authority: Literal["mount_scoped", "broad"],
+        mount_paths: tuple[str | PurePath, ...],
+    ) -> "Manifest":
+        if not mount_paths:
+            raise TypeError("At least one in-container mount path is required.")
+
+        acknowledged: set[str] = set()
+        for path in mount_paths:
+            key = self._mount_credential_exposure_policy_key(path, reject_root=True)
+            assert key is not None
+            acknowledged.add(key)
+        from ._mount_security import _validate_manifest_mount_provenance
+
+        _validate_manifest_mount_provenance(self)
+        trusted = self.model_copy(deep=True)
+        current = self._mount_credential_exposure_policy
+        trusted._mount_credential_exposure_policy = _MountCredentialExposurePolicy(
+            mount_scoped=(
+                current.mount_scoped | acknowledged
+                if authority == "mount_scoped"
+                else current.mount_scoped
+            ),
+            broad=(current.broad | acknowledged if authority == "broad" else current.broad),
+        )
+        return trusted
+
+    def _acknowledges_in_container_mount_credential_exposure(
+        self,
+        mount_path: str | PurePath,
+        authority: Literal["mount_scoped", "broad"],
+    ) -> bool:
+        key = self._mount_credential_exposure_policy_key(mount_path, reject_root=False)
+        if key is None:
+            return False
+        return key in getattr(self._mount_credential_exposure_policy, authority)
+
+    def _copy_mount_credential_exposure_policy_from(self, *sources: "Manifest") -> None:
+        mount_scoped: set[str] = set()
+        broad: set[str] = set()
+        for source in sources:
+            mount_scoped.update(source._mount_credential_exposure_policy.mount_scoped)
+            broad.update(source._mount_credential_exposure_policy.broad)
+        self._mount_credential_exposure_policy = _MountCredentialExposurePolicy(
+            mount_scoped=frozenset(mount_scoped),
+            broad=frozenset(broad),
+        )
+
+    def _mount_credential_exposure_policy_key(
+        self,
+        value: str | PurePath,
+        *,
+        reject_root: bool,
+    ) -> str | None:
+        text = value.as_posix() if isinstance(value, PurePath) else value
+        if not text:
+            if reject_root:
+                raise ValueError("Mount credential exposure path must identify a non-root path.")
+            return None
+        if "\\" in text:
+            raise ValueError("Mount credential exposure paths must use '/' separators.")
+        if reject_root and any(character in text for character in "*?[]"):
+            raise ValueError("Mount credential exposure paths must not contain wildcard syntax.")
+
+        raw = PurePosixPath(text)
+        if reject_root and ".." in raw.parts:
+            raise ValueError("Mount credential exposure paths must not contain parent segments.")
+        if not raw.is_absolute():
+            rel = self._normalize_rel_path_within_root(
+                posix_path_as_path(raw),
+                original=posix_path_as_path(raw),
+            )
+            if not rel.parts:
+                if reject_root:
+                    raise ValueError(
+                        "Mount credential exposure path must identify a non-root path."
+                    )
+                return None
+            return f"relative:{coerce_posix_path(rel).as_posix()}"
+
+        normalized_parts: list[str] = []
+        for part in raw.parts:
+            if part in {"", ".", "/"}:
+                continue
+            if part == "..":
+                if normalized_parts:
+                    normalized_parts.pop()
+                continue
+            normalized_parts.append(part)
+        normalized = PurePosixPath("/", *normalized_parts)
+        root = coerce_posix_path(self.root)
+        root_normalized = PurePosixPath(
+            "/",
+            *[part for part in root.parts if part not in {"/", ""}],
+        )
+        if normalized == PurePosixPath("/") or normalized == root_normalized:
+            if reject_root:
+                raise ValueError("Mount credential exposure path must identify a non-root path.")
+            return None
+        try:
+            absolute_relative = normalized.relative_to(root_normalized)
+        except ValueError:
+            return f"absolute:{normalized.as_posix()}"
+        return f"relative:{absolute_relative.as_posix()}"
 
     def ephemeral_entry_paths(self, depth: int | None = 1) -> set[Path]:
         _ = depth

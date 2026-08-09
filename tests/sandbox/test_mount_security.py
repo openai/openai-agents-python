@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 import importlib
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, ClassVar, Literal, cast
 
 import pytest
@@ -29,6 +29,7 @@ from agents.sandbox.entries import (
     AzureBlobMount,
     BaseEntry,
     BoxMount,
+    Dir,
     DockerVolumeMountStrategy,
     File,
     FuseMountPattern,
@@ -223,7 +224,7 @@ def test_rejects_explicit_credentials_for_in_container_mounts() -> None:
         }
     )
 
-    with pytest.raises(MountConfigError, match="cloud credentials are not supported") as exc:
+    with pytest.raises(MountConfigError, match="mount-scoped credentials") as exc:
         validate_manifest_mount_credential_boundaries(manifest)
 
     assert exc.value.context["credential_fields"] == (
@@ -232,6 +233,263 @@ def test_rejects_explicit_credentials_for_in_container_mounts() -> None:
     )
     assert "example-secret-key" not in str(exc.value)
     assert "example-secret-key" not in repr(exc.value.context)
+
+
+def test_exact_path_acknowledgement_allows_supported_mount_scoped_credentials() -> None:
+    manifest = Manifest(
+        entries={
+            "data": _s3_mount(
+                strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+                credentialed=True,
+            )
+        }
+    ).with_in_container_mount_credential_exposure_acknowledged("data")
+
+    validate_manifest_mount_credential_boundaries(manifest)
+
+    sibling = manifest.model_copy(deep=True)
+    sibling.entries["other"] = sibling.entries.pop("data")
+    with pytest.raises(MountConfigError, match="mount-scoped credentials"):
+        validate_manifest_mount_credential_boundaries(sibling)
+
+    mount = manifest.entries["data"]
+    assert isinstance(mount, S3Mount)
+    validate_mount_activation_credential_boundary(
+        mount,
+        mount.mount_strategy,
+        manifest=manifest,
+        mount_path="/workspace/data",
+        provider_backend_id="docker",
+    )
+    with pytest.raises(MountConfigError, match="mount-scoped credentials"):
+        validate_mount_activation_credential_boundary(
+            mount,
+            mount.mount_strategy,
+            manifest=manifest,
+            mount_path="/workspace/other",
+            provider_backend_id="docker",
+        )
+
+
+def test_mount_credential_acknowledgement_is_not_a_path_prefix() -> None:
+    mount = _s3_mount(
+        strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+        credentialed=True,
+    )
+    manifest = Manifest(
+        entries={"parent": Dir(children={"data": mount})}
+    ).with_in_container_mount_credential_exposure_acknowledged("parent")
+
+    with pytest.raises(MountConfigError, match="mount-scoped credentials"):
+        validate_manifest_mount_credential_boundaries(manifest)
+
+    validate_manifest_mount_credential_boundaries(
+        manifest.with_in_container_mount_credential_exposure_acknowledged("parent/data")
+    )
+
+
+def test_mount_credential_acknowledgement_preserves_path_whitespace() -> None:
+    manifest = Manifest(
+        entries={
+            "data ": _s3_mount(
+                strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+                credentialed=True,
+            )
+        }
+    ).with_in_container_mount_credential_exposure_acknowledged("data")
+
+    with pytest.raises(MountConfigError, match="mount-scoped credentials"):
+        validate_manifest_mount_credential_boundaries(manifest)
+
+    validate_manifest_mount_credential_boundaries(
+        manifest.with_in_container_mount_credential_exposure_acknowledged("data ")
+    )
+
+
+def test_mount_credential_acknowledgement_accepts_platform_path_objects() -> None:
+    manifest = Manifest(
+        entries={
+            "data": _s3_mount(
+                strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+                credentialed=True,
+            )
+        }
+    ).with_in_container_mount_credential_exposure_acknowledged(PureWindowsPath("data"))
+
+    mount = manifest.entries["data"]
+    assert isinstance(mount, S3Mount)
+    validate_mount_activation_credential_boundary(
+        mount,
+        mount.mount_strategy,
+        manifest=manifest,
+        mount_path=PureWindowsPath("/workspace/data"),
+        provider_backend_id="docker",
+    )
+    assert not Manifest()._acknowledges_in_container_mount_credential_exposure(
+        PureWindowsPath("/workspace/data"),
+        "mount_scoped",
+    )
+
+    with pytest.raises(ValueError, match="use '/' separators"):
+        Manifest().with_in_container_mount_credential_exposure_acknowledged("data\\child")
+
+
+@pytest.mark.parametrize(
+    "policy_key",
+    [
+        "in_container_mount_credential_exposure_acknowledged_paths",
+        "_in_container_mount_credential_exposure_acknowledged_paths",
+        "inContainerMountCredentialExposureAcknowledgedPaths",
+        "in_container_mount_broad_credential_exposure_acknowledged_paths",
+        "_mount_credential_exposure_policy",
+    ],
+)
+def test_manifest_input_cannot_inject_mount_credential_acknowledgement(policy_key: str) -> None:
+    with pytest.raises(TypeError, match="trusted Manifest instance"):
+        Manifest.model_validate({policy_key: ["data"]})
+
+
+def test_manifest_acknowledgement_is_runtime_only_and_rejects_root() -> None:
+    manifest = Manifest().with_in_container_mount_credential_exposure_acknowledged("data")
+    payload = manifest.model_dump(mode="json")
+
+    assert all("credential_exposure" not in key for key in payload)
+    restored = Manifest.model_validate(payload)
+    assert not restored._acknowledges_in_container_mount_credential_exposure(
+        "/workspace/data", "mount_scoped"
+    )
+    with pytest.raises(ValueError, match="non-root path"):
+        Manifest().with_in_container_mount_credential_exposure_acknowledged("/workspace")
+    with pytest.raises(TypeError, match="At least one"):
+        Manifest().with_in_container_mount_credential_exposure_acknowledged()
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "with_in_container_mount_credential_exposure_acknowledged",
+        "with_in_container_mount_broad_credential_exposure_acknowledged",
+    ],
+)
+@pytest.mark.parametrize(
+    "path",
+    [
+        "data/*",
+        "data?",
+        "data[0]",
+        "data/../other",
+        "/workspace/../outside",
+    ],
+)
+def test_manifest_acknowledgement_rejects_wildcard_and_parent_paths(
+    method_name: str,
+    path: str,
+) -> None:
+    method = getattr(Manifest(), method_name)
+
+    with pytest.raises(ValueError, match="wildcard syntax|parent segments"):
+        method(path)
+
+
+def test_manifest_acknowledgement_rejects_custom_mount_before_deepcopy() -> None:
+    sentinel = "custom-mount-deepcopy-secret"
+
+    class CustomS3Mount(S3Mount):
+        type: Literal["custom_deepcopy_s3_mount"] = "custom_deepcopy_s3_mount"  # type: ignore[assignment]
+        deepcopy_called: ClassVar[bool] = False
+
+        def __deepcopy__(self, memo: dict[int, Any] | None = None) -> CustomS3Mount:
+            _ = memo
+            type(self).deepcopy_called = True
+            raise RuntimeError(sentinel)
+
+    manifest = Manifest(
+        entries={
+            "data": CustomS3Mount(
+                bucket="bucket",
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            )
+        }
+    )
+
+    with pytest.raises(MountConfigError, match="custom mount implementations") as exc_info:
+        manifest.with_in_container_mount_credential_exposure_acknowledged("data")
+
+    assert CustomS3Mount.deepcopy_called is False
+    assert sentinel not in repr(exc_info.value)
+
+
+def test_manifest_acknowledgement_redacts_custom_provenance_traceback_locals() -> None:
+    sentinel = "custom-provenance-traceback-secret"
+
+    class CustomS3Mount(S3Mount):
+        type: Literal["custom_traceback_s3_mount"] = "custom_traceback_s3_mount"  # type: ignore[assignment]
+        api_token: str | None = None
+
+    class CustomInContainerStrategy(InContainerMountStrategy):
+        type: Literal["custom_traceback_strategy"] = "custom_traceback_strategy"  # type: ignore[assignment]
+        api_token: str | None = None
+
+    class CustomRclonePattern(RcloneMountPattern):
+        api_token: str | None = None
+
+    cases = [
+        (
+            Manifest(
+                entries={
+                    "data": CustomS3Mount(
+                        bucket="bucket",
+                        api_token=sentinel,
+                        mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+                    )
+                }
+            ),
+            "custom mount implementations",
+        ),
+        (
+            Manifest(
+                entries={
+                    "data": S3Mount(
+                        bucket="bucket",
+                        mount_strategy=CustomInContainerStrategy(
+                            api_token=sentinel,
+                            pattern=RcloneMountPattern(),
+                        ),
+                    )
+                }
+            ),
+            "custom mount strategies",
+        ),
+        (
+            Manifest(
+                entries={
+                    "data": S3Mount(
+                        bucket="bucket",
+                        mount_strategy=InContainerMountStrategy(
+                            pattern=CustomRclonePattern(api_token=sentinel)
+                        ),
+                    )
+                }
+            ),
+            "custom mount patterns",
+        ),
+    ]
+
+    for method_name in (
+        "with_in_container_mount_credential_exposure_acknowledged",
+        "with_in_container_mount_broad_credential_exposure_acknowledged",
+    ):
+        for manifest, message in cases:
+            method = getattr(manifest, method_name)
+            with pytest.raises(MountConfigError, match=message) as exc:
+                method("data")
+
+            traceback_cursor = exc.value.__traceback__
+            while traceback_cursor is not None:
+                module_name = str(traceback_cursor.tb_frame.f_globals.get("__name__", ""))
+                if module_name.startswith("agents."):
+                    assert sentinel not in repr(traceback_cursor.tb_frame.f_locals)
+                traceback_cursor = traceback_cursor.tb_next
 
 
 def test_builtin_mount_subclass_is_rejected_by_execution_provenance() -> None:
@@ -638,7 +896,7 @@ def test_preserves_credentialless_hosted_mount_strategies(
     assert isinstance(mount, S3Mount)
     mount.access_key_id = "example-access-key"
     mount.secret_access_key = "example-secret-key"
-    with pytest.raises(MountConfigError, match="cloud credentials are not supported"):
+    with pytest.raises(MountConfigError, match="mount-scoped credentials"):
         validate_manifest_mount_credential_boundaries(
             credentialed,
             provider_backend_id=backend_id,
@@ -869,7 +1127,7 @@ def test_ignores_environment_values_already_exposed_to_the_sandbox() -> None:
     validate_manifest_mount_credential_boundaries(manifest)
 
 
-def test_rejects_credentialless_blobfuse_mounts() -> None:
+def test_blobfuse_mounts_require_broad_acknowledgement() -> None:
     manifest = Manifest(
         entries={
             "data": AzureBlobMount(
@@ -880,11 +1138,40 @@ def test_rejects_credentialless_blobfuse_mounts() -> None:
         }
     )
 
-    with pytest.raises(MountConfigError, match="credentialless blobfuse mounts"):
+    with pytest.raises(MountConfigError, match="broad credential authority"):
         validate_manifest_mount_credential_boundaries(manifest)
 
+    validate_manifest_mount_credential_boundaries(
+        manifest.with_in_container_mount_broad_credential_exposure_acknowledged("data")
+    )
 
-def test_rejects_s3_files_before_ambient_iam_can_be_used() -> None:
+
+def test_blobfuse_account_key_requires_mount_scoped_and_broad_acknowledgement() -> None:
+    manifest = Manifest(
+        entries={
+            "data": AzureBlobMount(
+                account="example",
+                container="private",
+                account_key="account-key",
+                mount_strategy=InContainerMountStrategy(pattern=FuseMountPattern()),
+            )
+        }
+    )
+
+    mount_scoped = manifest.with_in_container_mount_credential_exposure_acknowledged("data")
+    with pytest.raises(MountConfigError, match="broad credential authority"):
+        validate_manifest_mount_credential_boundaries(mount_scoped)
+
+    broad = manifest.with_in_container_mount_broad_credential_exposure_acknowledged("data")
+    with pytest.raises(MountConfigError, match="mount-scoped credentials"):
+        validate_manifest_mount_credential_boundaries(broad)
+
+    validate_manifest_mount_credential_boundaries(
+        mount_scoped.with_in_container_mount_broad_credential_exposure_acknowledged("data")
+    )
+
+
+def test_s3_files_require_broad_acknowledgement_before_ambient_iam_can_be_used() -> None:
     safe = Manifest(
         entries={
             "data": S3FilesMount(
@@ -894,8 +1181,12 @@ def test_rejects_s3_files_before_ambient_iam_can_be_used() -> None:
             )
         }
     )
-    with pytest.raises(MountConfigError, match="requires ambient IAM credentials"):
+    with pytest.raises(MountConfigError, match="broad credential authority"):
         validate_manifest_mount_credential_boundaries(safe)
+
+    validate_manifest_mount_credential_boundaries(
+        safe.with_in_container_mount_broad_credential_exposure_acknowledged("data")
+    )
 
 
 @pytest.mark.parametrize(
@@ -919,17 +1210,13 @@ def test_rejects_credential_required_patterns_in_inherited_in_container_strategi
         validate_manifest_mount_credential_boundaries(Manifest(entries={"data": mount}))
 
 
-def test_trusted_opt_in_requires_a_matching_provider_owned_strategy() -> None:
+def test_acknowledgement_requires_a_matching_provider_owned_strategy() -> None:
     strategy = InContainerMountStrategy(pattern=RcloneMountPattern())
     cast(Any, strategy).type = "vercel_cloud_bucket"
     manifest = Manifest(entries={"data": _s3_mount(strategy=strategy, credentialed=True)})
 
     with pytest.raises(MountConfigError, match="custom mount strategies"):
-        validate_manifest_mount_credential_boundaries(
-            manifest,
-            allowed_in_container_credential_strategy_types=frozenset({"vercel_cloud_bucket"}),
-            provider_backend_id="vercel",
-        )
+        manifest.with_in_container_mount_credential_exposure_acknowledged("data")
 
 
 @pytest.mark.parametrize(
@@ -953,7 +1240,7 @@ def test_rejects_rclone_credential_source_overrides(extra_args: list[str]) -> No
         }
     )
 
-    with pytest.raises(MountConfigError, match="cloud credentials are not supported"):
+    with pytest.raises(MountConfigError, match="does not support exposing"):
         validate_manifest_mount_credential_boundaries(manifest)
 
 
@@ -964,17 +1251,176 @@ def test_rejects_rclone_credential_source_overrides(extra_args: list[str]) -> No
         (DaytonaCloudBucketMountStrategy(), "daytona"),
     ],
 )
-def test_rejects_box_mounts_that_execute_inside_the_sandbox(
+def test_box_mounts_with_direct_credentials_require_exact_acknowledgement(
     strategy: MountStrategyBase,
     backend_id: str | None,
 ) -> None:
-    manifest = Manifest(entries={"data": BoxMount(mount_strategy=strategy)})
+    manifest = Manifest(
+        entries={
+            "data": BoxMount(
+                access_token="box-access-token",
+                mount_strategy=strategy,
+            )
+        }
+    )
 
-    with pytest.raises(MountConfigError, match="Box mounts require credentials"):
+    with pytest.raises(MountConfigError, match="mount-scoped credentials"):
         validate_manifest_mount_credential_boundaries(
             manifest,
             provider_backend_id=backend_id,
         )
+
+    validate_manifest_mount_credential_boundaries(
+        manifest.with_in_container_mount_credential_exposure_acknowledged("data"),
+        provider_backend_id=backend_id,
+    )
+
+
+def test_box_config_file_requires_broad_acknowledgement() -> None:
+    manifest = Manifest(
+        entries={
+            "data": BoxMount(
+                box_config_file="/run/secrets/box.json",
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            )
+        }
+    )
+
+    with pytest.raises(MountConfigError, match="broad credential authority"):
+        validate_manifest_mount_credential_boundaries(manifest)
+    with pytest.raises(MountConfigError, match="broad credential authority"):
+        validate_manifest_mount_credential_boundaries(
+            manifest.with_in_container_mount_credential_exposure_acknowledged("data")
+        )
+    validate_manifest_mount_credential_boundaries(
+        manifest.with_in_container_mount_broad_credential_exposure_acknowledged("data")
+    )
+
+
+@pytest.mark.parametrize(
+    "mount",
+    [
+        BoxMount(mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern())),
+        BoxMount(
+            client_id="client-id",
+            mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+        ),
+        BoxMount(
+            client_secret="client-secret",
+            mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+        ),
+    ],
+)
+def test_box_in_container_mount_requires_non_interactive_authentication(
+    mount: BoxMount,
+) -> None:
+    manifest = Manifest(entries={"data": mount})
+
+    with pytest.raises(MountConfigError, match="non-interactive authentication source"):
+        validate_manifest_mount_credential_boundaries(manifest)
+
+
+@pytest.mark.parametrize(
+    ("mount", "broad"),
+    [
+        (
+            BoxMount(
+                access_token=value,
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            ),
+            False,
+        )
+        for value in ("", "   ")
+    ]
+    + [
+        (
+            BoxMount(
+                token=value,
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            ),
+            False,
+        )
+        for value in ("", "   ")
+    ]
+    + [
+        (
+            BoxMount(
+                config_credentials=value,
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            ),
+            False,
+        )
+        for value in ("", "   ")
+    ]
+    + [
+        (
+            BoxMount(
+                box_config_file=value,
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            ),
+            True,
+        )
+        for value in ("", "   ")
+    ],
+)
+def test_box_in_container_mount_rejects_empty_authentication_sources(
+    mount: BoxMount,
+    broad: bool,
+) -> None:
+    manifest = Manifest(entries={"data": mount})
+    acknowledged = (
+        manifest.with_in_container_mount_broad_credential_exposure_acknowledged("data")
+        if broad
+        else manifest.with_in_container_mount_credential_exposure_acknowledged("data")
+    )
+
+    with pytest.raises(MountConfigError, match="authentication values must not be empty"):
+        validate_manifest_mount_credential_boundaries(acknowledged)
+
+
+@pytest.mark.parametrize(
+    ("mount", "broad", "invalid_field"),
+    [
+        (
+            BoxMount(
+                access_token="box-access-token",
+                box_config_file=value,
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            ),
+            False,
+            "box_config_file",
+        )
+        for value in ("", "   ")
+    ]
+    + [
+        (
+            BoxMount(
+                access_token=value,
+                box_config_file="/run/secrets/box.json",
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            ),
+            True,
+            "access_token",
+        )
+        for value in ("", "   ")
+    ],
+)
+def test_box_in_container_mount_rejects_mixed_usable_and_empty_authentication_sources(
+    mount: BoxMount,
+    broad: bool,
+    invalid_field: str,
+) -> None:
+    manifest = Manifest(entries={"data": mount})
+    acknowledged = (
+        manifest.with_in_container_mount_broad_credential_exposure_acknowledged("data")
+        if broad
+        else manifest.with_in_container_mount_credential_exposure_acknowledged("data")
+    )
+
+    with pytest.raises(MountConfigError, match="authentication values must not be empty") as exc:
+        validate_manifest_mount_credential_boundaries(acknowledged)
+
+    assert exc.value.context["credential_fields"] == (invalid_field,)
 
 
 def test_preserves_box_mounts_with_an_external_strategy() -> None:
@@ -1172,7 +1618,7 @@ def test_rejects_rclone_on_the_fly_remote_name() -> None:
         }
     )
 
-    with pytest.raises(MountConfigError, match="cloud credentials are not supported") as exc:
+    with pytest.raises(MountConfigError, match="does not support exposing") as exc:
         validate_manifest_mount_credential_boundaries(manifest)
 
     assert sentinel not in str(exc.value)
@@ -1273,7 +1719,7 @@ def test_rejects_malformed_inline_credential_url_without_mutating_trusted_manife
         }
     )
 
-    with pytest.raises(MountConfigError, match="cloud credentials are not supported"):
+    with pytest.raises(MountConfigError, match="does not support exposing"):
         validate_manifest_mount_credential_boundaries(manifest)
 
     mount = manifest.entries["data"]
@@ -1303,7 +1749,7 @@ def test_rejects_mountpoint_endpoint_authority(endpoint_url: str) -> None:
         }
     )
 
-    with pytest.raises(MountConfigError, match="cloud credentials are not supported") as exc:
+    with pytest.raises(MountConfigError, match="does not support exposing") as exc:
         validate_manifest_mount_credential_boundaries(manifest)
 
     assert exc.value.context["credential_fields"] == (
@@ -1349,6 +1795,23 @@ def test_rejects_manifest_backed_credential_files(
             manifest,
             provider_backend_id="docker",
         )
+
+
+def test_broad_acknowledgement_does_not_allow_manifest_backed_rclone_config() -> None:
+    manifest = Manifest(
+        entries={
+            "credentials.conf": File(content=b"credential-file-secret"),
+            "data": S3Mount(
+                bucket="bucket",
+                mount_strategy=InContainerMountStrategy(
+                    pattern=RcloneMountPattern(config_file_path=Path("credentials.conf"))
+                ),
+            ),
+        }
+    ).with_in_container_mount_broad_credential_exposure_acknowledged("data")
+
+    with pytest.raises(MountConfigError, match="credential files stored in the manifest"):
+        validate_manifest_mount_credential_boundaries(manifest)
 
 
 @pytest.mark.parametrize(
@@ -1729,6 +2192,82 @@ def test_opaque_external_authority_remains_resumable_through_trusted_rebind(
     assert rebound.mount_authority_redacted is False
 
 
+def test_in_container_acknowledgement_is_rebound_only_from_trusted_manifest() -> None:
+    manifest = Manifest(
+        entries={
+            "data": _s3_mount(
+                strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+                credentialed=True,
+            )
+        }
+    ).with_in_container_mount_credential_exposure_acknowledged("data")
+    client = _SecurityTestClient()
+    state = TestSessionState(manifest=manifest, snapshot=NoopSnapshot(id="snapshot"))
+
+    payload = client.serialize_session_state(state)
+    restored = client.deserialize_session_state(payload)
+
+    assert "credential_exposure" not in repr(payload)
+    with pytest.raises(ValueError, match="cannot be resumed"):
+        restored.assert_path_grants_rebound()
+
+    rebound = restored.rebind_persisted_mount_authority(
+        manifest,
+        provider_backend_id="docker",
+    )
+    validate_manifest_mount_credential_boundaries(
+        rebound.manifest,
+        provider_backend_id="docker",
+    )
+    assert rebound.manifest._acknowledges_in_container_mount_credential_exposure(
+        "/workspace/data",
+        "mount_scoped",
+    )
+
+
+@pytest.mark.parametrize(
+    "mount",
+    [
+        AzureBlobMount(
+            account="example",
+            container="private",
+            mount_strategy=InContainerMountStrategy(pattern=FuseMountPattern()),
+        ),
+        S3FilesMount(
+            file_system_id="fs-123",
+            mount_strategy=InContainerMountStrategy(pattern=S3FilesMountPattern()),
+        ),
+    ],
+)
+def test_implicit_broad_authority_is_rebound_only_from_trusted_manifest(
+    mount: Mount,
+) -> None:
+    manifest = Manifest(
+        entries={"data": mount}
+    ).with_in_container_mount_broad_credential_exposure_acknowledged("data")
+    client = _SecurityTestClient()
+    state = TestSessionState(manifest=manifest, snapshot=NoopSnapshot(id="snapshot"))
+
+    payload = client.serialize_session_state(state)
+    restored = client.deserialize_session_state(payload)
+
+    assert payload[REDACTED_MOUNT_AUTHORITY_KEY] is True
+    assert "credential_exposure" not in repr(payload)
+    assert restored.mount_authority_redacted is True
+    rebound = restored.rebind_persisted_mount_authority(
+        manifest,
+        provider_backend_id="docker",
+    )
+    validate_manifest_mount_credential_boundaries(
+        rebound.manifest,
+        provider_backend_id="docker",
+    )
+    assert rebound.manifest._acknowledges_in_container_mount_credential_exposure(
+        "/workspace/data",
+        "broad",
+    )
+
+
 def test_mount_authority_rebind_requires_exact_credential_free_topology() -> None:
     original = Manifest(
         entries={
@@ -2102,6 +2641,51 @@ async def test_operation_error_with_mount_authority_is_replaced() -> None:
         traceback = traceback.tb_next
 
 
+@pytest.mark.parametrize(
+    "mount",
+    [
+        AzureBlobMount(
+            account="example",
+            container="private",
+            mount_strategy=InContainerMountStrategy(pattern=FuseMountPattern()),
+        ),
+        S3FilesMount(
+            file_system_id="fs-123",
+            mount_strategy=InContainerMountStrategy(pattern=S3FilesMountPattern()),
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_operation_error_with_implicit_broad_authority_is_replaced(
+    mount: Mount,
+) -> None:
+    sentinel = "implicit-broad-provider-secret"
+    manifest = Manifest(
+        entries={"data": mount}
+    ).with_in_container_mount_broad_credential_exposure_acknowledged("data")
+    provider_error = RuntimeError(sentinel)
+
+    @redact_mount_error_data
+    async def fail(*, manifest: Manifest) -> None:
+        _ = manifest
+        raise provider_error
+
+    with pytest.raises(RuntimeError, match="protected mount configuration") as exc:
+        await fail(manifest=manifest)
+
+    assert sentinel not in str(exc.value)
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None
+    assert provider_error.args == ()
+    assert provider_error.__traceback__ is None
+    traceback = exc.value.__traceback__
+    while traceback is not None:
+        frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
+        if "/src/agents/" in frame_path:
+            assert sentinel not in repr(traceback.tb_frame.f_locals)
+        traceback = traceback.tb_next
+
+
 def test_sync_operation_error_with_mount_authority_clears_source_arguments() -> None:
     sentinel = "sync-provider-operation-secret"
     manifest = Manifest(
@@ -2137,6 +2721,44 @@ def test_sync_operation_error_with_mount_authority_clears_source_arguments() -> 
     assert (
         cast(Any, BaseException.__traceback__).__get__(provider_error, type(provider_error)) is None
     )
+
+
+@pytest.mark.parametrize(
+    "mount",
+    [
+        AzureBlobMount(
+            account="example",
+            container="private",
+            mount_strategy=InContainerMountStrategy(pattern=FuseMountPattern()),
+        ),
+        S3FilesMount(
+            file_system_id="fs-123",
+            mount_strategy=InContainerMountStrategy(pattern=S3FilesMountPattern()),
+        ),
+    ],
+)
+def test_sync_operation_error_with_implicit_broad_authority_is_replaced(
+    mount: Mount,
+) -> None:
+    sentinel = "sync-implicit-broad-provider-secret"
+    manifest = Manifest(
+        entries={"data": mount}
+    ).with_in_container_mount_broad_credential_exposure_acknowledged("data")
+    provider_error = RuntimeError(sentinel)
+
+    @redact_mount_error_data_sync
+    def fail(*, manifest: Manifest) -> None:
+        _ = manifest
+        raise provider_error
+
+    with pytest.raises(RuntimeError, match="protected mount configuration") as exc:
+        fail(manifest=manifest)
+
+    assert sentinel not in str(exc.value)
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None
+    assert provider_error.args == ()
+    assert provider_error.__traceback__ is None
 
 
 @pytest.mark.asyncio
