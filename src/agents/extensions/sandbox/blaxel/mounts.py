@@ -28,6 +28,7 @@ from typing import Any, Literal
 from .... import _debug
 from ....logger import log_tool_action_warning
 from ....sandbox._mount_security import (
+    _mark_mount_error_data_safe,
     redact_mount_error_data,
     validate_mount_activation_credential_boundary,
 )
@@ -303,7 +304,9 @@ async def _ensure_tool(session: BaseSandboxSession, tool: str) -> None:
 
 def _mount_credential_path(session: BaseSandboxSession, stem: str) -> Path:
     root = PurePosixPath(session.state.manifest.root)
-    return posix_path_as_path(root / f".openai-agents-{stem}-{uuid.uuid4().hex[:8]}")
+    relative_path = Path(f".openai-agents-{stem}-{uuid.uuid4().hex[:8]}")
+    session.register_persist_workspace_skip_path(relative_path)
+    return posix_path_as_path(root / relative_path.as_posix())
 
 
 async def _write_mount_credential_file(
@@ -318,6 +321,20 @@ async def _write_mount_credential_file(
             message="failed to restrict mount credential file permissions",
             context={"exit_code": result.exit_code},
         )
+
+
+async def _remove_mount_credential_file(
+    session: BaseSandboxSession,
+    path: Path,
+) -> None:
+    result = await _exec(session, f"rm -f {shlex.quote(sandbox_path_str(path))}")
+    if result.exit_code != 0:
+        error = MountConfigError(
+            message="failed to remove mount credential file",
+            context={"exit_code": result.exit_code},
+        )
+        _mark_mount_error_data_safe(error)
+        raise error
 
 
 async def _mount_s3(session: BaseSandboxSession, config: BlaxelCloudBucketMountConfig) -> None:
@@ -368,7 +385,7 @@ async def _mount_s3(session: BaseSandboxSession, config: BlaxelCloudBucketMountC
             )
     finally:
         if cred_path is not None:
-            await _exec(session, f"rm -f {shlex.quote(sandbox_path_str(cred_path))}")
+            await _remove_mount_credential_file(session, cred_path)
 
 
 async def _mount_gcs(session: BaseSandboxSession, config: BlaxelCloudBucketMountConfig) -> None:
@@ -408,7 +425,7 @@ async def _mount_gcs(session: BaseSandboxSession, config: BlaxelCloudBucketMount
             )
     finally:
         if key_path is not None:
-            await _exec(session, f"rm -f {shlex.quote(sandbox_path_str(key_path))}")
+            await _remove_mount_credential_file(session, key_path)
 
 
 async def _mount_bucket(session: BaseSandboxSession, config: BlaxelCloudBucketMountConfig) -> None:

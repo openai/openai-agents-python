@@ -1040,9 +1040,14 @@ def _mark_mount_error_for_manifest(error: MountConfigError, manifest: Manifest) 
         _mark_error_data_redacted(error)
 
 
-def _mark_mount_validation_error(error: MountConfigError) -> None:
+def _mark_mount_error_data_safe(error: MountConfigError) -> None:
+    """Mark an SDK-created mount error whose message contains no credential-derived data."""
     _mark_error_data_redacted(error)
     setattr(error, _SAFE_MOUNT_VALIDATION_MESSAGE_ATTR, True)
+
+
+def _mark_mount_validation_error(error: MountConfigError) -> None:
+    _mark_mount_error_data_safe(error)
 
 
 def _absolute_manifest_path(root: str, value: str) -> str:

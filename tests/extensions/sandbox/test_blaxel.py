@@ -2314,15 +2314,19 @@ class TestValidateTarBytesExtra:
 class TestTarExcludeArgsWithSkipPaths:
     @pytest.mark.asyncio
     async def test_exclude_args_with_skip_paths(self, fake_sandbox: _FakeSandboxInstance) -> None:
+        from agents.extensions.sandbox.blaxel.mounts import _mount_credential_path
+
         session = _make_session(fake_sandbox)
-        session._runtime_persist_workspace_skip_relpaths = {
-            Path("node_modules"),
-            Path(".git"),
-        }
+        session.register_persist_workspace_skip_path(Path("node_modules"))
+        session.register_persist_workspace_skip_path(Path(".git"))
+        credential_path = _mount_credential_path(session, "s3fs-passwd")
+        credential_relative_path = credential_path.relative_to(Path(session.state.manifest.root))
         args = session._tar_exclude_args()
         assert len(args) > 0
         assert any("node_modules" in a for a in args)
         assert any(".git" in a for a in args)
+        assert any(credential_relative_path.as_posix() in arg for arg in args)
+        assert credential_relative_path in session._workspace_fingerprint_skip_relpaths()
 
     @pytest.mark.asyncio
     async def test_exclude_args_skips_empty_and_dot(
@@ -2863,6 +2867,9 @@ class _FakeMountSession:
     def __init__(self) -> None:
         self.exec_calls: list[tuple[tuple[str, ...], dict[str, float]]] = []
         self.write_calls: list[tuple[Path, bytes]] = []
+        self.persist_workspace_skip_paths: list[Path] = []
+        self.credential_lifecycle_events: list[tuple[str, Path]] = []
+        self.persist_workspace_skip_error: Exception | None = None
         self._next_results: list[_FakeExecResultForMount] = []
         self._default_result = _FakeExecResultForMount()
         self.state = MagicMock()
@@ -2878,7 +2885,16 @@ class _FakeMountSession:
         _ = user
         payload = data.read()
         assert isinstance(payload, bytes)
+        self.credential_lifecycle_events.append(("write", path))
         self.write_calls.append((path, payload))
+
+    def register_persist_workspace_skip_path(self, path: Path | str) -> Path:
+        relative_path = Path(path)
+        self.credential_lifecycle_events.append(("register", relative_path))
+        if self.persist_workspace_skip_error is not None:
+            raise self.persist_workspace_skip_error
+        self.persist_workspace_skip_paths.append(relative_path)
+        return relative_path
 
     class __class__:
         __name__ = "BlaxelSandboxSession"
@@ -3050,6 +3066,80 @@ class TestMountsModule:
         assert secret_access_key not in repr(session.exec_calls)
 
     @pytest.mark.asyncio
+    async def test_mount_s3_fails_when_credential_cleanup_fails(self) -> None:
+        from agents.extensions.sandbox.blaxel.mounts import BlaxelCloudBucketMountConfig, _mount_s3
+
+        session = _FakeMountSession()
+        secret_access_key = "s3-cleanup-secret"
+        session._next_results = [
+            _FakeExecResultForMount(exit_code=0),  # which s3fs
+            _FakeExecResultForMount(exit_code=0),  # chmod credential file
+            _FakeExecResultForMount(exit_code=0),  # mkdir
+            _FakeExecResultForMount(exit_code=0),  # s3fs mount
+            _FakeExecResultForMount(exit_code=1),  # rm credential file
+        ]
+
+        config = BlaxelCloudBucketMountConfig(
+            provider="s3",
+            bucket="my-bucket",
+            mount_path="/mnt/s3",
+            access_key_id="AKID",
+            secret_access_key=secret_access_key,
+        )
+        with pytest.raises(MountConfigError, match="failed to remove mount credential file"):
+            await _mount_s3(session, config)  # type: ignore[arg-type]
+
+        assert session.exec_calls[-1][0][2].startswith("rm -f ")
+        assert secret_access_key not in repr(session.exec_calls)
+        credential_path, _credential_payload = session.write_calls[0]
+        assert session.persist_workspace_skip_paths == [
+            credential_path.relative_to(Path("/workspace"))
+        ]
+        assert [event for event, _path in session.credential_lifecycle_events] == [
+            "register",
+            "write",
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider", ["s3", "gcs"])
+    async def test_mount_credentials_reject_registration_before_write(self, provider: str) -> None:
+        from agents.extensions.sandbox.blaxel.mounts import (
+            BlaxelCloudBucketMountConfig,
+            _mount_gcs,
+            _mount_s3,
+        )
+
+        session = _FakeMountSession()
+        session.persist_workspace_skip_error = RuntimeError("registration rejected")
+        session._next_results = [_FakeExecResultForMount(exit_code=0)]  # which
+        if provider == "s3":
+            mount = _mount_s3
+            config = BlaxelCloudBucketMountConfig(
+                provider="s3",
+                bucket="bucket",
+                mount_path="/mnt/data",
+                access_key_id="AKID",
+                secret_access_key="SECRET",
+            )
+        else:
+            mount = _mount_gcs
+            config = BlaxelCloudBucketMountConfig(
+                provider="gcs",
+                bucket="bucket",
+                mount_path="/mnt/data",
+                service_account_key='{"private_key":"SECRET"}',
+            )
+
+        with pytest.raises(RuntimeError, match="registration rejected"):
+            await mount(session, config)  # type: ignore[arg-type]
+
+        assert [event for event, _path in session.credential_lifecycle_events] == ["register"]
+        assert session.persist_workspace_skip_paths == []
+        assert session.write_calls == []
+        assert len(session.exec_calls) == 1
+        assert session.exec_calls[0][0][2].startswith("which ")
+
+    @pytest.mark.asyncio
     async def test_mount_s3_public_bucket(self) -> None:
         from agents.extensions.sandbox.blaxel.mounts import BlaxelCloudBucketMountConfig, _mount_s3
 
@@ -3067,6 +3157,9 @@ class TestMountsModule:
             read_only=True,
         )
         await _mount_s3(session, config)  # type: ignore[arg-type]
+        assert len(session.exec_calls) == 3
+        assert not any(call[0][2].startswith("rm -f ") for call in session.exec_calls)
+        assert session.persist_workspace_skip_paths == []
 
     @pytest.mark.asyncio
     async def test_mount_s3_with_endpoint(self) -> None:
@@ -3153,12 +3246,47 @@ class TestMountsModule:
             prefix="data/",
         )
         await _mount_gcs(session, config)  # type: ignore[arg-type]
+        assert len(session.exec_calls) == 5
         assert len(session.write_calls) == 1
         credential_path, credential_payload = session.write_calls[0]
         assert credential_path.parent == Path("/workspace")
         assert credential_path.name.startswith(".openai-agents-gcs-creds-")
         assert credential_payload == service_account_key.encode()
         assert "gcs-secret-command-sentinel" not in repr(session.exec_calls)
+
+    @pytest.mark.asyncio
+    async def test_mount_gcs_fails_when_credential_cleanup_fails(self) -> None:
+        from agents.extensions.sandbox.blaxel.mounts import BlaxelCloudBucketMountConfig, _mount_gcs
+
+        session = _FakeMountSession()
+        service_account_key = '{"private_key":"gcs-cleanup-secret"}'
+        session._next_results = [
+            _FakeExecResultForMount(exit_code=0),  # which gcsfuse
+            _FakeExecResultForMount(exit_code=0),  # chmod credential file
+            _FakeExecResultForMount(exit_code=0),  # mkdir
+            _FakeExecResultForMount(exit_code=0),  # gcsfuse mount
+            _FakeExecResultForMount(exit_code=1),  # rm credential file
+        ]
+
+        config = BlaxelCloudBucketMountConfig(
+            provider="gcs",
+            bucket="gcs-bucket",
+            mount_path="/mnt/gcs",
+            service_account_key=service_account_key,
+        )
+        with pytest.raises(MountConfigError, match="failed to remove mount credential file"):
+            await _mount_gcs(session, config)  # type: ignore[arg-type]
+
+        assert session.exec_calls[-1][0][2].startswith("rm -f ")
+        assert "gcs-cleanup-secret" not in repr(session.exec_calls)
+        credential_path, _credential_payload = session.write_calls[0]
+        assert session.persist_workspace_skip_paths == [
+            credential_path.relative_to(Path("/workspace"))
+        ]
+        assert [event for event, _path in session.credential_lifecycle_events] == [
+            "register",
+            "write",
+        ]
 
     @pytest.mark.asyncio
     async def test_mount_gcs_quotes_generated_key_path(self) -> None:
@@ -3236,6 +3364,9 @@ class TestMountsModule:
             mount_path="/mnt/pub-gcs",
         )
         await _mount_gcs(session, config)  # type: ignore[arg-type]
+        assert len(session.exec_calls) == 3
+        assert not any(call[0][2].startswith("rm -f ") for call in session.exec_calls)
+        assert session.persist_workspace_skip_paths == []
 
     @pytest.mark.asyncio
     async def test_mount_gcs_fails(self) -> None:
@@ -3409,6 +3540,44 @@ class TestMountsModule:
         assert result == []
 
     @pytest.mark.asyncio
+    async def test_activate_preserves_safe_credential_cleanup_error(self) -> None:
+        from agents.extensions.sandbox.blaxel.mounts import BlaxelCloudBucketMountStrategy
+        from agents.sandbox.entries import S3Mount
+
+        strategy = BlaxelCloudBucketMountStrategy()
+        mount = S3Mount(
+            bucket="test",
+            access_key_id="AKID",
+            secret_access_key="s3-cleanup-secret",
+            mount_strategy=strategy,
+        )
+        session = _FakeMountSession()
+        session.state.manifest = Manifest(
+            entries={"data": mount}
+        ).with_in_container_mount_credential_exposure_acknowledged("data")
+        session._next_results = [
+            _FakeExecResultForMount(exit_code=0),  # which
+            _FakeExecResultForMount(exit_code=0),  # chmod credential file
+            _FakeExecResultForMount(exit_code=0),  # mkdir
+            _FakeExecResultForMount(exit_code=0),  # mount
+            _FakeExecResultForMount(exit_code=1),  # rm credential file
+        ]
+        mount._resolve_mount_path = lambda s, d: Path("/workspace/data")  # type: ignore[assignment]
+
+        with pytest.raises(
+            MountConfigError,
+            match="failed to remove mount credential file",
+        ):
+            await strategy.activate(
+                mount,
+                session,  # type: ignore[arg-type]
+                Path("/workspace/data"),
+                Path("/workspace"),
+            )
+
+        assert "s3-cleanup-secret" not in repr(session.exec_calls)
+
+    @pytest.mark.asyncio
     async def test_deactivate(self) -> None:
         from agents.extensions.sandbox.blaxel.mounts import BlaxelCloudBucketMountStrategy
         from agents.sandbox.entries import S3Mount
@@ -3458,6 +3627,41 @@ class TestMountsModule:
             session,  # type: ignore[arg-type]
             Path("/workspace/mnt/s3"),
         )
+
+    @pytest.mark.asyncio
+    async def test_restore_preserves_cleanup_error_over_mount_error(self) -> None:
+        from agents.extensions.sandbox.blaxel.mounts import BlaxelCloudBucketMountStrategy
+        from agents.sandbox.entries import GCSMount
+
+        strategy = BlaxelCloudBucketMountStrategy()
+        mount = GCSMount(
+            bucket="test",
+            service_account_credentials='{"private_key":"gcs-cleanup-secret"}',
+            mount_strategy=strategy,
+        )
+        session = _FakeMountSession()
+        session.state.manifest = Manifest(
+            entries={"data": mount}
+        ).with_in_container_mount_credential_exposure_acknowledged("data")
+        session._next_results = [
+            _FakeExecResultForMount(exit_code=0),  # which
+            _FakeExecResultForMount(exit_code=0),  # chmod credential file
+            _FakeExecResultForMount(exit_code=0),  # mkdir
+            _FakeExecResultForMount(exit_code=1, stderr=b"mount failed"),  # mount
+            _FakeExecResultForMount(exit_code=1),  # rm credential file
+        ]
+
+        with pytest.raises(
+            MountConfigError,
+            match="failed to remove mount credential file",
+        ):
+            await strategy.restore_after_snapshot(
+                mount,
+                session,  # type: ignore[arg-type]
+                Path("/workspace/data"),
+            )
+
+        assert "gcs-cleanup-secret" not in repr(session.exec_calls)
 
 
 # ---------------------------------------------------------------------------
