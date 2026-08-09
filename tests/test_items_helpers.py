@@ -53,7 +53,7 @@ from agents import (
     TResponseInputItem,
     Usage,
 )
-from agents.items import ToolCallItem, ToolCallOutputItem
+from agents.items import ToolCallItem, ToolCallOutputItem, TResponseOutputItem
 
 
 def make_message(
@@ -650,7 +650,9 @@ def test_to_input_items_strips_nested_created_by_from_shell_call_output() -> Non
     raw_item = shell_output.model_dump(exclude_unset=True)
     original_chunk = raw_item["output"][0]
 
-    resp = ModelResponse(output=[raw_item], usage=Usage(), response_id=None)
+    resp = ModelResponse(
+        output=[cast(TResponseOutputItem, raw_item)], usage=Usage(), response_id=None
+    )
     input_items = resp.to_input_items()
 
     assert input_items == [
