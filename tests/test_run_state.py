@@ -3092,6 +3092,51 @@ class TestSerializationRoundTrip:
             "humidity": None,
         }
 
+    async def test_non_utf8_bytes_tool_output_keeps_dict_shape(self):
+        """A structured output with non-UTF-8 bytes must stay a dict, not collapse to a string.
+
+        Serializing in Python mode keeps default-valued fields and lets ``_ensure_json_compatible``
+        stringify only the offending value. Dumping with ``mode="json"`` would instead raise on the
+        non-UTF-8 bytes, trip the broad fallback, and replace the whole structured output with an
+        opaque ``str(item.output)``.
+        """
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="ItemAgent")
+        state = make_state(agent, context=context, original_input="test", max_turns=5)
+
+        class BlobResult(BaseModel):
+            payload: bytes
+            label: str = "default-label"
+            note: str | None = None
+
+        # An untyped function tool can return an arbitrary Pydantic model; here one field holds
+        # non-UTF-8 bytes while ``label``/``note`` are left at their defaults.
+        output = BlobResult(payload=b"\xff\xfe")
+        raw_tool_output = {
+            "type": "function_call_output",
+            "call_id": "call_blob",
+            "output": "blob stored",
+        }
+        state._generated_items.append(
+            ToolCallOutputItem(agent=agent, raw_item=raw_tool_output, output=output)
+        )
+
+        expected = {
+            "payload": str(b"\xff\xfe"),
+            "label": "default-label",
+            "note": None,
+        }
+
+        json_data = state.to_json()
+        serialized_output = json_data["generated_items"][0]["output"]
+        assert isinstance(serialized_output, dict)
+        assert serialized_output == expected
+
+        new_state = await RunState.from_json(agent, json_data)
+        restored_item = new_state._generated_items[0]
+        assert isinstance(restored_item, ToolCallOutputItem)
+        assert restored_item.output == expected
+
     async def test_serializes_original_input_with_function_call_output(self):
         """Test that original_input with function_call_output items is preserved."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
