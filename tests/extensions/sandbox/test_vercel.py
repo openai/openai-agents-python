@@ -640,7 +640,7 @@ def test_vercel_from_state_rejects_mismatched_trusted_mount_configuration(
         )
 
 
-def test_vercel_from_state_requires_trusted_manifest_for_mounts(
+def test_vercel_from_state_accepts_released_trusted_mount_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     vercel_module = _load_vercel_module(monkeypatch)
@@ -652,11 +652,86 @@ def test_vercel_from_state_requires_trusted_manifest_for_mounts(
         sandbox_id="sandbox-existing",
     )
 
-    with pytest.raises(MountConfigError, match="trusted create-time manifest"):
-        vercel_module.VercelSandboxSession.from_state(
-            state,
-            trusted_s3_mounts=vercel_module._vercel_s3_mount_map(manifest),
-        )
+    session = vercel_module.VercelSandboxSession.from_state(
+        state,
+        trusted_s3_mounts=vercel_module._vercel_s3_mount_map(manifest),
+    )
+
+    assert session._trusted_manifest == manifest
+
+
+def test_vercel_from_state_accepts_released_credential_exposure_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    package_module = importlib.import_module("agents.extensions.sandbox.vercel")
+    trusted_manifest = _vercel_s3_manifest(package_module, credentials=True)
+    state_manifest = vercel_module._manifest_without_vercel_s3_credentials(trusted_manifest)
+    state = vercel_module.VercelSandboxSessionState(
+        manifest=state_manifest,
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="sandbox-existing",
+    )
+
+    session = vercel_module.VercelSandboxSession.from_state(
+        state,
+        allow_s3_credential_exposure=True,
+        trusted_s3_mounts=vercel_module._vercel_s3_mount_map(trusted_manifest),
+    )
+
+    assert session._trusted_manifest.model_dump(mode="json") == state_manifest.model_dump(
+        mode="json"
+    )
+    assert session._runtime_s3_mount_sensitive_values() == (
+        "test-access-key",
+        "test-secret-key",
+        "test-session-token",
+    )
+
+
+@pytest.mark.parametrize("entrypoint", ["constructor", "from_state"])
+@pytest.mark.parametrize("include_trusted_manifest", [False, True])
+def test_vercel_direct_session_normalizes_released_credentialed_state_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+    include_trusted_manifest: bool,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    package_module = importlib.import_module("agents.extensions.sandbox.vercel")
+    manifest = _vercel_s3_manifest(package_module, credentials=True)
+    state = vercel_module.VercelSandboxSessionState(
+        manifest=manifest,
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="sandbox-existing",
+    )
+    kwargs: dict[str, Any] = {
+        "state": state,
+        "allow_s3_credential_exposure": True,
+        "trusted_s3_mounts": vercel_module._vercel_s3_mount_map(manifest),
+    }
+    if include_trusted_manifest:
+        kwargs["trusted_manifest"] = manifest
+
+    if entrypoint == "constructor":
+        session = vercel_module.VercelSandboxSession(**kwargs)
+    else:
+        session = vercel_module.VercelSandboxSession.from_state(**kwargs)
+
+    state_mount = state.manifest.entries["remote"]
+    assert isinstance(state_mount, S3Mount)
+    assert state_mount.access_key_id is None
+    assert state_mount.secret_access_key is None
+    assert state_mount.session_token is None
+    assert session.state is state
+    assert session._runtime_s3_mount_sensitive_values() == (
+        "test-access-key",
+        "test-secret-key",
+        "test-session-token",
+    )
+    payload = session.state.model_dump(mode="json")
+    assert "test-access-key" not in repr(payload)
+    assert "test-secret-key" not in repr(payload)
+    assert "test-session-token" not in repr(payload)
 
 
 def test_vercel_from_state_rejects_custom_mount_before_deepcopy(
@@ -899,7 +974,7 @@ async def test_vercel_create_requires_explicit_s3_credential_exposure(
     client = vercel_module.VercelSandboxClient()
     manifest = _vercel_s3_manifest(package_module, credentials=True)
 
-    with pytest.raises(MountConfigError, match="cloud credentials are not supported") as exc:
+    with pytest.raises(MountConfigError, match="mount-scoped credentials") as exc:
         await client.create(
             manifest=manifest,
             options=vercel_module.VercelSandboxClientOptions(),
@@ -912,6 +987,27 @@ async def test_vercel_create_requires_explicit_s3_credential_exposure(
         if isinstance(module_name, str) and module_name.startswith("agents."):
             assert "test-secret-key" not in repr(traceback.tb_frame.f_locals)
         traceback = traceback.tb_next
+
+
+@pytest.mark.asyncio
+async def test_vercel_create_accepts_manifest_mount_scoped_acknowledgement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    package_module = importlib.import_module("agents.extensions.sandbox.vercel")
+    client = vercel_module.VercelSandboxClient()
+    manifest = _vercel_s3_manifest(
+        package_module,
+        credentials=True,
+    ).with_in_container_mount_credential_exposure_acknowledged("remote")
+
+    session = await client.create(
+        manifest=manifest,
+        options=vercel_module.VercelSandboxClientOptions(),
+    )
+
+    assert _FakeAsyncSandbox.create_calls
+    await client.delete(session)
 
 
 @pytest.mark.asyncio
@@ -1106,7 +1202,7 @@ async def test_vercel_credential_opt_in_does_not_allow_signed_endpoint_urls(
     mount = cast(S3Mount, manifest.entries["remote"])
     mount.endpoint_url = "https://example.test?signature=endpoint-secret"
 
-    with pytest.raises(MountConfigError, match="cloud credentials are not supported"):
+    with pytest.raises(MountConfigError, match="does not support exposing"):
         await vercel_module.VercelSandboxClient().create(
             manifest=manifest,
             options=vercel_module.VercelSandboxClientOptions(
@@ -1179,7 +1275,7 @@ async def test_vercel_apply_manifest_uses_central_mount_validation(
     sandbox = _FakeAsyncSandbox(sandbox_id="sandbox-central-validation")
     session = vercel_module.VercelSandboxSession.from_state(state, sandbox=sandbox)
 
-    with pytest.raises(MountConfigError, match="cloud credentials are not supported"):
+    with pytest.raises(MountConfigError, match="mount-scoped credentials"):
         await session.apply_manifest()
 
     assert sandbox.run_command_calls == []

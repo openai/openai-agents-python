@@ -6,6 +6,7 @@ import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar, cast
+from uuid import uuid4
 
 import pydantic
 from openai.types.responses import (
@@ -155,6 +156,19 @@ class RunItemBase(Generic[T], abc.ABC):
             return self.raw_item.model_dump(exclude_unset=True)  # type: ignore
         else:
             raise AgentsException(f"Unexpected raw item type: {type(self.raw_item)}")
+
+
+@dataclass
+class InputItem(RunItemBase[TResponseInputItem]):
+    """Represents input admitted while resuming a run."""
+
+    raw_item: TResponseInputItem
+    """The normalized input item admitted before the next model call."""
+
+    type: Literal["input_item"] = "input_item"
+
+    input_id: str = field(default_factory=lambda: uuid4().hex)
+    """A durable occurrence identifier used for exactly-once conversation tracking."""
 
 
 @dataclass
@@ -669,7 +683,8 @@ class ToolApprovalItem(RunItemBase[Any]):
 
 
 RunItem: TypeAlias = (
-    MessageOutputItem
+    InputItem
+    | MessageOutputItem
     | ToolSearchCallItem
     | ToolSearchOutputItem
     | HandoffCallItem

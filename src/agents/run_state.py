@@ -78,6 +78,8 @@ from .items import (
     CompactionItem,
     HandoffCallItem,
     HandoffOutputItem,
+    InputItem,
+    ItemHelpers,
     MCPApprovalRequestItem,
     MCPApprovalResponseItem,
     MCPListToolsItem,
@@ -145,6 +147,7 @@ if TYPE_CHECKING:
     from .items import ModelResponse, RunItem
     from .run_internal.run_steps import (
         NextStepInterruption,
+        NextStepRunAgain,
         ProcessedResponse,
         ToolRunFunction,
     )
@@ -192,7 +195,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.14": "Scopes hosted MCP approvals and restored requests by server label.",
     "1.15": (
         "Persists canonical tool invocation identity plus sanitized mount authority and trusted "
-        "rebind metadata across resume flows."
+        "rebind metadata, durable pending input, and resumable next-model-call state."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -280,6 +283,9 @@ class RunState(Generic[TContext, TAgent]):
     _session_items: list[RunItem] = field(default_factory=list)
     """Full, unfiltered run items for session history."""
 
+    _pending_input: list[TResponseInputItem] = field(default_factory=list)
+    """Input staged for admission immediately before the next resumed model call."""
+
     _nested_history_owned_session_item_refs: list[NestedHistoryOwnedItemRef] = field(
         default_factory=list
     )
@@ -315,8 +321,8 @@ class RunState(Generic[TContext, TAgent]):
     _tool_output_guardrail_results: list[ToolOutputGuardrailResult] = field(default_factory=list)
     """Results from tool output guardrails applied during the run."""
 
-    _current_step: NextStepInterruption | None = None
-    """Current step if the run is interrupted (e.g., for tool approval)."""
+    _current_step: NextStepInterruption | NextStepRunAgain | None = None
+    """Current resumable step, or ``None`` when the state is terminal."""
 
     _last_processed_response: ProcessedResponse | None = None
     """The last processed model response. This is needed for resuming from interruptions."""
@@ -367,6 +373,7 @@ class RunState(Generic[TContext, TAgent]):
         self._model_responses = []
         self._generated_items = []
         self._session_items = []
+        self._pending_input = []
         self._nested_history_owned_session_item_refs = []
         self._input_guardrail_results = []
         self._output_guardrail_results = []
@@ -384,6 +391,55 @@ class RunState(Generic[TContext, TAgent]):
         from .agent_tool_state import get_agent_tool_state_scope
 
         self._agent_tool_state_scope_id = get_agent_tool_state_scope(context)
+
+    @property
+    def pending_input(self) -> list[TResponseInputItem]:
+        """Return a copy of input currently staged for the next resumed model call."""
+        return copy.deepcopy(self._pending_input)
+
+    def add_input(self, input: str | list[TResponseInputItem]) -> None:
+        """Stage input for admission immediately before the next resumed model call.
+
+        String input is normalized to a user message. Multiple calls preserve insertion order.
+        The input remains pending until its guardrails and conversation ownership boundary accept
+        it. Terminal states reject new input before mutating the state.
+        """
+        from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
+
+        if not isinstance(self._current_step, NextStepInterruption | NextStepRunAgain):
+            raise UserError("Cannot add input to a terminal RunState")
+        if self._max_turns is not None and self._current_turn >= self._max_turns:
+            raise UserError("Cannot add input to a RunState with no remaining model turns")
+        if isinstance(self._current_step, NextStepInterruption):
+            if self._current_step.response_accepted:
+                raise UserError(
+                    "Cannot add input while an accepted model response is awaiting local processing"
+                )
+            if self._current_agent is None:
+                raise UserError("Cannot add input to a RunState without a current agent")
+            tool_use_behavior = self._current_agent.tool_use_behavior
+            interrupted_tool_names = {
+                item.tool_name
+                for item in self._current_step.interruptions
+                if item.tool_name is not None
+            }
+            stops_before_next_model = tool_use_behavior == "stop_on_first_tool" or (
+                isinstance(tool_use_behavior, dict)
+                and bool(
+                    interrupted_tool_names & set(tool_use_behavior.get("stop_at_tool_names", []))
+                )
+            )
+            if stops_before_next_model or callable(tool_use_behavior):
+                raise UserError(
+                    "Cannot add input to an interrupted RunState whose tool result may end the run"
+                )
+
+        normalized = ItemHelpers.input_to_new_input_list(input)
+        self._pending_input.extend(copy.deepcopy(normalized))
+
+    def clear_pending_input(self) -> None:
+        """Remove all input staged for the next resumed model call."""
+        self._pending_input = []
 
     def get_interruptions(self) -> list[ToolApprovalItem]:
         """Return pending interruptions if the current step is an interruption."""
@@ -693,13 +749,13 @@ class RunState(Generic[TContext, TAgent]):
             for resp in self._model_responses
         ]
 
-    def _serialize_original_input(self) -> str | list[Any]:
-        """Normalize original input into the shape expected by Responses API."""
-        if not isinstance(self._original_input, list):
-            return self._original_input
+    def _serialize_input(self, input: str | list[Any]) -> str | list[Any]:
+        """Normalize input into the shape expected by Responses API."""
+        if not isinstance(input, list):
+            return input
 
         normalized_items = []
-        for item in self._original_input:
+        for item in input:
             normalized_item = _serialize_raw_item_value(item)
             if isinstance(normalized_item, dict):
                 normalized_item = dict(normalized_item)
@@ -712,6 +768,10 @@ class RunState(Generic[TContext, TAgent]):
                         normalized_item["status"] = "completed"
             normalized_items.append(normalized_item)
         return normalized_items
+
+    def _serialize_original_input(self) -> str | list[Any]:
+        """Normalize original input into the shape expected by Responses API."""
+        return self._serialize_input(self._original_input)
 
     def _generated_session_item_indexes(
         self,
@@ -1063,6 +1123,7 @@ class RunState(Generic[TContext, TAgent]):
             "current_turn": self._current_turn,
             "current_agent": current_agent_entry,
             "original_input": original_input_serialized,
+            "pending_input": self._serialize_input(self._pending_input),
             "model_responses": model_responses,
             "context": context_entry,
             "tool_use_tracker": copy.deepcopy(self._tool_use_tracker_snapshot),
@@ -1188,15 +1249,18 @@ class RunState(Generic[TContext, TAgent]):
         }
 
     def _serialize_current_step(self) -> dict[str, Any] | None:
-        """Serialize the current step if it's an interruption."""
+        """Serialize the current resumable step."""
         # Import at runtime to avoid circular import
-        from .run_internal.run_steps import NextStepInterruption
+        from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
 
         agent_identity_keys_by_id = (
             _build_agent_identity_keys_by_id(cast(Agent[Any], self._starting_agent))
             if self._starting_agent is not None
             else None
         )
+
+        if isinstance(self._current_step, NextStepRunAgain):
+            return {"type": "next_step_run_again"}
 
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return None
@@ -1215,6 +1279,8 @@ class RunState(Generic[TContext, TAgent]):
             "type": "next_step_interruption",
             "data": {
                 "interruptions": interruptions_data,
+                "response_accepted": self._current_step.response_accepted,
+                "llm_end_hooks_started": self._current_step.llm_end_hooks_started,
             },
         }
 
@@ -1235,6 +1301,9 @@ class RunState(Generic[TContext, TAgent]):
                 agent_identity_keys_by_id=agent_identity_keys_by_id,
             ),
         }
+
+        if isinstance(item, InputItem):
+            result["input_id"] = item.input_id
 
         # Add additional fields based on item type
         if hasattr(item, "output"):
@@ -2803,6 +2872,10 @@ def _run_state_raw_items(state_json: Mapping[str, Any]) -> list[Any]:
     if isinstance(original_input, list):
         raw_items.extend(original_input)
 
+    pending_input = state_json.get("pending_input")
+    if isinstance(pending_input, list):
+        raw_items.extend(pending_input)
+
     for response_key in ("model_responses", "last_model_response"):
         responses = state_json.get(response_key)
         if isinstance(responses, Mapping):
@@ -3206,6 +3279,13 @@ async def _build_run_state_from_json(
     set_agent_tool_state_scope(context, state._agent_tool_state_scope_id)
 
     state._current_turn = state_json["current_turn"]
+    pending_input_raw = state_json.get("pending_input", [])
+    if not isinstance(pending_input_raw, list):
+        raise UserError("Run state pending_input must be a list")
+    state._pending_input = cast(
+        list[TResponseInputItem],
+        [dict(item) if isinstance(item, Mapping) else item for item in pending_input_raw],
+    )
     state._model_responses = _deserialize_model_responses(state_json.get("model_responses", []))
     serialized_generated_items = state_json.get("generated_items", [])
     state._generated_items, generated_source_indexes = _deserialize_items_with_source_indexes(
@@ -3368,7 +3448,11 @@ async def _build_run_state_from_json(
     )
 
     current_step_data = state_json.get("current_step")
-    if current_step_data and current_step_data.get("type") == "next_step_interruption":
+    if current_step_data and current_step_data.get("type") == "next_step_run_again":
+        from .run_internal.run_steps import NextStepRunAgain
+
+        state._current_step = NextStepRunAgain()
+    elif current_step_data and current_step_data.get("type") == "next_step_interruption":
         interruptions: list[ToolApprovalItem] = []
         interruptions_data = current_step_data.get("data", {}).get(
             "interruptions", current_step_data.get("interruptions", [])
@@ -3385,8 +3469,16 @@ async def _build_run_state_from_json(
         from .run_internal.run_steps import NextStepInterruption
 
         state._current_step = NextStepInterruption(
-            interruptions=[item for item in interruptions if isinstance(item, ToolApprovalItem)]
+            interruptions=[item for item in interruptions if isinstance(item, ToolApprovalItem)],
+            response_accepted=bool(
+                current_step_data.get("data", {}).get("response_accepted", False)
+            ),
+            llm_end_hooks_started=bool(
+                current_step_data.get("data", {}).get("llm_end_hooks_started", True)
+            ),
         )
+        if state._current_step.response_accepted:
+            state._clear_generated_items_last_processed_marker()
         for approval_item in state._current_step.interruptions:
             context._mark_restored_unbound_pending_approval(approval_item)
 
@@ -3581,7 +3673,17 @@ def _validate_completed_tool_invocations(
     if state._last_processed_response is not None:
         for run_item in state._last_processed_response.new_items:
             record_run_item(run_item)
-    for response in state._model_responses:
+    responses_for_invocation_validation = state._model_responses
+    if (
+        state._last_processed_response is None
+        and getattr(state._current_step, "response_accepted", False)
+        and responses_for_invocation_validation
+    ):
+        # A server-accepted response is checkpointed before fallible local processing. Its raw
+        # invocations remain durable for diagnostics, but they are not registered runtime work
+        # unless response processing succeeds.
+        responses_for_invocation_validation = responses_for_invocation_validation[:-1]
+    for response in responses_for_invocation_validation:
         for raw_item in response.output:
             record_raw_item(raw_item, allow_handoff_alternative=True)
     if isinstance(state._original_input, list):
@@ -4307,7 +4409,22 @@ def _deserialize_items(
         )
 
         try:
-            if item_type == "message_output_item":
+            if item_type == "input_item":
+                input_id = item_data.get("input_id")
+                if isinstance(input_id, str):
+                    input_item = InputItem(
+                        agent=agent,
+                        raw_item=cast(TResponseInputItem, normalized_raw_item),
+                        input_id=input_id,
+                    )
+                else:
+                    input_item = InputItem(
+                        agent=agent,
+                        raw_item=cast(TResponseInputItem, normalized_raw_item),
+                    )
+                result.append(input_item)
+
+            elif item_type == "message_output_item":
                 raw_item_msg = _deserialize_message_output_item(normalized_raw_item)
                 result.append(MessageOutputItem(agent=agent, raw_item=raw_item_msg))
 

@@ -2,10 +2,12 @@
 
 import tempfile
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from agents import Agent, RunConfig, SQLiteSession
+from agents.items import TResponseInputItem
 from agents.memory import SessionSettings
 from tests.fake_model import FakeModel
 from tests.memory.test_session import run_agent_async
@@ -59,6 +61,63 @@ async def test_session_limit_parameter(runner_method):
         assert last_input[1].get("content")[0]["text"] == "Reply 3"
         assert last_input[2].get("content") == "Message 4"
 
+        session.close()
+
+
+@pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
+@pytest.mark.asyncio
+async def test_session_limit_drops_unmatched_history_function_call_output(runner_method):
+    """A limit boundary must not pass an output whose matching call was excluded."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        session = SQLiteSession("limit_tool_pair", Path(temp_dir) / "test_limit_tool_pair.db")
+        history = cast(
+            list[TResponseInputItem],
+            [
+                {"role": "user", "content": "What is the weather?"},
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "get_weather",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "sunny",
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "It is sunny.",
+                            "annotations": [],
+                        }
+                    ],
+                },
+            ],
+        )
+        await session.add_items(history)
+
+        assert await session.get_items(limit=2) == history[-2:]
+
+        model = FakeModel()
+        model.set_next_output([get_text_message("Tomorrow is sunny too.")])
+        agent = Agent(name="test", model=model)
+
+        await run_agent_async(
+            runner_method,
+            agent,
+            "What about tomorrow?",
+            session=session,
+            run_config=RunConfig(session_settings=SessionSettings(limit=2)),
+        )
+
+        assert model.last_turn_args["input"] == [
+            history[-1],
+            {"role": "user", "content": "What about tomorrow?"},
+        ]
         session.close()
 
 

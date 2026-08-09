@@ -15,7 +15,15 @@ from typing import Any, cast
 
 from .. import _debug
 from ..exceptions import UserError
-from ..items import HandoffOutputItem, ItemHelpers, RunItem, ToolCallOutputItem, TResponseInputItem
+from ..items import (
+    HandoffOutputItem,
+    InputItem,
+    ItemHelpers,
+    ModelResponse,
+    RunItem,
+    ToolCallOutputItem,
+    TResponseInputItem,
+)
 from ..logger import (
     log_model_and_tool_action_debug,
     log_model_and_tool_action_warning,
@@ -52,9 +60,11 @@ from .items import (
     strip_internal_input_item_metadata,
 )
 from .oai_conversation import OpenAIServerConversationTracker
-from .run_steps import SingleStepResult
+from .run_steps import NextStepInterruption, ProcessedResponse, SingleStepResult
 
 __all__ = [
+    "admit_pending_input",
+    "commit_server_pending_input",
     "prepare_input_with_session",
     "persist_session_items_for_guardrail_trip",
     "reconcile_nested_history_owned_session_item_refs",
@@ -70,6 +80,110 @@ __all__ = [
 
 
 _SESSION_LIMIT_UNSET = object()
+
+
+async def admit_pending_input(
+    *,
+    run_state: RunState[Any],
+    agent: Any,
+    session: Session | None,
+    server_conversation_tracker: OpenAIServerConversationTracker | None,
+    store: bool | None,
+    wrapper: RunContextWrapper[Any],
+) -> list[RunItem]:
+    """Admit staged RunState input into the active conversation ownership boundary.
+
+    The caller must run pending-input guardrails first. Client-managed sessions accept the input
+    before the model call, while server-managed conversations keep it pending until a model
+    response confirms that the server accepted the request.
+    """
+    pending_input = run_state.pending_input
+    if not pending_input:
+        return []
+
+    admission_items: list[RunItem] = [
+        InputItem(agent=agent, raw_item=item) for item in pending_input
+    ]
+
+    if session is not None and server_conversation_tracker is None:
+        await save_result_to_session(
+            session,
+            [],
+            admission_items,
+            None,
+            store=store,
+            wrapper=wrapper,
+        )
+    if server_conversation_tracker is None:
+        run_state.clear_pending_input()
+
+    return admission_items
+
+
+def commit_server_pending_input(
+    *,
+    run_state: RunState[Any],
+    tracker: OpenAIServerConversationTracker,
+    admission_items: list[InputItem],
+    generated_items: list[RunItem],
+    session_items: list[RunItem],
+    model_response: ModelResponse,
+    processed_response: ProcessedResponse | None,
+    current_turn: int,
+) -> bool:
+    """Commit only pending-input occurrences accepted by a server-managed request."""
+    if not admission_items:
+        return False
+
+    admission_ids = {item.input_id for item in admission_items}
+    accepted_ids = admission_ids & tracker.accepted_input_item_ids
+
+    def retain_accepted_admissions(items: list[RunItem]) -> None:
+        items[:] = [
+            item
+            for item in items
+            if not (
+                isinstance(item, InputItem)
+                and item.input_id in admission_ids
+                and item.input_id not in accepted_ids
+            )
+        ]
+
+    retain_accepted_admissions(generated_items)
+    retain_accepted_admissions(session_items)
+    run_state._pending_input = copy.deepcopy(
+        [item.raw_item for item in admission_items if item.input_id not in accepted_ids]
+    )
+
+    # A model input filter may omit every staged occurrence. In that case the response does not
+    # acknowledge pending input, so normal turn processing owns the response and the input remains
+    # available for a later request.
+    if not accepted_ids:
+        return False
+
+    state_generated_items = list(generated_items)
+    state_session_items = list(session_items)
+
+    run_state._generated_items = state_generated_items
+    run_state._session_items = state_session_items
+    if not run_state._model_responses or run_state._model_responses[-1] is not model_response:
+        run_state._model_responses.append(model_response)
+    run_state._last_processed_response = processed_response
+    run_state._current_step = NextStepInterruption(
+        interruptions=(
+            list(processed_response.interruptions) if processed_response is not None else []
+        ),
+        response_accepted=True,
+        llm_end_hooks_started=False,
+    )
+    run_state._current_turn = current_turn
+    run_state._conversation_id = tracker.conversation_id
+    run_state._previous_response_id = tracker.previous_response_id
+    run_state._auto_previous_response_id = tracker.auto_previous_response_id
+    # The accepted model response is durable, but its processed items have not yet been merged
+    # because local hooks and tool work can still fail. Preserve that distinction across retries.
+    run_state._clear_generated_items_last_processed_marker()
+    return True
 
 
 async def _session_get_items(
@@ -258,6 +372,7 @@ async def prepare_input_with_session(
     ]
 
     prune_history_indexes: set[int] = set()
+    output_pruning_indexes: set[int] | None = None
 
     if session_input_callback is None or not include_history_in_prepared_input:
         prepared_items_raw: list[TResponseInputItem] = (
@@ -268,6 +383,8 @@ async def prepare_input_with_session(
         appended_items = list(new_input_list)
         if include_history_in_prepared_input:
             prune_history_indexes = set(range(len(converted_history)))
+            if session_input_callback is None and resolved_settings.limit is not None:
+                output_pruning_indexes = set(prune_history_indexes)
     else:
         if not callable(session_input_callback):
             raise UserError(
@@ -351,6 +468,7 @@ async def prepare_input_with_session(
     filtered = drop_orphan_function_calls(
         prepared_as_inputs,
         pruning_indexes=prune_history_indexes,
+        output_pruning_indexes=output_pruning_indexes,
     )
     normalized = normalize_input_items_for_api(filtered)
     deduplicated = deduplicate_input_items_preferring_latest(normalized)

@@ -132,16 +132,11 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
     def _validate_manifest_for_create(
         self,
         manifest: Manifest,
-        *,
-        allowed_in_container_credential_strategy_types: frozenset[str] = frozenset(),
     ) -> Manifest:
         from .._mount_security import validate_manifest_mount_credential_boundaries
 
         validate_manifest_mount_credential_boundaries(
             manifest,
-            allowed_in_container_credential_strategy_types=(
-                allowed_in_container_credential_strategy_types
-            ),
             provider_backend_id=self.backend_id,
         )
         return manifest

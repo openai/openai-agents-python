@@ -202,8 +202,20 @@ def _extract_tool_call_id(raw: Any) -> str | None:
 
 
 def get_unsent_tool_call_ids_for_interrupted_state(run_state: RunState[Any] | None) -> set[str]:
-    """Return tool call IDs whose local outputs belong to the current interruption."""
-    if run_state is None or not isinstance(run_state._current_step, NextStepInterruption):
+    """Return tool call IDs whose local outputs have not reached a server conversation."""
+    if run_state is None:
+        return set()
+
+    if isinstance(run_state._current_step, NextStepRunAgain):
+        if not run_state._model_responses:
+            return set()
+        return {
+            call_id
+            for item in run_state._model_responses[-1].output
+            if (call_id := _extract_tool_call_id(item)) is not None
+        }
+
+    if not isinstance(run_state._current_step, NextStepInterruption):
         return set()
 
     processed_response = run_state._last_processed_response

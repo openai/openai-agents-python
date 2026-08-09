@@ -27,7 +27,9 @@ from .guardrail import (
     OutputGuardrailResult,
 )
 from .items import (
+    InputItem,
     ItemHelpers,
+    ModelResponse,
     RunItem,
     TResponseInputItem,
 )
@@ -110,9 +112,12 @@ from .run_internal.run_steps import (
     NextStepHandoff,
     NextStepInterruption,
     NextStepRunAgain,
+    ProcessedResponse,
 )
 from .run_internal.session_persistence import (
     _session_get_items,
+    admit_pending_input,
+    commit_server_pending_input,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
@@ -775,6 +780,8 @@ class AgentRunner:
                         finalized_result._generated_prompt_cache_key = (
                             run_state._generated_prompt_cache_key
                         )
+                        finalized_result._pending_input_for_state = run_state.pending_input
+                        finalized_result._current_step_for_state = run_state._current_step
                         finalized_result._nested_history_owned_session_item_refs = list(
                             run_state._nested_history_owned_session_item_refs
                         )
@@ -782,9 +789,44 @@ class AgentRunner:
                     return finalized_result
 
                 pending_server_items: list[RunItem] | None = None
+                pending_input_admission_items: list[InputItem] = []
                 input_guardrail_results: list[InputGuardrailResult] = (
                     list(run_state._input_guardrail_results) if run_state is not None else []
                 )
+                input_guardrail_attempt_start = len(input_guardrail_results)
+
+                def _attempt_input_guardrail_results() -> list[InputGuardrailResult]:
+                    return input_guardrail_results[input_guardrail_attempt_start:]
+
+                def _commit_pending_server_response(
+                    model_response: ModelResponse,
+                    processed_response: ProcessedResponse | None,
+                ) -> bool:
+                    if (
+                        run_state is None
+                        or server_conversation_tracker is None
+                        or not pending_input_admission_items
+                    ):
+                        return False
+                    return commit_server_pending_input(
+                        run_state=run_state,
+                        tracker=server_conversation_tracker,
+                        admission_items=pending_input_admission_items,
+                        generated_items=generated_items,
+                        session_items=session_items,
+                        model_response=model_response,
+                        processed_response=processed_response,
+                        current_turn=current_turn,
+                    )
+
+                def _mark_response_hooks_started() -> None:
+                    if run_state is None or not isinstance(
+                        run_state._current_step, NextStepInterruption
+                    ):
+                        return
+                    if run_state._current_step.response_accepted:
+                        run_state._current_step.llm_end_hooks_started = True
+
                 # Output guardrails run once, at the end of the run. Accumulate their results
                 # here so the failure handler below can report them on the raised exception.
                 output_guardrail_results: list[OutputGuardrailResult] = []
@@ -946,11 +988,15 @@ class AgentRunner:
                     if run_state is not None and run_state._current_step is not None:
                         if isinstance(run_state._current_step, NextStepInterruption):
                             logger.debug("Continuing from interruption")
-                            if (
-                                not run_state._model_responses
-                                or not run_state._last_processed_response
-                            ):
+                            if not run_state._model_responses:
                                 raise UserError("No model response found in previous state")
+                            if run_state._last_processed_response is None:
+                                if run_state._current_step.response_accepted:
+                                    raise UserError(
+                                        "An accepted model response could not be processed; "
+                                        "start a new run instead of retrying it"
+                                    )
+                                raise UserError("No processed response found in previous state")
 
                             turn_result = await resolve_interrupted_turn(
                                 bindings=current_bindings,
@@ -963,6 +1009,7 @@ class AgentRunner:
                                 run_config=run_config,
                                 server_manages_conversation=server_conversation_tracker is not None,
                                 run_state=run_state,
+                                error_handlers=error_handlers,
                             )
 
                             if run_state._last_processed_response is not None:
@@ -1129,6 +1176,7 @@ class AgentRunner:
                                         wrapper=context_wrapper,
                                     )
                                 result._original_input = copy_input_items(original_input)
+                                run_state._current_step = None
                                 return _finalize_result(result)
                             elif isinstance(turn_result.next_step, NextStepHandoff):
                                 current_agent = cast(
@@ -1148,7 +1196,42 @@ class AgentRunner:
 
                     if run_state is not None:
                         if run_state._current_step is None:
-                            run_state._current_step = NextStepRunAgain()  # type: ignore[assignment]
+                            run_state._current_step = NextStepRunAgain()
+
+                        pending_input = run_state.pending_input
+                        if pending_input:
+                            pending_guardrails = current_agent.input_guardrails + (
+                                run_config.input_guardrails or []
+                            )
+                            try:
+                                await run_input_guardrails(
+                                    current_agent,
+                                    pending_guardrails,
+                                    pending_input,
+                                    context_wrapper,
+                                    input_guardrail_results,
+                                )
+                            finally:
+                                run_state._input_guardrail_results = list(input_guardrail_results)
+
+                            admission_items = await admit_pending_input(
+                                run_state=run_state,
+                                agent=current_agent,
+                                session=session,
+                                server_conversation_tracker=server_conversation_tracker,
+                                store=store_setting,
+                                wrapper=context_wrapper,
+                            )
+                            generated_items.extend(admission_items)
+                            session_items.extend(admission_items)
+                            if pending_server_items is not None:
+                                pending_server_items.extend(admission_items)
+                            pending_input_admission_items = [
+                                item for item in admission_items if isinstance(item, InputItem)
+                            ]
+                            if not run_state._pending_input:
+                                run_state._generated_items = list(generated_items)
+                                run_state._session_items = list(session_items)
                     all_tools = await get_all_tools(execution_agent, context_wrapper)
                     all_tools = await initialize_computer_tools(
                         tools=all_tools, context_wrapper=context_wrapper
@@ -1343,6 +1426,9 @@ class AgentRunner:
                                     prompt_cache_key_resolver=prompt_cache_key_resolver,
                                     error_handlers=error_handlers,
                                     agent_span=current_span,
+                                    on_response_accepted=_commit_pending_server_response,
+                                    on_response_hooks_started=_mark_response_hooks_started,
+                                    run_state=run_state,
                                 )
                             )
 
@@ -1415,6 +1501,9 @@ class AgentRunner:
                                 prompt_cache_key_resolver=prompt_cache_key_resolver,
                                 error_handlers=error_handlers,
                                 agent_span=current_span,
+                                on_response_accepted=_commit_pending_server_response,
+                                on_response_hooks_started=_mark_response_hooks_started,
+                                run_state=run_state,
                             )
                     finally:
                         if current_turn_span is not None:
@@ -1436,6 +1525,14 @@ class AgentRunner:
                     # Accumulate unfiltered items for observability.
                     turn_session_items = session_items_for_turn(turn_result)
                     session_items.extend(turn_session_items)
+                    if pending_input_admission_items and run_state is not None:
+                        run_state._generated_items = list(generated_items)
+                        run_state._session_items = list(session_items)
+                        run_state._model_responses = list(model_responses)
+                        run_state._last_processed_response = turn_result.processed_response
+                        run_state._current_turn = current_turn
+                        run_state._mark_generated_items_merged_with_last_processed()
+                    pending_input_admission_items = []
                     if run_state is not None and turn_result.nested_history_owned_items is not None:
                         run_state._nested_history_owned_session_item_refs = (
                             reconcile_nested_history_owned_session_item_refs(
@@ -1538,7 +1635,7 @@ class AgentRunner:
                                     session=session,
                                     run_state=run_state,
                                     session_persistence_enabled=session_persistence_enabled,
-                                    input_guardrail_results=input_guardrail_results,
+                                    input_guardrail_results=_attempt_input_guardrail_results(),
                                     items=_retained_items_for_blocked_output(items_to_save_turn),
                                     response_id=turn_result.model_response.response_id,
                                     store=store_setting,
@@ -1552,7 +1649,7 @@ class AgentRunner:
                                     session=session,
                                     run_state=run_state,
                                     session_persistence_enabled=session_persistence_enabled,
-                                    input_guardrail_results=input_guardrail_results,
+                                    input_guardrail_results=_attempt_input_guardrail_results(),
                                     items=items_to_save_turn,
                                     response_id=turn_result.model_response.response_id,
                                     store=store_setting,
@@ -1564,7 +1661,7 @@ class AgentRunner:
                                 session=session,
                                 run_state=run_state,
                                 session_persistence_enabled=session_persistence_enabled,
-                                input_guardrail_results=input_guardrail_results,
+                                input_guardrail_results=_attempt_input_guardrail_results(),
                                 items=items_to_save_turn,
                                 response_id=turn_result.model_response.response_id,
                                 store=store_setting,
@@ -1600,10 +1697,14 @@ class AgentRunner:
                                     run_state._current_turn_persisted_item_count
                                 )
                             result._original_input = copy_input_items(original_input)
+                            if run_state is not None:
+                                run_state._current_step = None
                             return _finalize_result(result)
                         elif isinstance(turn_result.next_step, NextStepInterruption):
                             if session_persistence_enabled:
-                                if not input_guardrails_triggered(input_guardrail_results):
+                                if not input_guardrails_triggered(
+                                    _attempt_input_guardrail_results()
+                                ):
                                     # Persist session items but skip approval placeholders.
                                     input_items_for_save_interruption: list[TResponseInputItem] = (
                                         session_input_items_for_persistence

@@ -138,6 +138,8 @@ class RunloopCloudBucketMountStrategy(MountStrategyBase):
         validate_mount_activation_credential_boundary(
             mount,
             self,
+            manifest=getattr(getattr(session, "state", None), "manifest", None),
+            mount_path=lambda: mount._resolve_mount_path(session, dest),
             provider_backend_id="runloop",
         )
         _assert_runloop_session(session)
@@ -176,6 +178,8 @@ class RunloopCloudBucketMountStrategy(MountStrategyBase):
         validate_mount_activation_credential_boundary(
             mount,
             self,
+            manifest=getattr(getattr(session, "state", None), "manifest", None),
+            mount_path=path,
             provider_backend_id="runloop",
         )
         _assert_runloop_session(session)

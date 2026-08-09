@@ -557,10 +557,16 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             manifest.model_copy(deep=True),
             run_as_user,
         )
+        mount_credential_exposure_policy = processed_manifest._mount_credential_exposure_policy
         for capability in capabilities:
             safe_error: RuntimeError | None = None
             try:
                 processed_manifest = capability.process_manifest(processed_manifest)
+                mount_credential_exposure_policy = (
+                    processed_manifest._merge_mount_credential_exposure_policy(
+                        mount_credential_exposure_policy
+                    )
+                )
             except Exception as error:
                 if not _manifest_has_configured_mount_authority(processed_manifest):
                     raise
@@ -571,6 +577,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                 capability = cast(Any, None)
                 manifest = None
                 processed_manifest = cast(Any, None)
+                mount_credential_exposure_policy = cast(Any, None)
                 run_as_user = None
                 _raise_data_redacted_error(safe_error)
         return processed_manifest

@@ -264,7 +264,17 @@ class InContainerMountStrategy(MountStrategyBase):
     ) -> list[MaterializedFile]:
         from ..._mount_security import validate_mount_activation_credential_boundary
 
-        validate_mount_activation_credential_boundary(mount, self)
+        validate_mount_activation_credential_boundary(
+            mount,
+            self,
+            manifest=getattr(session.state, "manifest", None),
+            mount_path=(
+                (lambda: mount._resolve_mount_path(session, dest))
+                if getattr(session.state, "manifest", None) is not None
+                else None
+            ),
+            provider_backend_id=session.state.type,
+        )
         return await mount.in_container_adapter().activate(self, session, dest, base_dir)
 
     async def deactivate(
@@ -293,7 +303,13 @@ class InContainerMountStrategy(MountStrategyBase):
     ) -> None:
         from ..._mount_security import validate_mount_activation_credential_boundary
 
-        validate_mount_activation_credential_boundary(mount, self)
+        validate_mount_activation_credential_boundary(
+            mount,
+            self,
+            manifest=getattr(session.state, "manifest", None),
+            mount_path=path,
+            provider_backend_id=session.state.type,
+        )
         await mount.in_container_adapter().restore_after_snapshot(self, session, path)
 
     def build_docker_volume_driver_config(
@@ -462,6 +478,12 @@ class Mount(BaseEntry):
         validate_mount_activation_credential_boundary(
             self,
             self.mount_strategy,
+            manifest=getattr(session.state, "manifest", None),
+            mount_path=(
+                (lambda: self._resolve_mount_path(session, dest))
+                if getattr(session.state, "manifest", None) is not None
+                else None
+            ),
             provider_backend_id=session.state.type,
         )
         return await self.mount_strategy.activate(self, session, dest, base_dir)

@@ -795,6 +795,7 @@ async def execute_tools_and_side_effects(
     error_handlers: RunErrorHandlers[TContext] | None = None,
     server_manages_conversation: bool = False,
     precomputed_skipped_raw_item_ids: set[int] | None = None,
+    run_state: RunState[Any] | None = None,
 ) -> SingleStepResult:
     """Run one turn of the loop, coordinating tools, approvals, guardrails, and handoffs."""
     public_agent = bindings.public_agent
@@ -836,6 +837,15 @@ async def execute_tools_and_side_effects(
         skipped_raw_item_ids=skipped_raw_item_ids,
     )
 
+    def _commit_accepted_response_tool_output(item: RunItem) -> None:
+        if run_state is None or not isinstance(run_state._current_step, NextStepInterruption):
+            return
+        if not run_state._current_step.response_accepted:
+            return
+        for target in (run_state._generated_items, run_state._session_items):
+            if item not in target:
+                target.append(item)
+
     (
         function_results,
         tool_input_guardrail_results,
@@ -851,6 +861,7 @@ async def execute_tools_and_side_effects(
         hooks=hooks,
         context_wrapper=context_wrapper,
         run_config=run_config,
+        tool_output_committer=_commit_accepted_response_tool_output,
     )
     new_step_items.extend(
         _build_tool_result_items(
@@ -1132,11 +1143,48 @@ async def resolve_interrupted_turn(
     run_config: RunConfig,
     server_manages_conversation: bool = False,
     run_state: RunState | None = None,
+    error_handlers: RunErrorHandlers[TContext] | None = None,
     nest_handoff_history_fn: Callable[..., HandoffInputData] | None = None,
 ) -> SingleStepResult:
     """Continue a turn that was previously interrupted waiting for tool approval."""
     public_agent = bindings.public_agent
     execution_agent = bindings.execution_agent
+
+    current_step = run_state._current_step if run_state is not None else None
+    if (
+        isinstance(current_step, NextStepInterruption)
+        and current_step.response_accepted
+        and not current_step.llm_end_hooks_started
+    ):
+        current_step.llm_end_hooks_started = True
+        await gather_with_cancel(
+            (
+                public_agent.hooks.on_llm_end(context_wrapper, public_agent, new_response)
+                if public_agent.hooks is not None
+                else _coro.noop_coroutine()
+            ),
+            hooks.on_llm_end(context_wrapper, public_agent, new_response),
+        )
+
+    if (
+        isinstance(current_step, NextStepInterruption)
+        and current_step.response_accepted
+        and not processed_response.has_tools_or_approvals_to_run()
+    ):
+        return await execute_tools_and_side_effects(
+            bindings=bindings,
+            original_input=original_input,
+            pre_step_items=original_pre_step_items,
+            new_response=new_response,
+            processed_response=processed_response,
+            output_schema=get_output_schema(execution_agent),
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+            error_handlers=error_handlers,
+            server_manages_conversation=server_manages_conversation,
+            run_state=run_state,
+        )
 
     execute_handoffs_call = execute_handoffs
 
@@ -3363,8 +3411,10 @@ async def get_single_step_result_from_response(
     tool_use_tracker,
     error_handlers: RunErrorHandlers[TContext] | None = None,
     server_manages_conversation: bool = False,
-    after_invocation_validation: Callable[[list[RunItem] | None], Awaitable[None]] | None = None,
+    after_invocation_validation: Callable[[ProcessedResponse | None], Awaitable[bool]]
+    | None = None,
     before_side_effects: Callable[[], Awaitable[None]] | None = None,
+    run_state: RunState[Any] | None = None,
 ) -> SingleStepResult:
     item_agent = bindings.public_agent
     try:
@@ -3406,7 +3456,7 @@ async def get_single_step_result_from_response(
     )
 
     if after_invocation_validation is not None:
-        await after_invocation_validation(processed_response.new_items)
+        await after_invocation_validation(processed_response)
 
     if before_side_effects is not None:
         await before_side_effects()
@@ -3426,4 +3476,5 @@ async def get_single_step_result_from_response(
         error_handlers=error_handlers,
         server_manages_conversation=server_manages_conversation,
         precomputed_skipped_raw_item_ids=skipped_raw_item_ids,
+        run_state=run_state,
     )
