@@ -375,6 +375,78 @@ def test_acknowledgement_accepts_complete_in_container_gcs_hmac_credentials() ->
     validate_manifest_mount_credential_boundaries(manifest)
 
 
+@pytest.mark.parametrize("blank_value", ["", "   "])
+@pytest.mark.parametrize(
+    ("mount_factory", "broad", "invalid_field"),
+    [
+        (
+            lambda value: GCSMount(
+                bucket="example-bucket",
+                access_token=value,
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            ),
+            False,
+            "access_token",
+        ),
+        (
+            lambda value: GCSMount(
+                bucket="example-bucket",
+                service_account_credentials=value,
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            ),
+            False,
+            "service_account_credentials",
+        ),
+        (
+            lambda value: GCSMount(
+                bucket="example-bucket",
+                service_account_file=value,
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            ),
+            True,
+            "service_account_file",
+        ),
+        (
+            lambda value: AzureBlobMount(
+                account="example-account",
+                container="example-container",
+                account_key=value,
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            ),
+            False,
+            "account_key",
+        ),
+        (
+            lambda value: AzureBlobMount(
+                account="example-account",
+                container="example-container",
+                identity_client_id=value,
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            ),
+            True,
+            "identity_client_id",
+        ),
+    ],
+)
+def test_acknowledgement_rejects_empty_in_container_scalar_authority(
+    mount_factory: Any,
+    broad: bool,
+    invalid_field: str,
+    blank_value: str,
+) -> None:
+    manifest = Manifest(entries={"data": mount_factory(blank_value)})
+    acknowledged = (
+        manifest.with_in_container_mount_broad_credential_exposure_acknowledged("data")
+        if broad
+        else manifest.with_in_container_mount_credential_exposure_acknowledged("data")
+    )
+
+    with pytest.raises(MountConfigError, match="must not be empty or whitespace-only") as exc_info:
+        validate_manifest_mount_credential_boundaries(acknowledged)
+
+    assert exc_info.value.context["credential_fields"] == (invalid_field,)
+
+
 @pytest.mark.parametrize(
     ("credentials", "invalid_fields"),
     [
@@ -424,6 +496,17 @@ def test_acknowledgement_rejects_incomplete_in_container_r2_credentials(
             bucket="example-bucket",
             account_id="example-account",
             access_key_id="access-key",
+            mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+        ),
+        GCSMount(
+            bucket="example-bucket",
+            access_token="",
+            mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+        ),
+        AzureBlobMount(
+            account="example-account",
+            container="example-container",
+            identity_client_id=" ",
             mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
         ),
     ],

@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import logging
+import shlex
 import tarfile
 import time
 import uuid
@@ -3158,6 +3159,65 @@ class TestMountsModule:
         assert credential_path.name.startswith(".openai-agents-gcs-creds-")
         assert credential_payload == service_account_key.encode()
         assert "gcs-secret-command-sentinel" not in repr(session.exec_calls)
+
+    @pytest.mark.asyncio
+    async def test_mount_gcs_quotes_generated_key_path(self) -> None:
+        from agents.extensions.sandbox.blaxel.mounts import BlaxelCloudBucketMountConfig, _mount_gcs
+
+        session = _FakeMountSession()
+        session.state.manifest = Manifest(root="/workspace data;echo not-executed")
+        session._next_results = [
+            _FakeExecResultForMount(exit_code=0),  # which gcsfuse
+            _FakeExecResultForMount(exit_code=0),  # chmod key
+            _FakeExecResultForMount(exit_code=0),  # mkdir
+            _FakeExecResultForMount(exit_code=0),  # gcsfuse mount
+            _FakeExecResultForMount(exit_code=0),  # rm key
+        ]
+
+        config = BlaxelCloudBucketMountConfig(
+            provider="gcs",
+            bucket="gcs-bucket",
+            mount_path="/mnt/gcs",
+            service_account_key='{"private_key":"gcs-secret"}',
+        )
+        await _mount_gcs(session, config)  # type: ignore[arg-type]
+
+        credential_path, _credential_payload = session.write_calls[0]
+        mount_command = session.exec_calls[3][0][2]
+        assert f"--key-file={credential_path.as_posix()}" in shlex.split(mount_command)
+        assert "echo" not in shlex.split(mount_command)
+
+    @pytest.mark.asyncio
+    async def test_mount_gcs_aborts_and_cleans_up_when_credential_chmod_fails(self) -> None:
+        from agents.extensions.sandbox.blaxel.mounts import BlaxelCloudBucketMountConfig, _mount_gcs
+
+        session = _FakeMountSession()
+        service_account_key = '{"private_key":"gcs-chmod-secret"}'
+        session._next_results = [
+            _FakeExecResultForMount(exit_code=0),  # which gcsfuse
+            _FakeExecResultForMount(exit_code=1),  # chmod key
+            _FakeExecResultForMount(exit_code=0),  # rm key
+        ]
+
+        config = BlaxelCloudBucketMountConfig(
+            provider="gcs",
+            bucket="gcs-bucket",
+            mount_path="/mnt/gcs",
+            service_account_key=service_account_key,
+        )
+        with pytest.raises(
+            MountConfigError,
+            match="failed to restrict mount credential file permissions",
+        ):
+            await _mount_gcs(session, config)  # type: ignore[arg-type]
+
+        commands = [call[0][2] for call in session.exec_calls]
+        assert len(session.write_calls) == 1
+        assert any(command.startswith("chmod 600 ") for command in commands)
+        assert any(command.startswith("rm -f ") for command in commands)
+        assert not any(command.startswith("mkdir -p ") for command in commands)
+        assert not any(command.startswith("gcsfuse ") for command in commands)
+        assert "gcs-chmod-secret" not in repr(session.exec_calls)
 
     @pytest.mark.asyncio
     async def test_mount_gcs_anonymous(self) -> None:

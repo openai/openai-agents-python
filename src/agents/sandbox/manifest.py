@@ -358,7 +358,26 @@ class Manifest(BaseModel):
         key = self._mount_credential_exposure_policy_key(mount_path, reject_root=False)
         if key is None:
             return False
-        return key in getattr(self._mount_credential_exposure_policy, authority)
+        lookup_keys = {key}
+        kind, _, path_text = key.partition(":")
+        root = coerce_posix_path(self.root)
+        root_normalized = PurePosixPath(
+            "/",
+            *[part for part in root.parts if part not in {"/", ""}],
+        )
+        if kind == "absolute":
+            try:
+                relative = PurePosixPath(path_text).relative_to(root_normalized)
+            except ValueError:
+                pass
+            else:
+                if relative.parts:
+                    lookup_keys.add(f"relative:{relative.as_posix()}")
+        else:
+            absolute = root_normalized / PurePosixPath(path_text)
+            lookup_keys.add(f"absolute:{absolute.as_posix()}")
+        acknowledged = getattr(self._mount_credential_exposure_policy, authority)
+        return not lookup_keys.isdisjoint(acknowledged)
 
     def _copy_mount_credential_exposure_policy_from(self, *sources: "Manifest") -> None:
         mount_scoped: set[str] = set()
@@ -434,11 +453,7 @@ class Manifest(BaseModel):
             if reject_root:
                 raise ValueError("Mount credential exposure path must identify a non-root path.")
             return None
-        try:
-            absolute_relative = normalized.relative_to(root_normalized)
-        except ValueError:
-            return f"absolute:{normalized.as_posix()}"
-        return f"relative:{absolute_relative.as_posix()}"
+        return f"absolute:{normalized.as_posix()}"
 
     def ephemeral_entry_paths(self, depth: int | None = 1) -> set[Path]:
         _ = depth

@@ -880,12 +880,12 @@ def _mount_has_usable_required_authority(
     return False
 
 
-def _invalid_required_authority_fields(
+def _invalid_in_container_authority_value_fields(
     mount: Mount,
-    required_fields: Collection[str],
+    mount_type: str,
 ) -> tuple[str, ...]:
     invalid: list[str] = []
-    for field_name in required_fields:
+    for field_name in _AUTHORITY_FIELDS_BY_MOUNT_TYPE.get(mount_type, ()):
         value = getattr(mount, field_name, None)
         if value is not None and (not isinstance(value, str) or not value.strip()):
             invalid.append(field_name)
@@ -1259,6 +1259,20 @@ def _mount_boundary_error(
             },
         )
 
+    invalid_authority_value_fields = (
+        _invalid_in_container_authority_value_fields(mount, mount_type)
+        if executes_in_container
+        else ()
+    )
+    if invalid_authority_value_fields:
+        return MountConfigError(
+            message="in-container mount authentication values must not be empty or whitespace-only",
+            context={
+                "mount_type": mount.type,
+                "credential_fields": invalid_authority_value_fields,
+            },
+        )
+
     authority_fields = frozenset(_configured_mount_authority_fields(mount))
     if strategy_boundary == "external":
         return None
@@ -1275,19 +1289,6 @@ def _mount_boundary_error(
     requires_implicit_broad = bool(
         capability is not None and capability.enables_broad_credential_discovery
     )
-    invalid_required_fields = (
-        _invalid_required_authority_fields(mount, capability.required_any_fields)
-        if capability is not None
-        else ()
-    )
-    if invalid_required_fields:
-        return MountConfigError(
-            message="in-container mount authentication values must not be empty or whitespace-only",
-            context={
-                "mount_type": mount.type,
-                "credential_fields": invalid_required_fields,
-            },
-        )
     if (
         capability is not None
         and capability.required_any_fields

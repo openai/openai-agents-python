@@ -312,7 +312,12 @@ async def _write_mount_credential_file(
     content: str,
 ) -> None:
     await session.write(path, io.BytesIO(content.encode()))
-    await _exec(session, f"chmod 600 {shlex.quote(sandbox_path_str(path))}")
+    result = await _exec(session, f"chmod 600 {shlex.quote(sandbox_path_str(path))}")
+    if result.exit_code != 0:
+        raise MountConfigError(
+            message="failed to restrict mount credential file permissions",
+            context={"exit_code": result.exit_code},
+        )
 
 
 async def _mount_s3(session: BaseSandboxSession, config: BlaxelCloudBucketMountConfig) -> None:
@@ -381,7 +386,7 @@ async def _mount_gcs(session: BaseSandboxSession, config: BlaxelCloudBucketMount
 
         opts: list[str] = []
         if key_path is not None:
-            opts.append(f"--key-file={sandbox_path_str(key_path)}")
+            opts.append(shlex.quote(f"--key-file={sandbox_path_str(key_path)}"))
         else:
             opts.append("--anonymous-access")
 

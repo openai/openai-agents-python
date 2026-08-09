@@ -1155,6 +1155,18 @@ class _ManifestReplacementCapability(Capability):
         )
 
 
+class _ManifestRootReplacementCapability(_ManifestReplacementCapability):
+    type: str = "manifest-root-replacement"
+
+    def __init__(self) -> None:
+        Capability.__init__(self, type="manifest-root-replacement")
+
+    def process_manifest(self, manifest: Manifest) -> Manifest:
+        replaced = super().process_manifest(manifest)
+        replaced.root = "/other"
+        return replaced
+
+
 def test_process_manifest_preserves_mount_acknowledgement_across_replacement() -> None:
     manifest = Manifest(
         entries={
@@ -1179,6 +1191,51 @@ def test_process_manifest_preserves_mount_acknowledgement_across_replacement() -
         "/workspace/data",
         "mount_scoped",
     )
+
+
+@pytest.mark.parametrize(
+    ("acknowledged_path", "expected_at_replacement_root"),
+    [("/workspace/data", False), ("data", True)],
+)
+def test_process_manifest_preserves_absolute_or_relative_acknowledgement_identity(
+    acknowledged_path: str,
+    expected_at_replacement_root: bool,
+) -> None:
+    manifest = Manifest(
+        root="/workspace",
+        entries={
+            "data": S3Mount(
+                bucket="example-bucket",
+                access_key_id="example-access-key",
+                secret_access_key="example-secret-key",
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            )
+        },
+    ).with_in_container_mount_credential_exposure_acknowledged(acknowledged_path)
+
+    processed = SandboxRuntimeSessionManager._process_manifest(
+        [_ManifestRootReplacementCapability()],
+        manifest,
+    )
+
+    assert processed is not None
+    assert processed.root == "/other"
+    assert (
+        processed._acknowledges_in_container_mount_credential_exposure(
+            "/other/data",
+            "mount_scoped",
+        )
+        is expected_at_replacement_root
+    )
+    if expected_at_replacement_root:
+        validate_manifest_mount_credential_boundaries(processed)
+    else:
+        assert processed._acknowledges_in_container_mount_credential_exposure(
+            "/workspace/data",
+            "mount_scoped",
+        )
+        with pytest.raises(MountConfigError, match="mount-scoped credentials"):
+            validate_manifest_mount_credential_boundaries(processed)
 
 
 class _CredentialedMountCapability(Capability):
