@@ -312,22 +312,124 @@ def test_acknowledgement_rejects_incomplete_in_container_s3_credentials(
         }
     ).with_in_container_mount_credential_exposure_acknowledged("data")
 
-    with pytest.raises(MountConfigError, match="require non-empty") as exc_info:
+    with pytest.raises(MountConfigError, match="complete non-empty credential set") as exc_info:
         validate_manifest_mount_credential_boundaries(manifest)
 
     assert exc_info.value.context["credential_fields"] == invalid_fields
 
 
-def test_incomplete_s3_credentials_remain_external_provider_configuration() -> None:
+@pytest.mark.parametrize(
+    ("credentials", "invalid_fields"),
+    [
+        ({"access_id": "access-id"}, ("secret_access_key",)),
+        ({"secret_access_key": "secret-key"}, ("access_id",)),
+        (
+            {"access_id": "access-id", "secret_access_key": ""},
+            ("secret_access_key",),
+        ),
+        (
+            {"access_id": " ", "secret_access_key": "secret-key"},
+            ("access_id",),
+        ),
+        (
+            {
+                "access_id": "access-id",
+                "service_account_credentials": '{"type":"service_account"}',
+            },
+            ("secret_access_key",),
+        ),
+    ],
+)
+def test_acknowledgement_rejects_incomplete_in_container_gcs_hmac_credentials(
+    credentials: dict[str, str],
+    invalid_fields: tuple[str, ...],
+) -> None:
     manifest = Manifest(
         entries={
-            "data": S3Mount(
+            "data": GCSMount(
                 bucket="example-bucket",
-                access_key_id="access-key",
-                mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+                **cast(Any, credentials),
             )
         }
-    )
+    ).with_in_container_mount_credential_exposure_acknowledged("data")
+
+    with pytest.raises(MountConfigError, match="complete non-empty credential set") as exc_info:
+        validate_manifest_mount_credential_boundaries(manifest)
+
+    assert exc_info.value.context["credential_fields"] == invalid_fields
+
+
+def test_acknowledgement_accepts_complete_in_container_gcs_hmac_credentials() -> None:
+    manifest = Manifest(
+        entries={
+            "data": GCSMount(
+                bucket="example-bucket",
+                access_id="access-id",
+                secret_access_key="secret-key",
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            )
+        }
+    ).with_in_container_mount_credential_exposure_acknowledged("data")
+
+    validate_manifest_mount_credential_boundaries(manifest)
+
+
+@pytest.mark.parametrize(
+    ("credentials", "invalid_fields"),
+    [
+        ({"access_key_id": "access-key"}, ("secret_access_key",)),
+        ({"secret_access_key": "secret-key"}, ("access_key_id",)),
+        (
+            {"access_key_id": "access-key", "secret_access_key": ""},
+            ("secret_access_key",),
+        ),
+    ],
+)
+def test_acknowledgement_rejects_incomplete_in_container_r2_credentials(
+    credentials: dict[str, str],
+    invalid_fields: tuple[str, ...],
+) -> None:
+    manifest = Manifest(
+        entries={
+            "data": R2Mount(
+                bucket="example-bucket",
+                account_id="example-account",
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+                **cast(Any, credentials),
+            )
+        }
+    ).with_in_container_mount_credential_exposure_acknowledged("data")
+
+    with pytest.raises(MountConfigError, match="complete non-empty credential set") as exc_info:
+        validate_manifest_mount_credential_boundaries(manifest)
+
+    assert exc_info.value.context["credential_fields"] == invalid_fields
+
+
+@pytest.mark.parametrize(
+    "mount",
+    [
+        S3Mount(
+            bucket="example-bucket",
+            access_key_id="access-key",
+            mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+        ),
+        GCSMount(
+            bucket="example-bucket",
+            access_id="access-id",
+            mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+        ),
+        R2Mount(
+            bucket="example-bucket",
+            account_id="example-account",
+            access_key_id="access-key",
+            mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+        ),
+    ],
+)
+def test_incomplete_credentials_remain_external_provider_configuration(mount: Mount) -> None:
+    manifest = Manifest(entries={"data": mount})
 
     validate_manifest_mount_credential_boundaries(manifest, provider_backend_id="docker")
 

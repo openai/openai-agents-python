@@ -70,6 +70,25 @@ _AUTHORITY_FIELDS_BY_MOUNT_TYPE: dict[str, tuple[str, ...]] = {
     "r2_mount": ("access_key_id", "secret_access_key"),
     "s3_mount": ("access_key_id", "secret_access_key", "session_token"),
 }
+# Each entry identifies the fields that activate an inline credential set and the non-empty
+# fields required whenever that set is active. Keep this table aligned with provider selection
+# and credential emission in the built-in mount implementations.
+_IN_CONTAINER_CREDENTIAL_SET_REQUIREMENTS_BY_MOUNT_TYPE: dict[
+    str, tuple[tuple[str, ...], tuple[str, ...]]
+] = {
+    "gcs_mount": (
+        ("access_id", "secret_access_key"),
+        ("access_id", "secret_access_key"),
+    ),
+    "r2_mount": (
+        ("access_key_id", "secret_access_key"),
+        ("access_key_id", "secret_access_key"),
+    ),
+    "s3_mount": (
+        ("access_key_id", "secret_access_key", "session_token"),
+        ("access_key_id", "secret_access_key"),
+    ),
+}
 _AUTHORITY_FILE_FIELDS_BY_MOUNT_TYPE: dict[str, tuple[str, ...]] = {
     "box_mount": ("box_config_file",),
     "gcs_mount": ("service_account_file",),
@@ -873,11 +892,16 @@ def _invalid_required_authority_fields(
     return tuple(sorted(invalid))
 
 
-def _invalid_in_container_s3_credential_fields(mount: Mount) -> tuple[str, ...]:
-    values = {
-        field_name: getattr(mount, field_name, None)
-        for field_name in ("access_key_id", "secret_access_key", "session_token")
-    }
+def _invalid_in_container_credential_set_fields(
+    mount: Mount,
+    mount_type: str,
+) -> tuple[str, ...]:
+    requirement = _IN_CONTAINER_CREDENTIAL_SET_REQUIREMENTS_BY_MOUNT_TYPE.get(mount_type)
+    if requirement is None:
+        return ()
+
+    configured_fields, required_fields = requirement
+    values = {field_name: getattr(mount, field_name, None) for field_name in configured_fields}
     if all(value is None for value in values.values()):
         return ()
 
@@ -886,10 +910,10 @@ def _invalid_in_container_s3_credential_fields(mount: Mount) -> tuple[str, ...]:
         for field_name, value in values.items()
         if value is not None and (not isinstance(value, str) or not value.strip())
     }
-    if not isinstance(values["access_key_id"], str) or not values["access_key_id"].strip():
-        invalid.add("access_key_id")
-    if not isinstance(values["secret_access_key"], str) or not values["secret_access_key"].strip():
-        invalid.add("secret_access_key")
+    for field_name in required_fields:
+        value = values[field_name]
+        if not isinstance(value, str) or not value.strip():
+            invalid.add(field_name)
     return tuple(sorted(invalid))
 
 
@@ -1221,20 +1245,17 @@ def _mount_boundary_error(
             },
         )
 
-    invalid_s3_credential_fields = (
-        _invalid_in_container_s3_credential_fields(mount)
-        if executes_in_container and mount_type == "s3_mount"
+    invalid_credential_set_fields = (
+        _invalid_in_container_credential_set_fields(mount, mount_type)
+        if executes_in_container
         else ()
     )
-    if invalid_s3_credential_fields:
+    if invalid_credential_set_fields:
         return MountConfigError(
-            message=(
-                "in-container S3 credentials require non-empty access_key_id and "
-                "secret_access_key values, and session_token requires that pair"
-            ),
+            message="in-container access credentials require a complete non-empty credential set",
             context={
                 "mount_type": mount.type,
-                "credential_fields": invalid_s3_credential_fields,
+                "credential_fields": invalid_credential_set_fields,
             },
         )
 
