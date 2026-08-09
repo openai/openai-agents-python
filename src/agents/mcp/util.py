@@ -788,9 +788,11 @@ class MCPUtil:
                         )
                     )
                 else:
-                    # Fall back to regular text content
+                    # Fall back to text content holding the block serialized as JSON.
+                    # ``str()`` on the dump would produce a Python repr (single quotes,
+                    # ``None``/``True``), which the model cannot parse back as JSON.
                     tool_output_list.append(
-                        ToolOutputTextDict(type="text", text=str(item.model_dump(mode="json")))
+                        ToolOutputTextDict(type="text", text=item.model_dump_json())
                     )
             if len(tool_output_list) == 1:
                 tool_output = tool_output_list[0]

@@ -4,6 +4,7 @@ from typing import Any, cast
 
 from mcp import Tool as _Tool
 from mcp.types import (
+    AudioContent as _AudioContent,
     CallToolResult as _CallToolResult,
     ImageContent as _ImageContent,
     InitializeResult as _InitializeResult,
@@ -22,6 +23,11 @@ from agents.mcp._compat import MCP_V2, MCPError
 # MCP v1 and v2 accept their wire-format aliases at runtime, but expose different constructor
 # signatures to static type checkers. Keep alias-based fixture construction in one test-only module.
 class Tool(_Tool):
+    def __init__(self, **data: Any) -> None:
+        super().__init__(**data)
+
+
+class AudioContent(_AudioContent):
     def __init__(self, **data: Any) -> None:
         super().__init__(**data)
 

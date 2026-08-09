@@ -1765,6 +1765,37 @@ async def test_mcp_fastmcp_behavior_verification():
 
 
 @pytest.mark.asyncio
+async def test_non_text_content_serialized_as_json():
+    """Non-text, non-image content blocks should reach the model as valid JSON, not repr."""
+
+    from mcp.types import ContentBlock, EmbeddedResource, ResourceLink, TextResourceContents
+
+    from .model_compat import AudioContent
+
+    server = FakeMCPServer()
+    server.add_tool("test_tool", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="test_tool", inputSchema={})
+
+    resource_link = ResourceLink(type="resource_link", name="report", uri="resource://reports/1")
+    embedded = EmbeddedResource(
+        type="resource",
+        resource=TextResourceContents(uri="resource://reports/2", text="hello world"),
+    )
+    audio = AudioContent(type="audio", data="AAAA", mimeType="audio/wav")
+    content_items: list[ContentBlock] = [resource_link, embedded, audio]
+    server._custom_content = content_items
+    result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
+
+    assert isinstance(result, list) and len(result) == len(content_items)
+    for output_item, content_item in zip(result, content_items, strict=False):
+        assert output_item["type"] == "text"
+        # The text must parse as JSON and round-trip the content block's data.
+        assert json.loads(output_item["text"]) == content_item.model_dump(mode="json")
+
+
+@pytest.mark.asyncio
 async def test_agent_convert_schemas_unset():
     """Test that leaving convert_schemas_to_strict unset (defaulting to False) leaves tool schemas
     as non-strict.
