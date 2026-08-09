@@ -17,6 +17,9 @@ from openai.types.responses.response_file_search_tool_call import ResponseFileSe
 from openai.types.responses.response_file_search_tool_call_param import (
     ResponseFileSearchToolCallParam,
 )
+from openai.types.responses.response_function_shell_tool_call_output import (
+    ResponseFunctionShellToolCallOutput,
+)
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
@@ -616,6 +619,61 @@ def test_to_input_items_strips_created_by_for_non_tool_search_items() -> None:
         },
     ]
     assert all("created_by" not in item for item in input_items)
+
+
+def test_to_input_items_strips_nested_created_by_from_shell_call_output() -> None:
+    """``shell_call_output`` carries ``created_by`` at the item level and inside each output chunk.
+
+    Both levels are output-only and absent from the input schema, so both must be stripped on
+    replay (mirroring the two-level stripping the runner does in ``turn_resolution``). The
+    original mapping input must not be mutated in the process.
+    """
+    shell_output = ResponseFunctionShellToolCallOutput.model_validate(
+        {
+            "id": "sco_1",
+            "call_id": "call_1",
+            "type": "shell_call_output",
+            "status": "completed",
+            "created_by": "program_top",
+            "output": [
+                {
+                    "outcome": {"type": "exit", "exit_code": 0},
+                    "stdout": "hi",
+                    "stderr": "",
+                    "created_by": "program_chunk",
+                }
+            ],
+        }
+    )
+    # A dict-form item shares its nested chunk dicts with the caller, so replaying must not
+    # mutate them.
+    raw_item = shell_output.model_dump(exclude_unset=True)
+    original_chunk = raw_item["output"][0]
+
+    resp = ModelResponse(output=[raw_item], usage=Usage(), response_id=None)
+    input_items = resp.to_input_items()
+
+    assert input_items == [
+        {
+            "id": "sco_1",
+            "call_id": "call_1",
+            "type": "shell_call_output",
+            "status": "completed",
+            "output": [
+                {
+                    "outcome": {"type": "exit", "exit_code": 0},
+                    "stdout": "hi",
+                    "stderr": "",
+                }
+            ],
+        }
+    ]
+    replayed = cast(dict[str, Any], input_items[0])
+    assert "created_by" not in replayed
+    assert "created_by" not in replayed["output"][0]
+    # The caller's original mapping (and its nested chunk) is untouched.
+    assert original_chunk["created_by"] == "program_chunk"
+    assert raw_item["created_by"] == "program_top"
 
 
 def test_input_to_new_input_list_copies_the_ones_produced_by_pydantic() -> None:

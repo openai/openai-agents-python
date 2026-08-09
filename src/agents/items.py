@@ -230,6 +230,20 @@ def _output_item_to_input_item(raw_item: Any) -> TResponseInputItem:
     # carry it (apply_patch/shell calls and tool-call outputs); the tool_search branch above
     # already drops it, so do the same for every other item type.
     payload.pop("created_by", None)
+    if item_type == "shell_call_output":
+        # ``shell_call_output.output`` is a list of content chunks that each carry their own
+        # output-only ``created_by``. ``payload`` was only shallow-copied above, so rebuild the
+        # list with fresh chunk copies to strip the nested field without mutating the caller's
+        # original mapping. Mirrors the two-level stripping the runner already does in
+        # ``turn_resolution``.
+        chunks = payload.get("output")
+        if isinstance(chunks, list):
+            payload["output"] = [
+                {key: value for key, value in chunk.items() if key != "created_by"}
+                if isinstance(chunk, dict)
+                else chunk
+                for chunk in chunks
+            ]
     return cast(TResponseInputItem, payload)
 
 
