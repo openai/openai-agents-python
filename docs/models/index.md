@@ -624,6 +624,8 @@ result = await Runner.run(
 
 If you use [`MultiProvider`][agents.MultiProvider], pass `openai_strict_feature_validation=True` instead.
 
+The OpenAI Chat Completions API can return audio output, but [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] does not currently convert audio output into Agents SDK run items. If a non-streaming message or streaming delta contains audio output, the adapter raises `AgentsException("Audio is not currently supported")` instead of returning a partial or empty result. Use [Realtime agents](../realtime/guide.md) or [Voice agents](../voice/quickstart.md) for SDK-managed audio workflows.
+
 Some OpenAI-compatible Chat Completions providers stream tool-call deltas in chunks that are not reliable enough for incremental SDK processing. In that case, enable streamed tool-call buffering so the SDK emits tool calls only after the provider stream finishes:
 
 ```python

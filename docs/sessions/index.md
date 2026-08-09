@@ -284,6 +284,8 @@ If your agent runs with `ModelSettings(store=False)`, the Responses API does not
 
 Compaction clears and rewrites the session history, so the SDK waits for compaction to finish before considering the run complete. In streaming mode, this means `run.stream_events()` can stay open for a few seconds after the last output token if compaction is heavy.
 
+`OpenAIResponsesCompactionSession.run_compaction()` treats the clear-and-rewrite operation as a recoverable replacement at the wrapper boundary. If replacement fails or is cancelled after the underlying history changes, the wrapper attempts to restore the previous history and waits for that recovery attempt to settle before the original exception or cancellation reaches the caller. If the underlying backend also fails during recovery, the previous history can remain unrestored and the SDK logs the recovery failure. The wrapper serializes calls to `add_items()`, `pop_item()`, and `clear_session()` with the locked replacement and recovery phase, but a mutation can complete while the remote compaction request is still in flight and then be overwritten by successful replacement. Run manual compaction between turns without concurrent wrapper mutations, and do not mutate the underlying session directly while compaction is running.
+
 If you want low-latency streaming or fast turn-taking, disable auto-compaction and call `run_compaction()` yourself between turns (or during idle time). You can decide when to force compaction based on your own criteria.
 
 ```python

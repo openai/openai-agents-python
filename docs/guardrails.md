@@ -51,6 +51,8 @@ Output guardrails run in 3 steps:
 
     Output guardrails always run after the agent completes, so they don't support the `run_in_parallel` parameter.
 
+An output tripwire and an exception raised by the guardrail function have different session behavior. A tripwire rejects the candidate final output. When the guardrail function raises an exception instead of returning a tripwire result, the runner treats the verdict as unknown and asks the configured session to persist the completed final-turn items before surfacing the guardrail exception. If that session write also fails, the session write error takes precedence. Streaming runs use the same persistence ordering as non-streaming runs and raise the terminal exception from `stream_events()`. An immediate [`RunResultStreaming.cancel()`][agents.result.RunResultStreaming.cancel] call while the output guardrail is running cancels the in-flight guardrail and does not start a final-turn session write.
+
 ## Tool guardrails
 
 Tool guardrails wrap **`FunctionTool` instances** and let you validate or block calls to those tools before and after execution. They are configured on the tool itself and run every time that tool is invoked.
