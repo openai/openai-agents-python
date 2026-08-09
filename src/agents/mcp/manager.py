@@ -177,6 +177,7 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
         self.suppress_cancelled_error = suppress_cancelled_error
         self.connect_in_parallel = connect_in_parallel
         self._workers: dict[MCPServer, _ServerWorker] = {}
+        self._lifecycle_lock = asyncio.Lock()
 
         self.failed_servers: list[MCPServer] = []
         self._failed_server_set: set[MCPServer] = set()
@@ -225,6 +226,10 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
 
     async def connect_all(self) -> list[MCPServer]:
         """Connect all servers in order and return the active list."""
+        async with self._lifecycle_lock:
+            return await self._connect_all()
+
+    async def _connect_all(self) -> list[MCPServer]:
         previous_connected_servers = set(self._connected_servers)
         previous_active_servers = list(self._active_servers)
         self.failed_servers = []
@@ -268,11 +273,15 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
             failed_only: If True, only retry servers that previously failed.
                 If False, cleanup and retry all servers.
         """
+        async with self._lifecycle_lock:
+            return await self._reconnect(failed_only=failed_only)
+
+    async def _reconnect(self, *, failed_only: bool) -> list[MCPServer]:
         if failed_only:
             failed_servers = self._unique_servers(self.failed_servers)
             servers_to_retry = await self._cleanup_servers(failed_servers)
         else:
-            await self.cleanup_all()
+            await self._cleanup_all()
             servers_to_retry = list(self._all_servers)
             self.failed_servers = []
             self._failed_server_set = set()
@@ -291,6 +300,10 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
 
     async def cleanup_all(self) -> None:
         """Cleanup all servers in reverse order."""
+        async with self._lifecycle_lock:
+            await self._cleanup_all()
+
+    async def _cleanup_all(self) -> None:
         for server in reversed(self._all_servers):
             try:
                 await self._cleanup_server(server)
@@ -368,6 +381,12 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
             await self._run_with_timeout(server.connect, self.connect_timeout_seconds)
 
     async def _cleanup_server(self, server: MCPServer) -> None:
+        if (
+            self.connect_in_parallel
+            and server not in self._workers
+            and server not in self._connected_servers
+        ):
+            return
         if self.connect_in_parallel and server in self._workers:
             worker = self._workers[server]
             if worker.is_done:

@@ -74,6 +74,20 @@ class TaskBoundServer(MCPServer):
         return ReadResourceResult(contents=[])
 
 
+class BlockingCleanupServer(TaskBoundServer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cleanup_started = asyncio.Event()
+        self.allow_cleanup = asyncio.Event()
+        self.cleanup_calls = 0
+
+    async def cleanup(self) -> None:
+        self.cleanup_calls += 1
+        self.cleanup_started.set()
+        await self.allow_cleanup.wait()
+        await super().cleanup()
+
+
 class FlakyServer(MCPServer):
     def __init__(self, failures: int) -> None:
         super().__init__()
@@ -480,6 +494,24 @@ async def test_manager_connects_in_worker_tasks_when_parallel() -> None:
         assert server._connect_task is not asyncio.current_task()
 
     assert server.cleaned is True
+
+
+@pytest.mark.asyncio
+async def test_manager_serializes_overlapping_parallel_cleanup_calls() -> None:
+    server = BlockingCleanupServer()
+    manager = MCPServerManager([server], connect_in_parallel=True)
+    await manager.connect_all()
+
+    first_cleanup = asyncio.create_task(manager.cleanup_all())
+    await server.cleanup_started.wait()
+    second_cleanup = asyncio.create_task(manager.cleanup_all())
+
+    server.allow_cleanup.set()
+    await asyncio.wait_for(asyncio.gather(first_cleanup, second_cleanup), timeout=1)
+
+    assert server.cleanup_calls == 1
+    assert manager._workers == {}
+    assert manager._connected_servers == set()
 
 
 @pytest.mark.asyncio
