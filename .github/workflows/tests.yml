@@ -16,6 +16,7 @@ env:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -44,6 +45,7 @@ jobs:
 
   typecheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -77,6 +79,7 @@ jobs:
 
   tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -120,6 +123,7 @@ jobs:
 
   mcp-v1-compat:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     env:
       OPENAI_API_KEY: fake-for-tests
     steps:
@@ -145,6 +149,7 @@ jobs:
 
   tests-windows:
     runs-on: windows-latest
+    timeout-minutes: 10
     env:
       OPENAI_API_KEY: fake-for-tests
     steps:
@@ -174,6 +179,7 @@ jobs:
 
   build-docs:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       OPENAI_API_KEY: fake-for-tests
     steps:

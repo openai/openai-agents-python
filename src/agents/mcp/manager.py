@@ -76,10 +76,11 @@ class _ServerWorker:
                     future=self._cleanup_future,
                 )
             )
-        await asyncio.shield(self._cleanup_future)
-
-    async def wait_until_stopped(self) -> None:
-        await asyncio.shield(self._task)
+        cleanup_waiter = asyncio.shield(self._cleanup_future)
+        if timeout_seconds is None:
+            await cleanup_waiter
+        else:
+            await asyncio.wait_for(cleanup_waiter, timeout=timeout_seconds)
 
     async def _submit(self, action: str, timeout_seconds: float | None) -> None:
         loop = asyncio.get_running_loop()
@@ -513,7 +514,6 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
     async def _get_worker(self, server: MCPServer) -> _ServerWorker:
         worker = self._workers.get(server)
         if worker is not None and worker.is_stopping:
-            await worker.wait_until_stopped()
             await worker.cleanup(self.cleanup_timeout_seconds)
             self._discard_worker(server, worker)
             worker = self._workers.get(server)
