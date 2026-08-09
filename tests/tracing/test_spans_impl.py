@@ -160,3 +160,44 @@ async def test_generator_close_surfaces_processor_failure() -> None:
         await generator.aclose()
 
     Scope.set_current_span(None)
+
+
+async def test_generator_close_releases_the_span_scope_when_finish_fails() -> None:
+    """A failing ``finish`` must still release the scope it took.
+
+    ``SpanImpl.finish`` runs the processor before resetting the scope, so a processor that
+    raises leaves the reset unreached. The finished span then stays current for the rest of
+    the caller's scope and every later span nests under it, which is the same leak the
+    ``GeneratorExit`` handling exists to prevent. ``TraceImpl`` already resets in a
+    ``finally`` for this reason.
+    """
+    Scope.set_current_span(None)
+
+    class FailingProcessor(DummyProcessor):
+        def on_span_end(self, span: Span[Any]) -> None:
+            raise ValueError("processor exploded")
+
+    span = SpanImpl(
+        trace_id="trace-finish-failure",
+        span_id="span-finish-failure",
+        parent_id=None,
+        processor=cast(Any, FailingProcessor()),
+        span_data=AgentSpanData(name="finish-failure"),
+        tracing_api_key=None,
+    )
+
+    async def stream() -> AsyncGenerator[int, None]:
+        with span:
+            yield 1
+
+    generator = stream()
+    assert await generator.asend(None) == 1
+    assert Scope.get_current_span() is span
+
+    with pytest.raises(ValueError, match="processor exploded"):
+        await generator.aclose()
+
+    assert Scope.get_current_span() is None
+    assert span._prev_span_token is None
+
+    Scope.set_current_span(None)

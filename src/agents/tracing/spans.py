@@ -43,17 +43,22 @@ def _finish_on_generator_exit(span: Span[Any]) -> None:
     An explicit ``finish`` from the wrong context is a context-ownership violation rather
     than an unavoidable one, so it still raises, and a processor that fails during
     ``finish`` still surfaces rather than being mistaken for a foreign token.
-    """
-    span.finish(reset_current=False)
 
-    token: contextvars.Token[Span[Any] | None] | None = span._prev_span_token  # type: ignore[attr-defined]
-    if token is None:
-        return
-    span._prev_span_token = None  # type: ignore[attr-defined]
+    The reset runs in a ``finally`` so that a failing ``finish`` still releases the scope
+    instead of leaving the finished span current, and the token is cleared only once the
+    reset has either succeeded or hit the foreign-context ``ValueError`` it expects. An
+    unexpected reset failure therefore leaves the handle in place rather than losing it.
+    """
     try:
-        Scope.reset_current_span(token)
-    except ValueError:
-        logger.debug("Skipping span context reset, token belongs to another context")
+        span.finish(reset_current=False)
+    finally:
+        token: contextvars.Token[Span[Any] | None] | None = span._prev_span_token  # type: ignore[attr-defined]
+        if token is not None:
+            try:
+                Scope.reset_current_span(token)
+            except ValueError:
+                logger.debug("Skipping span context reset, token belongs to another context")
+            span._prev_span_token = None  # type: ignore[attr-defined]
 
 
 class Span(abc.ABC, Generic[TSpanData]):
