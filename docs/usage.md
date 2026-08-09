@@ -38,6 +38,33 @@ Usage reporting varies across third-party adapters and provider backends. If you
 
 Review the adapter-specific notes in the [Third-party adapters](models/index.md#third-party-adapters) section of the Models guide and validate usage reporting on the exact provider backend you plan to deploy.
 
+### Preserving the raw provider usage payload
+
+`Usage` normalizes missing fields to `0`, so a field the provider never reported and a field the provider explicitly reported as `0` look identical. If you build cost or coverage reporting on top of usage, opt in to [`ModelSettings.preserve_raw_usage`][agents.model_settings.ModelSettings.preserve_raw_usage] and read [`ModelResponse.raw_usage`][agents.items.ModelResponse.raw_usage] from `result.raw_responses`:
+
+```python
+from agents import Agent, ModelSettings, Runner
+
+agent = Agent(
+    name="Assistant",
+    model_settings=ModelSettings(preserve_raw_usage=True),
+)
+
+result = await Runner.run(agent, "What's the weather in Tokyo?")
+
+for response in result.raw_responses:
+    print(response.raw_usage)
+```
+
+`raw_usage` is a JSON-compatible snapshot of the usage object as the model adapter received it, taken before the SDK normalizes it. Keys the provider omitted stay absent, while explicit `null`, zero, and provider-specific keys stay present as received. A provider that omitted `cached_tokens` yields `{"prompt_tokens_details": {}}` and one that reported it as zero yields `{"prompt_tokens_details": {"cached_tokens": 0}}`, even though `usage.input_tokens_details.cached_tokens` is `0` in both cases.
+
+Keep these boundaries in mind:
+
+-   It is one snapshot per completed `ModelResponse`, on both streamed and non-streamed calls. It is never aggregated, and `result.context_wrapper.usage` is unaffected.
+-   It does not ask the provider for usage. Streaming backends that need `ModelSettings(include_usage=True)` still need it.
+-   It is `None` when the adapter received no usage payload, or when an upstream adapter already discarded field-presence information.
+-   It is diagnostic metadata that `RunState` serialization does not persist, so it is unavailable after resuming a run from a serialized state.
+
 ## Per-request usage tracking
 
 The SDK automatically tracks usage for each API request in `request_usage_entries`, useful for detailed cost calculation and monitoring context window consumption.
@@ -82,5 +109,7 @@ For detailed API documentation, see:
 
 -   [`Usage`][agents.usage.Usage] - Usage tracking data structure
 -   [`RequestUsage`][agents.usage.RequestUsage] - Per-request usage details
+-   [`ModelSettings.preserve_raw_usage`][agents.model_settings.ModelSettings.preserve_raw_usage] - Opt in to raw provider usage snapshots
+-   [`ModelResponse.raw_usage`][agents.items.ModelResponse.raw_usage] - The preserved provider usage payload
 -   [`RunContextWrapper`][agents.run.RunContextWrapper] - Access usage from run context
 -   [`RunHooks`][agents.run.RunHooks] - Hook into usage tracking lifecycle
