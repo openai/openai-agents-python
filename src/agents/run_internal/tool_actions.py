@@ -128,6 +128,10 @@ class ComputerAction:
                 tool=action.computer_tool, run_context=context_wrapper
             )
             agent_hooks = agent.hooks
+            context_wrapper._mark_tool_invocation_executed(
+                action.tool_call,
+                tool_name=action.computer_tool.name,
+            )
             await gather_with_cancel(
                 hooks.on_tool_start(context_wrapper, agent, action.computer_tool),
                 (

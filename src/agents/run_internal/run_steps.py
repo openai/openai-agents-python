@@ -174,6 +174,12 @@ class NextStepInterruption:
     interruptions: list[ToolApprovalItem]
     """The list of tool calls awaiting approval."""
 
+    response_accepted: bool = False
+    """Whether the server accepted a response whose local processing is still incomplete."""
+
+    llm_end_hooks_started: bool = True
+    """Whether response-end hooks started before the interruption was persisted."""
+
 
 @dataclass
 class SingleStepResult:

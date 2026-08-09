@@ -146,8 +146,12 @@ def _populate_state_from_result(
     source_state = getattr(result, "_state", None)
     if isinstance(source_state, RunState):
         state._generated_prompt_cache_key = source_state._generated_prompt_cache_key
+        state._pending_input = copy.deepcopy(source_state._pending_input)
+        state._current_step = source_state._current_step
     else:
         state._generated_prompt_cache_key = getattr(result, "_generated_prompt_cache_key", None)
+        state._pending_input = copy.deepcopy(getattr(result, "_pending_input_for_state", []))
+        state._current_step = getattr(result, "_current_step_for_state", None)
     state._reasoning_item_id_policy = getattr(result, "_reasoning_item_id_policy", None)
 
     interruptions = list(getattr(result, "interruptions", []))
@@ -299,6 +303,12 @@ class RunResultBase(abc.ABC):
     """Root agent graph used when converting the result back into RunState."""
     _generated_prompt_cache_key: str | None = field(default=None, init=False, repr=False)
     """SDK-generated prompt cache key captured during the run."""
+    _pending_input_for_state: list[TResponseInputItem] = field(
+        default_factory=list, init=False, repr=False
+    )
+    """Pending input preserved when a non-streaming result is converted back to RunState."""
+    _current_step_for_state: Any = field(default=None, init=False, repr=False)
+    """Current step preserved when a non-streaming result is converted back to RunState."""
 
     @classmethod
     def __get_pydantic_core_schema__(
