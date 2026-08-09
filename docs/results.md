@@ -67,6 +67,7 @@ Resubmitting computer-tool items as conversation input uses the raw Responses pa
 
 [`new_items`][agents.result.RunResultBase.new_items] gives you the richest view of what happened during the run. Common item types are:
 
+-   [`InputItem`][agents.items.InputItem] for input admitted from `RunState.pending_input` immediately before a resumed model call
 -   [`MessageOutputItem`][agents.items.MessageOutputItem] for assistant messages
 -   [`ReasoningItem`][agents.items.ReasoningItem] for reasoning items
 -   [`ToolSearchCallItem`][agents.items.ToolSearchCallItem] and [`ToolSearchOutputItem`][agents.items.ToolSearchOutputItem] for Responses tool search requests and loaded tool-search results
@@ -131,6 +132,24 @@ if result.interruptions:
         state.approve(interruption)
     result = await Runner.run(agent, state)
 ```
+
+#### Add input before resuming
+
+Use [`RunState.add_input()`][agents.run_state.RunState.add_input] when new user input arrives after a run pauses or stops after a completed turn, but before the unfinished run reaches its next model call. A string becomes a user message, and multiple calls preserve insertion order. The staged input is part of serialized `RunState`, so it survives `to_json()` / `from_json()` and `to_string()` / `from_string()` round trips.
+
+```python
+state = result.to_state()
+state.add_input("Also keep the generated report in the project folder.")
+
+for interruption in state.get_interruptions():
+    state.approve(interruption)
+
+result = await Runner.run(agent, state)
+```
+
+On resume, the runner applies both the current agent's input guardrails and the input guardrails from [`RunConfig`][agents.run.RunConfig] only to the staged input. When a client-managed [`Session`][agents.memory.session.Session] is configured, the runner converts the accepted staged input into a durable [`InputItem`][agents.items.InputItem] and awaits the session write before issuing the model request. Without a client-managed session or server-managed conversation, the runner converts the accepted staged input into an `InputItem` before issuing the model request. For a server-managed conversation, the input remains pending until the server request accepts it. Across serialization, resume, and replay-safe retries, the SDK preserves one durable `InputItem` occurrence. This SDK occurrence guarantee is not a provider-delivery guarantee: if a retry policy returns `RetryDecision(approve_unsafe_replay=True)` after a request may have reached the provider, the runner can resend the staged input and provider-side work can repeat. Successfully admitted input appears in `new_items` as an `InputItem`. Read [`RunState.pending_input`][agents.run_state.RunState.pending_input] for a detached copy, or call [`RunState.clear_pending_input()`][agents.run_state.RunState.clear_pending_input] to discard all staged input before resuming.
+
+`RunState.add_input()` rejects a terminal state, a state with no remaining model turns, a state in which an accepted model response is awaiting local processing, and an interrupted state whose pending tool result may end the run before another model call. In those cases, finish the current run and start a new user turn instead.
 
 For streaming runs, finish consuming [`stream_events()`][agents.result.RunResultStreaming.stream_events] first, then inspect `result.interruptions` and resume from `result.to_state()`. For the full approval flow, see [Human-in-the-loop](human_in_the_loop.md).
 

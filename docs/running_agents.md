@@ -29,7 +29,7 @@ When you call any of the three `Runner` methods above, you pass in a starting ag
 
 -   a string (treated as a user message),
 -   a list of input items in the OpenAI Responses API format, or
--   a [`RunState`][agents.run_state.RunState] when resuming an interrupted run.
+-   a [`RunState`][agents.run_state.RunState] when resuming a paused run or a run stopped with `cancel(mode="after_turn")`. The state can also carry [input staged for the next resumed model call](results.md#add-input-before-resuming).
 
 The runner then runs a loop:
 

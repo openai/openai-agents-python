@@ -62,6 +62,8 @@ If you need to stop a streaming run in the middle, call [`result.cancel()`][agen
 A streamed run is not complete until `result.stream_events()` finishes. The SDK may still be persisting session items, finalizing approval state, or compacting history after the last visible token.
 
 If you are manually continuing from [`result.to_input_list(mode="normalized")`][agents.result.RunResultBase.to_input_list], and `cancel(mode="after_turn")` stops after a tool turn, rerun `result.last_agent` with that normalized input to continue the unfinished existing user turn instead of appending a fresh user turn right away.
+
+-   If new user input arrives before that unfinished run resumes, convert the drained result with `result.to_state()`, call [`state.add_input(...)`][agents.run_state.RunState.add_input], and resume from the state. The runner admits the staged input immediately before the next model call; see [Add input before resuming](results.md#add-input-before-resuming).
 -   If a streamed run stopped for tool approval, do not treat that as a new turn. Finish draining the stream, inspect `result.interruptions`, and resume from `result.to_state()` instead.
 -   Use [`RunConfig.session_input_callback`][agents.run.RunConfig.session_input_callback] to customize how retrieved session history and the new user input are merged before the next model call. If you rewrite new-turn items there, the rewritten version is what gets persisted for that turn.
 

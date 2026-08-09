@@ -72,8 +72,10 @@ Generic local/container strategies:
 
 | Strategy or pattern | Use it when | Notes |
 | --- | --- | --- |
-| `InContainerMountStrategy(pattern=RcloneMountPattern(...))` | The sandbox image can run `rclone`. | Supports credentialless S3, GCS, R2, and Azure Blob. `RcloneMountPattern` can run in `fuse` mode or `nfs` mode. |
+| `InContainerMountStrategy(pattern=RcloneMountPattern(...))` | The sandbox image can run `rclone`. | Supports S3, GCS, R2, Azure Blob, and Box. `RcloneMountPattern` can run in `fuse` mode or `nfs` mode. |
 | `InContainerMountStrategy(pattern=MountpointMountPattern(...))` | The image has `mount-s3` and you want Mountpoint-style S3 or S3-compatible access. | Supports `S3Mount` and `GCSMount`. |
+| `InContainerMountStrategy(pattern=FuseMountPattern(...))` | The image has `blobfuse2` and FUSE support. | Supports `AzureBlobMount`. |
+| `InContainerMountStrategy(pattern=S3FilesMountPattern(...))` | The image has `mount.s3files` and can reach an existing S3 Files mount target. | Supports `S3FilesMount`. |
 | `DockerVolumeMountStrategy(driver=...)` | Docker should attach a volume-driver-backed mount before the container starts. | Docker-only. S3, GCS, R2, Azure Blob, and Box can be mounted through `rclone`; S3 and GCS can also be mounted through `mountpoint`. |
 
 </div>
@@ -106,18 +108,24 @@ Hosted sandbox clients expose provider-specific mount strategies. Choose the bac
 
 | Backend | Mount notes |
 | --- | --- |
-| Docker | `InContainerMountStrategy` supports credentialless `S3Mount`, `GCSMount`, `R2Mount`, and `AzureBlobMount`. `DockerVolumeMountStrategy` supports those entries plus `BoxMount` and credentialed configurations. |
+| Docker | Supports `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, `BoxMount`, and `S3FilesMount` with local strategies such as `InContainerMountStrategy` and `DockerVolumeMountStrategy`. |
 | `ModalSandboxClient` | Supports cloud bucket mounts by using `ModalCloudBucketMountStrategy` with `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`. You can use inline credentials or a named Modal Secret. |
 | `CloudflareSandboxClient` | Supports bucket mounts by using `CloudflareBucketMountStrategy` with `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`. |
-| `BlaxelSandboxClient` | Supports credentialless cloud bucket mounts by pairing `BlaxelCloudBucketMountStrategy` with an `S3Mount`, `R2Mount`, or `GCSMount` entry. Also supports persistent Blaxel Drives with `BlaxelDriveMount` and `BlaxelDriveMountStrategy`, both available from `agents.extensions.sandbox.blaxel`. |
-| `DaytonaSandboxClient` | Supports credentialless cloud storage mounts through `rclone` by using `DaytonaCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, and `AzureBlobMount`. |
-| `E2BSandboxClient` | Supports credentialless cloud storage mounts through `rclone` by using `E2BCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, and `AzureBlobMount`. |
-| `RunloopSandboxClient` | Supports credentialless cloud storage mounts through `rclone` by using `RunloopCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, and `AzureBlobMount`. |
-| `VercelSandboxClient` | Supports create-time-only S3 and S3-compatible bucket mounts by pairing `VercelCloudBucketMountStrategy` with an `S3Mount` entry; mounted sessions cannot be resumed, and inline credentials require `VercelSandboxClientOptions(allow_s3_credential_exposure=True)`. |
+| `BlaxelSandboxClient` | Supports cloud bucket mounts by pairing `BlaxelCloudBucketMountStrategy` with an `S3Mount`, `R2Mount`, or `GCSMount` entry. Also supports persistent Blaxel Drives with `BlaxelDriveMount` and `BlaxelDriveMountStrategy`, both available from `agents.extensions.sandbox.blaxel`. |
+| `DaytonaSandboxClient` | Supports mounting cloud storage through `rclone` by using `DaytonaCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
+| `E2BSandboxClient` | Supports mounting cloud storage through `rclone` by using `E2BCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
+| `RunloopSandboxClient` | Supports mounting cloud storage through `rclone` by using `RunloopCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
+| `VercelSandboxClient` | Supports create-time-only S3 and S3-compatible bucket mounts by pairing `VercelCloudBucketMountStrategy` with an `S3Mount` entry; mounted sessions cannot be resumed, and inline credentials require `allow_s3_credential_exposure=True`. |
 
 </div>
 
-Mount credentials are trusted application configuration. Before a sandbox client starts a sandbox or mount helper, the Agents SDK rejects credential files that the same `Manifest` would materialize inside the sandbox. The Agents SDK also rejects inline cloud credentials with the general `InContainerMountStrategy` because that mount helper runs inside the sandbox. Use an externally executed strategy that keeps credentials in the owning adapter; a provider-specific strategy is not necessarily external and can be credentialless-only. A backend-specific exception applies only when that backend documents an explicit trusted opt-in, such as `VercelSandboxClientOptions(allow_s3_credential_exposure=True)` for Vercel S3 mounts.
+The mount tables describe which storage types each backend can execute. A check mark does not bypass the credential boundary for a mount helper that runs inside a model-controlled sandbox, and it does not mean that every strategy can operate without credentials. The Agents SDK accepts an in-container mount without an acknowledgement only when the selected helper can operate without protected authority. It rejects a mount that requires protected authority before starting the sandbox or mount helper unless trusted application code explicitly acknowledges the exposure for the exact mount path.
+
+Credentialless `rclone` mounts are limited to S3, GCS, R2, and Azure Blob. An in-container Box mount requires a non-interactive authentication source and the acknowledgement that matches that source. `FuseMountPattern` requires broad acknowledgement because `blobfuse2` discovers ambient Azure authority, even when no inline credential is configured. `S3FilesMountPattern` likewise requires broad acknowledgement because `mount.s3files` uses ambient IAM authority. These requirements also apply when Docker is the backend; the check marks below indicate that Docker can execute the mount after the applicable authority boundary is satisfied.
+
+Call `Manifest.with_in_container_mount_credential_exposure_acknowledged()` for mount-scoped values such as inline access keys. Call `Manifest.with_in_container_mount_broad_credential_exposure_acknowledged()` for broader authority such as managed or workload identity and external credential files. A mount that uses both authority classes requires both acknowledgements. Each method returns a copied `Manifest`; use the returned value. The acknowledgements are runtime-only, are not serialized, and permit the helper to receive credentials without confining credential use to the mounted path. Prefer an external or provider-native strategy when available, and otherwise use sandbox-scoped, short-lived, least-privilege credentials.
+
+`VercelSandboxClientOptions(allow_s3_credential_exposure=True)` remains a compatibility option for create-time Vercel S3 mounts with inline mount-scoped credentials. It does not authorize broad credential authority.
 
 The table below summarizes which remote storage entries each backend can mount directly.
 
@@ -125,13 +133,13 @@ The table below summarizes which remote storage entries each backend can mount d
 
 | Backend | AWS S3 | Cloudflare R2 | GCS | Azure Blob Storage | Box | S3 Files |
 | --- | --- | --- | --- | --- | --- | --- |
-| Docker | ✓ | ✓ | ✓ | ✓ | ✓ | - |
+| Docker | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `ModalSandboxClient` | ✓ | ✓ | ✓ | - | - | - |
 | `CloudflareSandboxClient` | ✓ | ✓ | ✓ | - | - | - |
 | `BlaxelSandboxClient` | ✓ | ✓ | ✓ | - | - | - |
-| `DaytonaSandboxClient` | ✓ | ✓ | ✓ | ✓ | - | - |
-| `E2BSandboxClient` | ✓ | ✓ | ✓ | ✓ | - | - |
-| `RunloopSandboxClient` | ✓ | ✓ | ✓ | ✓ | - | - |
+| `DaytonaSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
+| `E2BSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
+| `RunloopSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `VercelSandboxClient` | ✓ | - | - | - | - | - |
 
 </div>
