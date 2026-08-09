@@ -24,17 +24,26 @@ def sha256_io(stream: io.IOBase, *, chunk_size: int = 1024 * 1024) -> str:
         start_position = stream.tell()
 
     digest = hashlib.sha256()
-    while True:
-        chunk = stream.read(chunk_size)
-        if chunk in ("", b""):
-            break
-        if isinstance(chunk, str):
-            chunk = chunk.encode("utf-8")
-        if not isinstance(chunk, bytes | bytearray):
-            raise TypeError("sha256_io() requires a bytes-or-str readable stream")
-        digest.update(chunk)
-
-    if start_position is not None:
-        stream.seek(start_position)
+    hashing_error: BaseException | None = None
+    try:
+        while True:
+            chunk = stream.read(chunk_size)
+            if chunk in ("", b""):
+                break
+            if isinstance(chunk, str):
+                chunk = chunk.encode("utf-8")
+            if not isinstance(chunk, bytes | bytearray):
+                raise TypeError("sha256_io() requires a bytes-or-str readable stream")
+            digest.update(chunk)
+    except BaseException as exc:
+        hashing_error = exc
+        raise
+    finally:
+        if start_position is not None:
+            try:
+                stream.seek(start_position)
+            except BaseException:
+                if hashing_error is None:
+                    raise
 
     return digest.hexdigest()
