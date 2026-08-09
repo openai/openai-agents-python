@@ -1,4 +1,5 @@
 import abc
+import asyncio
 import io
 import shlex
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -14,6 +15,7 @@ from ...run_config import (
     SandboxArchiveLimits,
     SandboxConcurrencyLimits,
 )
+from .._mount_security import redact_mount_error_data, validate_manifest_mount_credential_boundaries
 from ..apply_patch import PatchFormat, WorkspaceEditor
 from ..entries import BaseEntry
 from ..errors import (
@@ -201,6 +203,9 @@ class BaseSandboxSession(abc.ABC):
     _runtime_persist_workspace_skip_relpaths: set[Path] | None = None
     _pre_stop_hooks: list[Callable[[], Awaitable[None]]] | None = None
     _pre_stop_hooks_ran: bool = False
+    _pre_stop_hooks_failed: bool = False
+    _pre_stop_hooks_lock: asyncio.Lock | None = None
+    _aclose_lock: asyncio.Lock | None = None
     _runtime_helpers_installed: set[PurePath] | None = None
     _runtime_helper_cache_key: object = _RUNTIME_HELPER_CACHE_KEY_UNSET
     _workspace_path_policy_cache: (
@@ -219,7 +224,19 @@ class BaseSandboxSession(abc.ABC):
     _max_local_dir_file_concurrency: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY
     _archive_limits: SandboxArchiveLimits | None = None
 
+    def _runtime_has_protected_mount_authority(self) -> bool:
+        """Return whether SDK-owned runtime state contains live mount authority."""
+
+        return False
+
+    @redact_mount_error_data
     async def start(self) -> None:
+        from .._mount_security import validate_manifest_mount_credential_boundaries
+
+        validate_manifest_mount_credential_boundaries(
+            self.state.manifest,
+            provider_backend_id=self.state.type,
+        )
         try:
             await self._ensure_backend_started()
             self._start_workspace_root_ready = self.state.workspace_root_ready
@@ -304,6 +321,10 @@ class BaseSandboxSession(abc.ABC):
     async def _start_workspace(self) -> None:
         """Restore snapshot or apply manifest state after backend startup is complete."""
 
+        validate_manifest_mount_credential_boundaries(
+            self.state.manifest,
+            provider_backend_id=self.state.type,
+        )
         if await self.state.snapshot.restorable(dependencies=self.dependencies):
             can_reuse_workspace = await self._can_reuse_restorable_snapshot_workspace()
             if can_reuse_workspace:
@@ -313,10 +334,7 @@ class BaseSandboxSession(abc.ABC):
             else:
                 # Fresh workspaces and drifted preserved workspaces both need the durable snapshot
                 # restored before ephemeral state is rebuilt.
-                await self._restore_snapshot_into_workspace_on_resume()
-                if self.should_provision_manifest_accounts_on_resume():
-                    await self.provision_manifest_accounts()
-                await self._reapply_ephemeral_manifest_on_resume()
+                await self._restore_snapshot_and_reapply_ephemeral_on_resume()
         elif self._can_reuse_preserved_workspace_on_resume():
             # There is no durable snapshot to restore, but a reconnected backend may still need
             # ephemeral mounts/files refreshed without reapplying the full manifest.
@@ -326,6 +344,12 @@ class BaseSandboxSession(abc.ABC):
             await self._apply_manifest(
                 provision_accounts=self.should_provision_manifest_accounts_on_resume()
             )
+
+    async def _restore_snapshot_and_reapply_ephemeral_on_resume(self) -> None:
+        await self._restore_snapshot_into_workspace_on_resume()
+        if self.should_provision_manifest_accounts_on_resume():
+            await self.provision_manifest_accounts()
+        await self._reapply_ephemeral_manifest_on_resume()
 
     async def _can_reuse_restorable_snapshot_workspace(self) -> bool:
         """Return whether a restorable snapshot can be skipped for this start."""
@@ -358,6 +382,7 @@ class BaseSandboxSession(abc.ABC):
 
         return error
 
+    @redact_mount_error_data
     async def stop(self) -> None:
         """
         Persist/snapshot the workspace.
@@ -366,6 +391,10 @@ class BaseSandboxSession(abc.ABC):
         sandbox resources (Docker containers, remote sessions, etc.) should implement
         `shutdown()` instead.
         """
+        validate_manifest_mount_credential_boundaries(
+            self.state.manifest,
+            provider_backend_id=self.state.type,
+        )
         try:
             try:
                 await self._before_stop()
@@ -406,6 +435,7 @@ class BaseSandboxSession(abc.ABC):
     def supports_pty(self) -> bool:
         return False
 
+    @redact_mount_error_data
     async def shutdown(self) -> None:
         """
         Tear down sandbox resources (best-effort).
@@ -431,10 +461,16 @@ class BaseSandboxSession(abc.ABC):
 
         return
 
+    async def _terminate_ambiguous_mount_transition(self) -> None:
+        """Make a session unusable after a mount transition has an unknown outcome."""
+
+        await self.shutdown()
+
     async def __aenter__(self) -> Self:
         await self.start()
         return self
 
+    @redact_mount_error_data
     async def aclose(self) -> None:
         """Run the session cleanup lifecycle outside of ``async with``.
 
@@ -444,12 +480,35 @@ class BaseSandboxSession(abc.ABC):
         ``delete()`` separately for backend-specific deletion such as removing a Docker container
         or deleting a temporary host workspace.
         """
+
+        lock = self._aclose_lock
+        if lock is None:
+            lock = asyncio.Lock()
+            self._aclose_lock = lock
+        async with lock:
+            await self._aclose_impl()
+
+    async def _aclose_impl(self) -> None:
+        cleanup_error: BaseException | None = None
         try:
             await self.run_pre_stop_hooks()
-            await self.stop()
+        except BaseException as exc:
+            cleanup_error = exc
+        try:
+            if cleanup_error is None and not self._pre_stop_hooks_failed:
+                await self.stop()
             await self.shutdown()
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
         finally:
-            await self._aclose_dependencies()
+            try:
+                await self._aclose_dependencies()
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if cleanup_error is not None:
+            raise cleanup_error
 
     async def __aexit__(
         self,
@@ -484,22 +543,29 @@ class BaseSandboxSession(abc.ABC):
         hooks.append(hook)
         self._pre_stop_hooks_ran = False
 
+    @redact_mount_error_data
     async def run_pre_stop_hooks(self) -> None:
         """Run registered pre-stop hooks once before workspace persistence."""
 
-        hooks = self._pre_stop_hooks
-        if hooks is None or self._pre_stop_hooks_ran:
-            return
-        self._pre_stop_hooks_ran = True
-        cleanup_error: BaseException | None = None
-        for hook in hooks:
-            try:
-                await hook()
-            except BaseException as exc:
-                if cleanup_error is None:
-                    cleanup_error = exc
-        if cleanup_error is not None:
-            raise cleanup_error
+        lock = self._pre_stop_hooks_lock
+        if lock is None:
+            lock = asyncio.Lock()
+            self._pre_stop_hooks_lock = lock
+        async with lock:
+            hooks = self._pre_stop_hooks
+            if hooks is None or self._pre_stop_hooks_ran:
+                return
+            self._pre_stop_hooks_ran = True
+            cleanup_error: BaseException | None = None
+            for hook in hooks:
+                try:
+                    await hook()
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+            if cleanup_error is not None:
+                self._pre_stop_hooks_failed = True
+                raise cleanup_error
 
     async def _run_pre_stop_hooks(self) -> None:
         await self.run_pre_stop_hooks()
@@ -571,6 +637,7 @@ class BaseSandboxSession(abc.ABC):
             skip_paths.update(self._runtime_persist_workspace_skip_relpaths)
         return skip_paths
 
+    @redact_mount_error_data
     async def exec(
         self,
         *command: str | Path,
@@ -594,6 +661,7 @@ class BaseSandboxSession(abc.ABC):
         sanitized_command = self._prepare_exec_command(*command, shell=shell, user=user)
         return await self._exec_internal(*sanitized_command, timeout=timeout)
 
+    @redact_mount_error_data
     async def resolve_exposed_port(self, port: int) -> ExposedPortEndpoint:
         self._assert_exposed_port_configured(port)
         return await self._resolve_exposed_port(port)
@@ -1200,9 +1268,22 @@ class BaseSandboxSession(abc.ABC):
             provision_accounts=provision_accounts,
         )
 
-    async def _validate_manifest_application(self, *, only_ephemeral: bool = False) -> None:
-        _ = only_ephemeral
+    async def _validate_manifest_application(
+        self,
+        *,
+        only_ephemeral: bool = False,
+        manifest: Manifest | None = None,
+        session_running: bool | None = None,
+    ) -> None:
+        _ = (only_ephemeral, session_running)
+        from .._mount_security import validate_manifest_mount_credential_boundaries
 
+        validate_manifest_mount_credential_boundaries(
+            manifest or self.state.manifest,
+            provider_backend_id=self.state.type,
+        )
+
+    @redact_mount_error_data
     async def apply_manifest(self, *, only_ephemeral: bool = False) -> MaterializationResult:
         await self._validate_manifest_application(only_ephemeral=only_ephemeral)
         return await self._apply_manifest(

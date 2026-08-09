@@ -34,6 +34,7 @@ from runloop_api_client.types.shared.launch_parameters import (
     UserParameters as _RunloopSdkUserParameters,
 )
 
+from ....sandbox._mount_security import redact_mount_error_data
 from ....sandbox.entries import Mount
 from ....sandbox.errors import (
     ExecTimeoutError,
@@ -734,6 +735,7 @@ class RunloopSandboxSession(BaseSandboxSession):
             return 0.001
         return float(timeout_s)
 
+    @redact_mount_error_data
     async def start(self) -> None:
         """Resume a reconnected Runloop devbox without replaying full setup when possible.
 
@@ -741,6 +743,7 @@ class RunloopSandboxSession(BaseSandboxSession):
         In that path, Runloop reuses the live machine and only reapplies snapshot or ephemeral
         manifest state if the cached workspace fingerprint no longer matches.
         """
+        await self._validate_manifest_application()
         if self._skip_start:
             if await self.state.snapshot.restorable(dependencies=self.dependencies):
                 is_running = await self.running()
@@ -1554,6 +1557,7 @@ class RunloopSandboxClient(BaseSandboxClient[RunloopSandboxClientOptions | None]
     def platform(self) -> RunloopPlatformClient:
         return self._platform
 
+    @redact_mount_error_data
     async def create(
         self,
         *,
@@ -1585,6 +1589,7 @@ class RunloopSandboxClient(BaseSandboxClient[RunloopSandboxClientOptions | None]
             else Manifest(root=_default_runloop_manifest_root(user_parameters))
         )
         _validate_runloop_manifest_root(manifest, user_parameters=user_parameters)
+        self._validate_manifest_for_create(manifest)
 
         timeouts_in = resolved_options.timeouts
         if isinstance(timeouts_in, RunloopTimeouts):
@@ -1666,6 +1671,7 @@ class RunloopSandboxClient(BaseSandboxClient[RunloopSandboxClientOptions | None]
             pass
         return session
 
+    @redact_mount_error_data
     async def resume(
         self,
         state: SandboxSessionState,

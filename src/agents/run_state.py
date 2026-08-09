@@ -57,7 +57,15 @@ from ._tool_invocation import (
     tool_output_identity,
 )
 from .agent import Agent
-from .exceptions import ModelBehaviorError, UserError
+from .exceptions import (
+    ModelBehaviorError,
+    UserError,
+    _clear_data_redacted_error_traceback,
+    _detach_data_redacted_error_traceback,
+    _is_error_data_redacted,
+    _mark_error_data_redacted,
+    _raise_data_redacted_error,
+)
 from .guardrail import (
     GuardrailFunctionOutput,
     InputGuardrail,
@@ -182,7 +190,10 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "flows."
     ),
     "1.14": "Scopes hosted MCP approvals and restored requests by server label.",
-    "1.15": "Persists canonical tool invocation identity and lifecycle across resume flows.",
+    "1.15": (
+        "Persists canonical tool invocation identity plus sanitized mount authority and trusted "
+        "rebind metadata across resume flows."
+    ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -1102,7 +1113,17 @@ class RunState(Generic[TContext, TAgent]):
             include_tracing_api_key=include_tracing_api_key
         )
         if self._sandbox is not None:
-            result["sandbox"] = copy.deepcopy(self._sandbox)
+            from .sandbox._mount_security import (
+                _raise_invalid_run_state_sandbox_envelope,
+                sanitize_run_state_sandbox_mount_authority,
+            )
+
+            if not isinstance(self._sandbox, Mapping):
+                self._sandbox = None
+                _raise_invalid_run_state_sandbox_envelope()
+
+            sanitized_sandbox, _redacted = sanitize_run_state_sandbox_mount_authority(self._sandbox)
+            result["sandbox"] = sanitized_sandbox
 
         return result
 
@@ -1382,18 +1403,43 @@ class RunState(Generic[TContext, TAgent]):
         Raises:
             UserError: If the string is invalid JSON or has incompatible schema version.
         """
+        parse_error: UserError | None = None
         try:
             state_json = json.loads(state_string)
         except json.JSONDecodeError as e:
-            raise UserError(f"Failed to parse run state JSON: {e}") from e
+            message = (
+                "Failed to parse run state JSON at "
+                f"line {e.lineno}, column {e.colno}, character {e.pos}"
+            )
+            e.doc = "<redacted>"
+            e.__traceback__ = None
+            state_string = "<redacted>"
+            parse_error = UserError(message)
 
-        return await RunState.from_json(
-            initial_agent=initial_agent,
-            state_json=state_json,
-            context_override=context_override,
-            context_deserializer=context_deserializer,
-            strict_context=strict_context,
-        )
+        state_string = "<redacted>"
+        if parse_error is not None:
+            _mark_error_data_redacted(parse_error)
+            _raise_data_redacted_error(parse_error)
+
+        safe_error: Exception | None = None
+        try:
+            return await RunState.from_json(
+                initial_agent=initial_agent,
+                state_json=state_json,
+                context_override=context_override,
+                context_deserializer=context_deserializer,
+                strict_context=strict_context,
+            )
+        except Exception as error:
+            if not _is_error_data_redacted(error):
+                raise
+            _clear_data_redacted_error_traceback(error)
+            _detach_data_redacted_error_traceback(error)
+            safe_error = error
+
+        state_json = cast(Any, None)
+        assert safe_error is not None
+        _raise_data_redacted_error(safe_error)
 
     @staticmethod
     async def from_json(
@@ -1423,6 +1469,38 @@ class RunState(Generic[TContext, TAgent]):
         Raises:
             UserError: If the dict has incompatible schema version.
         """
+        if not isinstance(state_json, dict):
+            state_json = cast(Any, None)
+            error = UserError("Run state JSON must be an object")
+            _mark_error_data_redacted(error)
+            _raise_data_redacted_error(error)
+
+        schema_error: UserError | None = None
+        try:
+            _validate_run_state_schema_version(state_json)
+        except UserError as error:
+            _mark_error_data_redacted(error)
+            _clear_data_redacted_error_traceback(error)
+            _detach_data_redacted_error_traceback(error)
+            schema_error = error
+
+        if schema_error is not None:
+            state_json = cast(Any, None)
+            _raise_data_redacted_error(schema_error)
+
+        from .sandbox._mount_security import (
+            _raise_invalid_run_state_sandbox_envelope,
+            sanitize_run_state_sandbox_mount_authority,
+        )
+
+        if "sandbox" in state_json:
+            if not isinstance(state_json["sandbox"], Mapping):
+                state_json["sandbox"] = {}
+                _raise_invalid_run_state_sandbox_envelope()
+            sanitized_sandbox, _redacted = sanitize_run_state_sandbox_mount_authority(
+                state_json["sandbox"]
+            )
+            state_json["sandbox"] = sanitized_sandbox
         return await _build_run_state_from_json(
             initial_agent=initial_agent,
             state_json=state_json,
@@ -2944,6 +3022,22 @@ def _deserialize_tool_output_guardrail_results(
     return deserialized
 
 
+def _validate_run_state_schema_version(state_json: Mapping[str, Any]) -> str:
+    schema_version = state_json.get("$schemaVersion")
+    if not schema_version:
+        raise UserError("Run state is missing schema version")
+    if not isinstance(schema_version, str):
+        raise UserError("Run state schema version has an invalid type")
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        supported_versions = ", ".join(sorted(SUPPORTED_SCHEMA_VERSIONS))
+        raise UserError(
+            "Run state schema version is not supported. "
+            f"Supported versions are: {supported_versions}. "
+            f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
+        )
+    return schema_version
+
+
 async def _build_run_state_from_json(
     initial_agent: Agent[Any],
     state_json: dict[str, Any],
@@ -2963,16 +3057,7 @@ async def _build_run_state_from_json(
     safely, this function warns or raises (in ``strict_context`` mode) rather than silently
     claiming that the rebuilt mapping is equivalent to the original object.
     """
-    schema_version = state_json.get("$schemaVersion")
-    if not schema_version:
-        raise UserError("Run state is missing schema version")
-    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
-        supported_versions = ", ".join(sorted(SUPPORTED_SCHEMA_VERSIONS))
-        raise UserError(
-            f"Run state schema version {schema_version} is not supported. "
-            f"Supported versions are: {supported_versions}. "
-            f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
-        )
+    schema_version = _validate_run_state_schema_version(state_json)
     schema_major, schema_minor = (int(part) for part in schema_version.split(".", maxsplit=1))
     programmatic_major, programmatic_minor = (
         int(part) for part in _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION.split(".", maxsplit=1)

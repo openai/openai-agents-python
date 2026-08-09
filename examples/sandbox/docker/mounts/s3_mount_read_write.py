@@ -10,9 +10,6 @@ if __package__ is None or __package__ == "":
 
 from agents.sandbox.entries import (
     DockerVolumeMountStrategy,
-    InContainerMountStrategy,
-    MountpointMountPattern,
-    RcloneMountPattern,
     S3Mount,
 )
 from examples.sandbox.docker.mounts.mount_smoke import (
@@ -37,36 +34,6 @@ def _mount_cases() -> list[MountSmokeCase]:
                 region=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION"),
                 endpoint_url=os.getenv("S3_ENDPOINT_URL"),
                 mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
-                read_only=False,
-            ),
-        ),
-        MountSmokeCase(
-            name="in_container/rclone",
-            mount_dir="s3-in-container-rclone",
-            mount=S3Mount(
-                bucket=bucket,
-                access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                session_token=os.getenv("AWS_SESSION_TOKEN"),
-                prefix=os.getenv("S3_MOUNT_PREFIX"),
-                region=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION"),
-                endpoint_url=os.getenv("S3_ENDPOINT_URL"),
-                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
-                read_only=False,
-            ),
-        ),
-        MountSmokeCase(
-            name="in_container/mountpoint",
-            mount_dir="s3-in-container-mountpoint",
-            mount=S3Mount(
-                bucket=bucket,
-                access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                session_token=os.getenv("AWS_SESSION_TOKEN"),
-                prefix=os.getenv("S3_MOUNT_PREFIX"),
-                region=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION"),
-                endpoint_url=os.getenv("S3_ENDPOINT_URL"),
-                mount_strategy=InContainerMountStrategy(pattern=MountpointMountPattern()),
                 read_only=False,
             ),
         ),

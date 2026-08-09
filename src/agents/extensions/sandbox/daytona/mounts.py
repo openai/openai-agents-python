@@ -4,7 +4,8 @@ Provides ``DaytonaCloudBucketMountStrategy``, a wrapper around the generic
 :class:`InContainerMountStrategy` that ensures ``rclone`` is installed inside
 the sandbox before delegating to :class:`RcloneMountPattern`.
 
-Supports S3, R2, GCS, Azure Blob, and Box mounts through a single code path.
+Supports credentialless S3, R2, GCS, and Azure Blob mounts through a single code path.
+Authenticated mounts require an external or provider-native mount strategy.
 """
 
 from __future__ import annotations
@@ -13,6 +14,10 @@ import logging
 from pathlib import Path
 from typing import Literal
 
+from ....sandbox._mount_security import (
+    redact_mount_error_data,
+    validate_mount_activation_credential_boundary,
+)
 from ....sandbox.entries.mounts.base import InContainerMountStrategy, Mount, MountStrategyBase
 from ....sandbox.entries.mounts.patterns import RcloneMountPattern
 from ....sandbox.errors import MountConfigError
@@ -164,9 +169,10 @@ class DaytonaCloudBucketMountStrategy(MountStrategyBase):
     """Mount rclone-backed cloud storage in Daytona sandboxes.
 
     Wraps :class:`InContainerMountStrategy` with automatic ``rclone``
-    provisioning.  Use with any rclone-backed provider mount (``S3Mount``,
-    ``R2Mount``, ``GCSMount``, ``AzureBlobMount``, ``BoxMount``) and let the
-    generic framework handle config generation and mount execution.
+    provisioning.  Use with rclone-backed provider mounts that support anonymous access
+    (``S3Mount``, ``R2Mount``, ``GCSMount``, ``AzureBlobMount``) and let the
+    generic framework handle anonymous config generation and mount execution. Explicit cloud
+    credentials are not supported because the delegated helper executes inside the sandbox.
 
     Usage::
 
@@ -175,8 +181,6 @@ class DaytonaCloudBucketMountStrategy(MountStrategyBase):
 
         mount = S3Mount(
             bucket="my-bucket",
-            access_key_id="...",
-            secret_access_key="...",
             mount_path=Path("/mnt/bucket"),
             mount_strategy=DaytonaCloudBucketMountStrategy(),
         )
@@ -191,6 +195,7 @@ class DaytonaCloudBucketMountStrategy(MountStrategyBase):
     def validate_mount(self, mount: Mount) -> None:
         self._delegate().validate_mount(mount)
 
+    @redact_mount_error_data
     async def activate(
         self,
         mount: Mount,
@@ -198,6 +203,11 @@ class DaytonaCloudBucketMountStrategy(MountStrategyBase):
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
+        validate_mount_activation_credential_boundary(
+            mount,
+            self,
+            provider_backend_id="daytona",
+        )
         _assert_daytona_session(session)
         if self.pattern.mode == "fuse":
             await _ensure_fuse_support(session)
@@ -223,12 +233,18 @@ class DaytonaCloudBucketMountStrategy(MountStrategyBase):
         _assert_daytona_session(session)
         await self._delegate().teardown_for_snapshot(mount, session, path)
 
+    @redact_mount_error_data
     async def restore_after_snapshot(
         self,
         mount: Mount,
         session: BaseSandboxSession,
         path: Path,
     ) -> None:
+        validate_mount_activation_credential_boundary(
+            mount,
+            self,
+            provider_backend_id="daytona",
+        )
         _assert_daytona_session(session)
         if self.pattern.mode == "fuse":
             await _ensure_fuse_support(session)

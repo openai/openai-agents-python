@@ -35,6 +35,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, Field
 
 from ....logger import log_tool_action_warning
+from ....sandbox._mount_security import redact_mount_error_data
 from ....sandbox.entries import Mount
 from ....sandbox.errors import (
     ExecNonZeroError,
@@ -1685,6 +1686,7 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
         )
         self._dependencies = dependencies
 
+    @redact_mount_error_data
     async def create(
         self,
         *,
@@ -1695,6 +1697,7 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
         if options is None:
             raise ValueError("E2BSandboxClient.create requires options")
         manifest = manifest if manifest is not None else Manifest()
+        self._validate_manifest_for_create(manifest)
 
         sandbox_type = _coerce_sandbox_type(options.sandbox_type)
 
@@ -1766,6 +1769,7 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
             raise TypeError("E2BSandboxClient.delete expects an E2BSandboxSession")
         return session
 
+    @redact_mount_error_data
     async def resume(
         self,
         state: SandboxSessionState,
@@ -1812,6 +1816,7 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
                 lifecycle=_e2b_lifecycle(state.on_timeout, auto_resume=state.auto_resume),
                 mcp=state.mcp,
             )
+        if not reconnected:
             state.sandbox_id = str(_sandbox_id(sandbox))
             state.workspace_root_ready = False
 

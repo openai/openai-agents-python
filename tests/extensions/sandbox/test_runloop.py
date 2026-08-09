@@ -21,8 +21,16 @@ from agents.run_state import RunState
 from agents.sandbox import Manifest, SandboxPathGrant
 from agents.sandbox.capabilities import Shell
 from agents.sandbox.capabilities.tools.shell_tool import ExecCommandArgs, ExecCommandTool
-from agents.sandbox.entries import File, InContainerMountStrategy, Mount, MountpointMountPattern
+from agents.sandbox.entries import (
+    File,
+    InContainerMountStrategy,
+    Mount,
+    MountpointMountPattern,
+    RcloneMountPattern,
+    S3Mount,
+)
 from agents.sandbox.entries.mounts.base import InContainerMountAdapter
+from agents.sandbox.errors import MountConfigError
 from agents.sandbox.manifest import Environment
 from agents.sandbox.materialization import MaterializedFile
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
@@ -1295,6 +1303,18 @@ def test_runloop_package_re_exports_backend_symbols(monkeypatch: pytest.MonkeyPa
     assert package_module.RunloopUserParameters is runloop_module.RunloopUserParameters
 
 
+@pytest.fixture(autouse=True)
+def _trust_recording_mounts_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agents.sandbox import _mount_security
+
+    original = _mount_security._mount_class_is_trusted
+    monkeypatch.setattr(
+        _mount_security,
+        "_mount_class_is_trusted",
+        lambda mount: isinstance(mount, _RecordingMount) or original(mount),
+    )
+
+
 class _RecordingMount(Mount):
     type: str = "runloop_recording_mount"
     mount_strategy: InContainerMountStrategy = Field(
@@ -2049,7 +2069,10 @@ class TestRunloopSandbox:
             session = await client.create(
                 options=runloop_module.RunloopSandboxClientOptions(pause_on_exit=True),
             )
-            state = session.state
+            state = cast(
+                Any,
+                client.deserialize_session_state(client.serialize_session_state(session.state)),
+            )
             sdk = _FakeAsyncRunloopSDK.created_instances[-1]
             sdk.devbox.create_calls.clear()
             sdk.devbox.devboxes[state.devbox_id].status = "suspended"
@@ -2059,6 +2082,41 @@ class TestRunloopSandbox:
         assert sdk.devbox.from_id_calls == [state.devbox_id]
         assert sdk.devbox.create_calls == []
         assert resumed._inner._skip_start is True  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_skip_start_rejects_unsafe_mount_before_provider_work(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sentinel = "runloop-start-secret"
+        runloop_module = _load_runloop_module(monkeypatch)
+
+        async with runloop_module.RunloopSandboxClient() as client:
+            session = await client.create(options=runloop_module.RunloopSandboxClientOptions())
+            sdk = _FakeAsyncRunloopSDK.created_instances[-1]
+            devbox = sdk.devbox.devboxes[session.state.devbox_id]
+            session.state.manifest = Manifest(
+                entries={
+                    "data": S3Mount(
+                        bucket="bucket",
+                        access_key_id="access-key",
+                        secret_access_key=sentinel,
+                        mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+                    )
+                }
+            )
+            session._inner._skip_start = True  # noqa: SLF001
+            exec_calls_before = len(devbox.exec_calls)
+            resume_calls_before = devbox.resume_calls
+            snapshot_calls_before = len(devbox.snapshot_calls)
+
+            with pytest.raises(MountConfigError) as exc:
+                await session.start()
+
+        assert len(devbox.exec_calls) == exec_calls_before
+        assert devbox.resume_calls == resume_calls_before
+        assert len(devbox.snapshot_calls) == snapshot_calls_before
+        assert sentinel not in str(exc.value)
 
     @pytest.mark.asyncio
     async def test_resume_reconnects_running_devbox_without_pause(

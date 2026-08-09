@@ -275,8 +275,8 @@ class TestSandboxSessionStateRoundTrip:
     @pytest.mark.parametrize(
         ("payload", "error_type", "message"),
         [
-            ({}, ValueError, "must include a string `type`"),
-            ({"type": "missing"}, ValueError, "unknown sandbox session state type `missing`"),
+            ({}, ValueError, "sandbox session state payload is invalid"),
+            ({"type": "missing"}, ValueError, "sandbox session state payload is invalid"),
             ("not-a-state", TypeError, "session state payload must be"),
         ],
     )
@@ -288,6 +288,127 @@ class TestSandboxSessionStateRoundTrip:
     ) -> None:
         with pytest.raises(error_type, match=message):
             SandboxSessionState.parse(payload)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"type": "session-state-parse-secret"},
+            {
+                "type": "simple-roundtrip",
+                "snapshot": {"type": "noop", "id": "snapshot"},
+                "manifest": {
+                    "entries": {
+                        "data": {
+                            "type": "unknown",
+                            "token": "session-state-parse-secret",
+                        }
+                    }
+                },
+            },
+        ],
+    )
+    def test_parse_redacts_malformed_payload_errors(self, payload: dict[str, object]) -> None:
+        sentinel = "session-state-parse-secret"
+
+        with pytest.raises(ValueError, match="sandbox session state payload is invalid") as exc:
+            SandboxSessionState.parse(payload)
+
+        assert sentinel not in str(exc.value)
+        traceback = exc.value.__traceback__
+        while traceback is not None:
+            frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
+            if "/src/agents/" in frame_path:
+                assert sentinel not in repr(traceback.tb_frame.f_locals)
+            traceback = traceback.tb_next
+
+    @pytest.mark.parametrize("as_json", [False, True])
+    def test_direct_model_validation_redacts_malformed_mount_authority(
+        self,
+        as_json: bool,
+    ) -> None:
+        sentinel = "direct-model-validation-secret"
+        payload: dict[str, object] = {
+            "type": "simple-roundtrip",
+            "session_id": [],
+            "snapshot": {"type": "noop", "id": "snapshot"},
+            "manifest": {
+                "entries": {
+                    "data": {
+                        "type": "s3_mount",
+                        "bucket": "bucket",
+                        "secret_access_key": {"secret": sentinel},
+                        "mount_strategy": {"type": "docker_volume", "driver": "rclone"},
+                    }
+                }
+            },
+        }
+        model_input: object = json.dumps(payload) if as_json else payload
+
+        with pytest.raises(ValidationError) as exc:
+            if as_json:
+                _SimpleSessionState.model_validate_json(cast(str, model_input))
+            else:
+                _SimpleSessionState.model_validate(model_input)
+
+        assert sentinel not in str(exc.value)
+        assert sentinel not in repr(exc.value)
+        traceback = exc.value.__traceback__
+        while traceback is not None:
+            frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
+            if "/src/agents/" in frame_path:
+                assert sentinel not in repr(traceback.tb_frame.f_locals)
+            traceback = traceback.tb_next
+
+    @pytest.mark.parametrize("as_json", [False, True])
+    def test_direct_model_validation_redacts_non_mapping_manifest(
+        self,
+        as_json: bool,
+    ) -> None:
+        sentinel = "non-mapping-manifest-secret"
+        payload: dict[str, object] = {
+            "type": "simple-roundtrip",
+            "snapshot": {"type": "noop", "id": "snapshot"},
+            "manifest": [sentinel],
+        }
+        model_input: object = json.dumps(payload) if as_json else payload
+
+        with pytest.raises(ValidationError) as exc:
+            if as_json:
+                _SimpleSessionState.model_validate_json(cast(str, model_input))
+            else:
+                _SimpleSessionState.model_validate(model_input)
+
+        assert sentinel not in str(exc.value)
+        assert sentinel not in repr(exc.value)
+        assert exc.value.__cause__ is None
+        assert exc.value.__context__ is None
+        traceback = exc.value.__traceback__
+        while traceback is not None:
+            frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
+            if "/src/agents/" in frame_path:
+                assert sentinel not in repr(traceback.tb_frame.f_locals)
+            traceback = traceback.tb_next
+
+    def test_model_validate_json_redacts_malformed_json(self) -> None:
+        sentinel = "malformed-session-state-secret"
+        malformed_json = (
+            '{"type":"simple-roundtrip","manifest":{"entries":{"data":'
+            f'{{"secret_access_key":"{sentinel}"}}}}'
+        )
+
+        with pytest.raises(ValueError, match="sandbox session state JSON is invalid") as exc:
+            _SimpleSessionState.model_validate_json(malformed_json)
+
+        assert sentinel not in str(exc.value)
+        assert sentinel not in repr(exc.value)
+        assert exc.value.__cause__ is None
+        assert exc.value.__context__ is None
+        traceback = exc.value.__traceback__
+        while traceback is not None:
+            frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
+            if "/src/agents/" in frame_path:
+                assert sentinel not in repr(traceback.tb_frame.f_locals)
+            traceback = traceback.tb_next
 
     def test_subclass_registration_skips_non_literal_or_empty_type_defaults(self) -> None:
         assert "plain-type" not in SandboxSessionState._subclass_registry

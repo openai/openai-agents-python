@@ -544,6 +544,18 @@ class _RestorableSnapshot(SnapshotBase):
         return True
 
 
+@pytest.fixture(autouse=True)
+def _trust_recording_mounts_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agents.sandbox import _mount_security
+
+    original = _mount_security._mount_class_is_trusted
+    monkeypatch.setattr(
+        _mount_security,
+        "_mount_class_is_trusted",
+        lambda mount: isinstance(mount, _RecordingMount) or original(mount),
+    )
+
+
 class _RecordingMount(Mount):
     type: str = "recording_mount"
     mount_strategy: InContainerMountStrategy = Field(
@@ -1335,6 +1347,10 @@ async def test_e2b_resume_reuses_paused_timeout_lifecycle_sandbox(
         on_timeout="pause",
         auto_resume=True,
         pause_on_exit=False,
+    )
+    state = cast(
+        E2BSandboxSessionState,
+        client.deserialize_session_state(client.serialize_session_state(state)),
     )
 
     resumed = await client.resume(state)

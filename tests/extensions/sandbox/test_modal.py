@@ -43,6 +43,7 @@ from agents.sandbox.session.runtime_helpers import (
     RESOLVE_WORKSPACE_PATH_HELPER,
     WORKSPACE_FINGERPRINT_HELPER,
 )
+from agents.sandbox.session.sandbox_session_state import SandboxSessionState
 from agents.sandbox.snapshot import LocalSnapshot
 from agents.sandbox.types import ExecResult
 
@@ -60,6 +61,18 @@ def _with_aio(fn: Callable[..., object]) -> Callable[..., object]:
 
 def _set_aio_attr(obj: object, name: str, fn: Callable[..., object]) -> None:
     setattr(obj, name, _with_aio(fn))
+
+
+@pytest.fixture(autouse=True)
+def _trust_recording_mounts_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agents.sandbox import _mount_security
+
+    original = _mount_security._mount_class_is_trusted
+    monkeypatch.setattr(
+        _mount_security,
+        "_mount_class_is_trusted",
+        lambda mount: isinstance(mount, _RecordingMount) or original(mount),
+    )
 
 
 class _RecordingMount(Mount):
@@ -546,6 +559,45 @@ def test_modal_deserialize_session_state_defaults_missing_idle_timeout(
     )
 
     assert restored.idle_timeout is None
+
+
+@pytest.mark.asyncio
+async def test_modal_deserialize_discards_surviving_resource_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    client = modal_module.ModalSandboxClient()
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(
+            root="/workspace",
+            entries={
+                "remote": S3Mount(
+                    bucket="bucket",
+                    mount_strategy=modal_module.ModalCloudBucketMountStrategy(
+                        secret_name="protected-secret"
+                    ),
+                )
+            },
+        ),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id="sb-survivor",
+        workspace_root_ready=True,
+    )
+    payload = client.serialize_session_state(state)
+    cast(dict[str, object], payload["manifest"])["entries"] = {}
+    payload.pop("__openai_agents_redacted_mount_authority", None)
+
+    restored = client.deserialize_session_state(payload)
+    assert restored.sandbox_id is None
+    assert restored.workspace_root_ready is False
+    session = await client.resume(restored)
+
+    assert restored.sandbox_id == session.state.sandbox_id
+    assert restored.sandbox_id != "sb-survivor"
+    assert restored.workspace_root_ready is False
+    assert sys.modules["modal"].Sandbox.from_id_calls == []
+    assert len(create_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -1124,20 +1176,137 @@ async def test_modal_resume_eagerly_reconnects_sandbox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     modal_module, create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    client = modal_module.ModalSandboxClient()
 
     state = modal_module.ModalSandboxSessionState(
-        manifest=Manifest(root="/workspace"),
+        manifest=Manifest(
+            root="/workspace",
+            entries={
+                "remote": S3Mount(
+                    bucket="bucket",
+                    mount_strategy=modal_module.ModalCloudBucketMountStrategy(),
+                )
+            },
+        ),
         snapshot=modal_module.resolve_snapshot(None, "snapshot"),
         app_name="sandbox-tests",
         sandbox_id="sb-existing",
     )
+    state = client.deserialize_session_state(client.serialize_session_state(state))
 
-    client = modal_module.ModalSandboxClient()
     session = await client.resume(state)
 
     assert session._inner._sandbox is not None  # noqa: SLF001
     assert create_calls == []
     assert sys.modules["modal"].Sandbox.from_id_calls == ["sb-existing"]
+
+
+@pytest.mark.asyncio
+async def test_modal_resume_reconnects_deserialized_credentialless_external_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    trusted_manifest = Manifest(
+        root="/workspace",
+        entries={
+            "remote": S3Mount(
+                bucket="bucket",
+                mount_strategy=modal_module.ModalCloudBucketMountStrategy(),
+            )
+        },
+    )
+    state = modal_module.ModalSandboxSessionState(
+        manifest=trusted_manifest,
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id="sb-existing",
+    )
+    client = modal_module.ModalSandboxClient()
+    restored = client.deserialize_session_state(client.serialize_session_state(state))
+    session = await client.resume(restored)
+
+    assert session._inner._sandbox is not None  # noqa: SLF001
+    assert restored.mount_authority_rebound is False
+    assert create_calls == []
+    assert sys.modules["modal"].Sandbox.from_id_calls == ["sb-existing"]
+
+
+@pytest.mark.asyncio
+async def test_modal_resume_reconnects_generically_parsed_credentialless_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    trusted_manifest = Manifest(
+        root="/workspace",
+        entries={
+            "remote": S3Mount(
+                bucket="bucket",
+                mount_strategy=modal_module.ModalCloudBucketMountStrategy(),
+            )
+        },
+    )
+    state = modal_module.ModalSandboxSessionState(
+        manifest=trusted_manifest,
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id="sb-existing",
+    )
+    client = modal_module.ModalSandboxClient()
+    restored = SandboxSessionState.parse(client.serialize_session_state(state))
+    assert isinstance(restored, modal_module.ModalSandboxSessionState)
+    session = await client.resume(restored)
+
+    assert session._inner._sandbox is not None  # noqa: SLF001
+    assert restored.mount_authority_rebound is False
+    assert create_calls == []
+    assert sys.modules["modal"].Sandbox.from_id_calls == ["sb-existing"]
+
+
+@pytest.mark.asyncio
+async def test_modal_resume_creates_fresh_sandbox_for_rebound_mount_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    trusted_manifest = Manifest(
+        root="/workspace",
+        entries={
+            "remote": S3Mount(
+                bucket="bucket",
+                mount_strategy=modal_module.ModalCloudBucketMountStrategy(
+                    secret_name="current-secret"
+                ),
+            )
+        },
+    )
+    state = modal_module.ModalSandboxSessionState(
+        manifest=trusted_manifest,
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id="sb-existing",
+    )
+    client = modal_module.ModalSandboxClient()
+    serialized = client.serialize_session_state(state)
+    assert "current-secret" not in repr(serialized)
+    restored = client.deserialize_session_state(serialized)
+    assert restored.mount_authority_redacted is True
+    rebound = restored.rebind_persisted_mount_authority(
+        trusted_manifest,
+        provider_backend_id="modal",
+    )
+    assert rebound.mount_authority_redacted is False
+
+    original_session_id = rebound.session_id
+    session = await client.resume(rebound)
+
+    assert session._inner._sandbox is not None  # noqa: SLF001
+    assert rebound.session_id != original_session_id
+    assert rebound.sandbox_id == "sb-123"
+    assert len(create_calls) == 1
+    assert sys.modules["modal"].Sandbox.from_id_calls == []
+    volumes = cast(dict[str, object], create_calls[0]["volumes"])
+    assert volumes.keys() == {"/workspace/remote"}
+    mount = cast(Any, volumes["/workspace/remote"])
+    assert mount.secret.name == "current-secret"
 
 
 @pytest.mark.asyncio
@@ -3899,3 +4068,41 @@ async def test_modal_pty_start_cleans_up_unregistered_process_on_cancellation(
 
     assert sandbox.process.terminate_calls == 1
     assert session._pty_processes == {}  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_modal_direct_persist_redacts_protected_mount_provider_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    sentinel = "direct-modal-persist-secret"
+    source_error = RuntimeError(f"provider echoed {sentinel}")
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(
+            root="/workspace",
+            entries={
+                "remote": S3Mount(
+                    bucket="bucket",
+                    mount_strategy=modal_module.ModalCloudBucketMountStrategy(secret_name=sentinel),
+                )
+            },
+        ),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id="sb-direct-persist",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state)
+
+    async def fail_persist() -> io.IOBase:
+        raise source_error
+
+    monkeypatch.setattr(session, "_persist_workspace_via_tar", fail_persist)
+
+    with pytest.raises(RuntimeError, match="protected mount configuration") as exc_info:
+        await session.persist_workspace()
+
+    assert sentinel not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    assert source_error.args == ()
+    assert source_error.__traceback__ is None
