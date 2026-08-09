@@ -172,15 +172,17 @@ def drop_orphan_function_calls(
     items: list[TResponseInputItem],
     *,
     pruning_indexes: set[int] | None = None,
+    output_pruning_indexes: set[int] | None = None,
 ) -> list[TResponseInputItem]:
     """
     Remove tool and program call items that do not have corresponding outputs so resumptions or
-    retries do not replay stale calls. Program-owned items are removed with an orphan program,
-    while programs with retained hosted calls or tool outputs remain available for continuation.
-    Reasoning items that immediately precede a call dropped by this pass are also removed, since
-    the Responses API rejects reasoning items that are not followed by their associated
-    model-emitted item (``Item 'rs_...' of type 'reasoning' was provided without its required
-    following item``).
+    retries do not replay stale calls. When ``output_pruning_indexes`` identifies unambiguous
+    stored history, also remove tool outputs whose corresponding calls are no longer present after
+    history pruning. Program-owned items are removed with an orphan program, while programs with
+    retained hosted calls or tool outputs remain available for continuation. Reasoning items that
+    immediately precede a call dropped by this pass are also removed, since the Responses API
+    rejects reasoning items that are not followed by their associated model-emitted item (``Item
+    'rs_...' of type 'reasoning' was provided without its required following item``).
     """
 
     completed_call_ids = _completed_call_ids_by_type(items)
@@ -208,54 +210,71 @@ def drop_orphan_function_calls(
             orphan_program_call_ids.add(call_id)
 
     dropped_indexes: set[int] = set()
-    filtered: list[TResponseInputItem] = []
+    reasoning_trigger_indexes: set[int] = set()
     for index, entry in enumerate(items):
         if not isinstance(entry, dict):
-            filtered.append(entry)
             continue
         entry_type = entry.get("type")
         if not isinstance(entry_type, str):
-            filtered.append(entry)
             continue
         if pruning_indexes is not None and index not in pruning_indexes:
-            filtered.append(entry)
             continue
         program_caller_id = _get_program_caller_id(entry)
         if program_caller_id is not None and program_caller_id in orphan_program_call_ids:
             dropped_indexes.add(index)
-            continue
-        output_type = _TOOL_CALL_TO_OUTPUT_TYPE.get(entry_type)
-        if output_type is None:
-            filtered.append(entry)
+            reasoning_trigger_indexes.add(index)
             continue
         call_id = entry.get("call_id")
+        output_type = _TOOL_CALL_TO_OUTPUT_TYPE.get(entry_type)
+        if output_type is None:
+            continue
         if program_caller_id is not None and _is_pending_hosted_shell_call(entry):
-            filtered.append(entry)
             continue
         if entry_type == "program" and call_id in active_program_call_ids:
-            filtered.append(entry)
             continue
         if isinstance(call_id, str) and call_id in completed_call_ids.get(output_type, set()):
-            filtered.append(entry)
             continue
         if (
             entry_type == "tool_search_call"
             and not isinstance(call_id, str)
             and index in matched_anonymous_tool_search_calls
         ):
-            filtered.append(entry)
             continue
         # Tool call entry will be dropped; record so we can also drop preceding reasoning items.
         dropped_indexes.add(index)
+        reasoning_trigger_indexes.add(index)
+
+    available_call_ids = _available_call_ids_by_output_type(
+        items,
+        excluded_indexes=dropped_indexes,
+    )
+    if output_pruning_indexes is not None:
+        for index in output_pruning_indexes:
+            if index in dropped_indexes or index < 0 or index >= len(items):
+                continue
+            entry = items[index]
+            if not isinstance(entry, dict):
+                continue
+            entry_type = entry.get("type")
+            if not isinstance(entry_type, str) or entry_type not in available_call_ids:
+                continue
+            call_id = entry.get("call_id")
+            if isinstance(call_id, str) and call_id not in available_call_ids[entry_type]:
+                dropped_indexes.add(index)
 
     if not dropped_indexes:
-        return filtered
-    return _drop_reasoning_items_preceding_dropped_calls(items, dropped_indexes)
+        return list(items)
+    return _drop_reasoning_items_preceding_dropped_calls(
+        items,
+        dropped_indexes,
+        reasoning_trigger_indexes,
+    )
 
 
 def _drop_reasoning_items_preceding_dropped_calls(
     items: list[TResponseInputItem],
     dropped_indexes: set[int],
+    reasoning_trigger_indexes: set[int],
 ) -> list[TResponseInputItem]:
     """Drop reasoning items whose tied tool call was just dropped as orphan.
 
@@ -278,7 +297,7 @@ def _drop_reasoning_items_preceding_dropped_calls(
             next_entry = items[next_index]
             if isinstance(next_entry, dict) and next_entry.get("type") == "reasoning":
                 continue
-            if next_index in dropped_indexes:
+            if next_index in reasoning_trigger_indexes:
                 drop_reasoning.add(index)
             break
     excluded = dropped_indexes | drop_reasoning
@@ -957,6 +976,32 @@ def _completed_call_ids_by_type(payload: list[TResponseInputItem]) -> dict[str, 
         if isinstance(call_id, str):
             completed[item_type].add(call_id)
     return completed
+
+
+def _available_call_ids_by_output_type(
+    payload: list[TResponseInputItem],
+    *,
+    excluded_indexes: set[int],
+) -> dict[str, set[str]]:
+    """Return retained call ids grouped by their required output type."""
+    available: dict[str, set[str]] = {
+        output_type: set() for output_type in _TOOL_CALL_TO_OUTPUT_TYPE.values()
+    }
+    for index, entry in enumerate(payload):
+        if index in excluded_indexes:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        item_type = entry.get("type")
+        if not isinstance(item_type, str):
+            continue
+        output_type = _TOOL_CALL_TO_OUTPUT_TYPE.get(item_type)
+        if output_type is None:
+            continue
+        call_id = entry.get("call_id")
+        if isinstance(call_id, str):
+            available[output_type].add(call_id)
+    return available
 
 
 def _get_program_caller_id(entry: TResponseInputItem) -> str | None:

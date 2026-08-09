@@ -67,6 +67,7 @@ from agents.items import (
     TResponseInputItem,
 )
 from agents.lifecycle import RunHooks
+from agents.memory import SessionSettings
 from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.run import AgentRunner, get_default_agent_runner, set_default_agent_runner
 from agents.run_config import _default_trace_include_sensitive_data
@@ -2516,7 +2517,7 @@ async def test_input_guardrail_tripwire_does_not_save_assistant_message_to_sessi
 
 
 @pytest.mark.asyncio
-async def test_prepare_input_with_session_keeps_function_call_outputs():
+async def test_prepare_input_with_session_keeps_orphan_output_without_limit():
     history_item = cast(
         TResponseInputItem,
         {
@@ -2529,14 +2530,160 @@ async def test_prepare_input_with_session_keeps_function_call_outputs():
 
     prepared_input, session_items = await prepare_input_with_session("hello", session, None)
 
-    assert isinstance(prepared_input, list)
-    assert len(session_items) == 1
-    assert cast(dict[str, Any], session_items[0]).get("role") == "user"
-    first_item = cast(dict[str, Any], prepared_input[0])
-    last_item = cast(dict[str, Any], prepared_input[-1])
-    assert first_item["type"] == "function_call_output"
-    assert last_item["role"] == "user"
-    assert last_item["content"] == "hello"
+    assert prepared_input == [history_item, {"role": "user", "content": "hello"}]
+    assert session_items == [{"role": "user", "content": "hello"}]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_drops_limited_orphan_history_function_call_outputs():
+    history_item = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call_output",
+            "call_id": "call_prepare",
+            "output": "ok",
+        },
+    )
+    session = SimpleListSession(history=[history_item])
+
+    prepared_input, session_items = await prepare_input_with_session(
+        "hello",
+        session,
+        None,
+        SessionSettings(limit=1),
+    )
+
+    assert prepared_input == [{"role": "user", "content": "hello"}]
+    assert session_items == [{"role": "user", "content": "hello"}]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_preserves_new_function_call_outputs():
+    new_output = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call_output",
+            "call_id": "call_prepare",
+            "output": "ok",
+        },
+    )
+    session = SimpleListSession()
+
+    prepared_input, session_items = await prepare_input_with_session(
+        [new_output],
+        session,
+        None,
+        SessionSettings(limit=1),
+    )
+
+    assert prepared_input == [new_output]
+    assert session_items == [new_output]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_leaves_custom_callback_output_unchanged():
+    history_output = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call_output",
+            "call_id": "call_callback",
+            "output": "ok",
+        },
+    )
+    session = SimpleListSession(history=[history_output])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        return history + new_input
+
+    prepared_input, session_items = await prepare_input_with_session(
+        "hello",
+        session,
+        callback,
+        SessionSettings(limit=1),
+    )
+
+    assert prepared_input == [history_output, {"role": "user", "content": "hello"}]
+    assert session_items == [{"role": "user", "content": "hello"}]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_drops_output_for_program_owned_call_pruned_with_parent():
+    program = cast(
+        TResponseInputItem,
+        {
+            "type": "program",
+            "call_id": "program_orphan",
+            "code": "return await tools.lookup({});",
+            "fingerprint": "fingerprint:orphan",
+        },
+    )
+    function_call = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "call_orphan",
+            "name": "lookup",
+            "arguments": "{}",
+            "caller": {"type": "program", "caller_id": "program_orphan"},
+        },
+    )
+    function_output = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call_output",
+            "call_id": "call_orphan",
+            "output": "ok",
+        },
+    )
+    session = SimpleListSession(history=[program, function_call, function_output])
+
+    prepared_input, session_items = await prepare_input_with_session(
+        "hello",
+        session,
+        None,
+        SessionSettings(limit=3),
+    )
+
+    assert prepared_input == [{"role": "user", "content": "hello"}]
+    assert session_items == [{"role": "user", "content": "hello"}]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_keeps_paired_history_function_call_outputs():
+    function_call = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "call_prepare",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+    )
+    function_call_output = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call_output",
+            "call_id": "call_prepare",
+            "output": "ok",
+        },
+    )
+    session = SimpleListSession(history=[function_call, function_call_output])
+
+    prepared_input, session_items = await prepare_input_with_session(
+        "hello",
+        session,
+        None,
+        SessionSettings(limit=2),
+    )
+
+    assert prepared_input == [
+        function_call,
+        function_call_output,
+        {"role": "user", "content": "hello"},
+    ]
+    assert session_items == [{"role": "user", "content": "hello"}]
 
 
 @pytest.mark.asyncio

@@ -372,6 +372,7 @@ async def prepare_input_with_session(
     ]
 
     prune_history_indexes: set[int] = set()
+    output_pruning_indexes: set[int] | None = None
 
     if session_input_callback is None or not include_history_in_prepared_input:
         prepared_items_raw: list[TResponseInputItem] = (
@@ -382,6 +383,8 @@ async def prepare_input_with_session(
         appended_items = list(new_input_list)
         if include_history_in_prepared_input:
             prune_history_indexes = set(range(len(converted_history)))
+            if session_input_callback is None and resolved_settings.limit is not None:
+                output_pruning_indexes = set(prune_history_indexes)
     else:
         if not callable(session_input_callback):
             raise UserError(
@@ -465,6 +468,7 @@ async def prepare_input_with_session(
     filtered = drop_orphan_function_calls(
         prepared_as_inputs,
         pruning_indexes=prune_history_indexes,
+        output_pruning_indexes=output_pruning_indexes,
     )
     normalized = normalize_input_items_for_api(filtered)
     deduplicated = deduplicate_input_items_preferring_latest(normalized)
