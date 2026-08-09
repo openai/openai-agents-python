@@ -20,6 +20,7 @@ try:
         StreamedAudioResult,
         STTModelSettings,
         TTSModelSettings,
+        VoiceModelProvider,
         VoicePipeline,
         VoicePipelineConfig,
         VoiceStreamEvent,
@@ -1479,3 +1480,93 @@ async def test_voice_workflow_errors_apply_model_and_tool_logging_policies(
             assert error in record.args
             assert record.exc_info is not None
             assert record.exc_info[1] is error
+
+
+class _FalseySTT(FakeSTT):
+    """A concrete STT model whose truth value is False."""
+
+    def __bool__(self) -> bool:
+        return False
+
+
+class _FalseyTTS(FakeTTS):
+    """A concrete TTS model whose truth value is False."""
+
+    def __bool__(self) -> bool:
+        return False
+
+
+class _RaisingModelProvider(VoiceModelProvider):
+    """A provider that records lookups and fails if the pipeline ever falls back to it."""
+
+    def __init__(self) -> None:
+        self.stt_calls = 0
+        self.tts_calls = 0
+
+    def get_stt_model(self, model_name: str | None) -> Any:
+        self.stt_calls += 1
+        raise AssertionError("provider STT lookup should not be reached for an explicit model")
+
+    def get_tts_model(self, model_name: str | None) -> Any:
+        self.tts_calls += 1
+        raise AssertionError("provider TTS lookup should not be reached for an explicit model")
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_preserves_falsey_explicit_models_single_turn() -> None:
+    # An explicit STT/TTS model whose __bool__ is False must still be used instead of the
+    # provider default on the single static-audio turn path.
+    fake_stt = _FalseySTT(["first"])
+    workflow = FakeWorkflow([["out_1"]])
+    fake_tts = _FalseyTTS()
+    provider = _RaisingModelProvider()
+    config = VoicePipelineConfig(
+        model_provider=provider, tts_settings=TTSModelSettings(buffer_size=1)
+    )
+    pipeline = VoicePipeline(
+        workflow=workflow, stt_model=fake_stt, tts_model=fake_tts, config=config
+    )
+    assert pipeline.stt_model is fake_stt
+    assert pipeline.tts_model is fake_tts
+
+    audio_input = AudioInput(buffer=np.zeros(2, dtype=np.int16))
+    result = await pipeline.run(audio_input)
+    events, audio_chunks = await extract_events(result)
+
+    assert events == ["turn_started", "audio", "turn_ended", "session_ended"]
+    await fake_tts.verify_audio("out_1", audio_chunks[0])
+    assert pipeline.stt_model is fake_stt
+    assert pipeline.tts_model is fake_tts
+    assert provider.stt_calls == 0
+    assert provider.tts_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_preserves_falsey_explicit_models_streamed() -> None:
+    # The streamed multi-turn path reaches the STT getter via create_session; a falsey but
+    # explicit model must still be used instead of the provider default.
+    fake_stt = _FalseySTT(["first", "second"])
+    workflow = FakeWorkflow([["out_1"], ["out_2"]])
+    fake_tts = _FalseyTTS()
+    provider = _RaisingModelProvider()
+    config = VoicePipelineConfig(model_provider=provider)
+    pipeline = VoicePipeline(
+        workflow=workflow, stt_model=fake_stt, tts_model=fake_tts, config=config
+    )
+
+    streamed_audio_input = await FakeStreamedAudioInput.get(count=2)
+    result = await pipeline.run(streamed_audio_input)
+    events, audio_chunks = await extract_events(result)
+
+    assert events == [
+        "turn_started",
+        "audio",
+        "turn_ended",
+        "turn_started",
+        "audio",
+        "turn_ended",
+        "session_ended",
+    ]
+    assert len(audio_chunks) == 2
+    assert provider.stt_calls == 0
+    assert provider.tts_calls == 0

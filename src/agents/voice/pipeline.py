@@ -75,12 +75,12 @@ class VoicePipeline:
             raise UserError(f"Unsupported audio input type: {type(audio_input)}")
 
     def _get_tts_model(self) -> TTSModel:
-        if not self.tts_model:
+        if self.tts_model is None:
             self.tts_model = self.config.model_provider.get_tts_model(self._tts_model_name)
         return self.tts_model
 
     def _get_stt_model(self) -> STTModel:
-        if not self.stt_model:
+        if self.stt_model is None:
             self.stt_model = self.config.model_provider.get_stt_model(self._stt_model_name)
         return self.stt_model
 
