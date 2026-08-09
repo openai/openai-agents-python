@@ -37,7 +37,7 @@ from openai.types.responses.response_output_item import (
 )
 from openai.types.responses.response_usage import InputTokensDetails
 from openai.types.responses.tool_param import Mcp
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from agents import Agent, Model, ModelSettings, RunConfig, RunHooks, Runner, handoff, trace
 from agents._tool_invocation import tool_invocation_identity_and_scope
@@ -102,6 +102,7 @@ from agents.run_state import (
     _capability_identity_signature,
     _deserialize_items,
     _deserialize_processed_response,
+    _deserialize_tool_call_output_raw_item,
     _serialize_guardrail_results,
     _serialize_tool_action_groups,
 )
@@ -5607,6 +5608,58 @@ class TestRunStateSerializationEdgeCases:
 
         result_shell = _deserialize_items([item_data_shell], {"TestAgent": agent})
         assert len(result_shell) == 1
+        assert result_shell[0].raw_item == item_data_shell["raw_item"]
+
+    @pytest.mark.parametrize(
+        "raw_item",
+        [
+            {"type": "local_shell_call_output", "call_id": "call123"},
+            {
+                "type": "local_shell_call_output",
+                "id": "shell123",
+                "output": "result",
+            },
+            {
+                "type": "local_shell_call_output",
+                "call_id": 123,
+                "output": "result",
+            },
+            {
+                "type": "local_shell_call_output",
+                "call_id": b"call123",
+                "output": "result",
+            },
+            {
+                "type": "local_shell_call_output",
+                "call_id": "",
+                "output": "result",
+            },
+            {
+                "type": "local_shell_call_output",
+                "call_id": "call123",
+                "output": 123,
+            },
+            {
+                "type": "local_shell_call_output",
+                "call_id": "call123",
+                "output": b"result",
+            },
+        ],
+        ids=[
+            "missing-output",
+            "id-only",
+            "invalid-call-id",
+            "bytes-call-id",
+            "empty-call-id",
+            "invalid-output",
+            "bytes-output",
+        ],
+    )
+    async def test_deserialize_rejects_invalid_local_shell_call_output(
+        self, raw_item: dict[str, Any]
+    ) -> None:
+        with pytest.raises(ValidationError):
+            _deserialize_tool_call_output_raw_item(raw_item)
 
     async def test_deserialize_reasoning_item(self):
         """Test deserialization of reasoning_item."""

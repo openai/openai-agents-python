@@ -11,7 +11,7 @@ from collections import deque
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Generic, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, cast
 from uuid import uuid4
 
 from openai.types.responses import (
@@ -36,8 +36,8 @@ from openai.types.responses.response_output_item import (
     Program,
     ProgramOutput,
 )
-from pydantic import TypeAdapter, ValidationError
-from typing_extensions import TypeVar
+from pydantic import StringConstraints, TypeAdapter, ValidationError
+from typing_extensions import TypedDict, TypeVar
 
 from ._tool_identity import (
     FunctionToolLookupKey,
@@ -211,9 +211,20 @@ if _missing_schema_version_summaries:
         f"Missing summaries: {', '.join(_missing_schema_version_summaries)}"
     )
 
+
+class _LocalShellCallOutputPayload(TypedDict):
+    """SDK-produced local-shell output shape stored in released RunState snapshots."""
+
+    type: Literal["local_shell_call_output"]
+    call_id: Annotated[str, StringConstraints(strict=True, min_length=1)]
+    output: Annotated[str, StringConstraints(strict=True)]
+
+
 _FUNCTION_OUTPUT_ADAPTER: TypeAdapter[FunctionCallOutput] = TypeAdapter(FunctionCallOutput)
 _COMPUTER_OUTPUT_ADAPTER: TypeAdapter[ComputerCallOutput] = TypeAdapter(ComputerCallOutput)
-_LOCAL_SHELL_OUTPUT_ADAPTER: TypeAdapter[LocalShellCallOutput] = TypeAdapter(LocalShellCallOutput)
+_LOCAL_SHELL_OUTPUT_ADAPTER: TypeAdapter[_LocalShellCallOutputPayload] = TypeAdapter(
+    _LocalShellCallOutputPayload
+)
 _TOOL_CALL_OUTPUT_UNION_ADAPTER: TypeAdapter[
     FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput
 ] = TypeAdapter(FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput)
@@ -2727,14 +2738,19 @@ def _deserialize_tool_call_output_raw_item(
             ComputerCallOutput,
             _to_dump_compatible(_COMPUTER_OUTPUT_ADAPTER.validate_python(normalized_raw_item)),
         )
-    if output_type == "local_shell_call_output":
-        return _LOCAL_SHELL_OUTPUT_ADAPTER.validate_python(normalized_raw_item)
     if output_type == "program_output":
         try:
             return ProgramOutput(**normalized_raw_item)
         except Exception:
             return normalized_raw_item
-    if output_type in {"shell_call_output", "apply_patch_call_output", "custom_tool_call_output"}:
+    if output_type == "local_shell_call_output":
+        _LOCAL_SHELL_OUTPUT_ADAPTER.validate_python(normalized_raw_item)
+        return normalized_raw_item
+    if output_type in {
+        "shell_call_output",
+        "apply_patch_call_output",
+        "custom_tool_call_output",
+    }:
         return normalized_raw_item
 
     try:

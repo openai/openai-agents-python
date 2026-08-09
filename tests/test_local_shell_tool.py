@@ -4,25 +4,32 @@ These confirm that LocalShellAction.execute forwards the command to the executor
 and that Runner.run executes local shell calls and records their outputs.
 """
 
+import json
 from typing import Any, cast
 
+import httpx
 import pytest
+from openai import AsyncOpenAI
 from openai.types.responses import ResponseOutputText
+from openai.types.responses.response_input_param import LocalShellCallOutput
 from openai.types.responses.response_output_item import LocalShellCall, LocalShellCallAction
 
 from agents import (
     Agent,
     LocalShellCommandRequest,
     LocalShellTool,
+    OpenAIResponsesModel,
     RunConfig,
     RunContextWrapper,
     RunHooks,
     Runner,
+    UserError,
 )
 from agents.items import ToolCallOutputItem
 from agents.run_internal.run_loop import LocalShellAction, ToolRunLocalShellCall
+from agents.run_state import RunState
 
-from .fake_model import FakeModel
+from .fake_model import FakeModel, get_response_obj
 from .test_responses import get_text_message
 
 
@@ -36,6 +43,60 @@ class RecordingLocalShellExecutor:
     def __call__(self, request: LocalShellCommandRequest) -> str:
         self.calls.append(request)
         return self.output
+
+
+async def _create_serialized_local_shell_state() -> tuple[LocalShellTool, dict[str, Any]]:
+    tool = LocalShellTool(executor=RecordingLocalShellExecutor(output="shell result"))
+    initial_model = FakeModel()
+    initial_agent = Agent(name="shell-agent", model=initial_model, tools=[tool])
+    local_shell_call = LocalShellCall(
+        id="lsh_test",
+        action=LocalShellCallAction(
+            command=["bash", "-c", "echo shell"],
+            env={},
+            type="exec",
+            timeout_ms=1000,
+            working_directory="/tmp",
+        ),
+        call_id="call_local_shell",
+        status="completed",
+        type="local_shell_call",
+    )
+    initial_model.add_multiple_turn_outputs(
+        [
+            [get_text_message("running shell"), local_shell_call],
+            [get_text_message("shell complete")],
+        ]
+    )
+    result = await Runner.run(initial_agent, input="please run shell")
+    return tool, json.loads(json.dumps(result.to_state().to_json()))
+
+
+def _create_recording_responses_model() -> tuple[
+    OpenAIResponsesModel, list[httpx.Request], httpx.AsyncClient
+]:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            content=get_response_obj([get_text_message("resumed")]).model_dump_json(),
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = AsyncOpenAI(
+        api_key="test-key",
+        base_url="https://example.test/v1",
+        http_client=http_client,
+    )
+    return (
+        OpenAIResponsesModel(model="codex-mini-latest", openai_client=client),
+        requests,
+        http_client,
+    )
 
 
 @pytest.mark.asyncio
@@ -156,3 +217,126 @@ async def test_runner_executes_local_shell_calls() -> None:
 
     assert result.final_output == "shell complete"
     assert len(result.raw_responses) == 2
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "schema_version",
+    [None, "1.13"],
+    ids=["current", "v0.19.4"],
+)
+async def test_local_shell_output_survives_run_state_resume(schema_version: str | None) -> None:
+    tool, serialized = await _create_serialized_local_shell_state()
+    if schema_version is not None:
+        serialized["$schemaVersion"] = schema_version
+
+    resumed_model, requests, http_client = _create_recording_responses_model()
+    try:
+        resumed_agent = Agent(name="shell-agent", model=resumed_model, tools=[tool])
+        resumed_state = await RunState.from_json(resumed_agent, serialized)
+
+        shell_outputs = [
+            item.raw_item
+            for item in resumed_state._generated_items
+            if isinstance(item, ToolCallOutputItem)
+            and isinstance(item.raw_item, dict)
+            and item.raw_item.get("type") == "local_shell_call_output"
+        ]
+        assert shell_outputs == [
+            {
+                "type": "local_shell_call_output",
+                "call_id": "call_local_shell",
+                "output": "shell result",
+            }
+        ]
+
+        await Runner.run(resumed_agent, resumed_state)
+    finally:
+        await http_client.aclose()
+
+    assert len(requests) == 1
+    request_body = json.loads(requests[0].content)
+    replayed = [item for item in request_body["input"] if isinstance(item, dict)]
+    replayed_call = next(item for item in replayed if item.get("type") == "local_shell_call")
+    replayed_output = next(
+        item for item in replayed if item.get("type") == "local_shell_call_output"
+    )
+    assert replayed_call["call_id"] == replayed_output["call_id"] == "call_local_shell"
+    assert "id" not in replayed_output
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "schema_version",
+    [None, "1.13"],
+    ids=["current", "v0.19.4"],
+)
+async def test_run_state_rejects_id_only_local_shell_output(schema_version: str | None) -> None:
+    tool, serialized = await _create_serialized_local_shell_state()
+    invalid_output = {
+        "type": "local_shell_call_output",
+        "id": "legacy-only",
+        "output": "shell result",
+    }
+    for item_group in ("generated_items", "session_items"):
+        output_items = [
+            item
+            for item in serialized[item_group]
+            if item.get("raw_item", {}).get("type") == "local_shell_call_output"
+        ]
+        assert len(output_items) == 1
+        output_items[0]["raw_item"] = invalid_output.copy()
+    if schema_version is not None:
+        serialized["$schemaVersion"] = schema_version
+
+    resumed_model, requests, http_client = _create_recording_responses_model()
+    resumed_agent = Agent(name="shell-agent", model=resumed_model, tools=[tool])
+    try:
+        if schema_version is None:
+            with pytest.raises(UserError, match="completed tool invocation 'call_local_shell'"):
+                await RunState.from_json(resumed_agent, serialized)
+        else:
+            resumed_state = await RunState.from_json(resumed_agent, serialized)
+            await Runner.run(resumed_agent, resumed_state)
+    finally:
+        await http_client.aclose()
+
+    if schema_version is None:
+        assert requests == []
+    else:
+        assert len(requests) == 1
+        request_body = json.loads(requests[0].content)
+        replayed_types = {
+            item.get("type") for item in request_body["input"] if isinstance(item, dict)
+        }
+        assert "local_shell_call" not in replayed_types
+        assert "local_shell_call_output" not in replayed_types
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "schema_version",
+    [None, "1.13"],
+    ids=["current", "v0.19.4"],
+)
+async def test_run_state_preserves_official_local_shell_original_input(
+    schema_version: str | None,
+) -> None:
+    original_input: LocalShellCallOutput = {
+        "type": "local_shell_call_output",
+        "id": "lsh_output_123",
+        "output": "shell result",
+    }
+    model = FakeModel()
+    model.add_multiple_turn_outputs([[get_text_message("complete")]])
+    agent = Agent(name="shell-agent", model=model)
+    result = await Runner.run(agent, input=[original_input])
+    serialized = json.loads(json.dumps(result.to_state().to_json()))
+    if schema_version is not None:
+        serialized["$schemaVersion"] = schema_version
+
+    restored_state = await RunState.from_json(agent, serialized)
+    assert restored_state.to_json()["original_input"] == [original_input]
