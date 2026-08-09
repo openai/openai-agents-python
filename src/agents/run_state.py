@@ -1307,20 +1307,8 @@ class RunState(Generic[TContext, TAgent]):
 
         # Add additional fields based on item type
         if hasattr(item, "output"):
-            serialized_output = item.output
             try:
-                if hasattr(serialized_output, "model_dump"):
-                    # ``output`` is the tool's actual return value, not a wire item, so keep
-                    # fields left at their defaults. ``exclude_unset`` would drop them and make
-                    # the restored ``.output`` disagree with the full model-facing ``raw_item``.
-                    # Stay in Python mode and let ``_ensure_json_compatible`` handle JSON
-                    # conversion below: ``mode="json"`` raises on values like non-UTF-8 bytes,
-                    # which would trip the fallback and replace the whole structured output with
-                    # an opaque string instead of a dict.
-                    serialized_output = serialized_output.model_dump()
-                elif dataclasses.is_dataclass(serialized_output):
-                    serialized_output = dataclasses.asdict(serialized_output)  # type: ignore[arg-type]
-                serialized_output = _ensure_json_compatible(serialized_output)
+                serialized_output = _ensure_json_compatible(_serialize_output_value(item.output))
             except Exception:
                 serialized_output = str(item.output)
             result["output"] = serialized_output
@@ -1734,6 +1722,33 @@ def _ensure_json_compatible(value: Any) -> Any:
         return json.loads(json.dumps(value, default=str))
     except Exception:
         return str(value)
+
+
+def _serialize_output_value(value: Any) -> Any:
+    """Convert a tool output value, including containers of models, to plain data.
+
+    ``_ensure_json_compatible`` stringifies anything ``json.dumps`` cannot handle, so
+    Pydantic models and dataclasses nested in containers would otherwise degrade to
+    their reprs instead of structured data. Sets and models nested inside dataclass
+    instances intentionally keep the previous behavior and degrade through
+    ``_ensure_json_compatible``'s string fallback.
+    """
+    if hasattr(value, "model_dump"):
+        # ``output`` is the tool's actual return value, not a wire item, so keep fields
+        # left at their defaults. ``exclude_unset`` would drop them and make the restored
+        # ``.output`` disagree with the full model-facing ``raw_item``. Stay in Python
+        # mode and let ``_ensure_json_compatible`` handle JSON conversion afterwards:
+        # ``mode="json"`` raises on values like non-UTF-8 bytes, which would trip the
+        # fallback and replace the whole structured output with an opaque string
+        # instead of a dict.
+        return value.model_dump()
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return dataclasses.asdict(value)
+    if isinstance(value, dict):
+        return {key: _serialize_output_value(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_serialize_output_value(item) for item in value]
+    return value
 
 
 def _serialize_tool_call_data(tool_call: Any) -> Any:

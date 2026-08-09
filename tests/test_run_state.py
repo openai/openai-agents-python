@@ -3128,6 +3128,46 @@ class TestSerializationRoundTrip:
         assert raw_item_again["acknowledged_safety_checks"] == expected_checks
         json.dumps(roundtripped.to_json())
 
+    async def test_serializes_output_containers_of_models(self):
+        """Containers of Pydantic models and dataclasses should serialize as structured data."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="ItemAgent")
+
+        class Weather(BaseModel):
+            city: str
+            temperature: int
+
+        @dataclass
+        class Reading:
+            value: int
+            label: str
+
+        cases: list[tuple[Any, Any]] = [
+            ([Weather(city="sf", temperature=18)], [{"city": "sf", "temperature": 18}]),
+            (
+                {"today": Weather(city="sf", temperature=18)},
+                {"today": {"city": "sf", "temperature": 18}},
+            ),
+            ((Reading(value=1, label="ok"),), [{"value": 1, "label": "ok"}]),
+        ]
+        for output, expected in cases:
+            state = make_state(agent, context=context, original_input="test", max_turns=5)
+            state._generated_items.append(
+                ToolCallOutputItem(
+                    agent=agent,
+                    raw_item={"type": "function_call_output", "call_id": "c1", "output": "x"},
+                    output=output,
+                )
+            )
+
+            json_data = state.to_json()
+            assert json_data["generated_items"][0]["output"] == expected
+
+            new_state = await RunState.from_json(agent, json_data)
+            restored_item = new_state._generated_items[0]
+            assert isinstance(restored_item, ToolCallOutputItem)
+            assert restored_item.output == expected
+
     async def test_deserializes_tool_call_output_custom_data(self):
         """SDK-only tool output custom data should survive RunState roundtrips."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
