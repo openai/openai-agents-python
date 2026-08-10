@@ -79,11 +79,32 @@ class RealtimeInputAudioTranscriptionConfig(TypedDict):
     language: NotRequired[str]
     """The language code for transcription."""
 
-    model: NotRequired[Literal["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"] | str]
+    model: NotRequired[
+        Literal[
+            "gpt-transcribe",
+            "gpt-live-transcribe",
+            "gpt-4o-transcribe",
+            "gpt-4o-mini-transcribe",
+            "gpt-4o-mini-transcribe-2025-12-15",
+            "gpt-4o-transcribe-diarize",
+            "gpt-realtime-whisper",
+            "whisper-1",
+        ]
+        | str
+    ]
     """The transcription model to use."""
 
     prompt: NotRequired[str]
     """An optional prompt to guide transcription."""
+
+    keywords: NotRequired[list[str]]
+    """Literal terms that may appear in the audio."""
+
+    languages: NotRequired[list[str]]
+    """Expected input languages for transcription."""
+
+    delay: NotRequired[Literal["minimal", "low", "medium", "high", "xhigh"]]
+    """The latency and accuracy tradeoff for streaming transcription."""
 
 
 class RealtimeInputAudioNoiseReductionConfig(TypedDict):
@@ -130,7 +151,8 @@ class RealtimeAudioInputConfig(TypedDict, total=False):
     format: RealtimeAudioFormat | OpenAIRealtimeAudioFormats
     noise_reduction: RealtimeInputAudioNoiseReductionConfig | None
     transcription: RealtimeInputAudioTranscriptionConfig
-    turn_detection: RealtimeTurnDetectionConfig
+    turn_detection: RealtimeTurnDetectionConfig | None
+    """Configuration for detecting conversation turns, or ``None`` to disable detection."""
 
 
 class RealtimeAudioOutputConfig(TypedDict, total=False):
@@ -201,8 +223,8 @@ class RealtimeSessionModelSettings(TypedDict):
     input_audio_noise_reduction: NotRequired[RealtimeInputAudioNoiseReductionConfig | None]
     """Noise reduction configuration for input audio."""
 
-    turn_detection: NotRequired[RealtimeTurnDetectionConfig]
-    """Configuration for detecting conversation turns."""
+    turn_detection: NotRequired[RealtimeTurnDetectionConfig | None]
+    """Configuration for detecting conversation turns, or ``None`` to disable detection."""
 
     tool_choice: NotRequired[ToolChoice]
     """How the model should choose which tools to call."""

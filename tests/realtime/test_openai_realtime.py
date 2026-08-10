@@ -14,6 +14,7 @@ from pydantic import TypeAdapter
 from agents import Agent, WebSearchTool, function_tool
 from agents.exceptions import UserError
 from agents.handoffs import handoff
+from agents.realtime import RealtimeSessionModelSettings
 from agents.realtime.model import RealtimeModelConfig, RealtimePlaybackTracker
 from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
@@ -476,7 +477,7 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
     @pytest.mark.asyncio
     async def test_session_update_disable_turn_detection(self, model, mock_websocket):
         """Session.update should allow users to disable turn-detection."""
-        config = {
+        config: RealtimeModelConfig = {
             "api_key": "test-api-key-123",
             "initial_model_settings": {
                 "model_name": "gpt-4o-realtime-preview",
@@ -2807,6 +2808,65 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert payload["model"] == "gpt-realtime-2.1"
         assert payload["parallel_tool_calls"] is False
         assert payload["reasoning"] == {"effort": "low"}
+
+    def test_session_config_forwards_ga_input_audio_transcription_options(self, model):
+        contextual_settings: RealtimeSessionModelSettings = {
+            "audio": {
+                "input": {
+                    "transcription": {
+                        "model": "gpt-transcribe",
+                        "keywords": ["LegalOn", "TomoniAI"],
+                        "languages": ["ja", "en"],
+                        "prompt": "A Japanese conversation about LegalOn and TomoniAI.",
+                    }
+                }
+            }
+        }
+        low_latency_settings: RealtimeSessionModelSettings = {
+            "audio": {
+                "input": {
+                    "transcription": {
+                        "model": "gpt-live-transcribe",
+                    },
+                    "turn_detection": None,
+                }
+            }
+        }
+        whisper_settings: RealtimeSessionModelSettings = {
+            "audio": {
+                "input": {
+                    "transcription": {
+                        "model": "gpt-realtime-whisper",
+                        "delay": "low",
+                    },
+                    "turn_detection": None,
+                }
+            }
+        }
+
+        contextual_payload = model._get_session_config(contextual_settings).model_dump(
+            exclude_unset=True
+        )
+        low_latency_payload = model._get_session_config(low_latency_settings).model_dump(
+            exclude_unset=True
+        )
+        whisper_payload = model._get_session_config(whisper_settings).model_dump(exclude_unset=True)
+
+        assert contextual_payload["audio"]["input"]["transcription"] == {
+            "model": "gpt-transcribe",
+            "keywords": ["LegalOn", "TomoniAI"],
+            "languages": ["ja", "en"],
+            "prompt": "A Japanese conversation about LegalOn and TomoniAI.",
+        }
+        assert low_latency_payload["audio"]["input"]["transcription"] == {
+            "model": "gpt-live-transcribe",
+        }
+        assert low_latency_payload["audio"]["input"]["turn_detection"] is None
+        assert whisper_payload["audio"]["input"]["transcription"] == {
+            "model": "gpt-realtime-whisper",
+            "delay": "low",
+        }
+        assert whisper_payload["audio"]["input"]["turn_detection"] is None
 
     def test_session_config_passes_max_output_tokens(self, model):
         # Integer cap is forwarded verbatim to the server payload.
