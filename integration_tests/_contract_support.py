@@ -683,6 +683,26 @@ def _optional_dependency_for_binding_in_modules(
     return None
 
 
+def _preserve_released_callable_for_promotion(
+    contract: Mapping[str, Any],
+    callables: dict[str, Any],
+    qualified_name: str,
+    *,
+    fail_if_missing: bool,
+    unavailable_reason: str,
+) -> None:
+    released_callable = contract["callables"].get(qualified_name)
+    if released_callable is None:
+        if not fail_if_missing:
+            return
+        raise ValueError(
+            f"Cannot promote new canonical callable {qualified_name} because "
+            f"{unavailable_reason}. Ensure the binding is available and exposes an inspectable "
+            "signature on the release preparation host."
+        )
+    callables[qualified_name] = deepcopy(released_callable)
+
+
 def build_released_api_contract(
     contract: dict[str, Any],
     *,
@@ -749,6 +769,7 @@ def build_released_api_contract(
         if module_name == "agents":
             continue
         qualified_name = f"{module_name}.{entry['name']}"
+        is_new_canonical_import = entry not in contract["canonical_imports"]
         optional_dependency = (
             _optional_dependency_for_binding_in_modules(
                 release_policy.modules, module_name, entry["name"]
@@ -759,15 +780,33 @@ def build_released_api_contract(
         if optional_dependency is not None and not _optional_dependency_is_available_for_contract(
             optional_dependency, policy_unsupported_platforms
         ):
-            if qualified_name in contract["callables"]:
-                callables[qualified_name] = deepcopy(contract["callables"][qualified_name])
+            if _optional_dependency_is_unsupported_for_contract(
+                optional_dependency, policy_unsupported_platforms
+            ):
+                _preserve_released_callable_for_promotion(
+                    contract,
+                    callables,
+                    qualified_name,
+                    fail_if_missing=is_new_canonical_import,
+                    unavailable_reason=(
+                        f"optional dependency {optional_dependency!r} is unsupported on "
+                        f"{sys.platform!r}"
+                    ),
+                )
             continue
         try:
             module = _import_contract_module(module_name, agents_module)
         except Exception as error:
             if _matches_platform_import_error(contract, module_name, error):
-                if qualified_name in contract["callables"]:
-                    callables[qualified_name] = deepcopy(contract["callables"][qualified_name])
+                _preserve_released_callable_for_promotion(
+                    contract,
+                    callables,
+                    qualified_name,
+                    fail_if_missing=is_new_canonical_import,
+                    unavailable_reason=(
+                        f"module {module_name!r} has a declared import error on {sys.platform!r}"
+                    ),
+                )
                 continue
             raise
         value = getattr(module, entry["name"], None)
@@ -776,8 +815,16 @@ def build_released_api_contract(
                 _import_contract_module(entry["canonical_module"], agents_module)
             except Exception as error:
                 if _matches_platform_import_error(contract, entry["canonical_module"], error):
-                    if qualified_name in contract["callables"]:
-                        callables[qualified_name] = deepcopy(contract["callables"][qualified_name])
+                    _preserve_released_callable_for_promotion(
+                        contract,
+                        callables,
+                        qualified_name,
+                        fail_if_missing=is_new_canonical_import,
+                        unavailable_reason=(
+                            f"canonical module {entry['canonical_module']!r} has a declared "
+                            f"import error on {sys.platform!r}"
+                        ),
+                    )
                     continue
                 raise
             continue
@@ -788,7 +835,14 @@ def build_released_api_contract(
             continue
         try:
             _signature(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as error:
+            _preserve_released_callable_for_promotion(
+                contract,
+                callables,
+                qualified_name,
+                fail_if_missing=is_new_canonical_import,
+                unavailable_reason=f"its signature cannot be inspected: {error!r}",
+            )
             continue
         callables[qualified_name] = _callable_contract(value)
 
@@ -1190,9 +1244,7 @@ def validate_released_api_contract(
                         "optional declaration or correct its dependency module"
                     )
         binding_only_names = set(optional_bindings) - set(optional_exports)
-        for name in sorted(
-            (unavailable_optional_bindings - unsupported_optional_bindings) & binding_only_names
-        ):
+        for name in sorted(unavailable_optional_bindings & binding_only_names):
             if name not in current_names:
                 errors.append(
                     f"Invalid released {module_name} optional dependency declaration: "
@@ -1203,13 +1255,19 @@ def validate_released_api_contract(
             try:
                 getattr(module, name)
             except (AttributeError, ImportError):
-                pass
+                if name in unsupported_optional_bindings:
+                    errors.append(
+                        f"Invalid released {module_name} optional dependency declaration: "
+                        f"{name!r} remains in __all__ on an unsupported platform but its "
+                        "binding is unavailable"
+                    )
             else:
-                errors.append(
-                    f"Invalid released {module_name} optional dependency declaration: "
-                    f"{name!r} remains in __all__ and its binding resolves; remove its "
-                    "optional declaration or correct its dependency module"
-                )
+                if name not in unsupported_optional_bindings:
+                    errors.append(
+                        f"Invalid released {module_name} optional dependency declaration: "
+                        f"{name!r} remains in __all__ and its binding resolves; remove its "
+                        "optional declaration or correct its dependency module"
+                    )
         missing_names = sorted(
             set(released["names"]) - unavailable_optional_exports - current_names
         )

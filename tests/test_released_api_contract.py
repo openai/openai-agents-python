@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import asdict, dataclass
 from enum import Enum
 from importlib.metadata import version
+from inspect import Signature
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1262,12 +1263,6 @@ def test_release_contract_policy_honors_unsupported_platform_during_promotion(
             "agents.platform_parent.PlatformBinding": _callable_contract(PlatformBinding)
         },
     }
-    provider_entry = {
-        "canonical_module": "agents.optional_impl",
-        "canonical_name": "OptionalProvider",
-        "module": "agents.optional_parent",
-        "name": "OptionalProvider",
-    }
 
     def import_module(module_name: str, _agents_module: object) -> object:
         if module_name == "agents":
@@ -1303,12 +1298,11 @@ def test_release_contract_policy_honors_unsupported_platform_during_promotion(
                     unsupported_platforms=("win32",),
                 ),
             ),
-            canonical_imports=(provider_entry,),
         ),
     )
 
     assert updated["optional_dependency_unsupported_platforms"] == {"optional_backend": ["win32"]}
-    assert provider_entry in updated["canonical_imports"]
+    assert updated["canonical_imports"] == contract["canonical_imports"]
     assert updated["required_submodule_exports"]["agents.optional_parent"] == {
         "names": ["OptionalProvider"],
         "optional_bindings": {},
@@ -1318,6 +1312,173 @@ def test_release_contract_policy_honors_unsupported_platform_during_promotion(
         PlatformBinding
     )
     assert "agents.optional_parent.OptionalProvider" not in updated["callables"]
+
+
+def test_release_contract_policy_rejects_new_callable_on_unsupported_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agents_module = SimpleNamespace(__all__=[])
+    contract: dict[str, Any] = {
+        "baseline": "v0.19.4",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": [],
+        "public_modules": ["agents"],
+        "canonical_imports": [],
+        "callables": {},
+    }
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(contract_support, "_optional_dependency_is_available", lambda _name: False)
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"Cannot promote new canonical callable agents\.optional_parent\.OptionalProvider "
+            r"because optional dependency 'optional_backend' is unsupported on 'win32'.*"
+            r"release preparation host"
+        ),
+    ):
+        build_released_api_contract(
+            contract,
+            baseline="v0.20.0",
+            baseline_commit="b" * 40,
+            agents_module=agents_module,
+            release_policy=_release_policy(
+                {
+                    "agents.optional_parent": {
+                        "optional_bindings": {},
+                        "optional_exports": {"OptionalProvider": "optional_backend"},
+                    }
+                },
+                dependency_installations=(
+                    OptionalDependencyInstallation(
+                        dependency_module="optional_backend",
+                        extra="optional-provider",
+                        unsupported_platforms=("win32",),
+                    ),
+                ),
+                canonical_imports=(
+                    {
+                        "canonical_module": "agents.optional_impl",
+                        "canonical_name": "OptionalProvider",
+                        "module": "agents.optional_parent",
+                        "name": "OptionalProvider",
+                    },
+                ),
+            ),
+        )
+
+
+def test_release_contract_policy_rejects_new_callable_with_uninspectable_signature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UninspectableMeta(type):
+        @property
+        def __signature__(cls) -> Signature:
+            raise ValueError("signature unavailable")
+
+    class Uninspectable(metaclass=UninspectableMeta):
+        pass
+
+    agents_module = SimpleNamespace(__all__=[])
+    submodule = SimpleNamespace(__all__=["Uninspectable"], Uninspectable=Uninspectable)
+    contract: dict[str, Any] = {
+        "baseline": "v0.19.4",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": [],
+        "public_modules": ["agents"],
+        "canonical_imports": [],
+        "callables": {},
+    }
+    modules = {
+        "agents": agents_module,
+        "agents.submodule": submodule,
+        "agents.submodule.impl": submodule,
+    }
+    monkeypatch.setattr(
+        contract_support,
+        "_import_contract_module",
+        lambda module_name, _agents_module: modules[module_name],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"Cannot promote new canonical callable agents\.submodule\.Uninspectable because "
+            r"its signature cannot be inspected.*release preparation host"
+        ),
+    ):
+        build_released_api_contract(
+            contract,
+            baseline="v0.20.0",
+            baseline_commit="b" * 40,
+            agents_module=agents_module,
+            release_policy=_release_policy(
+                {
+                    "agents.submodule": {
+                        "optional_bindings": {},
+                        "optional_exports": {},
+                    }
+                },
+                canonical_imports=(
+                    {
+                        "canonical_module": "agents.submodule.impl",
+                        "canonical_name": "Uninspectable",
+                        "module": "agents.submodule",
+                        "name": "Uninspectable",
+                    },
+                ),
+            ),
+        )
+
+
+def test_release_contract_policy_keeps_existing_uninspectable_canonical_surface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UninspectableMeta(type):
+        @property
+        def __signature__(cls) -> Signature:
+            raise ValueError("signature unavailable")
+
+    class Uninspectable(metaclass=UninspectableMeta):
+        pass
+
+    agents_module = SimpleNamespace(__all__=[])
+    submodule = SimpleNamespace(__all__=["Uninspectable"], Uninspectable=Uninspectable)
+    canonical_entry = {
+        "canonical_module": "agents.submodule.impl",
+        "canonical_name": "Uninspectable",
+        "module": "agents.submodule",
+        "name": "Uninspectable",
+    }
+    contract: dict[str, Any] = {
+        "baseline": "v0.19.4",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": [],
+        "public_modules": ["agents", "agents.submodule"],
+        "canonical_imports": [canonical_entry],
+        "callables": {},
+    }
+    modules = {
+        "agents": agents_module,
+        "agents.submodule": submodule,
+        "agents.submodule.impl": submodule,
+    }
+    monkeypatch.setattr(
+        contract_support,
+        "_import_contract_module",
+        lambda module_name, _agents_module: modules[module_name],
+    )
+
+    updated = build_released_api_contract(
+        contract,
+        baseline="v0.20.0",
+        baseline_commit="b" * 40,
+        agents_module=agents_module,
+    )
+
+    assert updated["canonical_imports"] == [canonical_entry]
+    assert "agents.submodule.Uninspectable" not in updated["callables"]
 
 
 def test_public_api_contract_skips_optional_surface_on_frozen_unsupported_platform(
@@ -1436,6 +1597,42 @@ def test_public_api_contract_rejects_dangling_optional_export_on_unsupported_pla
     assert validate_released_api_contract(contract, agents_module=agents_module) == [
         "Invalid released agents.submodule optional dependency declaration: "
         "'OptionalExport' remains in __all__ on an unsupported platform but its "
+        "binding is unavailable"
+    ]
+
+
+def test_public_api_contract_rejects_dangling_optional_binding_on_unsupported_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agents_module = SimpleNamespace(__all__=[])
+    submodule = SimpleNamespace(__all__=["OptionalBinding"])
+    contract: dict[str, Any] = {
+        "required_top_level_exports": [],
+        "public_modules": ["agents.submodule"],
+        "required_submodule_exports": {
+            "agents.submodule": {
+                "names": ["OptionalBinding"],
+                "optional_bindings": {"OptionalBinding": "optional_binding_dependency"},
+                "optional_exports": {},
+            }
+        },
+        "optional_dependency_unsupported_platforms": {"optional_binding_dependency": ["win32"]},
+        "canonical_imports": [],
+        "callables": {},
+    }
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(contract_support, "_optional_dependency_is_available", lambda _name: True)
+    monkeypatch.setattr(
+        contract_support,
+        "_import_contract_module",
+        lambda module_name, _agents_module: (
+            agents_module if module_name == "agents" else submodule
+        ),
+    )
+
+    assert validate_released_api_contract(contract, agents_module=agents_module) == [
+        "Invalid released agents.submodule optional dependency declaration: "
+        "'OptionalBinding' remains in __all__ on an unsupported platform but its "
         "binding is unavailable"
     ]
 
