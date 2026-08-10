@@ -1,4 +1,5 @@
 import copy
+from collections import OrderedDict
 
 import pytest
 
@@ -344,6 +345,351 @@ def test_allOf_single_entry_merging():
     assert result["properties"]["a"]["type"] == "boolean"
 
 
+def test_allOf_single_ref_entry_merging():
+    schema = {
+        "$defs": {
+            "Inner": {
+                "type": "object",
+                "properties": {"b": {"type": "string"}},
+                "required": ["b"],
+            },
+            "Outer": {"$ref": "#/$defs/Inner"},
+        },
+        "type": "object",
+        "allOf": [{"$ref": "#/$defs/Outer"}],
+    }
+
+    result = ensure_strict_json_schema(schema)
+
+    assert "allOf" not in result
+    assert "$ref" not in result
+    assert result["type"] == "object"
+    assert result["properties"] == {"b": {"type": "string"}}
+    assert result["required"] == ["b"]
+    assert result["additionalProperties"] is False
+
+
+def test_allOf_single_ref_entry_preserves_annotated_aliases():
+    schema = {
+        "components": {
+            "schemas": {
+                "Inner": {
+                    "type": "object",
+                    "description": "inner",
+                    "properties": {"value": {"type": "string"}},
+                },
+                "Outer": {
+                    "$ref": "#/components/schemas/Inner",
+                    "description": "outer",
+                },
+            }
+        },
+        "type": "object",
+        "allOf": [
+            {
+                "$ref": "#/components/schemas/Outer",
+                "title": "entry",
+            }
+        ],
+    }
+
+    result = ensure_strict_json_schema(schema)
+
+    assert "$ref" not in result
+    assert result["description"] == "outer"
+    assert result["title"] == "entry"
+    assert result["properties"] == {"value": {"type": "string"}}
+    assert result["required"] == ["value"]
+    assert result["additionalProperties"] is False
+
+
+def test_allOf_single_ref_entry_rejects_overlapping_parent_constraints():
+    schema = {
+        "$defs": {
+            "T": {
+                "type": "object",
+                "properties": {"inner": {"type": "string"}},
+            }
+        },
+        "type": "object",
+        "properties": {"outer": {"type": "string"}},
+        "allOf": [{"$ref": "#/$defs/T", "description": "alias"}],
+    }
+
+    with pytest.raises(UserError, match="singleton `allOf`"):
+        ensure_strict_json_schema(schema)
+
+
+def test_nested_single_allOf_rejects_overlapping_parent_constraints():
+    schema = {
+        "$defs": {
+            "T": {
+                "type": "object",
+                "properties": {"inner": {"type": "string"}},
+            }
+        },
+        "type": "object",
+        "properties": {"outer": {"type": "string"}},
+        "allOf": [{"allOf": [{"$ref": "#/$defs/T"}]}],
+    }
+
+    with pytest.raises(UserError, match="singleton `allOf`"):
+        ensure_strict_json_schema(schema)
+
+
+@pytest.mark.parametrize(
+    ("referenced_value", "parent_value"),
+    [
+        (1, True),
+        ({"nested": [1]}, {"nested": [True]}),
+    ],
+    ids=["top-level", "nested"],
+)
+def test_allOf_single_ref_entry_rejects_json_distinct_equal_python_values(
+    referenced_value, parent_value
+):
+    schema = {
+        "$defs": {"T": {"const": referenced_value}},
+        "const": parent_value,
+        "allOf": [{"$ref": "#/$defs/T"}],
+    }
+
+    with pytest.raises(UserError, match="singleton `allOf`"):
+        ensure_strict_json_schema(schema)
+
+
+def test_allOf_single_ref_entry_accepts_equal_json_numbers():
+    schema = {
+        "$defs": {"T": {"const": 1}},
+        "const": 1.0,
+        "allOf": [{"$ref": "#/$defs/T"}],
+    }
+
+    result = ensure_strict_json_schema(schema)
+
+    assert result["const"] == 1
+    assert isinstance(result["const"], int)
+
+
+def test_allOf_single_ref_entry_accepts_equal_mapping_subclasses():
+    schema = {
+        "$defs": {"T": {"const": OrderedDict([("nested", [1])])}},
+        "const": {"nested": [1]},
+        "allOf": [{"$ref": "#/$defs/T"}],
+    }
+
+    result = ensure_strict_json_schema(schema)
+
+    assert result["const"] == {"nested": [1]}
+
+
+def test_allOf_single_circular_ref_is_rejected():
+    schema = {
+        "$defs": {
+            "A": {"$ref": "#/$defs/B"},
+            "B": {"$ref": "#/$defs/A"},
+        },
+        "type": "object",
+        "allOf": [{"$ref": "#/$defs/A"}],
+    }
+
+    with pytest.raises(UserError, match="circular"):
+        ensure_strict_json_schema(schema)
+
+
+def test_allOf_single_annotated_circular_ref_is_rejected():
+    schema = {
+        "components": {
+            "schemas": {
+                "A": {"$ref": "#/components/schemas/B", "description": "a"},
+                "B": {"$ref": "#/components/schemas/A", "description": "b"},
+            }
+        },
+        "type": "object",
+        "allOf": [{"$ref": "#/components/schemas/A"}],
+    }
+
+    with pytest.raises(UserError, match="circular"):
+        ensure_strict_json_schema(schema)
+
+
+def test_allOf_single_ref_chain_spends_node_budget(monkeypatch):
+    monkeypatch.setattr("agents.strict_schema._MAX_SCHEMA_NODES", 4)
+    schema = {
+        "components": {
+            "schemas": {
+                "A": {"$ref": "#/components/schemas/B"},
+                "B": {"$ref": "#/components/schemas/C"},
+                "C": {"type": "object", "properties": {}},
+            }
+        },
+        "type": "object",
+        "allOf": [{"$ref": "#/components/schemas/A"}],
+    }
+
+    with pytest.raises(UserError, match="too large"):
+        ensure_strict_json_schema(schema)
+
+
+def test_allOf_single_ref_rejects_nested_id_before_promoting_target():
+    schema = {
+        "$defs": {"T": {"type": "string"}},
+        "contentSchema": {
+            "$id": "https://example.test/nested",
+            "$ref": "#/$defs/T",
+        },
+        "type": "object",
+        "allOf": [{"$ref": "#/contentSchema"}],
+    }
+
+    with pytest.raises(UserError, match=r"nested `\$id`"):
+        ensure_strict_json_schema(schema)
+
+
+def test_allOf_single_ref_rejects_nested_id_owner_before_resolution():
+    schema = {
+        "$defs": {"T": {"type": "string"}},
+        "type": "object",
+        "properties": {
+            "node": {
+                "$id": "https://example.test/nested",
+                "$defs": {"T": {"type": "integer"}},
+                "allOf": [{"$ref": "#/$defs/T"}],
+            }
+        },
+    }
+
+    with pytest.raises(UserError, match=r"nested `\$id` resource"):
+        ensure_strict_json_schema(schema)
+
+
+def test_allOf_single_ref_rejects_descendant_nested_id_owner_before_resolution():
+    schema = {
+        "$defs": {"T": {"type": "string"}},
+        "type": "object",
+        "properties": {
+            "node": {
+                "$id": "https://example.test/nested",
+                "$defs": {"T": {"type": "integer"}},
+                "type": "object",
+                "properties": {
+                    "child": {
+                        "allOf": [{"$ref": "#/$defs/T"}],
+                    }
+                },
+            }
+        },
+    }
+
+    with pytest.raises(UserError, match=r"nested `\$id` resource"):
+        ensure_strict_json_schema(schema)
+
+
+def test_allOf_single_ref_rejects_promoted_nested_id_with_descendant_ref():
+    schema = {
+        "$defs": {"T": {"type": "string"}},
+        "contentSchema": {
+            "$id": "https://example.test/nested",
+            "$defs": {"T": {"type": "integer"}},
+            "type": "object",
+            "properties": {"value": {"$ref": "#/$defs/T"}},
+        },
+        "type": "object",
+        "allOf": [{"$ref": "#/contentSchema"}],
+    }
+
+    with pytest.raises(UserError, match=r"nested `\$id` resource"):
+        ensure_strict_json_schema(schema)
+
+
+def test_allOf_single_ref_rejects_target_below_nested_id_resource():
+    schema = {
+        "$defs": {"T": {"type": "string"}},
+        "contentSchema": {
+            "$id": "https://example.test/nested",
+            "$defs": {"T": {"type": "integer"}},
+            "target": {"$ref": "#/$defs/T"},
+        },
+        "type": "object",
+        "allOf": [{"$ref": "#/contentSchema/target"}],
+    }
+
+    with pytest.raises(UserError, match=r"nested `\$id` resource"):
+        ensure_strict_json_schema(schema)
+
+
+@pytest.mark.parametrize(
+    ("container", "ref"),
+    [
+        ({"$defs": {"$id": {"type": "object", "properties": {}}}}, "#/$defs/$id"),
+        (
+            {"components": {"schemas": {"$id": {"type": "object", "properties": {}}}}},
+            "#/components/schemas/$id",
+        ),
+    ],
+    ids=["defs", "components-schemas"],
+)
+def test_allOf_single_ref_allows_id_as_schema_map_member_name(container, ref):
+    schema = {
+        **container,
+        "type": "object",
+        "allOf": [{"$ref": ref}],
+    }
+
+    result = ensure_strict_json_schema(schema)
+
+    assert result["type"] == "object"
+    assert result["properties"] == {}
+    assert result["additionalProperties"] is False
+
+
+def test_ref_allows_unrelated_id_definition_name():
+    schema = {
+        "$defs": {
+            "$id": {"type": "integer"},
+            "T": {"type": "string"},
+        },
+        "type": "object",
+        "properties": {
+            "value": {
+                "$ref": "#/$defs/T",
+                "description": "value",
+            }
+        },
+    }
+
+    result = ensure_strict_json_schema(schema)
+
+    assert result["properties"]["value"] == {
+        "type": "string",
+        "description": "value",
+    }
+
+
+@pytest.mark.parametrize(
+    ("definition_name", "ref_token"),
+    [("a/b", "a~1b"), ("a~b", "a~0b"), ("a~1b", "a~01b")],
+    ids=["slash", "tilde", "replacement-order"],
+)
+def test_allOf_single_ref_entry_decodes_json_pointer_tokens(definition_name, ref_token):
+    schema = {
+        "$defs": {
+            definition_name: {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+            }
+        },
+        "type": "object",
+        "allOf": [{"$ref": f"#/$defs/{ref_token}"}],
+    }
+
+    result = ensure_strict_json_schema(schema)
+
+    assert result["properties"] == {"value": {"type": "string"}}
+    assert result["required"] == ["value"]
+    assert result["additionalProperties"] is False
+
+
 @pytest.mark.parametrize("additional_properties", [True, {}], ids=["true", "schema"])
 def test_allOf_single_entry_cannot_overwrite_strict_object(additional_properties):
     schema = {
@@ -436,3 +782,211 @@ def test_ref_expansion_bomb_is_rejected():
     }
     with pytest.raises(UserError):
         ensure_strict_json_schema(schema)
+
+
+def test_ref_with_incompatible_sibling_is_rejected():
+    # Parent-wins merging would silently discard the referenced constraints on `b`.
+    schema = {
+        "$defs": {
+            "T": {
+                "type": "object",
+                "properties": {"b": {"type": "string"}},
+                "required": ["b"],
+            }
+        },
+        "type": "object",
+        "properties": {
+            "node": {
+                "properties": {"a": {"type": "string"}},
+                "required": ["a"],
+                "$ref": "#/$defs/T",
+            }
+        },
+    }
+
+    with pytest.raises(UserError, match="incompatible sibling"):
+        ensure_strict_json_schema(schema)
+
+
+def test_ref_with_incompatible_type_sibling_is_rejected():
+    schema = {
+        "$defs": {
+            "T": {
+                "type": "object",
+                "properties": {"b": {"type": "string"}},
+                "required": ["b"],
+            }
+        },
+        "type": "object",
+        "properties": {"node": {"type": "string", "$ref": "#/$defs/T"}},
+    }
+
+    with pytest.raises(UserError, match="incompatible sibling"):
+        ensure_strict_json_schema(schema)
+
+
+def test_ref_with_single_all_of_sibling_is_rejected():
+    schema = {
+        "$defs": {
+            "A": {"type": "string"},
+            "B": {"type": "integer"},
+        },
+        "type": "object",
+        "properties": {
+            "node": {
+                "$ref": "#/$defs/A",
+                "allOf": [{"$ref": "#/$defs/B"}],
+            }
+        },
+    }
+
+    with pytest.raises(UserError, match="incompatible sibling"):
+        ensure_strict_json_schema(schema)
+
+
+def test_ref_with_validation_sibling_is_rejected():
+    schema = {
+        "$defs": {"T": {"type": "string"}},
+        "type": "object",
+        "properties": {"node": {"$ref": "#/$defs/T", "minLength": 1}},
+    }
+
+    with pytest.raises(UserError, match="incompatible sibling"):
+        ensure_strict_json_schema(schema)
+
+
+def test_ref_with_interacting_object_sibling_is_rejected():
+    schema = {
+        "$defs": {
+            "T": {
+                "type": "object",
+                "properties": {"b": {"type": "string"}},
+                "required": ["b"],
+                "additionalProperties": False,
+            }
+        },
+        "type": "object",
+        "properties": {
+            "node": {
+                "$ref": "#/$defs/T",
+                "additionalProperties": False,
+            }
+        },
+    }
+
+    with pytest.raises(UserError, match="incompatible sibling"):
+        ensure_strict_json_schema(schema)
+
+
+def test_ref_with_annotation_sibling_is_still_expanded():
+    # Annotation-only siblings (description/title/... ) do not constrain the accepted
+    # values, so a `$ref` carrying them must keep expanding into the referent.
+    schema = {
+        "$defs": {
+            "T": {
+                "type": "object",
+                "properties": {"b": {"type": "string"}},
+                "required": ["b"],
+            }
+        },
+        "type": "object",
+        "properties": {
+            "node": {
+                "contentMediaType": "application/json",
+                "description": "a node",
+                "title": "Node",
+                "$ref": "#/$defs/T",
+            }
+        },
+    }
+
+    result = ensure_strict_json_schema(schema)
+    node = result["properties"]["node"]
+    assert node["type"] == "object"
+    assert node["properties"] == {"b": {"type": "string"}}
+    assert node["required"] == ["b"]
+    assert node["description"] == "a node"
+    assert node["title"] == "Node"
+    assert node["contentMediaType"] == "application/json"
+    assert "$ref" not in node
+
+
+def test_ref_with_schema_metadata_is_still_expanded():
+    schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+            "T": {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+            }
+        },
+        "$ref": "#/$defs/T",
+    }
+
+    result = ensure_strict_json_schema(schema)
+
+    assert result["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+    assert result["type"] == "object"
+    assert result["properties"] == {"value": {"type": "string"}}
+    assert result["required"] == ["value"]
+    assert result["additionalProperties"] is False
+    assert "$ref" not in result
+
+
+def test_root_ref_with_id_is_still_expanded():
+    schema = {
+        "$id": "https://example.test/root",
+        "$defs": {
+            "T": {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+            }
+        },
+        "$ref": "#/$defs/T",
+    }
+
+    result = ensure_strict_json_schema(schema)
+
+    assert result["$id"] == "https://example.test/root"
+    assert result["type"] == "object"
+    assert result["properties"] == {"value": {"type": "string"}}
+    assert result["required"] == ["value"]
+    assert result["additionalProperties"] is False
+    assert "$ref" not in result
+
+
+def test_nested_ref_with_id_is_rejected_before_resolution():
+    schema = {
+        "$defs": {"T": {"type": "string"}},
+        "type": "object",
+        "properties": {
+            "value": {
+                "$id": "https://example.test/nested",
+                "$defs": {"T": {"type": "integer"}},
+                "$ref": "#/$defs/T",
+            }
+        },
+    }
+
+    with pytest.raises(UserError, match=r"nested `\$id` resource"):
+        ensure_strict_json_schema(schema)
+
+
+def test_ref_with_anchor_is_still_expanded():
+    schema = {
+        "$defs": {"T": {"type": "string"}},
+        "type": "object",
+        "properties": {
+            "value": {
+                "$anchor": "value",
+                "$ref": "#/$defs/T",
+            }
+        },
+    }
+
+    result = ensure_strict_json_schema(schema)
+
+    assert result["properties"]["value"] == {
+        "$anchor": "value",
+        "type": "string",
+    }

@@ -1924,6 +1924,327 @@ def test_to_function_tool_failed_strict_conversion_keeps_original_schema():
 
 
 @pytest.mark.parametrize(
+    "node_schema",
+    [
+        {
+            "properties": {"a": {"type": "string"}},
+            "required": ["a"],
+            "$ref": "#/$defs/T",
+        },
+        {
+            "$ref": "#/$defs/T",
+            "allOf": [{"$ref": "#/$defs/U"}],
+        },
+        {"$ref": "#/$defs/T", "additionalProperties": False},
+    ],
+    ids=["overlapping-properties", "singleton-all-of", "interacting-object-constraints"],
+)
+def test_to_function_tool_ref_sibling_falls_back_to_original_schema(node_schema):
+    schema = {
+        "$defs": {
+            "T": {
+                "type": "object",
+                "properties": {"b": {"type": "string"}},
+                "required": ["b"],
+            },
+            "U": {"type": "integer"},
+        },
+        "type": "object",
+        "properties": {"node": node_schema},
+    }
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema == schema
+
+
+def test_to_function_tool_ref_with_schema_metadata_remains_strict():
+    schema = {
+        "$defs": {"T": {"type": "string"}},
+        "type": "object",
+        "properties": {
+            "value": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$ref": "#/$defs/T",
+            }
+        },
+    }
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is True
+    assert function_tool.params_json_schema["properties"]["value"] == {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "string",
+    }
+    assert function_tool.params_json_schema["additionalProperties"] is False
+
+
+def test_to_function_tool_ref_with_nested_id_falls_back_to_original_schema():
+    schema = {
+        "$defs": {"T": {"type": "string"}},
+        "type": "object",
+        "properties": {
+            "value": {
+                "$id": "https://example.test/nested",
+                "$defs": {"T": {"type": "integer"}},
+                "$ref": "#/$defs/T",
+            }
+        },
+        "additionalProperties": False,
+    }
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema == schema
+
+
+def test_to_function_tool_ref_with_anchor_remains_strict():
+    schema = {
+        "$defs": {"T": {"type": "string"}},
+        "type": "object",
+        "properties": {
+            "value": {
+                "$anchor": "value",
+                "$ref": "#/$defs/T",
+            }
+        },
+        "additionalProperties": False,
+    }
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is True
+    assert function_tool.params_json_schema["properties"]["value"] == {
+        "$anchor": "value",
+        "type": "string",
+    }
+    assert function_tool.params_json_schema["additionalProperties"] is False
+
+
+def test_to_function_tool_single_all_of_annotated_alias_remains_strict():
+    schema = {
+        "components": {
+            "schemas": {
+                "Inner": {
+                    "type": "object",
+                    "description": "inner",
+                    "properties": {"value": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+                "Outer": {
+                    "$ref": "#/components/schemas/Inner",
+                    "description": "outer",
+                },
+            }
+        },
+        "type": "object",
+        "allOf": [
+            {
+                "$ref": "#/components/schemas/Outer",
+                "title": "entry",
+            }
+        ],
+        "additionalProperties": False,
+    }
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is True
+    assert function_tool.params_json_schema["description"] == "outer"
+    assert function_tool.params_json_schema["title"] == "entry"
+    assert function_tool.params_json_schema["properties"] == {"value": {"type": "string"}}
+    assert function_tool.params_json_schema["required"] == ["value"]
+    assert function_tool.params_json_schema["additionalProperties"] is False
+    assert "$ref" not in function_tool.params_json_schema
+
+
+def test_to_function_tool_single_all_of_annotated_entry_conflict_falls_back():
+    schema = {
+        "$defs": {
+            "T": {
+                "type": "object",
+                "properties": {"inner": {"type": "string"}},
+                "additionalProperties": False,
+            }
+        },
+        "type": "object",
+        "properties": {"outer": {"type": "string"}},
+        "allOf": [{"$ref": "#/$defs/T", "description": "alias"}],
+        "additionalProperties": False,
+    }
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema == schema
+
+
+def test_to_function_tool_nested_single_all_of_conflict_falls_back():
+    schema = {
+        "$defs": {
+            "T": {
+                "type": "object",
+                "properties": {"inner": {"type": "string"}},
+                "additionalProperties": False,
+            }
+        },
+        "type": "object",
+        "properties": {"outer": {"type": "string"}},
+        "allOf": [{"allOf": [{"$ref": "#/$defs/T"}]}],
+        "additionalProperties": False,
+    }
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema == schema
+
+
+def test_to_function_tool_single_all_of_json_distinct_overlap_falls_back():
+    schema = {
+        "$defs": {"T": {"const": 1}},
+        "type": "object",
+        "const": True,
+        "properties": {},
+        "allOf": [{"$ref": "#/$defs/T"}],
+        "additionalProperties": False,
+    }
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema == schema
+
+
+def test_to_function_tool_single_all_of_nested_id_falls_back():
+    schema = {
+        "$defs": {"T": {"type": "string"}},
+        "contentSchema": {
+            "$id": "https://example.test/nested",
+            "$defs": {"T": {"type": "integer"}},
+            "type": "object",
+            "properties": {"value": {"$ref": "#/$defs/T"}},
+        },
+        "type": "object",
+        "properties": {},
+        "allOf": [{"$ref": "#/contentSchema"}],
+        "additionalProperties": False,
+    }
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema == schema
+
+
+def test_to_function_tool_single_all_of_nested_id_owner_falls_back():
+    schema = {
+        "$defs": {"T": {"type": "string"}},
+        "type": "object",
+        "properties": {
+            "node": {
+                "$id": "https://example.test/nested",
+                "$defs": {"T": {"type": "integer"}},
+                "allOf": [{"$ref": "#/$defs/T"}],
+            }
+        },
+        "additionalProperties": False,
+    }
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema == schema
+
+
+def test_to_function_tool_single_all_of_descendant_nested_id_owner_falls_back():
+    schema = {
+        "$defs": {"T": {"type": "string"}},
+        "type": "object",
+        "properties": {
+            "node": {
+                "$id": "https://example.test/nested",
+                "$defs": {"T": {"type": "integer"}},
+                "type": "object",
+                "properties": {
+                    "child": {
+                        "allOf": [{"$ref": "#/$defs/T"}],
+                    }
+                },
+                "additionalProperties": False,
+            }
+        },
+        "additionalProperties": False,
+    }
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema == schema
+
+
+def test_to_function_tool_single_all_of_target_below_nested_id_falls_back():
+    schema = {
+        "$defs": {"T": {"type": "string"}},
+        "contentSchema": {
+            "$id": "https://example.test/nested",
+            "$defs": {"T": {"type": "integer"}},
+            "target": {"$ref": "#/$defs/T"},
+        },
+        "type": "object",
+        "properties": {},
+        "allOf": [{"$ref": "#/contentSchema/target"}],
+        "additionalProperties": False,
+    }
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema == schema
+
+
+def test_to_function_tool_ref_allows_unrelated_id_definition_name():
+    schema = {
+        "$defs": {
+            "$id": {"type": "integer"},
+            "T": {"type": "string"},
+        },
+        "type": "object",
+        "properties": {
+            "value": {
+                "$ref": "#/$defs/T",
+                "description": "value",
+            }
+        },
+        "additionalProperties": False,
+    }
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is True
+    assert function_tool.params_json_schema["properties"]["value"] == {
+        "type": "string",
+        "description": "value",
+    }
+
+
+@pytest.mark.parametrize(
     "free_form_schema",
     [
         {"type": "object", "description": "key/value pairs"},
