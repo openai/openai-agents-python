@@ -589,7 +589,7 @@ async def test_cloudflare_protected_mount_state_drops_identity_before_resume() -
         provider_backend_id="cloudflare",
     )
 
-    with pytest.raises(RuntimeError, match="protected mount configuration"):
+    with pytest.raises(MountConfigError, match="sandbox mount configuration is invalid"):
         await client.resume(rebound)
 
 
@@ -617,7 +617,7 @@ async def test_cloudflare_resume_rejects_direct_state_with_configured_authority(
 
     monkeypatch.setattr(CloudflareSandboxSession, "running", running)
 
-    with pytest.raises(RuntimeError, match="protected mount configuration"):
+    with pytest.raises(MountConfigError, match="sandbox mount configuration is invalid"):
         await CloudflareSandboxClient().resume(_make_state(manifest=manifest))
 
     assert provider_calls == 0
@@ -1567,9 +1567,16 @@ async def test_cloudflare_resume_reapply_surfaces_terminal_delete_failure() -> N
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["persist", "hydrate"])
+@pytest.mark.parametrize(
+    ("operation", "expected_type"),
+    [
+        ("persist", WorkspaceArchiveReadError),
+        ("hydrate", WorkspaceArchiveWriteError),
+    ],
+)
 async def test_cloudflare_direct_persistence_redacts_protected_remount_failure(
     operation: str,
+    expected_type: type[WorkspaceArchiveReadError | WorkspaceArchiveWriteError],
 ) -> None:
     sentinel = "cloudflare-direct-persistence-secret"
     fake_http = _FakeHttp(
@@ -1595,7 +1602,7 @@ async def test_cloudflare_direct_persistence_redacts_protected_remount_failure(
     )
     sess = _make_session(state=_make_state(manifest=manifest), fake_http=fake_http)
 
-    with pytest.raises(RuntimeError, match="protected mount configuration") as exc_info:
+    with pytest.raises(expected_type, match="protected mount configuration") as exc_info:
         if operation == "persist":
             await sess.persist_workspace()
         else:
@@ -1603,6 +1610,7 @@ async def test_cloudflare_direct_persistence_redacts_protected_remount_failure(
 
     assert sentinel not in str(exc_info.value)
     assert sentinel not in repr(exc_info.value)
+    assert exc_info.value.context == {}
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
     traceback = exc_info.value.__traceback__

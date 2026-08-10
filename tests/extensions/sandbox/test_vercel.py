@@ -30,9 +30,14 @@ from agents.sandbox.entries import (
 from agents.sandbox.entries.mounts.base import InContainerMountAdapter
 from agents.sandbox.errors import (
     ConfigurationError,
+    ErrorCode,
+    ExecTransportError,
+    ExposedPortUnavailableError,
     InvalidManifestPathError,
     MountCommandError,
     MountConfigError,
+    WorkspaceArchiveReadError,
+    WorkspaceArchiveWriteError,
 )
 from agents.sandbox.manifest import EnvEntry, Environment, StrEnvValue
 from agents.sandbox.materialization import MaterializedFile
@@ -832,7 +837,9 @@ def test_vercel_from_state_redacts_trusted_mount_credentials_from_failure_traceb
         sandbox_id="sandbox-existing",
     )
 
-    with pytest.raises(RuntimeError, match="protected mount configuration") as exc_info:
+    with pytest.raises(
+        MountConfigError, match="sandbox mount configuration is invalid"
+    ) as exc_info:
         vercel_module.VercelSandboxSession.from_state(
             state,
             allow_s3_credential_exposure=allow_s3_credential_exposure,
@@ -875,7 +882,9 @@ def test_vercel_constructor_redacts_trusted_mount_credentials_from_failure_trace
         sandbox_id="sandbox-existing",
     )
 
-    with pytest.raises(RuntimeError, match="protected mount configuration") as exc_info:
+    with pytest.raises(
+        MountConfigError, match="sandbox mount configuration is invalid"
+    ) as exc_info:
         vercel_module.VercelSandboxSession(
             state=state,
             allow_s3_credential_exposure=allow_s3_credential_exposure,
@@ -896,10 +905,24 @@ def test_vercel_constructor_redacts_trusted_mount_credentials_from_failure_trace
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["exec", "read", "write", "resolve_exposed_port"])
+@pytest.mark.parametrize(
+    ("operation", "expected_type"),
+    [
+        ("exec", ExecTransportError),
+        ("read", WorkspaceArchiveReadError),
+        ("write", WorkspaceArchiveWriteError),
+        ("resolve_exposed_port", ExposedPortUnavailableError),
+    ],
+)
 async def test_vercel_protected_session_public_operations_redact_provider_failures(
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
+    expected_type: type[
+        ExecTransportError
+        | WorkspaceArchiveReadError
+        | WorkspaceArchiveWriteError
+        | ExposedPortUnavailableError
+    ],
 ) -> None:
     vercel_module = _load_vercel_module(monkeypatch)
     package_module = importlib.import_module("agents.extensions.sandbox.vercel")
@@ -950,10 +973,11 @@ async def test_vercel_protected_session_public_operations_redact_provider_failur
         async def invoke() -> object:
             return await session.resolve_exposed_port(3000)
 
-    with pytest.raises(RuntimeError, match="protected mount configuration") as exc_info:
+    with pytest.raises(expected_type, match="protected mount configuration") as exc_info:
         await invoke()
 
     assert sentinel not in str(exc_info.value)
+    assert exc_info.value.context == {}
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
     _assert_base_exception_slots_cleared(source_error)
@@ -2692,7 +2716,9 @@ async def test_vercel_s3_mount_failure_redacts_full_activation_traceback(
     with pytest.raises(MountCommandError) as exc_info:
         await session.start()
 
-    assert exc_info.value.context["stderr"] == "sandbox provider command failed"
+    assert exc_info.value.error_code is ErrorCode.MOUNT_FAILED
+    assert exc_info.value.op == "materialize"
+    assert exc_info.value.context == {}
     assert transformed_secret not in str(exc_info.value)
     assert transformed_secret not in repr(exc_info.value.context)
     assert exc_info.value.retryable is True
@@ -2732,8 +2758,9 @@ async def test_vercel_s3_mount_failure_discards_transformed_stderr(
     with pytest.raises(MountCommandError) as exc_info:
         await session.start()
 
-    assert exc_info.value.context["stderr"] == "sandbox provider command failed"
-    assert exc_info.value.context["exit_code"] == 1
+    assert exc_info.value.error_code is ErrorCode.MOUNT_FAILED
+    assert exc_info.value.op == "materialize"
+    assert exc_info.value.context == {}
     assert transformed_secret not in str(exc_info.value)
     assert transformed_secret not in repr(exc_info.value.context)
     assert sandbox.stop_calls == 1
@@ -2784,7 +2811,9 @@ async def test_vercel_s3_mount_failure_ignores_hostile_exception_descriptors(
         await session.start()
 
     assert type(exc_info.value) is MountCommandError
-    assert exc_info.value.context["stderr"] == "sandbox provider command failed"
+    assert exc_info.value.error_code is ErrorCode.MOUNT_FAILED
+    assert exc_info.value.op == "materialize"
+    assert exc_info.value.context == {}
     assert exc_info.value.retryable is True
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None

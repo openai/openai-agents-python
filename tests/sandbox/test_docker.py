@@ -42,6 +42,7 @@ from agents.sandbox.entries import (
 )
 from agents.sandbox.entries.mounts.base import InContainerMountAdapter
 from agents.sandbox.errors import (
+    ErrorCode,
     ExecTimeoutError,
     ExecTransportError,
     InvalidManifestPathError,
@@ -2401,9 +2402,13 @@ async def test_docker_direct_persist_redacts_protected_mount_provider_error(
 
     monkeypatch.setattr(session, "_stage_workspace_copy", fail_stage_workspace_copy)
 
-    with pytest.raises(RuntimeError, match="protected mount configuration") as exc_info:
+    with pytest.raises(
+        WorkspaceArchiveReadError, match="protected mount configuration"
+    ) as exc_info:
         await session.persist_workspace()
 
+    assert exc_info.value.error_code is ErrorCode.WORKSPACE_ARCHIVE_READ_ERROR
+    assert exc_info.value.context == {}
     assert sentinel not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None

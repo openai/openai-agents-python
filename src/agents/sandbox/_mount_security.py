@@ -1,24 +1,30 @@
 from __future__ import annotations
 
-import asyncio
 import copy
 import dataclasses
 import importlib
 import re
-import traceback
+import sys
+import types
 from collections.abc import Callable, Collection, Coroutine, Iterable, Mapping
 from functools import wraps
 from pathlib import PurePath, PurePosixPath
-from typing import TYPE_CHECKING, Any, NoReturn, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, NoReturn, ParamSpec, TypeVar, cast, get_args
 from urllib.parse import urlsplit
 
 from ..exceptions import (
-    _clear_data_redacted_error_traceback,
-    _detach_data_redacted_error_traceback,
+    _base_exception_instance_dict,
+    _discard_exception_graph,
+    _exact_string_state_entry,
+    _exact_string_state_value,
     _is_error_data_redacted,
     _mark_error_data_redacted,
+    _object_instance_dict,
     _raise_data_redacted_error,
+    _replace_data_redacted_process_control_error,
+    _static_type_metadata,
 )
+from . import errors as _sandbox_errors
 from .entries import (
     AzureBlobMount,
     BaseEntry,
@@ -40,7 +46,7 @@ from .entries.mounts.patterns import (
     RcloneMountPattern,
     S3FilesMountPattern,
 )
-from .errors import MountConfigError
+from .errors import ErrorCode, MountConfigError, OpName, SandboxError
 
 if TYPE_CHECKING:
     from .manifest import Manifest
@@ -404,6 +410,71 @@ _IN_CONTAINER_MOUNT_CREDENTIAL_CAPABILITIES: tuple[_InContainerMountCredentialCa
 _RCLONE_SAFE_FLAG_ARGS = frozenset({"allow-other"})
 _RCLONE_SAFE_VALUE_ARGS = frozenset({"buffer-size", "gid", "uid"})
 _SAFE_MOUNT_VALIDATION_MESSAGE_ATTR = "_agents_safe_mount_validation_message"
+_SAFE_MOUNT_VALIDATION_MESSAGE_MARKER = object()
+_SANDBOX_ERROR_OPS = frozenset(get_args(OpName))
+_STRUCTURED_SANDBOX_ERROR_SAFE_SUBTYPE_STATE: tuple[
+    tuple[type[SandboxError], tuple[tuple[str, object], ...]], ...
+] = (
+    (_sandbox_errors.SandboxError, ()),
+    (_sandbox_errors.ConfigurationError, ()),
+    (_sandbox_errors.SandboxRuntimeError, ()),
+    (_sandbox_errors.ArtifactError, ()),
+    (_sandbox_errors.SnapshotError, ()),
+    (_sandbox_errors.ApplyPatchError, ()),
+    (_sandbox_errors.InvalidManifestPathError, ()),
+    (_sandbox_errors.InvalidCompressionSchemeError, ()),
+    (_sandbox_errors.ExposedPortUnavailableError, ()),
+    (_sandbox_errors.ExecFailureError, (("command", ()),)),
+    (
+        _sandbox_errors.ExecNonZeroError,
+        (("command", ()), ("exit_code", 1), ("stdout", b""), ("stderr", b"")),
+    ),
+    (_sandbox_errors.ExecTimeoutError, (("command", ()), ("timeout_s", None))),
+    (_sandbox_errors.ExecTransportError, (("command", ()),)),
+    (_sandbox_errors.PtySessionNotFoundError, (("session_id", -1),)),
+    (_sandbox_errors.WorkspaceIOError, ()),
+    (_sandbox_errors.ApplyPatchPathError, ()),
+    (_sandbox_errors.ApplyPatchDiffError, ()),
+    (_sandbox_errors.ApplyPatchFileNotFoundError, ()),
+    (_sandbox_errors.ApplyPatchDecodeError, ()),
+    (_sandbox_errors.WorkspaceReadNotFoundError, ()),
+    (_sandbox_errors.WorkspaceArchiveReadError, ()),
+    (_sandbox_errors.WorkspaceArchiveWriteError, ()),
+    (_sandbox_errors.WorkspaceWriteTypeError, ()),
+    (_sandbox_errors.WorkspaceStopError, ()),
+    (_sandbox_errors.WorkspaceStartError, ()),
+    (_sandbox_errors.WorkspaceRootNotFoundError, ()),
+    (_sandbox_errors.LocalArtifactError, ()),
+    (_sandbox_errors.LocalFileReadError, ()),
+    (_sandbox_errors.LocalDirReadError, ()),
+    (_sandbox_errors.LocalChecksumError, ()),
+    (_sandbox_errors.GitArtifactError, ()),
+    (_sandbox_errors.GitMissingInImageError, ()),
+    (_sandbox_errors.GitCloneError, ()),
+    (_sandbox_errors.GitSubpathError, ()),
+    (_sandbox_errors.GitCopyError, ()),
+    (_sandbox_errors.MountArtifactError, ()),
+    (_sandbox_errors.MountToolMissingError, ()),
+    (_sandbox_errors.MountCommandError, ()),
+    (_sandbox_errors.SkillsConfigError, ()),
+    (_sandbox_errors.SnapshotPersistError, ()),
+    (_sandbox_errors.SnapshotRestoreError, ()),
+    (_sandbox_errors.SnapshotNotRestorableError, ()),
+)
+_CALL_AUTHORITY_REQUIRED_STATE_KEYS = (
+    "state",
+    "manifest",
+    "default_manifest",
+    "_sandbox_config",
+    "session_state",
+    "_trusted_manifest",
+)
+_CALL_AUTHORITY_LINK_STATE_KEYS = (
+    "session",
+    "_session",
+    "_client",
+    "_inner",
+)
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
@@ -416,37 +487,26 @@ class _InvalidRawMountManifestError(ValueError):
 def redact_mount_error_data(
     function: Callable[_P, Coroutine[Any, Any, _T]],
 ) -> Callable[_P, Coroutine[Any, Any, _T]]:
-    """Replace marked validation failures after clearing payload-bearing async frames."""
+    """Replace failures after clearing async frames that handled mount authority."""
 
     @wraps(function)
     async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _T:
-        call_has_authority = _call_has_configured_mount_authority(args, kwargs)
-        safe_error: Exception | None = None
-        safe_cancel: asyncio.CancelledError | None = None
+        call_has_authority = _call_has_configured_mount_authority(
+            args,
+            kwargs,
+            function=function,
+        )
+        safe_error: BaseException | None = None
         try:
             return await function(*args, **kwargs)
-        except asyncio.CancelledError as error:
-            if not call_has_authority:
-                raise
-            discard_mount_source_exception(error)
-            safe_cancel = asyncio.CancelledError()
-        except Exception as error:
-            if isinstance(error, MountConfigError) and _is_error_data_redacted(error):
-                safe_error = _replace_mount_error(error)
-            elif _is_error_data_redacted(error):
-                _clear_data_redacted_error_traceback(error)
-                _detach_data_redacted_error_traceback(error)
-                error.__cause__ = None
-                error.__context__ = None
-                safe_error = error
-            elif call_has_authority:
-                safe_error = _replace_mount_operation_error(error)
+        except BaseException as error:
+            error_is_redacted = _is_error_data_redacted(error)
+            if call_has_authority or error_is_redacted:
+                safe_error = _replace_protected_mount_error(error)
             else:
                 raise
 
-        del args, kwargs, call_has_authority
-        if safe_cancel is not None:
-            raise safe_cancel from None
+        del args, kwargs, call_has_authority, error_is_redacted
         assert safe_error is not None
         _raise_data_redacted_error(safe_error)
 
@@ -458,33 +518,30 @@ def _redact_mount_error_data_sync(
     *,
     preserve_value_error_type: bool,
 ) -> Callable[_P, _T]:
-    """Replace validation failures after clearing payload-bearing sync frames."""
+    """Replace failures after clearing sync frames that handled mount authority."""
 
     @wraps(function)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _T:
-        call_has_authority = _call_has_configured_mount_authority(args, kwargs)
-        safe_error: Exception | None = None
+        call_has_authority = _call_has_configured_mount_authority(
+            args,
+            kwargs,
+            function=function,
+        )
+        safe_error: BaseException | None = None
         try:
             return function(*args, **kwargs)
-        except Exception as error:
-            if isinstance(error, MountConfigError) and _is_error_data_redacted(error):
-                safe_error = _replace_mount_error(error)
-            elif _is_error_data_redacted(error):
-                _clear_data_redacted_error_traceback(error)
-                _detach_data_redacted_error_traceback(error)
-                error.__cause__ = None
-                error.__context__ = None
-                safe_error = error
-            elif preserve_value_error_type and call_has_authority and isinstance(error, ValueError):
+        except BaseException as error:
+            error_is_redacted = _is_error_data_redacted(error)
+            if preserve_value_error_type and call_has_authority and isinstance(error, ValueError):
                 discard_mount_source_exception(error)
                 safe_error = ValueError("sandbox mount validation failed")
                 _mark_error_data_redacted(safe_error)
-            elif call_has_authority:
-                safe_error = _replace_mount_operation_error(error)
+            elif call_has_authority or error_is_redacted:
+                safe_error = _replace_protected_mount_error(error)
             else:
                 raise
 
-        del args, kwargs, call_has_authority
+        del args, kwargs, call_has_authority, error_is_redacted
         assert safe_error is not None
         _raise_data_redacted_error(safe_error)
 
@@ -492,7 +549,7 @@ def _redact_mount_error_data_sync(
 
 
 def redact_mount_error_data_sync(function: Callable[_P, _T]) -> Callable[_P, _T]:
-    """Replace marked validation failures after clearing payload-bearing sync frames."""
+    """Replace failures after clearing sync frames that handled mount authority."""
 
     return _redact_mount_error_data_sync(function, preserve_value_error_type=False)
 
@@ -505,24 +562,95 @@ def redact_mount_validation_error_data_sync(
     return _redact_mount_error_data_sync(function, preserve_value_error_type=True)
 
 
-def _replace_mount_error(error: MountConfigError) -> MountConfigError:
-    message = (
-        error.message
-        if getattr(error, _SAFE_MOUNT_VALIDATION_MESSAGE_ATTR, False)
-        else "sandbox mount configuration is invalid"
-    )
+def _replace_mount_error(
+    error: MountConfigError,
+    *,
+    state: dict[object, object],
+    error_code: ErrorCode,
+    op: OpName,
+    retryable: bool | None,
+) -> MountConfigError:
+    message = "sandbox mount configuration is invalid"
+    if (
+        state is not None
+        and _exact_string_state_value(state, _SAFE_MOUNT_VALIDATION_MESSAGE_ATTR)
+        is _SAFE_MOUNT_VALIDATION_MESSAGE_MARKER
+        and type(_exact_string_state_value(state, "message")) is str
+    ):
+        message = cast(str, _exact_string_state_value(state, "message"))
+    discard_mount_source_exception(error)
     safe_error = MountConfigError(message=message)
+    safe_error.error_code = error_code
+    safe_error.op = op
+    safe_error.retryable = retryable
     _mark_error_data_redacted(safe_error)
-    _clear_data_redacted_error_traceback(error)
-    _detach_data_redacted_error_traceback(error)
-    error.__cause__ = None
-    error.__context__ = None
-    error.args = ("Error details are redacted.",)
-    error.context = {}
     return safe_error
 
 
-def _replace_mount_operation_error(error: Exception) -> RuntimeError:
+def _replace_protected_mount_error(error: BaseException) -> BaseException:
+    process_control_error = _replace_data_redacted_process_control_error(error)
+    if process_control_error is not None:
+        return process_control_error
+    structured_error = _replace_structured_sandbox_error(error)
+    if structured_error is not None:
+        return structured_error
+    return _replace_mount_operation_error(error)
+
+
+def _replace_structured_sandbox_error(error: BaseException) -> SandboxError | None:
+    error_type = type(error)
+    state = _base_exception_instance_dict(error)
+    if state is None:
+        return None
+    error_code = _exact_string_state_value(state, "error_code")
+    op = _exact_string_state_value(state, "op")
+    retryable_found, retryable = _exact_string_state_entry(state, "retryable")
+    if (
+        type(error_code) is not ErrorCode
+        or type(op) is not str
+        or op not in _SANDBOX_ERROR_OPS
+        or not retryable_found
+        or (retryable is not None and type(retryable) is not bool)
+    ):
+        return None
+
+    if error_type is MountConfigError:
+        return _replace_mount_error(
+            cast(MountConfigError, error),
+            state=state,
+            error_code=error_code,
+            op=cast(OpName, op),
+            retryable=retryable,
+        )
+
+    safe_subtype_state = next(
+        (
+            fields
+            for candidate, fields in _STRUCTURED_SANDBOX_ERROR_SAFE_SUBTYPE_STATE
+            if error_type is candidate
+        ),
+        None,
+    )
+    if safe_subtype_state is None:
+        return None
+
+    discard_mount_source_exception(error)
+    safe_error = cast(SandboxError, BaseException.__new__(error_type))
+    message = "sandbox operation failed while using a protected mount configuration"
+    object.__setattr__(safe_error, "message", message)
+    object.__setattr__(safe_error, "error_code", error_code)
+    object.__setattr__(safe_error, "op", cast(OpName, op))
+    object.__setattr__(safe_error, "context", {})
+    object.__setattr__(safe_error, "cause", None)
+    object.__setattr__(safe_error, "retryable", retryable)
+    for field_name, field_value in safe_subtype_state:
+        object.__setattr__(safe_error, field_name, field_value)
+    BaseException.__init__(safe_error, message)
+    _mark_error_data_redacted(safe_error)
+    return safe_error
+
+
+def _replace_mount_operation_error(error: BaseException) -> RuntimeError:
     discard_mount_source_exception(error)
     safe_error = RuntimeError(
         "sandbox operation failed while using a protected mount configuration"
@@ -533,53 +661,7 @@ def _replace_mount_operation_error(error: Exception) -> RuntimeError:
 
 def discard_mount_source_exception(error: BaseException) -> None:
     """Clear source frames without consulting provider-defined exception attributes."""
-
-    pending = [error]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-
-        linked: list[BaseException] = []
-        for descriptor in (
-            cast(Any, BaseException.__cause__),
-            cast(Any, BaseException.__context__),
-        ):
-            try:
-                candidate = descriptor.__get__(current, type(current))
-            except BaseException:
-                continue
-            if isinstance(candidate, BaseException):
-                linked.append(candidate)
-
-        try:
-            source_traceback = cast(Any, BaseException.__traceback__).__get__(
-                current, type(current)
-            )
-        except BaseException:
-            source_traceback = None
-        if source_traceback is not None:
-            try:
-                traceback.clear_frames(source_traceback)
-            except BaseException:
-                pass
-        try:
-            BaseException.__init__(current)
-        except BaseException:
-            pass
-        for descriptor, value in (
-            (cast(Any, BaseException.args), ()),
-            (cast(Any, BaseException.__traceback__), None),
-            (cast(Any, BaseException.__cause__), None),
-            (cast(Any, BaseException.__context__), None),
-        ):
-            try:
-                descriptor.__set__(current, value)
-            except BaseException:
-                pass
-        pending.extend(linked)
+    _discard_exception_graph(error)
 
 
 def _url_contains_inline_authority(value: object) -> bool:
@@ -921,10 +1003,16 @@ def _manifest_has_configured_mount_authority(manifest: Manifest) -> bool:
     pending = list(manifest.entries.values())
     while pending:
         entry = pending.pop()
-        if isinstance(entry, Mount) and _mount_has_or_may_hide_configured_authority(entry):
+        entry_metadata = _static_type_metadata(type(entry))
+        entry_mro = () if entry_metadata is None else entry_metadata[1]
+        if any(base is Mount for base in entry_mro) and _mount_has_or_may_hide_configured_authority(
+            cast(Mount, entry)
+        ):
             return True
-        if isinstance(entry, Dir):
+        if type(entry) is Dir:
             pending.extend(entry.children.values())
+        elif any(base is Dir for base in entry_mro):
+            return True
     return False
 
 
@@ -946,65 +1034,224 @@ def _mount_has_or_may_hide_configured_authority(mount: Mount) -> bool:
     return bool(_configured_mount_authority_fields(mount))
 
 
+def _decorated_owner_type(function: Callable[..., object]) -> type | None:
+    """Resolve the SDK class that owns a decorated function without importing modules."""
+
+    if type(function) is not types.FunctionType:
+        return None
+    module_name = function.__module__
+    qualname = function.__qualname__
+    if (
+        type(module_name) is not str
+        or not module_name.startswith("agents.")
+        or type(qualname) is not str
+        or qualname.count(".") != 1
+    ):
+        return None
+    owner_name, _ = qualname.split(".", 1)
+    module = sys.modules.get(module_name)
+    if type(module) is not types.ModuleType:
+        return None
+    module_dict_descriptor = cast(Any, types.ModuleType).__dict__["__dict__"]
+    module_state = module_dict_descriptor.__get__(module, types.ModuleType)
+    if type(module_state) is not dict:
+        return None
+    candidate = _exact_string_state_value(module_state, owner_name)
+    if not isinstance(candidate, type) or _static_type_metadata(candidate) is None:
+        return None
+    return candidate
+
+
+def _trusted_authority_owner_base(
+    value: object,
+    *,
+    decorated_owner_type: type | None,
+) -> type | None:
+    """Return a canonical SDK base whose instance-state descriptor is trusted."""
+
+    from ..run_config import SandboxRunConfig
+    from .sandbox_agent import SandboxAgent
+    from .session.base_sandbox_session import BaseSandboxSession
+    from .session.sandbox_client import BaseSandboxClient
+    from .session.sandbox_session_state import SandboxSessionState
+
+    metadata = _static_type_metadata(type(value))
+    if metadata is None:
+        return None
+    _, value_mro = metadata
+    candidates = (
+        decorated_owner_type,
+        BaseSandboxSession,
+        BaseSandboxClient,
+        SandboxSessionState,
+        SandboxRunConfig,
+        SandboxAgent,
+        MountStrategyBase,
+    )
+    for candidate in candidates:
+        if candidate is not None and any(base is candidate for base in value_mro):
+            return candidate
+    return None
+
+
+def _exact_slot_state_entry(
+    value: object,
+    *,
+    trusted_base: type,
+    name: str,
+) -> tuple[bool, bool, object | None]:
+    """Read one exact Python slot without invoking provider attribute hooks.
+
+    The first boolean reports whether the named state is declared by the
+    inspected hierarchy. The second reports whether that declaration is an
+    exact Python slot. A non-slot declaration is returned as the third value
+    for identity comparison only. A declared but unreadable slot is unresolved
+    and returns ``(True, True, None)`` so callers can fail closed.
+    """
+
+    value_metadata = _static_type_metadata(type(value))
+    if value_metadata is None:
+        return False, False, None
+    _, value_mro = value_metadata
+    if not any(base is trusted_base for base in value_mro):
+        return False, False, None
+
+    for base in value_mro:
+        base_metadata = _static_type_metadata(base)
+        if base_metadata is None:
+            return False, False, None
+        namespace, _ = base_metadata
+        for candidate, descriptor in namespace.items():
+            if type(candidate) is not str or str.__eq__(candidate, name) is not True:
+                continue
+            if type(descriptor) is not types.MemberDescriptorType:
+                return True, False, descriptor
+            try:
+                slot_value = descriptor.__get__(value, type(value))
+            except BaseException:
+                return True, True, None
+            return True, True, slot_value
+        if base is trusted_base:
+            break
+    return False, False, None
+
+
 def _call_has_configured_mount_authority(
-    args: tuple[object, ...], kwargs: Mapping[str, object]
+    args: tuple[object, ...],
+    kwargs: Mapping[str, object],
+    *,
+    function: Callable[..., object],
 ) -> bool:
-    """Inspect only SDK call-boundary manifest owners."""
+    """Inspect SDK-owned call-boundary state for protected authority."""
 
     from .manifest import Manifest
+    from .session.base_sandbox_session import BaseSandboxSession
+    from .session.sandbox_session import SandboxSession
 
     try:
-        for value in (*args, *kwargs.values()):
-            candidates = [value]
-            state = getattr(value, "state", None)
-            if state is not None:
-                candidates.append(state)
-            default_manifest = getattr(value, "default_manifest", None)
-            if default_manifest is not None:
-                candidates.append(default_manifest)
-            sandbox_config = getattr(value, "_sandbox_config", None)
-            if sandbox_config is not None:
-                candidates.append(sandbox_config)
-                configured_state = getattr(sandbox_config, "session_state", None)
-                if configured_state is not None:
-                    candidates.append(configured_state)
-                configured_session = getattr(sandbox_config, "session", None)
-                if configured_session is not None:
-                    candidates.append(configured_session)
-                    configured_session_state = getattr(configured_session, "state", None)
-                    if configured_session_state is not None:
-                        candidates.append(configured_session_state)
-            for candidate in candidates:
-                has_runtime_authority = getattr(
-                    candidate,
-                    "_runtime_has_protected_mount_authority",
-                    None,
-                )
-                if (
-                    not isinstance(candidate, type)
-                    and callable(has_runtime_authority)
-                    and has_runtime_authority()
-                ):
+        sandbox_session_metadata = _static_type_metadata(SandboxSession)
+        if sandbox_session_metadata is None:
+            return True
+        sandbox_session_state_descriptor = sandbox_session_metadata[0]["state"]
+        values = (*args, *kwargs.values())
+        for value in values:
+            if type(value) is Manifest and _manifest_has_configured_mount_authority(value):
+                return True
+
+        decorated_owner_type = _decorated_owner_type(function)
+        pending = [(value, False) for value in values]
+        seen_optional: set[int] = set()
+        seen_required: set[int] = set()
+        while pending:
+            value, must_resolve_owner = pending.pop()
+            value_id = id(value)
+            if value_id in seen_required or (not must_resolve_owner and value_id in seen_optional):
+                continue
+            if must_resolve_owner:
+                seen_required.add(value_id)
+            else:
+                seen_optional.add(value_id)
+
+            value_metadata = _static_type_metadata(type(value))
+            value_mro = () if value_metadata is None else value_metadata[1]
+            if type(value) is Manifest:
+                if _manifest_has_configured_mount_authority(value):
                     return True
-                if isinstance(candidate, Mount):
-                    if _mount_has_or_may_hide_configured_authority(candidate):
+                continue
+            if any(base is Manifest for base in value_mro):
+                return True
+            if any(base is Mount for base in value_mro):
+                if _mount_has_or_may_hide_configured_authority(cast(Mount, value)):
+                    return True
+                continue
+            if type(value) is dict:
+                pending.extend((item, must_resolve_owner) for item in dict.values(value))
+                continue
+            if type(value) is list or type(value) is tuple:
+                pending.extend((item, must_resolve_owner) for item in value)
+                continue
+            if value is None or type(value) in (str, bytes, int, float, bool, complex):
+                continue
+            if any(base is PurePath for base in value_mro):
+                continue
+
+            trusted_base = _trusted_authority_owner_base(
+                value,
+                decorated_owner_type=decorated_owner_type,
+            )
+            if trusted_base is None:
+                if must_resolve_owner:
+                    return True
+                continue
+            state = _object_instance_dict(value, trusted_base=trusted_base)
+            if state is None:
+                return True
+            is_session_owner = any(base is BaseSandboxSession for base in value_mro)
+            for name in _CALL_AUTHORITY_REQUIRED_STATE_KEYS:
+                found, candidate = _exact_string_state_entry(state, name)
+                if name == "state" and is_session_owner:
+                    if not found:
+                        state_declared, is_exact_slot, candidate = _exact_slot_state_entry(
+                            value,
+                            trusted_base=trusted_base,
+                            name=name,
+                        )
+                        if state_declared and is_exact_slot:
+                            if candidate is None:
+                                return True
+                            found = True
+                        elif state_declared and candidate is sandbox_session_state_descriptor:
+                            inner_found, inner = _exact_string_state_entry(state, "_inner")
+                            if (
+                                not inner_found
+                                or inner is None
+                                or _trusted_authority_owner_base(
+                                    inner,
+                                    decorated_owner_type=decorated_owner_type,
+                                )
+                                is None
+                            ):
+                                return True
+                        elif state_declared:
+                            return True
+                if found and candidate is not None:
+                    pending.append((candidate, True))
+            for name in _CALL_AUTHORITY_LINK_STATE_KEYS:
+                found, candidate = _exact_string_state_entry(state, name)
+                if found and candidate is not None:
+                    pending.append((candidate, False))
+
+            credentials_found, credentials = _exact_string_state_entry(
+                state,
+                "_trusted_s3_mount_credentials",
+            )
+            if type(credentials) is dict:
+                for configured in dict.values(credentials):
+                    if type(configured) is tuple and any(item is not None for item in configured):
                         return True
-                    continue
-                if isinstance(candidate, Mapping) and any(
-                    isinstance(item, Mount) and _mount_has_or_may_hide_configured_authority(item)
-                    for item in candidate.values()
-                ):
-                    return True
-                manifest = (
-                    candidate
-                    if isinstance(candidate, Manifest)
-                    else getattr(candidate, "manifest", None)
-                )
-                if isinstance(manifest, Manifest) and _manifest_has_configured_mount_authority(
-                    manifest
-                ):
-                    return True
-    except Exception:
+            elif credentials_found and credentials is not None:
+                return True
+    except BaseException:
         return True
     return False
 
@@ -1043,7 +1290,11 @@ def _mark_mount_error_for_manifest(error: MountConfigError, manifest: Manifest) 
 def _mark_mount_error_data_safe(error: MountConfigError) -> None:
     """Mark an SDK-created mount error whose message contains no credential-derived data."""
     _mark_error_data_redacted(error)
-    setattr(error, _SAFE_MOUNT_VALIDATION_MESSAGE_ATTR, True)
+    setattr(
+        error,
+        _SAFE_MOUNT_VALIDATION_MESSAGE_ATTR,
+        _SAFE_MOUNT_VALIDATION_MESSAGE_MARKER,
+    )
 
 
 def _mark_mount_validation_error(error: MountConfigError) -> None:
