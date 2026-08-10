@@ -60,10 +60,8 @@ from .agent import Agent
 from .exceptions import (
     ModelBehaviorError,
     UserError,
-    _clear_data_redacted_error_traceback,
-    _detach_data_redacted_error_traceback,
-    _is_error_data_redacted,
     _mark_error_data_redacted,
+    _prepare_data_redacted_error,
     _raise_data_redacted_error,
 )
 from .guardrail import (
@@ -158,6 +156,18 @@ TAction = TypeVar("TAction")
 ContextOverride = Mapping[str, Any] | RunContextWrapper[Any]
 ContextSerializer = Callable[[Any], Mapping[str, Any]]
 ContextDeserializer = Callable[[Mapping[str, Any]], Any]
+RunStateValidationError = UserError | ValueError
+RunStateValidationErrorType = type[UserError] | type[ValueError]
+RunStateValidationErrorFactory = Callable[
+    [str, RunStateValidationErrorType], RunStateValidationError
+]
+
+
+def _default_run_state_validation_error(
+    message: str,
+    error_type: RunStateValidationErrorType,
+) -> RunStateValidationError:
+    return error_type(message)
 
 
 # RunState schema policy.
@@ -1478,25 +1488,30 @@ class RunState(Generic[TContext, TAgent]):
         Raises:
             UserError: If the string is invalid JSON or has incompatible schema version.
         """
-        parse_error: UserError | None = None
+        parse_error: BaseException | None = None
         try:
             state_json = json.loads(state_string)
-        except json.JSONDecodeError as e:
-            message = (
-                "Failed to parse run state JSON at "
-                f"line {e.lineno}, column {e.colno}, character {e.pos}"
-            )
-            e.doc = "<redacted>"
-            e.__traceback__ = None
+        except json.JSONDecodeError as error:
             state_string = "<redacted>"
-            parse_error = UserError(message)
+            _prepare_data_redacted_error(error)
+            parse_error = UserError("Failed to parse run state JSON")
+        except BaseException as error:
+            state_string = "<redacted>"
+            prepared_error = _prepare_data_redacted_error(error)
+            if type(prepared_error) in {asyncio.CancelledError, KeyboardInterrupt, SystemExit}:
+                parse_error = prepared_error
+            else:
+                parse_error = UserError("Failed to parse run state JSON")
 
         state_string = "<redacted>"
         if parse_error is not None:
             _mark_error_data_redacted(parse_error)
+            initial_agent = cast(Any, None)
+            context_override = None
+            context_deserializer = None
             _raise_data_redacted_error(parse_error)
 
-        safe_error: Exception | None = None
+        safe_error: BaseException | None = None
         try:
             return await RunState.from_json(
                 initial_agent=initial_agent,
@@ -1505,14 +1520,17 @@ class RunState(Generic[TContext, TAgent]):
                 context_deserializer=context_deserializer,
                 strict_context=strict_context,
             )
-        except Exception as error:
-            if not _is_error_data_redacted(error):
-                raise
-            _clear_data_redacted_error_traceback(error)
-            _detach_data_redacted_error_traceback(error)
-            safe_error = error
+        except BaseException as error:
+            trusted_error_message = _known_run_state_error_message(error)
+            safe_error = _prepare_data_redacted_error(
+                error,
+                trusted_error_message=trusted_error_message,
+            )
 
         state_json = cast(Any, None)
+        initial_agent = cast(Any, None)
+        context_override = None
+        context_deserializer = None
         assert safe_error is not None
         _raise_data_redacted_error(safe_error)
 
@@ -1544,50 +1562,94 @@ class RunState(Generic[TContext, TAgent]):
         Raises:
             UserError: If the dict has incompatible schema version.
         """
-        if not isinstance(state_json, dict):
-            state_json = cast(Any, None)
-            error = UserError("Run state JSON must be an object")
-            _mark_error_data_redacted(error)
-            _raise_data_redacted_error(error)
+        restore_error: BaseException | None = None
+        trusted_validation_errors: list[tuple[BaseException, str]] = []
 
-        schema_error: UserError | None = None
+        def validation_error_factory(
+            message: str,
+            error_type: RunStateValidationErrorType,
+        ) -> RunStateValidationError:
+            error = error_type(message)
+            trusted_validation_errors.append((error, message))
+            return error
+
         try:
-            _validate_run_state_schema_version(state_json)
-        except UserError as error:
-            _mark_error_data_redacted(error)
-            _clear_data_redacted_error_traceback(error)
-            _detach_data_redacted_error_traceback(error)
-            schema_error = error
+            if not isinstance(state_json, dict):
+                state_json = cast(Any, None)
+                raise validation_error_factory("Run state JSON must be an object", UserError)
 
-        if schema_error is not None:
-            state_json = cast(Any, None)
-            _raise_data_redacted_error(schema_error)
+            _validate_run_state_json_value(state_json)
 
-        from .sandbox._mount_security import (
-            _raise_invalid_run_state_sandbox_envelope,
-            sanitize_run_state_sandbox_mount_authority,
-        )
-
-        if "sandbox" in state_json:
-            if not isinstance(state_json["sandbox"], Mapping):
-                state_json["sandbox"] = {}
-                _raise_invalid_run_state_sandbox_envelope()
-            sanitized_sandbox, _redacted = sanitize_run_state_sandbox_mount_authority(
-                state_json["sandbox"]
+            _validate_run_state_schema_version(
+                state_json,
+                validation_error_factory=validation_error_factory,
             )
-            state_json["sandbox"] = sanitized_sandbox
-        return await _build_run_state_from_json(
-            initial_agent=initial_agent,
-            state_json=state_json,
-            context_override=context_override,
-            context_deserializer=context_deserializer,
-            strict_context=strict_context,
-        )
+
+            from .sandbox._mount_security import sanitize_run_state_sandbox_mount_authority
+
+            if "sandbox" in state_json:
+                if not isinstance(state_json["sandbox"], Mapping):
+                    state_json["sandbox"] = {}
+                    raise validation_error_factory(
+                        "RunState sandbox resume state has an invalid envelope",
+                        ValueError,
+                    )
+                sanitized_sandbox, _redacted = sanitize_run_state_sandbox_mount_authority(
+                    state_json["sandbox"],
+                    validation_error_factory=lambda message: cast(
+                        ValueError,
+                        validation_error_factory(message, ValueError),
+                    ),
+                )
+                state_json["sandbox"] = sanitized_sandbox
+
+            return await _build_run_state_from_json(
+                initial_agent=initial_agent,
+                state_json=state_json,
+                context_override=context_override,
+                context_deserializer=context_deserializer,
+                strict_context=strict_context,
+                validation_error_factory=validation_error_factory,
+            )
+        except BaseException as error:
+            trusted_error_message = _trusted_run_state_validation_message(
+                error,
+                trusted_validation_errors,
+            )
+            restore_error = _prepare_data_redacted_error(
+                error,
+                trusted_error_message=trusted_error_message,
+            )
+            trusted_validation_errors.clear()
+
+        state_json = cast(Any, None)
+        initial_agent = cast(Any, None)
+        context_override = None
+        context_deserializer = None
+        assert restore_error is not None
+        _raise_data_redacted_error(restore_error)
 
 
 # --------------------------
 # Private helpers
 # --------------------------
+
+
+def _validate_run_state_json_value(value: object) -> None:
+    """Validate the exact built-in JSON tree without invoking caller-defined protocols."""
+    if type(value) is dict:
+        for key, item in dict.items(cast(dict[object, object], value)):
+            if type(key) is not str:
+                raise TypeError("Run state JSON contains an unsupported value")
+            _validate_run_state_json_value(item)
+        return
+    if type(value) is list:
+        for item in list.__iter__(cast(list[object], value)):
+            _validate_run_state_json_value(item)
+        return
+    if type(value) in {str, int, float, bool, type(None)}:
+        return
+    raise TypeError("Run state JSON contains an unsupported value")
 
 
 def _get_attr(obj: Any, attr: str, default: Any = None) -> Any:
@@ -1658,17 +1720,14 @@ def _context_meta_warning_message(context_meta: Mapping[str, Any] | None) -> str
             "RunState context was serialized from a custom type; provide context_deserializer "
             "or context_override to restore it."
         )
-    original_type = context_meta.get("original_type") or "custom"
-    class_path = context_meta.get("class_path")
-    type_label = f"{original_type} ({class_path})" if class_path else str(original_type)
     if context_meta.get("omitted"):
         return (
-            "RunState context was omitted during serialization for "
-            f"{type_label}; provide context_override to supply it."
+            "RunState context was omitted during serialization; provide context_override "
+            "to supply it."
         )
     return (
-        "RunState context was serialized from "
-        f"{type_label}; provide context_deserializer or context_override to restore it."
+        "RunState context requires explicit restoration; provide context_deserializer or "
+        "context_override to restore it."
     )
 
 
@@ -2192,6 +2251,7 @@ async def _restore_pending_nested_agent_tool_runs(
     scope_id: str | None = None,
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
+    validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
 ) -> None:
     """Rehydrate nested agent-as-tool run state into the ephemeral tool-call cache."""
     if not function_actions:
@@ -2214,6 +2274,7 @@ async def _restore_pending_nested_agent_tool_runs(
                 state_json=dict(nested_state_data),
                 context_deserializer=context_deserializer,
                 strict_context=strict_context,
+                validation_error_factory=validation_error_factory,
             )
         except Exception:
             if strict_context:
@@ -2246,6 +2307,7 @@ async def _deserialize_processed_response(
     strict_context: bool = False,
     program_call_ids: Collection[str] = (),
     completed_program_call_ids: Collection[str] = (),
+    validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
 ) -> ProcessedResponse:
     """Deserialize a ProcessedResponse from JSON data.
 
@@ -2262,6 +2324,7 @@ async def _deserialize_processed_response(
         processed_response_data.get("new_items", []),
         agent_map,
         agent_identity_map=agent_identity_map,
+        validation_error_factory=validation_error_factory,
     )
 
     if hasattr(current_agent, "get_all_tools"):
@@ -2563,6 +2626,7 @@ async def _deserialize_processed_response(
         scope_id=scope_id,
         context_deserializer=context_deserializer,
         strict_context=strict_context,
+        validation_error_factory=validation_error_factory,
     )
 
     mcp_approval_requests: list[ToolRunMCPApprovalRequest] = []
@@ -2600,6 +2664,7 @@ async def _deserialize_processed_response(
             agent_map=agent_map,
             agent_identity_map=agent_identity_map,
             fallback_agent=current_agent,
+            validation_error_factory=validation_error_factory,
         )
         if approval_item is not None:
             interruptions.append(approval_item)
@@ -2713,6 +2778,7 @@ def _resolve_agent_from_data(
     agent_map: Mapping[str, Agent[Any]],
     agent_identity_map: Mapping[str, Agent[Any]] | None = None,
     fallback_agent: Agent[Any] | None = None,
+    validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
 ) -> Agent[Any] | None:
     """Resolve an agent from serialized data with an optional fallback."""
     agent_name = None
@@ -2727,9 +2793,9 @@ def _resolve_agent_from_data(
         resolved = agent_identity_map.get(agent_identity)
         if resolved is not None:
             return resolved
-        raise UserError(
-            "Run state references an agent identity that is not present in the restored graph: "
-            f"{agent_identity}"
+        raise validation_error_factory(
+            "Run state references an agent identity that is not present in the restored graph",
+            UserError,
         )
 
     if agent_name:
@@ -2757,6 +2823,7 @@ def _deserialize_tool_approval_item(
     agent_identity_map: Mapping[str, Agent[Any]] | None = None,
     fallback_agent: Agent[Any] | None = None,
     pre_normalized_raw_item: Any | None = None,
+    validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
 ) -> ToolApprovalItem | None:
     """Deserialize a ToolApprovalItem from serialized data."""
     agent = _resolve_agent_from_data(
@@ -2764,6 +2831,7 @@ def _deserialize_tool_approval_item(
         agent_map,
         agent_identity_map,
         fallback_agent,
+        validation_error_factory=validation_error_factory,
     )
     if agent is None:
         return None
@@ -3043,6 +3111,7 @@ def _deserialize_output_guardrail_results(
     agent_map: dict[str, Agent[Any]],
     agent_identity_map: Mapping[str, Agent[Any]] | None = None,
     fallback_agent: Agent[Any],
+    validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
 ) -> list[OutputGuardrailResult]:
     """Rehydrate output guardrail results from serialized data."""
     deserialized: list[OutputGuardrailResult] = []
@@ -3058,6 +3127,7 @@ def _deserialize_output_guardrail_results(
             agent_map,
             agent_identity_map,
             fallback_agent,
+            validation_error_factory=validation_error_factory,
         )
         if resolved_agent is None:
             resolved_agent = fallback_agent
@@ -3133,18 +3203,23 @@ def _deserialize_tool_output_guardrail_results(
     return deserialized
 
 
-def _validate_run_state_schema_version(state_json: Mapping[str, Any]) -> str:
+def _validate_run_state_schema_version(
+    state_json: Mapping[str, Any],
+    *,
+    validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
+) -> str:
     schema_version = state_json.get("$schemaVersion")
     if not schema_version:
-        raise UserError("Run state is missing schema version")
+        raise validation_error_factory("Run state is missing schema version", UserError)
     if not isinstance(schema_version, str):
-        raise UserError("Run state schema version has an invalid type")
+        raise validation_error_factory("Run state schema version has an invalid type", UserError)
     if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         supported_versions = ", ".join(sorted(SUPPORTED_SCHEMA_VERSIONS))
-        raise UserError(
+        raise validation_error_factory(
             "Run state schema version is not supported. "
             f"Supported versions are: {supported_versions}. "
-            f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
+            f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}.",
+            UserError,
         )
     return schema_version
 
@@ -3155,6 +3230,7 @@ async def _build_run_state_from_json(
     context_override: ContextOverride | None = None,
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
+    validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
 ) -> RunState[Any, Agent[Any]]:
     """Shared helper to rebuild RunState from JSON payload.
 
@@ -3168,7 +3244,10 @@ async def _build_run_state_from_json(
     safely, this function warns or raises (in ``strict_context`` mode) rather than silently
     claiming that the rebuilt mapping is equivalent to the original object.
     """
-    schema_version = _validate_run_state_schema_version(state_json)
+    schema_version = _validate_run_state_schema_version(
+        state_json,
+        validation_error_factory=validation_error_factory,
+    )
     schema_major, schema_minor = (int(part) for part in schema_version.split(".", maxsplit=1))
     programmatic_major, programmatic_minor = (
         int(part) for part in _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
@@ -3177,24 +3256,25 @@ async def _build_run_state_from_json(
         programmatic_major,
         programmatic_minor,
     ) and _run_state_uses_programmatic_tool_calling(state_json):
-        raise UserError(
+        raise validation_error_factory(
             "Run state contains Programmatic Tool Calling data but uses schema version "
             f"{schema_version}. Programmatic Tool Calling requires schema version "
-            f"{_PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION} or later."
+            f"{_PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION} or later.",
+            UserError,
         )
 
     agent_identity_map = _build_agent_identity_map(initial_agent)
     agent_map = _build_agent_map(initial_agent)
 
     current_agent_data = state_json["current_agent"]
-    current_agent_name = current_agent_data["name"]
     current_agent = _resolve_agent_from_data(
         current_agent_data,
         agent_map,
         agent_identity_map=agent_identity_map,
+        validation_error_factory=validation_error_factory,
     )
     if current_agent is None:
-        raise UserError(f"Agent {current_agent_name} not found in agent map")
+        raise validation_error_factory("Run state agent not found in agent map", UserError)
 
     context_data = state_json["context"]
     usage = deserialize_usage(context_data.get("usage", {}))
@@ -3214,10 +3294,16 @@ async def _build_run_state_from_json(
     ):
         warning_message = _context_meta_warning_message(context_meta)
         if strict_context:
-            raise UserError(warning_message)
+            raise validation_error_factory(warning_message, UserError)
         logger.warning(warning_message)
 
     if isinstance(context_override, RunContextWrapper):
+        if type(context_override) is not RunContextWrapper:
+            raise validation_error_factory(
+                "RunState restoration does not support RunContextWrapper subclasses; "
+                "provide the custom context value directly or wrap it in RunContextWrapper.",
+                UserError,
+            )
         context = context_override
     elif context_override is not None:
         context = RunContextWrapper(context=context_override)
@@ -3225,29 +3311,46 @@ async def _build_run_state_from_json(
         context = RunContextWrapper(context=None)
     elif context_deserializer is not None:
         if not isinstance(serialized_context, Mapping):
-            raise UserError(
-                "Serialized run state context must be a mapping to use context_deserializer."
+            raise validation_error_factory(
+                "Serialized run state context must be a mapping to use context_deserializer.",
+                UserError,
             )
         try:
             rebuilt_context = context_deserializer(dict(serialized_context))
         except Exception as exc:
-            raise UserError(
-                "Context deserializer failed while rebuilding RunState context."
+            raise validation_error_factory(
+                "Context deserializer failed while rebuilding RunState context.",
+                UserError,
             ) from exc
         if isinstance(rebuilt_context, RunContextWrapper):
+            if type(rebuilt_context) is not RunContextWrapper:
+                raise validation_error_factory(
+                    "RunState restoration does not support RunContextWrapper subclasses; "
+                    "provide the custom context value directly or wrap it in RunContextWrapper.",
+                    UserError,
+                )
             context = rebuilt_context
         else:
             context = RunContextWrapper(context=rebuilt_context)
     elif isinstance(serialized_context, Mapping):
         context = RunContextWrapper(context=serialized_context)
     else:
-        raise UserError("Serialized run state context must be a mapping. Please provide one.")
+        raise validation_error_factory(
+            "Serialized run state context must be a mapping. Please provide one.",
+            UserError,
+        )
     context.usage = usage
     context._restored_unbound_approval_call_ids = set()
     context._allow_legacy_approval_binding_reconstruction = (schema_major, schema_minor) < (1, 15)
     context._rebuild_approvals(context_data.get("approvals", {}))
     if (schema_major, schema_minor) >= (1, 15):
-        context._rebuild_tool_invocations(context_data.get("tool_invocations", {}))
+        context._rebuild_tool_invocations(
+            context_data.get("tool_invocations", {}),
+            validation_error_factory=lambda message: cast(
+                UserError,
+                validation_error_factory(message, UserError),
+            ),
+        )
     else:
         context._tool_invocations = {}
     hosted_mcp_major, hosted_mcp_minor = (
@@ -3261,7 +3364,7 @@ async def _build_run_state_from_json(
     if (
         context_override is None
         and serialized_tool_input is not None
-        and getattr(context, "tool_input", None) is None
+        and context.tool_input is None
     ):
         context.tool_input = serialized_tool_input
 
@@ -3296,7 +3399,7 @@ async def _build_run_state_from_json(
     state._current_turn = state_json["current_turn"]
     pending_input_raw = state_json.get("pending_input", [])
     if not isinstance(pending_input_raw, list):
-        raise UserError("Run state pending_input must be a list")
+        raise validation_error_factory("Run state pending_input must be a list", UserError)
     state._pending_input = cast(
         list[TResponseInputItem],
         [dict(item) if isinstance(item, Mapping) else item for item in pending_input_raw],
@@ -3307,6 +3410,7 @@ async def _build_run_state_from_json(
         serialized_generated_items,
         agent_map,
         agent_identity_map=agent_identity_map,
+        validation_error_factory=validation_error_factory,
     )
 
     last_processed_response_data = state_json.get("last_processed_response")
@@ -3323,6 +3427,7 @@ async def _build_run_state_from_json(
             strict_context=strict_context,
             program_call_ids=program_call_ids,
             completed_program_call_ids=completed_program_call_ids,
+            validation_error_factory=validation_error_factory,
         )
     else:
         state._last_processed_response = None
@@ -3333,6 +3438,7 @@ async def _build_run_state_from_json(
             serialized_session_items,
             agent_map,
             agent_identity_map=agent_identity_map,
+            validation_error_factory=validation_error_factory,
         )
     else:
         serialized_session_items = []
@@ -3392,8 +3498,9 @@ async def _build_run_state_from_json(
 
     nested_history_refs_json = state_json.get("nested_history_owned_session_item_refs", [])
     if not isinstance(nested_history_refs_json, list):
-        raise UserError(
-            "Run state nested_history_owned_session_item_refs must be a list of objects"
+        raise validation_error_factory(
+            "Run state nested_history_owned_session_item_refs must be a list of objects",
+            UserError,
         )
     nested_history_refs: list[NestedHistoryOwnedItemRef] = []
     for item_ref in nested_history_refs_json:
@@ -3406,15 +3513,19 @@ async def _build_run_state_from_json(
             or type(item_ref.get("input_index")) is not int
             or cast(int, item_ref["input_index"]) < 0
         ):
-            raise UserError(
+            raise validation_error_factory(
                 "Run state nested_history_owned_session_item_refs entries must contain a "
-                "non-negative integer index and input_index, and 64-character digest"
+                "non-negative integer index and input_index, and 64-character digest",
+                UserError,
             )
         session_source_index = cast(int, item_ref["index"])
         input_index = cast(int, item_ref["input_index"])
         digest = cast(str, item_ref["digest"])
         if "session_items" in state_json and session_source_index >= len(serialized_session_items):
-            raise UserError("Run state nested history ownership references a missing session item")
+            raise validation_error_factory(
+                "Run state nested history ownership references a missing session item",
+                UserError,
+            )
         session_index = restored_session_indexes.get(session_source_index)
         if session_index is None:
             logger.warning(
@@ -3423,16 +3534,25 @@ async def _build_run_state_from_json(
             )
             continue
         if not isinstance(state._original_input, list) or input_index >= len(state._original_input):
-            raise UserError("Run state nested history ownership references a missing input item")
+            raise validation_error_factory(
+                "Run state nested history ownership references a missing input item",
+                UserError,
+            )
 
         run_item = state._session_items[session_index]
         run_input_item = run_item_to_input_item(run_item)
         if run_input_item is None or digest_input_item(run_input_item) != digest:
-            raise UserError("Run state nested history ownership session digest does not match")
+            raise validation_error_factory(
+                "Run state nested history ownership session digest does not match",
+                UserError,
+            )
         ensure_nested_history_run_item_occurrence_key(run_item)
         input_item = cast(TResponseInputItem, state._original_input[input_index])
         if digest_input_item(input_item) != digest:
-            raise UserError("Run state nested history ownership input digest does not match")
+            raise validation_error_factory(
+                "Run state nested history ownership input digest does not match",
+                UserError,
+            )
         nested_history_refs.append(
             NestedHistoryOwnedItemRef(
                 session_index=session_index,
@@ -3454,6 +3574,7 @@ async def _build_run_state_from_json(
         agent_map=agent_map,
         agent_identity_map=agent_identity_map,
         fallback_agent=current_agent,
+        validation_error_factory=validation_error_factory,
     )
     state._tool_input_guardrail_results = _deserialize_tool_input_guardrail_results(
         state_json.get("tool_input_guardrail_results", [])
@@ -3477,6 +3598,7 @@ async def _build_run_state_from_json(
                 item_data,
                 agent_map=agent_map,
                 agent_identity_map=agent_identity_map,
+                validation_error_factory=validation_error_factory,
             )
             if approval_item is not None:
                 interruptions.append(approval_item)
@@ -3521,6 +3643,7 @@ async def _build_run_state_from_json(
     _validate_completed_tool_invocations(
         state,
         reconstruct_legacy=(schema_major, schema_minor) < (1, 15),
+        validation_error_factory=validation_error_factory,
     )
 
     return state
@@ -3530,6 +3653,7 @@ def _validate_completed_tool_invocations(
     state: RunState[Any, Agent[Any]],
     *,
     reconstruct_legacy: bool = False,
+    validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
 ) -> None:
     """Reconcile invocation bindings with restored calls and outputs."""
     if state._context is None:
@@ -3804,9 +3928,10 @@ def _validate_completed_tool_invocations(
             or any(expected_call not in occurrence for occurrence in occurrences)
             or expected_output not in restored_outputs
         ):
-            raise UserError(
-                f"RunState completed tool invocation {call_id!r} does not match a restored "
-                "tool call and output."
+            raise validation_error_factory(
+                "RunState completed tool invocation does not match a restored tool call "
+                "and output.",
+                UserError,
             )
 
 
@@ -4343,6 +4468,7 @@ def _deserialize_items(
     agent_map: dict[str, Agent[Any]],
     *,
     agent_identity_map: Mapping[str, Agent[Any]] | None = None,
+    validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
 ) -> list[RunItem]:
     """Deserialize run items from JSON data.
 
@@ -4388,6 +4514,7 @@ def _deserialize_items(
                 raw_agent,
                 agent_map,
                 agent_identity_map,
+                validation_error_factory=validation_error_factory,
             )
             if agent_candidate is not None:
                 return agent_candidate, agent_candidate.name
@@ -4513,11 +4640,13 @@ def _deserialize_items(
                     item_data.get("source_agent"),
                     agent_map,
                     agent_identity_map,
+                    validation_error_factory=validation_error_factory,
                 )
                 target_agent = _resolve_agent_from_data(
                     item_data.get("target_agent"),
                     agent_map,
                     agent_identity_map,
+                    validation_error_factory=validation_error_factory,
                 )
 
                 # If we cannot resolve both agents, skip this item gracefully
@@ -4590,6 +4719,7 @@ def _deserialize_items(
                     agent_identity_map=agent_identity_map,
                     fallback_agent=agent,
                     pre_normalized_raw_item=normalized_raw_item,
+                    validation_error_factory=validation_error_factory,
                 )
                 if approval_item is not None:
                     result.append(approval_item)
@@ -4613,6 +4743,7 @@ def _deserialize_items_with_source_indexes(
     agent_map: dict[str, Agent[Any]],
     *,
     agent_identity_map: Mapping[str, Agent[Any]] | None = None,
+    validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
 ) -> tuple[list[RunItem], list[int]]:
     """Deserialize items while retaining indexes of source entries that survived."""
     items: list[RunItem] = []
@@ -4622,6 +4753,7 @@ def _deserialize_items_with_source_indexes(
             [item_data],
             agent_map,
             agent_identity_map=agent_identity_map,
+            validation_error_factory=validation_error_factory,
         )
         items.extend(deserialized)
         source_indexes.extend([source_index] * len(deserialized))
@@ -4633,3 +4765,96 @@ def _clone_original_input(original_input: str | list[Any]) -> str | list[Any]:
     if isinstance(original_input, str):
         return original_input
     return copy.deepcopy(original_input)
+
+
+_TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
+    {
+        "Run state JSON must be an object",
+        "Run state is missing schema version",
+        "Run state schema version has an invalid type",
+        (
+            "Run state schema version is not supported. "
+            f"Supported versions are: {', '.join(sorted(SUPPORTED_SCHEMA_VERSIONS))}. "
+            f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
+        ),
+        "Run state agent not found in agent map",
+        "Run state pending_input must be a list",
+        "Run state references an agent identity that is not present in the restored graph",
+        (
+            "RunState context was serialized from a custom type; provide context_deserializer "
+            "or context_override to restore it."
+        ),
+        (
+            "RunState context was omitted during serialization; provide context_override "
+            "to supply it."
+        ),
+        (
+            "RunState context requires explicit restoration; provide context_deserializer or "
+            "context_override to restore it."
+        ),
+        "Serialized run state context must be a mapping to use context_deserializer.",
+        (
+            "RunState restoration does not support RunContextWrapper subclasses; "
+            "provide the custom context value directly or wrap it in RunContextWrapper."
+        ),
+        "Context deserializer failed while rebuilding RunState context.",
+        "Serialized run state context must be a mapping. Please provide one.",
+        "Run state nested_history_owned_session_item_refs must be a list of objects",
+        (
+            "Run state nested_history_owned_session_item_refs entries must contain a "
+            "non-negative integer index and input_index, and 64-character digest"
+        ),
+        "Run state nested history ownership references a missing session item",
+        "Run state nested history ownership references a missing input item",
+        "Run state nested history ownership session digest does not match",
+        "Run state nested history ownership input digest does not match",
+        "RunState tool_invocations must be a mapping.",
+        "RunState tool_invocations contains an invalid call ID.",
+        "RunState tool invocation must be a mapping.",
+        "RunState tool invocation contains invalid lifecycle data.",
+        "Hosted MCP approval decisions require a non-empty request id.",
+        (
+            "Persistent hosted MCP approval decisions require a non-empty server_label "
+            "and tool name."
+        ),
+        "RunState completed tool invocation does not match a restored tool call and output.",
+        "RunState sandbox resume state contains an invalid manifest",
+        "RunState sandbox resume state has an invalid envelope",
+        *(
+            "Run state contains Programmatic Tool Calling data but uses schema version "
+            f"{schema_version}. Programmatic Tool Calling requires schema version "
+            f"{_PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION} or later."
+            for schema_version in SUPPORTED_SCHEMA_VERSIONS
+        ),
+    }
+)
+
+
+def _known_run_state_error_message(error: BaseException) -> str | None:
+    if type(error) not in {UserError, ValueError}:
+        return None
+    try:
+        args = cast(Any, BaseException.args).__get__(error, type(error))
+    except BaseException:
+        return None
+    if type(args) is not tuple or len(args) != 1 or type(args[0]) is not str:
+        return None
+    message = args[0]
+    return message if message in _TRUSTED_RUN_STATE_ERROR_MESSAGES else None
+
+
+def _trusted_run_state_validation_message(
+    error: BaseException,
+    trusted_validation_errors: Sequence[tuple[BaseException, str]],
+) -> str | None:
+    message = _known_run_state_error_message(error)
+    if message is None:
+        return None
+    return next(
+        (
+            trusted_message
+            for trusted_error, trusted_message in trusted_validation_errors
+            if trusted_error is error and trusted_message == message
+        ),
+        None,
+    )

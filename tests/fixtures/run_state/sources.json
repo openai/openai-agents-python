@@ -1,0 +1,199 @@
+{
+  "baseline": "v0.19.4",
+  "features": [
+    {
+      "commit": "74e8c1e22d7441bd42c58bcd4270937ccc2dca8c",
+      "feature": "reasoning_item_id_policy",
+      "fixture": "features/v1_2_reasoning_item_id_policy.json",
+      "provenance": "historical_writer",
+      "version": "1.2"
+    },
+    {
+      "commit": "6814a54711f591712c893f0a8be1cf56c512ae63",
+      "feature": "resumed_trace_state",
+      "fixture": "features/v1_3_resumed_trace_state.json",
+      "provenance": "historical_writer",
+      "version": "1.3"
+    },
+    {
+      "commit": "159beb56130f7d85192acfd593c9168757984dc0",
+      "feature": "request_id",
+      "fixture": "features/v1_4_request_id.json",
+      "provenance": "historical_writer",
+      "version": "1.4"
+    },
+    {
+      "commit": "e0f6a28c20887b83dd4e1532cdfe0b78a01d4961",
+      "feature": "tool_search_and_display_metadata",
+      "fixture": "features/v1_5_tool_search_and_display_metadata.json",
+      "provenance": "historical_writer",
+      "version": "1.5"
+    },
+    {
+      "commit": "86739b1a0f94d73f9a35e68f6f25ddc0beaa2078",
+      "feature": "approval_rejection_message",
+      "fixture": "features/v1_6_approval_rejection_message.json",
+      "provenance": "historical_writer",
+      "version": "1.6"
+    },
+    {
+      "commit": "2d665c9a67fdf3198a0daa0f9978b8239d78e78b",
+      "emitted_version": "1.9",
+      "feature": "duplicate_agent_identity_and_sandbox",
+      "fixture": "features/v1_7_duplicate_agent_identity_and_sandbox.json",
+      "note": "The release-boundary schema renumbering introduced this reader version without a writer that emitted it. The recorded writer emitted 1.9; only the schema label is changed to exercise the canonical compatibility branch.",
+      "provenance": "canonical_compatibility",
+      "version": "1.7"
+    },
+    {
+      "commit": "2d665c9a67fdf3198a0daa0f9978b8239d78e78b",
+      "emitted_version": "1.9",
+      "feature": "prompt_cache_key",
+      "fixture": "features/v1_8_prompt_cache_key.json",
+      "note": "The release-boundary schema renumbering introduced this reader version without a writer that emitted it. The recorded writer emitted 1.9; only the schema label is changed to exercise the canonical compatibility branch.",
+      "provenance": "canonical_compatibility",
+      "version": "1.8"
+    },
+    {
+      "commit": "bed924b45d97ea0080655329129075e457d46c6d",
+      "feature": "custom_tool_call_and_tool_origin",
+      "fixture": "features/v1_9_custom_tool_call_and_tool_origin.json",
+      "provenance": "historical_writer",
+      "version": "1.9"
+    },
+    {
+      "commit": "a4ba63f7045d27998a0b1bc1ee64a313574ee139",
+      "feature": "unlimited_max_turns",
+      "fixture": "features/v1_10_unlimited_max_turns.json",
+      "provenance": "historical_writer",
+      "version": "1.10"
+    },
+    {
+      "commit": "70c447e14ffabdf29bfaeb4bb3df33bb6dfaaab7",
+      "feature": "tool_output_custom_data",
+      "fixture": "features/v1_11_tool_output_custom_data.json",
+      "provenance": "historical_writer",
+      "version": "1.11"
+    },
+    {
+      "commit": "95df2c99a745655ba71c763b8ac036283e9df87e",
+      "feature": "input_cache_write_usage",
+      "fixture": "features/v1_12_input_cache_write_usage.json",
+      "provenance": "historical_writer",
+      "version": "1.12"
+    },
+    {
+      "commit": "ece7b0e5861d6c839041d5f860a2a2cf08bba81e",
+      "feature": "programmatic_tool_calling",
+      "fixture": "features/v1_13_programmatic_tool_calling.json",
+      "provenance": "historical_writer",
+      "version": "1.13"
+    },
+    {
+      "commit": "ece7b0e5861d6c839041d5f860a2a2cf08bba81e",
+      "feature": "nested_history_ownership",
+      "fixture": "features/v1_13_nested_history_ownership.json",
+      "provenance": "historical_writer",
+      "version": "1.13"
+    },
+    {
+      "commit": "0c60a196af1236044a829e39b10f22a9cedaa326",
+      "feature": "hosted_mcp_approval_scope",
+      "fixture": "features/v1_14_hosted_mcp_approval_scope.json",
+      "provenance": "historical_writer",
+      "version": "1.14"
+    },
+    {
+      "commit": "9c6cadf8201f4908ced206d49ed9f1489dc9db67",
+      "feature": "canonical_invocation_identity",
+      "fixture": "features/v1_15_canonical_invocation_identity.json",
+      "provenance": "historical_writer",
+      "version": "1.15"
+    }
+  ],
+  "resume": {
+    "commit": "92aa1b905306d7f5a130d911061c44cddeaa6e20",
+    "feature": "pending_tool_approval",
+    "fixture": "resume/v1_13_pending_tool_approval.json",
+    "provenance": "historical_writer",
+    "version": "1.13"
+  },
+  "security": {
+    "commit": "92aa1b905306d7f5a130d911061c44cddeaa6e20",
+    "feature": "legacy_mount_credentials",
+    "fixture": "security/v1_13_legacy_mount_credentials.json",
+    "provenance": "historical_writer",
+    "sentinels": [
+      "RUNSTATE_ACCESS_SENTINEL_42",
+      "RUNSTATE_SECRET_SENTINEL_42",
+      "RUNSTATE_TOKEN_SENTINEL_42"
+    ],
+    "version": "1.13"
+  },
+  "versions": {
+    "1.0": {
+      "commit": "3ce7c24d349b77bb750062b7e0e856d9ff48a5d5",
+      "fixture": "minimal/v1_0.json"
+    },
+    "1.1": {
+      "commit": "db4a462accb87f75b27feba8dafe0b27e1707bec",
+      "fixture": "minimal/v1_1.json"
+    },
+    "1.10": {
+      "commit": "b9cbab149f2b94d5597c2f987db6f96c54d86395",
+      "fixture": "minimal/v1_10.json"
+    },
+    "1.11": {
+      "commit": "7fc489eb0d2d09b38f81d852c22f9193a89044c0",
+      "fixture": "minimal/v1_11.json"
+    },
+    "1.12": {
+      "commit": "8724b1b9baf8495f35efc4c2a767a5d1ca6f84cc",
+      "fixture": "minimal/v1_12.json"
+    },
+    "1.13": {
+      "commit": "965335aba6f6c71500e0b8cdb4e9e495f5801d4d",
+      "fixture": "minimal/v1_13.json"
+    },
+    "1.14": {
+      "commit": "8b810bc4bd1acaafeab3fcfe65ad93187a561be0",
+      "fixture": "minimal/v1_14.json"
+    },
+    "1.15": {
+      "commit": "4720150fde047baa4e88b16082b282bee3a5e87d",
+      "fixture": "minimal/v1_15.json"
+    },
+    "1.2": {
+      "commit": "74e8c1e22d7441bd42c58bcd4270937ccc2dca8c",
+      "fixture": "minimal/v1_2.json"
+    },
+    "1.3": {
+      "commit": "6814a54711f591712c893f0a8be1cf56c512ae63",
+      "fixture": "minimal/v1_3.json"
+    },
+    "1.4": {
+      "commit": "159beb56130f7d85192acfd593c9168757984dc0",
+      "fixture": "minimal/v1_4.json"
+    },
+    "1.5": {
+      "commit": "e96186113bb72b13d16b07d0305d6f7a4130c965",
+      "fixture": "minimal/v1_5.json"
+    },
+    "1.6": {
+      "commit": "9ac31ab49ff655478f344f8dfdc44550683ff475",
+      "fixture": "minimal/v1_6.json"
+    },
+    "1.7": {
+      "commit": "e0124244f4fad45f2489b715aad32fde0959724b",
+      "fixture": "minimal/v1_7.json"
+    },
+    "1.8": {
+      "commit": "22f072a923b7ebd44eb218117b8cf1abaca4b2db",
+      "fixture": "minimal/v1_8.json"
+    },
+    "1.9": {
+      "commit": "2d665c9a67fdf3198a0daa0f9978b8239d78e78b",
+      "fixture": "minimal/v1_9.json"
+    }
+  }
+}

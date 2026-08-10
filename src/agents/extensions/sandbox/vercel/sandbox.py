@@ -89,6 +89,7 @@ _VERCEL_S3_MOUNT_START_SESSION: ContextVar[object | None] = ContextVar(
     "vercel_s3_mount_start_session",
     default=None,
 )
+_REDACTED_MOUNT_FAILURE_CAUSE_TYPE = "redacted"
 DEFAULT_VERCEL_WORKSPACE_ROOT = "/vercel/sandbox"
 _DEFAULT_MANIFEST_ROOT = cast(str, Manifest.model_fields["root"].default)
 DEFAULT_VERCEL_SANDBOX_TIMEOUT_MS = 270_000
@@ -765,7 +766,8 @@ class VercelSandboxSession(BaseSandboxSession):
         return _vercel_provider_retryability(error)
 
     async def _runtime_fail_s3_mount_transition(self, error: BaseException) -> None:
-        self._s3_mount_failure = type(error).__name__
+        _ = error
+        self._s3_mount_failure = _REDACTED_MOUNT_FAILURE_CAUSE_TYPE
         stop_task = asyncio.create_task(self._stop_attached_sandbox())
         while not stop_task.done():
             try:

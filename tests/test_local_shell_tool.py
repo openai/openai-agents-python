@@ -295,8 +295,12 @@ async def test_run_state_rejects_id_only_local_shell_output(schema_version: str 
     resumed_agent = Agent(name="shell-agent", model=resumed_model, tools=[tool])
     try:
         if schema_version is None:
-            with pytest.raises(UserError, match="completed tool invocation 'call_local_shell'"):
+            with pytest.raises(
+                UserError,
+                match="completed tool invocation does not match a restored tool call and output",
+            ) as exc_info:
                 await RunState.from_json(resumed_agent, serialized)
+            assert "call_local_shell" not in str(exc_info.value)
         else:
             resumed_state = await RunState.from_json(resumed_agent, serialized)
             await Runner.run(resumed_agent, resumed_state)

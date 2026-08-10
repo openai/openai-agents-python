@@ -17,7 +17,9 @@ from pydantic import (
 )
 from typing_extensions import Self
 
-from .._mount_security import redact_mount_error_data_sync
+from .._mount_security import (
+    redact_mount_error_data_sync,
+)
 from ..manifest import Manifest
 from ..snapshot import SnapshotBase
 
@@ -102,13 +104,16 @@ class SandboxSessionState(BaseModel):
             payload = payload.model_dump()
 
         if isinstance(payload, dict):
-            from ...exceptions import _raise_data_redacted_error
+            from ...exceptions import (
+                _raise_data_redacted_error,
+                _replace_data_redacted_process_control_error,
+            )
             from .._mount_security import (
                 _redact_mount_state_validation_error,
                 sanitize_raw_session_state_mount_authority,
             )
 
-            safe_error: ValueError | None = None
+            safe_error: BaseException | None = None
             sanitized: object = None
             state_type: object = None
             subclass: SessionStateClass | None = None
@@ -129,14 +134,16 @@ class SandboxSessionState(BaseModel):
                     subclass.model_validate(payload),
                     payload=payload,
                 )
-            except Exception as error:
+            except BaseException as error:
                 payload.clear()
                 if isinstance(sanitized, dict):
                     sanitized.clear()
-                safe_error = _redact_mount_state_validation_error(
-                    error,
-                    message="sandbox session state payload is invalid",
-                )
+                safe_error = _replace_data_redacted_process_control_error(error)
+                if safe_error is None:
+                    safe_error = _redact_mount_state_validation_error(
+                        error,
+                        message="sandbox session state payload is invalid",
+                    )
 
             payload = cast(Any, None)
             sanitized = None
@@ -161,18 +168,23 @@ class SandboxSessionState(BaseModel):
     ) -> Self:
         """Validate JSON without retaining malformed input in a public error."""
 
-        from ...exceptions import _raise_data_redacted_error
+        from ...exceptions import (
+            _raise_data_redacted_error,
+            _replace_data_redacted_process_control_error,
+        )
         from .._mount_security import _redact_mount_state_validation_error
 
         decoded: object = None
-        safe_error: ValueError | None = None
+        safe_error: BaseException | None = None
         try:
             decoded = json.loads(json_data)
-        except Exception as error:
-            safe_error = _redact_mount_state_validation_error(
-                error,
-                message="sandbox session state JSON is invalid",
-            )
+        except BaseException as error:
+            safe_error = _replace_data_redacted_process_control_error(error)
+            if safe_error is None:
+                safe_error = _redact_mount_state_validation_error(
+                    error,
+                    message="sandbox session state JSON is invalid",
+                )
 
         if safe_error is not None:
             if isinstance(decoded, dict | list):
@@ -191,9 +203,18 @@ class SandboxSessionState(BaseModel):
                 by_alias=by_alias,
                 by_name=by_name,
             )
-        except Exception:
+        except BaseException as error:
+            safe_error = _replace_data_redacted_process_control_error(error)
             json_data = cast(Any, None)
-            raise
+            if safe_error is not None:
+                _raise_data_redacted_error(safe_error)
+            if isinstance(error, Exception):
+                raise
+            safe_error = _redact_mount_state_validation_error(
+                error,
+                message="sandbox session state JSON is invalid",
+            )
+            _raise_data_redacted_error(safe_error)
 
     @classmethod
     def _mark_persisted_path_grants(
@@ -338,7 +359,7 @@ class SandboxSessionState(BaseModel):
         )
 
         data: dict[str, Any] | None = None
-        safe_error: Exception | None = None
+        safe_error: BaseException | None = None
         provenance_error = _manifest_mount_provenance_error(self.manifest)
         if provenance_error is not None:
             _mark_mount_validation_error(provenance_error)
@@ -351,7 +372,7 @@ class SandboxSessionState(BaseModel):
                         cast(dict[str, Any], data).get("manifest")
                     )
                 )
-            except Exception as error:
+            except BaseException as error:
                 if not _manifest_has_configured_mount_authority(self.manifest):
                     raise
                 safe_error = _redact_mount_serialization_error(error)
@@ -380,37 +401,54 @@ class SandboxSessionState(BaseModel):
     @model_validator(mode="wrap")
     @classmethod
     def _restore_mount_authority_marker(cls, value: Any, handler: Any) -> SandboxSessionState:
-        from ...exceptions import _raise_data_redacted_error
+        from ...exceptions import (
+            _raise_data_redacted_error,
+            _replace_data_redacted_process_control_error,
+        )
         from .._mount_security import (
             REDACTED_MOUNT_AUTHORITY_KEY,
+            _manifest_has_configured_mount_authority,
             _redact_mount_state_validation_error,
             sanitize_raw_session_state_mount_authority,
         )
 
-        marker = isinstance(value, Mapping) and value.get(REDACTED_MOUNT_AUTHORITY_KEY) is True
+        marker = False
         state: SandboxSessionState | None = None
         sanitized: object = None
-        safe_error: ValueError | None = None
-        if (
-            isinstance(value, Mapping)
-            and "manifest" in value
-            and not isinstance(value.get("manifest"), Manifest)
-        ):
-            try:
+        safe_error: BaseException | None = None
+        redact_failure = True
+        try:
+            if isinstance(value, Mapping):
+                marker = value.get(REDACTED_MOUNT_AUTHORITY_KEY) is True
+            if (
+                isinstance(value, Mapping)
+                and "manifest" in value
+                and not isinstance(value.get("manifest"), Manifest)
+            ):
                 sanitized, redacted = sanitize_raw_session_state_mount_authority(value)
                 marker = marker or redacted
+                redact_failure = marker
                 state = handler(sanitized)
-            except Exception as error:
-                if isinstance(value, dict):
-                    value.clear()
-                if isinstance(sanitized, dict):
-                    sanitized.clear()
+            else:
+                manifest = value.get("manifest") if isinstance(value, Mapping) else None
+                redact_failure = marker or (
+                    isinstance(manifest, Manifest)
+                    and _manifest_has_configured_mount_authority(manifest)
+                )
+                state = handler(value)
+        except BaseException as error:
+            safe_error = _replace_data_redacted_process_control_error(error)
+            if safe_error is None and not redact_failure:
+                raise
+            if isinstance(value, dict):
+                value.clear()
+            if isinstance(sanitized, dict):
+                sanitized.clear()
+            if safe_error is None:
                 safe_error = _redact_mount_state_validation_error(
                     error,
                     message="sandbox session state payload is invalid",
                 )
-        else:
-            state = handler(value)
 
         if safe_error is not None:
             value = cast(Any, None)

@@ -52,8 +52,7 @@ def test_memory_extra_lazy_exports_resolve_to_the_installed_backend(
     module_name: str,
     module_symbol: str,
 ) -> None:
-    if os.environ["OPENAI_AGENTS_INTEGRATION_EXTRA"] != optional_extra:
-        pytest.skip(f"This environment does not include the {optional_extra} extra.")
+    assert os.environ["OPENAI_AGENTS_INTEGRATION_EXTRA"] == optional_extra
 
     memory = importlib.import_module("agents.extensions.memory")
     module = importlib.import_module(module_name)

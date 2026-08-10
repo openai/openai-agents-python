@@ -20,6 +20,7 @@ Run this command from the repository root:
 
 ```bash
 env UV_DEFAULT_INDEX=https://pypi.org/simple \
+  OPENAI_AGENTS_INTEGRATION_STRICT=1 \
   OPENAI_AGENTS_INTEGRATION_EXTERNAL_PROVIDERS=1 \
   OPENAI_AGENTS_INTEGRATION_DIRECT_PROVIDERS=0 \
   make integration-tests-release
@@ -27,8 +28,8 @@ env UV_DEFAULT_INDEX=https://pypi.org/simple \
 
 - Use the release profile as the default whenever `$integration-tests` is invoked without a narrower request.
 - Use OpenRouter as the standard multi-provider gateway. Add provider-specific direct connections only when the user explicitly requests that additional credential matrix.
-- Use existing `OPENAI_API_KEY` and `OPENROUTER_API_KEY` values without printing them. Missing optional service configuration may skip capability-specific tests unless strict mode was explicitly requested.
-- The command rebuilds the wheel and source distribution, creates isolated virtual environments, checks public imports and optional dependencies, and runs the release-oriented live suites.
+- Use existing `OPENAI_API_KEY` and `OPENROUTER_API_KEY` values without printing them. The release target enforces strict mode, so missing required service configuration fails instead of skipping.
+- The command rebuilds the wheel and source distribution, creates isolated virtual environments, checks public imports and optional dependencies, runs the release-oriented live suites, and executes the local Docker security contract against both artifacts.
 - Do not run watch mode, modify source files, create a branch, commit, push, or open a pull request as part of this skill.
 
 ## Paired release validation
@@ -41,6 +42,7 @@ Use a focused target only when the user specifically asks to narrow the run:
 
 ```bash
 env UV_DEFAULT_INDEX=https://pypi.org/simple make integration-tests-packaging
+env UV_DEFAULT_INDEX=https://pypi.org/simple make integration-tests-security
 env UV_DEFAULT_INDEX=https://pypi.org/simple make integration-tests-core
 env UV_DEFAULT_INDEX=https://pypi.org/simple make integration-tests-providers
 env UV_DEFAULT_INDEX=https://pypi.org/simple make integration-tests-hosted

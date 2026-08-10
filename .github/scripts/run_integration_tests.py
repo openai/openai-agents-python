@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = ROOT / ".tmp" / "integration-tests"
 DIST = WORKSPACE / "dist"
+RESULTS = WORKSPACE / "results"
 TESTS = ROOT / "integration_tests"
 EXTRAS = "any-llm,litellm,realtime,voice"
 OPTIONAL_EXTRAS = (
@@ -22,8 +26,10 @@ OPTIONAL_EXTRAS = (
     "viz",
     "s3",
 )
+STRICT_PROFILES = frozenset({"release", "security"})
 PROFILES = (
     "packaging",
+    "security",
     "mcp-v1",
     "core",
     "providers",
@@ -43,7 +49,26 @@ def run(command: list[str], *, env: dict[str, str] | None = None) -> None:
     subprocess.run(command, cwd=ROOT, env=env, check=True)
 
 
+def run_pytest(command: list[str], *, env: dict[str, str]) -> tuple[int, str]:
+    print(f"[integration] {' '.join(command)}", flush=True)
+    process = subprocess.Popen(
+        command,
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    output: list[str] = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end="", flush=True)
+        output.append(line)
+    return process.wait(), "".join(output)
+
+
 def build_distributions() -> tuple[Path, Path]:
+    shutil.rmtree(DIST, ignore_errors=True)
     DIST.mkdir(parents=True, exist_ok=True)
     run(["uv", "build", "--out-dir", str(DIST)])
     wheels = sorted(DIST.glob("openai_agents-*.whl"), key=lambda path: path.stat().st_mtime)
@@ -139,6 +164,8 @@ def run_suite(
     selection: str,
     environment_kind: str,
     additional_env: dict[str, str] | None = None,
+    profile: str,
+    require_no_skips: bool = False,
 ) -> None:
     child_env = dict(os.environ)
     child_env.pop("PYTHONPATH", None)
@@ -179,7 +206,141 @@ def run_suite(
         "-m",
         selection,
     ]
-    run(command, env=child_env)
+    result_path = RESULTS / profile / f"{environment_kind}.xml"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    command.append(f"--junitxml={result_path}")
+    return_code = 1
+    output = ""
+    try:
+        return_code, output = run_pytest(command, env=child_env)
+    finally:
+        deselected_matches = re.findall(r"(\d+) deselected", output)
+        deselected = int(deselected_matches[-1]) if deselected_matches else 0
+        junit_totals = _print_junit_summary(
+            profile,
+            environment_kind,
+            result_path,
+            deselected=deselected,
+        )
+    if return_code:
+        raise subprocess.CalledProcessError(return_code, command)
+    if junit_totals is None:
+        raise RuntimeError(
+            f"Integration profile {profile}/{environment_kind} did not produce "
+            "a valid JUnit report."
+        )
+    if (profile in STRICT_PROFILES or require_no_skips) and junit_totals["skipped"]:
+        raise RuntimeError(
+            f"Required integration suite {profile}/{environment_kind} skipped "
+            f"{junit_totals['skipped']} required test(s)."
+        )
+
+
+def _print_junit_summary(
+    profile: str,
+    environment_kind: str,
+    result_path: Path,
+    *,
+    deselected: int,
+) -> dict[str, int] | None:
+    if not result_path.exists():
+        print(
+            f"[integration] summary profile={profile} environment={environment_kind} "
+            "result=missing",
+            flush=True,
+        )
+        return None
+    root = _sanitize_and_load_junit(result_path)
+    if root is None:
+        print(
+            f"[integration] summary profile={profile} environment={environment_kind} "
+            "result=invalid",
+            flush=True,
+        )
+        return None
+    suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+    totals = {
+        key: sum(int(suite.attrib.get(key, "0")) for suite in suites)
+        for key in ("tests", "failures", "errors", "skipped")
+    }
+    passed = totals["tests"] - totals["failures"] - totals["errors"] - totals["skipped"]
+    print(
+        f"[integration] summary profile={profile} environment={environment_kind} "
+        f"passed={passed} failed={totals['failures']} errors={totals['errors']} "
+        f"skipped={totals['skipped']} deselected={deselected}",
+        flush=True,
+    )
+    return totals
+
+
+def _sanitize_and_load_junit(result_path: Path) -> ET.Element | None:
+    try:
+        tree = ET.parse(result_path)
+        source_root = tree.getroot()
+        if source_root.tag == "testsuite":
+            suites = [source_root]
+        elif source_root.tag == "testsuites":
+            suites = list(source_root.findall("testsuite"))
+        else:
+            suites = []
+        if not suites:
+            raise ValueError("JUnit report does not contain a test suite.")
+
+        safe_suites: list[ET.Element] = []
+        for suite_index, suite in enumerate(suites):
+            counts: dict[str, int] = {}
+            for key in ("tests", "failures", "errors", "skipped"):
+                value = int(suite.attrib.get(key, "0"))
+                if value < 0:
+                    raise ValueError(f"JUnit {key} count must be non-negative.")
+                counts[key] = value
+            testcases = list(suite.findall("testcase"))
+            actual_counts = {
+                "tests": len(testcases),
+                "failures": sum(len(case.findall("failure")) for case in testcases),
+                "errors": sum(len(case.findall("error")) for case in testcases),
+                "skipped": sum(len(case.findall("skipped")) for case in testcases),
+            }
+            if counts != actual_counts:
+                raise ValueError("JUnit declared counts do not match testcase outcomes.")
+            if any(
+                sum(len(case.findall(outcome)) for outcome in ("failure", "error", "skipped")) > 1
+                for case in testcases
+            ):
+                raise ValueError("JUnit testcase has multiple terminal outcomes.")
+
+            safe_suite = ET.Element(
+                "testsuite",
+                {
+                    "name": f"suite-{suite_index}",
+                    **{key: str(value) for key, value in counts.items()},
+                },
+            )
+            safe_suites.append(safe_suite)
+            for case_index, case in enumerate(testcases):
+                safe_case = ET.SubElement(
+                    safe_suite,
+                    "testcase",
+                    {"name": f"case-{case_index}"},
+                )
+                for outcome in ("failure", "error", "skipped"):
+                    if case.find(outcome) is not None:
+                        ET.SubElement(safe_case, outcome)
+                        break
+
+        if source_root.tag == "testsuite":
+            safe_root = safe_suites[0]
+        else:
+            safe_root = ET.Element("testsuites")
+            safe_root.extend(safe_suites)
+        ET.ElementTree(safe_root).write(result_path, encoding="utf-8", xml_declaration=True)
+    except (ET.ParseError, OSError, ValueError):
+        try:
+            result_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+    return safe_root
 
 
 def main() -> None:
@@ -191,6 +352,9 @@ def main() -> None:
         help="Include configured direct Anthropic and Gemini providers alongside OpenRouter.",
     )
     args = parser.parse_args()
+    if args.profile in STRICT_PROFILES:
+        os.environ["OPENAI_AGENTS_INTEGRATION_STRICT"] = "1"
+    shutil.rmtree(RESULTS / args.profile, ignore_errors=True)
     if args.all:
         os.environ["OPENAI_AGENTS_INTEGRATION_EXTERNAL_PROVIDERS"] = "1"
         os.environ["OPENAI_AGENTS_INTEGRATION_DIRECT_PROVIDERS"] = "1"
@@ -212,16 +376,33 @@ def main() -> None:
                 selection="mcp_compat",
                 environment_kind=environment_kind,
                 additional_env={"OPENAI_AGENTS_INTEGRATION_MCP_VERSION": mcp_version},
+                profile=args.profile,
             )
 
-    if args.profile in {"packaging", "core", "hosted", "full", "release", "nightly", "manual"}:
-        python = create_environment("core", wheel)
+    if args.profile in {
+        "packaging",
+        "security",
+        "core",
+        "hosted",
+        "full",
+        "release",
+        "nightly",
+        "manual",
+    }:
+        python = create_environment(
+            "core",
+            wheel,
+            optional_extra="docker" if args.profile in STRICT_PROFILES else None,
+        )
         selections = {
             "packaging": "packaging",
+            "security": "security",
             "core": "packaging or core",
             "hosted": "packaging or hosted",
             "full": "packaging or ((core or hosted) and not nightly and not manual)",
-            "release": "packaging or ((core or hosted) and not nightly and not manual)",
+            "release": (
+                "packaging or security or ((core or hosted) and not nightly and not manual)"
+            ),
             "nightly": "packaging or ((core or hosted) and not manual)",
             "manual": "packaging or core or hosted",
         }
@@ -231,6 +412,7 @@ def main() -> None:
             sdist,
             selection=selections[args.profile],
             environment_kind="core",
+            profile=args.profile,
         )
 
     if args.profile in {"providers", "realtime", "voice", "full", "release", "nightly", "manual"}:
@@ -249,17 +431,63 @@ def main() -> None:
             sdist,
             selection=selection,
             environment_kind="extended",
+            profile=args.profile,
         )
 
-    if args.profile in {"packaging", "full", "release", "nightly", "manual"}:
-        python = create_environment("sdist", sdist)
-        run_suite(python, wheel, sdist, selection="packaging", environment_kind="sdist")
+    if args.profile in {"packaging", "security", "full", "release", "nightly", "manual"}:
+        python = create_environment(
+            "sdist",
+            sdist,
+            optional_extra="docker" if args.profile in STRICT_PROFILES else None,
+        )
+        if args.profile == "security":
+            selection = "security"
+        elif args.profile == "release":
+            selection = "packaging or distribution_smoke or security"
+        elif args.profile in {"nightly", "manual"}:
+            selection = "packaging or distribution_smoke"
+        else:
+            selection = "packaging"
+        run_suite(
+            python,
+            wheel,
+            sdist,
+            selection=selection,
+            environment_kind="sdist",
+            profile=args.profile,
+        )
+
+    if args.profile in {"packaging", "release"}:
+        for artifact_kind, distribution in (("wheel", wheel), ("sdist", sdist)):
+            environment_kind = f"{artifact_kind}-cloudflare"
+            python = create_environment(
+                environment_kind,
+                distribution,
+                optional_extra="cloudflare",
+            )
+            run_suite(
+                python,
+                wheel,
+                sdist,
+                selection="packaging_dependency",
+                environment_kind=environment_kind,
+                additional_env={"OPENAI_AGENTS_INTEGRATION_REQUIRE_OPTIONAL_EXPORTS": "1"},
+                profile=args.profile,
+                require_no_skips=True,
+            )
 
     if args.profile in {"extras", "full", "release", "nightly", "manual"}:
         for optional_extra in OPTIONAL_EXTRAS:
             environment_kind = f"extra-{optional_extra}"
             python = create_environment(environment_kind, wheel, optional_extra=optional_extra)
-            run_suite(python, wheel, sdist, selection="extras", environment_kind=environment_kind)
+            run_suite(
+                python,
+                wheel,
+                sdist,
+                selection="extras",
+                environment_kind=environment_kind,
+                profile=args.profile,
+            )
 
 
 if __name__ == "__main__":

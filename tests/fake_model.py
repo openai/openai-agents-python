@@ -78,6 +78,36 @@ class FakeModel(Model):
             return []
         return self.turn_outputs.pop(0)
 
+    def _record_turn_args(
+        self,
+        *,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        tracing: ModelTracing,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        prompt: Any | None,
+    ) -> None:
+        turn_args = {
+            "system_instructions": system_instructions,
+            "input": input,
+            "model_settings": model_settings,
+            "tools": tools,
+            "output_schema": output_schema,
+            "handoffs": handoffs,
+            "tracing": tracing,
+            "previous_response_id": previous_response_id,
+            "conversation_id": conversation_id,
+            "prompt": prompt,
+        }
+        if self.first_turn_args is None:
+            self.first_turn_args = turn_args.copy()
+        self.last_turn_args = turn_args
+
     async def get_response(
         self,
         system_instructions: str | None,
@@ -92,20 +122,18 @@ class FakeModel(Model):
         conversation_id: str | None,
         prompt: Any | None,
     ) -> ModelResponse:
-        turn_args = {
-            "system_instructions": system_instructions,
-            "input": input,
-            "model_settings": model_settings,
-            "tools": tools,
-            "output_schema": output_schema,
-            "previous_response_id": previous_response_id,
-            "conversation_id": conversation_id,
-        }
-
-        if self.first_turn_args is None:
-            self.first_turn_args = turn_args.copy()
-
-        self.last_turn_args = turn_args
+        self._record_turn_args(
+            system_instructions=system_instructions,
+            input=input,
+            model_settings=model_settings,
+            tools=tools,
+            output_schema=output_schema,
+            handoffs=handoffs,
+            tracing=tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
 
         with generation_span(disabled=not self.tracing_enabled) as span:
             output = self.get_next_output()
@@ -158,20 +186,18 @@ class FakeModel(Model):
         conversation_id: str | None = None,
         prompt: Any | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
-        turn_args = {
-            "system_instructions": system_instructions,
-            "input": input,
-            "model_settings": model_settings,
-            "tools": tools,
-            "output_schema": output_schema,
-            "previous_response_id": previous_response_id,
-            "conversation_id": conversation_id,
-        }
-
-        if self.first_turn_args is None:
-            self.first_turn_args = turn_args.copy()
-
-        self.last_turn_args = turn_args
+        self._record_turn_args(
+            system_instructions=system_instructions,
+            input=input,
+            model_settings=model_settings,
+            tools=tools,
+            output_schema=output_schema,
+            handoffs=handoffs,
+            tracing=tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
         with generation_span(disabled=not self.tracing_enabled) as span:
             output = self.get_next_output()
             if isinstance(output, Exception):
@@ -360,8 +386,19 @@ def get_response_obj(
             output_tokens=usage.output_tokens if usage else 0,
             total_tokens=usage.total_tokens if usage else 0,
             input_tokens_details=InputTokensDetails.model_validate(
-                {"cache_write_tokens": 0, "cached_tokens": 0}
+                {
+                    "cache_write_tokens": (
+                        getattr(usage.input_tokens_details, "cache_write_tokens", 0) if usage else 0
+                    ),
+                    "cached_tokens": (
+                        getattr(usage.input_tokens_details, "cached_tokens", 0) if usage else 0
+                    ),
+                }
             ),
-            output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
+            output_tokens_details=OutputTokensDetails(
+                reasoning_tokens=(
+                    getattr(usage.output_tokens_details, "reasoning_tokens", 0) if usage else 0
+                )
+            ),
         ),
     )

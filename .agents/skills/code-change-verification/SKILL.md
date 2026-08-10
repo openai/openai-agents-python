@@ -7,7 +7,7 @@ description: Run the mandatory verification stack when changes affect runtime co
 
 ## Overview
 
-Ensure work is only marked complete after formatting, linting, type checking, and tests pass. Use this skill when changes affect runtime code, tests, or build/test configuration. You can skip it for docs-only or repository metadata unless a user asks for the full stack.
+Ensure work is only marked complete after formatting, linting, type checking, and tests pass. Use this skill when changes affect runtime code, tests, or build/test configuration. You can skip it for docs-only or repository metadata unless a user asks for the full stack. This is a post-review final gate: when `$implementation-final-review` applies, do not invoke the broad stack until its clean-review condition applies to the stable task diff.
 
 ## Quick start
 
@@ -18,6 +18,13 @@ Ensure work is only marked complete after formatting, linting, type checking, an
 5. While the parallel steps are still running, the scripts emit periodic heartbeat updates so you can tell that work is still in progress.
 6. If any command fails, fix the issue, rerun the script, and report the failing output.
 7. Confirm completion only when all commands succeed with no remaining issues.
+
+## Start condition and host capacity
+
+- During iterative review, use only focused tests and a narrowly targeted static check when the changed typing boundary requires one. Defer repository-wide `make typecheck` and the rest of this complete stack until review is clean.
+- Immediately before starting the complete stack, use available read-only task or process evidence to check whether another repository-wide test, typecheck, build, examples runner, or integration command is already active on the same host.
+- When concrete contention is visible, continue useful non-heavy work such as review, remediation, evidence preparation, or focused checks, then check again later. Do not create or wait on a repository lock, host-wide mutex, or sentinel file.
+- Start automatically once review is clean, the diff is stable, and observable host capacity is available. Do not require a user-triggered `finalize` message. If host telemetry is unavailable, do not block solely because capacity cannot be measured.
 
 ## Codex execution policy
 

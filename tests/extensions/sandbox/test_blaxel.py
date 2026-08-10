@@ -2997,7 +2997,6 @@ class TestMountsModule:
 
     def test_build_mount_config_unsupported(self) -> None:
         from agents.extensions.sandbox.blaxel.mounts import _build_mount_config
-        from agents.sandbox.errors import MountConfigError
 
         # Use a MagicMock with a type attribute to simulate an unsupported mount.
         mount = MagicMock()
@@ -3007,7 +3006,6 @@ class TestMountsModule:
 
     def test_assert_blaxel_session_wrong_type(self) -> None:
         from agents.extensions.sandbox.blaxel.mounts import _assert_blaxel_session
-        from agents.sandbox.errors import MountConfigError
 
         class _WrongSession:
             pass
@@ -3206,7 +3204,6 @@ class TestMountsModule:
     @pytest.mark.asyncio
     async def test_mount_s3_fails(self) -> None:
         from agents.extensions.sandbox.blaxel.mounts import BlaxelCloudBucketMountConfig, _mount_s3
-        from agents.sandbox.errors import MountConfigError
 
         session = _FakeMountSession()
         session._next_results = [
@@ -3371,7 +3368,6 @@ class TestMountsModule:
     @pytest.mark.asyncio
     async def test_mount_gcs_fails(self) -> None:
         from agents.extensions.sandbox.blaxel.mounts import BlaxelCloudBucketMountConfig, _mount_gcs
-        from agents.sandbox.errors import MountConfigError
 
         session = _FakeMountSession()
         session._next_results = [
@@ -3481,7 +3477,6 @@ class TestMountsModule:
     @pytest.mark.asyncio
     async def test_install_tool_fails_after_retries(self) -> None:
         from agents.extensions.sandbox.blaxel.mounts import _install_tool
-        from agents.sandbox.errors import MountConfigError
 
         session = _FakeMountSession()
         session._next_results = [
@@ -3913,7 +3908,6 @@ class TestDriveMounts:
     @pytest.mark.asyncio
     async def test_attach_drive_error(self) -> None:
         from agents.extensions.sandbox.blaxel.mounts import BlaxelDriveMountConfig, _attach_drive
-        from agents.sandbox.errors import MountConfigError
 
         sandbox = _FakeSandboxInstance()
         sandbox.drives.mount_error = RuntimeError("mount api error")
@@ -3926,7 +3920,6 @@ class TestDriveMounts:
     @pytest.mark.asyncio
     async def test_attach_drive_no_drives_api(self) -> None:
         from agents.extensions.sandbox.blaxel.mounts import BlaxelDriveMountConfig, _attach_drive
-        from agents.sandbox.errors import MountConfigError
 
         class _NoDrives:
             pass
@@ -3999,7 +3992,6 @@ class TestDriveMounts:
     @pytest.mark.asyncio
     async def test_drive_strategy_validate_wrong_mount_type(self) -> None:
         from agents.extensions.sandbox.blaxel.mounts import BlaxelDriveMountStrategy
-        from agents.sandbox.errors import MountConfigError
 
         strategy = BlaxelDriveMountStrategy()
         mount = MagicMock()
@@ -4010,7 +4002,6 @@ class TestDriveMounts:
     @pytest.mark.asyncio
     async def test_drive_strategy_validate_non_drive_mount(self) -> None:
         from agents.extensions.sandbox.blaxel.mounts import BlaxelDriveMountStrategy
-        from agents.sandbox.errors import MountConfigError
 
         strategy = BlaxelDriveMountStrategy()
         mount = MagicMock()

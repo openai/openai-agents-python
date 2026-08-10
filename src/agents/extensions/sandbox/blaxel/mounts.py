@@ -101,6 +101,7 @@ class BlaxelCloudBucketMountStrategy(MountStrategyBase):
         await _mount_bucket(session, config)
         return []
 
+    @redact_mount_error_data
     async def deactivate(
         self,
         mount: Mount,
@@ -113,6 +114,7 @@ class BlaxelCloudBucketMountStrategy(MountStrategyBase):
         mount_path = mount._resolve_mount_path(session, dest)
         await _unmount_bucket(session, mount_path.as_posix())
 
+    @redact_mount_error_data
     async def teardown_for_snapshot(
         self,
         mount: Mount,
@@ -590,6 +592,7 @@ class BlaxelDriveMountStrategy(MountStrategyBase):
                 context={"mount_type": mount.type},
             )
 
+    @redact_mount_error_data
     async def activate(
         self,
         mount: Mount,
@@ -609,6 +612,7 @@ class BlaxelDriveMountStrategy(MountStrategyBase):
         await _attach_drive(sandbox, config)
         return []
 
+    @redact_mount_error_data
     async def deactivate(
         self,
         mount: Mount,
@@ -623,6 +627,7 @@ class BlaxelDriveMountStrategy(MountStrategyBase):
         if sandbox is not None:
             await _detach_drive(sandbox, config.mount_path)
 
+    @redact_mount_error_data
     async def teardown_for_snapshot(
         self,
         mount: Mount,
@@ -635,6 +640,7 @@ class BlaxelDriveMountStrategy(MountStrategyBase):
         if sandbox is not None:
             await _detach_drive(sandbox, effective_path)
 
+    @redact_mount_error_data
     async def restore_after_snapshot(
         self,
         mount: Mount,

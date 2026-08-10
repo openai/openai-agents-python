@@ -29,7 +29,7 @@ from agents.sandbox.entries.mounts.patterns import (
     RcloneMountConfig,
     S3FilesMountConfig,
 )
-from agents.sandbox.errors import MountCommandError, MountConfigError
+from agents.sandbox.errors import ErrorCode, MountCommandError, MountConfigError
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.session.events import SandboxSessionEvent
 from agents.sandbox.session.manager import Instrumentation
@@ -632,25 +632,26 @@ async def test_s3_mountpoint_failure_redacts_credentials_from_errors_and_events(
                 session_token="token",
                 prefix=None,
                 region="us-east-1",
-                endpoint_url=None,
+                endpoint_url="https://user:inline-endpoint-secret@example.test",
                 mount_type="s3_mount",
                 read_only=False,
             ),
         )
 
-    context = exc_info.value.context
-    command = str(context["command"])
-    stderr = str(context["stderr"])
-    assert "REDACTED" in stderr
+    assert exc_info.value.error_code is ErrorCode.MOUNT_FAILED
+    assert exc_info.value.op == "materialize"
+    assert exc_info.value.retryable is False
+    assert exc_info.value.context == {}
+    command = " ".join(str(part) for part in inner.exec_calls[-1])
     assert ".sandbox-mountpoint-env" in command
     assert any(
         path.as_posix().startswith(".sandbox-mountpoint-env/")
         for path in inner.persist_workspace_skip_paths()
     )
     serialized_events = "\n".join(event.model_dump_json() for event in events)
-    for sensitive_value in ("access", "secret", "token"):
+    for sensitive_value in ("access", "secret", "token", "inline-endpoint-secret"):
         assert sensitive_value not in command
-        assert sensitive_value not in stderr
+        assert sensitive_value not in repr(exc_info.value)
         assert sensitive_value not in serialized_events
 
 
@@ -1473,7 +1474,7 @@ async def test_blobfuse_cache_path_must_be_outside_mount_path() -> None:
                 container="container",
                 endpoint=None,
                 identity_client_id=None,
-                account_key="secret",
+                account_key=None,
                 mount_type="azure_blob_mount",
                 read_only=True,
             ),

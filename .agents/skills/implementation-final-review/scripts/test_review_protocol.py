@@ -188,7 +188,7 @@ class ReviewProtocolTest(unittest.TestCase):
                     }
                 ],
                 "eligible_concurrent_gates": "none",
-                "deferred_gates": "make format",
+                "deferred_gates": "make lint; make typecheck; make tests",
                 "credited_receipts": [],
             },
             "architecture_references": [],
@@ -336,6 +336,25 @@ class ReviewProtocolTest(unittest.TestCase):
         self.assertEqual(
             summary["packet_sha256"], hashlib.sha256(self.packet_path.read_bytes()).hexdigest()
         )
+
+    def test_packet_defers_broad_final_gates_until_clean_review(self) -> None:
+        packet = copy.deepcopy(self.packet)
+        packet["verification"]["eligible_concurrent_gates"] = "make tests"
+        self._write_packet(self.packet_path, packet)
+        with self.assertRaisesRegex(
+            ProtocolError,
+            "verification.eligible_concurrent_gates must be 'none'",
+        ):
+            self._validate_packet()
+
+        packet["verification"]["eligible_concurrent_gates"] = "none"
+        packet["verification"]["deferred_gates"] = "none"
+        self._write_packet(self.packet_path, packet)
+        with self.assertRaisesRegex(
+            ProtocolError,
+            "verification.deferred_gates must list the applicable broad final gates",
+        ):
+            self._validate_packet()
 
     def test_packet_fails_closed_on_missing_field_or_incomplete_assignment(self) -> None:
         cases = []

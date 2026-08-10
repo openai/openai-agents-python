@@ -16,6 +16,9 @@ class SkillContractTest(unittest.TestCase):
         cls.reviewer_brief = (cls.skill_root / "references" / "reviewer-brief.md").read_text()
         cls.review_protocol = (cls.skill_root / "scripts" / "review_protocol.py").read_text()
         cls.repo_instructions = (cls.skill_root.parents[2] / "AGENTS.md").read_text()
+        cls.code_change_verification = (
+            cls.skill_root.parent / "code-change-verification" / "SKILL.md"
+        ).read_text()
 
     def test_repo_local_metadata_matches_skill(self) -> None:
         self.assertEqual(self.skill.splitlines()[1], "name: implementation-final-review")
@@ -82,53 +85,62 @@ class SkillContractTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, self.reviewer_brief)
 
-    def test_full_verification_can_overlap_review_without_weakening_freeze(self) -> None:
+    def test_full_verification_waits_for_clean_review(self) -> None:
         required_text = (
-            "Do not leave the implementer idle while reviewers run",
-            "complete mutating formatting before fingerprinting",
-            "every eligible non-mutating final repository gate",
-            "exact frozen content",
-            "`make lint`, `make typecheck`, and `make tests` during review",
-            "discard verification credit only for changed or dependency-invalidated components",
-            "accept the overlapped result from step 12",
-            "exact clean-reviewed fingerprint",
-            "do not rerun successful exact-fingerprint work",
+            "Do not start any broad final repository gate while review is incomplete or "
+            "finding-bearing",
+            "defer `make lint`, `make typecheck`, `make tests`, repository-wide builds, "
+            "examples runners, and integration suites until step 19 establishes clean review",
+            "Do not run `make tests-review`, `make tests`, or repository-wide `make typecheck` "
+            "during an iterative review round",
+            "Set `verification.eligible_concurrent_gates` to `none`",
+            "the exact clean-reviewed fingerprint must still pass the complete "
+            "repository-required verification stack",
+            "After the clean-review condition is met",
         )
 
         for text in required_text:
             with self.subTest(text=text):
                 self.assertIn(text, self.skill)
 
-        self.assertIn("Eligible concurrent final-gate commands", self.reviewer_brief)
+        self.assertIn("Eligible concurrent final-gate commands: `none`", self.reviewer_brief)
+        self.assertIn("Broad final gates deferred until clean review", self.reviewer_brief)
         self.assertIn(
-            "Gates deferred because they may mutate task-owned content", self.reviewer_brief
+            "packet preflight rejects any attempt to overlap a broad final gate with review",
+            self.reviewer_brief,
         )
 
-    def test_overlapped_final_gates_preserve_fingerprint_integrity(self) -> None:
+    def test_host_capacity_check_avoids_locks_and_finalize_prompts(self) -> None:
+        for source in (self.skill, self.code_change_verification, self.repo_instructions):
+            with self.subTest(source=source[:40]):
+                self.assertIn("available read-only task or process evidence", source)
+                self.assertIn("repository lock", source)
+                self.assertIn("host-wide mutex", source)
+                self.assertIn("user-triggered `finalize`", source)
+
+        self.assertIn("If host telemetry is unavailable", self.skill)
+        self.assertIn("Lack of host telemetry alone is not a blocker", self.repo_instructions)
+
+    def test_work_status_reporting_distinguishes_running_and_final_states(self) -> None:
         required_text = (
-            "establish that it does not edit, format, regenerate, stage, or create any "
-            "task-owned deliverable",
-            "Record combined, component, and repository fingerprints immediately before each "
-            "gate starts and after it exits",
-            "all fingerprints match the reviewed repository state exactly",
-            "cancel or stop the obsolete verification when practical",
-            "Keep `$pr-draft-summary` deferred",
-            "Invoke `$pr-draft-summary` last",
+            "Use `RUNNING` only in commentary",
+            "Use `COMPLETE` in the final response only when",
+            "Use `NEEDS_DECISION` in the final response only when",
+            'instead of asking the user to say "continue"',
         )
-
         for text in required_text:
             with self.subTest(text=text):
-                self.assertIn(text, self.skill)
+                self.assertIn(text, self.repo_instructions)
 
-    def test_iterative_review_can_skip_unaffected_slow_subsystems(self) -> None:
+    def test_iterative_review_uses_focused_checks_only(self) -> None:
         required_text = (
-            "for changes unrelated to every `review_optional` owner, run `make tests-review`",
-            "for a leaf subsystem change, run `make tests-review` plus that subsystem's "
-            "complete test file or directory",
-            "for cross-cutting core or shared test-infrastructure changes, run `make tests`",
-            "The reduced check earns no final-gate credit",
-            "the exact clean-reviewed fingerprint must still pass the complete `make tests` gate",
-            "If the affected boundary is uncertain, run `make tests`",
+            "Prefer focused tests plus a narrowly targeted import, generated-surface, or static "
+            "check",
+            "Run a targeted type check only when the change directly affects a typing boundary",
+            "Do not run repository-wide lint, typecheck, builds, integration suites, "
+            "`make tests-review`, or `make tests`",
+            "run only focused checks that target the changed boundary",
+            "The focused check earns no final-gate credit",
         )
 
         for text in required_text:
@@ -152,8 +164,8 @@ class SkillContractTest(unittest.TestCase):
         required_text = (
             "package exports and generated public surfaces when applicable",
             "protocol capability ownership, pagination termination, cache ownership",
-            "in `openai-agents-python`, this means `make format` before fingerprinting",
-            "`make lint`, `make typecheck`, and `make tests` during review",
+            "defer `make lint`, `make typecheck`, `make tests`, repository-wide builds",
+            "the implementer runs the complete stack once after the clean-review gate",
         )
 
         for text in required_text:
@@ -292,11 +304,13 @@ class SkillContractTest(unittest.TestCase):
 
     def test_intermediate_verification_is_cost_aware_but_final_gate_is_complete(self) -> None:
         required_text = (
-            "Prefer an already successful same-fingerprint check over rerunning it",
+            "Prefer an already successful same-fingerprint focused check over rerunning it",
             "never replay cumulative historical verification",
-            "The reduced check earns no final-gate credit",
-            "the exact clean-reviewed fingerprint must still pass the complete `make tests` gate",
-            "complete the repository's code-change verification",
+            "The focused check earns no final-gate credit",
+            "the exact clean-reviewed fingerprint must still pass the complete "
+            "repository-required verification stack",
+            "check observable host capacity before starting the repository's "
+            "code-change verification",
         )
         for text in required_text:
             with self.subTest(text=text):

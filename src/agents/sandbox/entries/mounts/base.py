@@ -4,10 +4,9 @@ import abc
 import builtins
 import inspect
 import warnings
-from collections.abc import Callable, Coroutine, Mapping
-from functools import wraps
+from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 from pydantic import BaseModel, Field, SerializeAsAny, field_validator
 
@@ -16,36 +15,11 @@ from ...materialization import MaterializedFile
 from ...types import FileMode, Permissions
 from ...workspace_paths import coerce_posix_path, posix_path_as_path, windows_absolute_path
 from ..base import BaseEntry
+from ._redaction import _redact_mount_lifecycle_error
 from .patterns import MountPattern, MountPatternBase, MountPatternConfig
 
 if TYPE_CHECKING:
     from ...session.base_sandbox_session import BaseSandboxSession
-
-_P = ParamSpec("_P")
-_T = TypeVar("_T")
-
-
-def _redact_mount_lifecycle_error(
-    function: Callable[_P, Coroutine[Any, Any, _T]],
-) -> Callable[_P, Coroutine[Any, Any, _T]]:
-    """Load the mount error boundary lazily to avoid an entries/security import cycle."""
-
-    protected: Callable[_P, Coroutine[Any, Any, _T]] | None = None
-
-    @wraps(function)
-    async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _T:
-        nonlocal protected
-        if protected is None:
-            from ..._mount_security import redact_mount_error_data
-
-            protected = redact_mount_error_data(function)
-        try:
-            return await protected(*args, **kwargs)
-        except BaseException:
-            del args, kwargs
-            raise
-
-    return wrapper
 
 
 class InContainerMountAdapter:
@@ -84,6 +58,7 @@ class InContainerMountAdapter:
             )
         return config
 
+    @_redact_mount_lifecycle_error
     async def activate(
         self,
         strategy: InContainerMountStrategy,
@@ -97,6 +72,7 @@ class InContainerMountAdapter:
         await strategy.pattern.apply(session, mount_path, config)
         return []
 
+    @_redact_mount_lifecycle_error
     async def deactivate(
         self,
         strategy: InContainerMountStrategy,
@@ -109,6 +85,7 @@ class InContainerMountAdapter:
         config = await self._build_config(strategy, session, include_config_text=False)
         await strategy.pattern.unapply(session, mount_path, config)
 
+    @_redact_mount_lifecycle_error
     async def teardown_for_snapshot(
         self,
         strategy: InContainerMountStrategy,
@@ -118,6 +95,7 @@ class InContainerMountAdapter:
         config = await self._build_config(strategy, session, include_config_text=False)
         await strategy.pattern.unapply(session, path, config)
 
+    @_redact_mount_lifecycle_error
     async def restore_after_snapshot(
         self,
         strategy: InContainerMountStrategy,
@@ -277,6 +255,7 @@ class InContainerMountStrategy(MountStrategyBase):
         )
         return await mount.in_container_adapter().activate(self, session, dest, base_dir)
 
+    @_redact_mount_lifecycle_error
     async def deactivate(
         self,
         mount: Mount,
@@ -286,6 +265,7 @@ class InContainerMountStrategy(MountStrategyBase):
     ) -> None:
         await mount.in_container_adapter().deactivate(self, session, dest, base_dir)
 
+    @_redact_mount_lifecycle_error
     async def teardown_for_snapshot(
         self,
         mount: Mount,
@@ -328,6 +308,7 @@ class DockerVolumeMountStrategy(MountStrategyBase):
     def validate_mount(self, mount: Mount) -> None:
         mount.docker_volume_adapter().validate(self)
 
+    @_redact_mount_lifecycle_error
     async def activate(
         self,
         mount: Mount,
@@ -343,6 +324,7 @@ class DockerVolumeMountStrategy(MountStrategyBase):
         _ = (mount, session, dest, base_dir)
         return []
 
+    @_redact_mount_lifecycle_error
     async def deactivate(
         self,
         mount: Mount,
@@ -358,6 +340,7 @@ class DockerVolumeMountStrategy(MountStrategyBase):
         _ = (mount, session, dest, base_dir)
         return None
 
+    @_redact_mount_lifecycle_error
     async def teardown_for_snapshot(
         self,
         mount: Mount,
@@ -367,6 +350,7 @@ class DockerVolumeMountStrategy(MountStrategyBase):
         _ = (mount, session, path)
         return None
 
+    @_redact_mount_lifecycle_error
     async def restore_after_snapshot(
         self,
         mount: Mount,
@@ -488,6 +472,7 @@ class Mount(BaseEntry):
         )
         return await self.mount_strategy.activate(self, session, dest, base_dir)
 
+    @_redact_mount_lifecycle_error
     async def unmount(
         self,
         session: BaseSandboxSession,

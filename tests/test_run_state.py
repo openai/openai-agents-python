@@ -4657,7 +4657,7 @@ class TestDeserializeHelpers:
 
         # Try to deserialize with a different agent that doesn't have AgentA in handoffs
         agent_b = Agent(name="AgentB")
-        with pytest.raises(Exception, match="Agent AgentA not found in agent map"):
+        with pytest.raises(Exception, match="Run state agent not found in agent map"):
             await RunState.from_string(agent_b, json_str)
 
 
@@ -6896,7 +6896,7 @@ class TestRunStateSerializationEdgeCases:
             name="TestAgent",
             tools=[ProgrammaticToolCallingTool(), rebound_lookup],
         )
-        with pytest.raises(ModelBehaviorError, match="caller programmatic"):
+        with pytest.raises(ModelBehaviorError, match="Error details are redacted"):
             await RunState.from_json(
                 rebound_agent,
                 state.to_json(),
@@ -6945,7 +6945,7 @@ class TestRunStateSerializationEdgeCases:
             return "rebound"
 
         rebound_agent = Agent(name="TestAgent", tools=[rebound_lookup])
-        with pytest.raises(ModelBehaviorError, match="programmatic_tool_calling tool"):
+        with pytest.raises(ModelBehaviorError, match="Error details are redacted"):
             await RunState.from_json(rebound_agent, state.to_json(), context_override={})
 
     @pytest.mark.asyncio
@@ -6975,7 +6975,7 @@ class TestRunStateSerializationEdgeCases:
             functions=[ToolRunFunction(tool_call=function_call, function_tool=saved_lookup)]
         )
 
-        with pytest.raises(ModelBehaviorError, match="parent program item"):
+        with pytest.raises(ModelBehaviorError, match="Error details are redacted"):
             await RunState.from_json(agent, state.to_json(), context_override={})
 
     @pytest.mark.asyncio
@@ -7026,7 +7026,7 @@ class TestRunStateSerializationEdgeCases:
             functions=[ToolRunFunction(tool_call=function_call, function_tool=saved_lookup)]
         )
 
-        with pytest.raises(ModelBehaviorError, match="already completed"):
+        with pytest.raises(ModelBehaviorError, match="Error details are redacted"):
             await RunState.from_json(agent, state.to_json(), context_override={})
 
     @pytest.mark.asyncio
@@ -7093,7 +7093,7 @@ class TestRunStateSerializationEdgeCases:
             name="TestAgent",
             tools=[ProgrammaticToolCallingTool(), rebound_mcp_tool],
         )
-        with pytest.raises(ModelBehaviorError, match="caller programmatic"):
+        with pytest.raises(ModelBehaviorError, match="Error details are redacted"):
             await RunState.from_json(
                 rebound_agent,
                 state.to_json(),
@@ -8271,7 +8271,7 @@ class TestRunStateSerializationEdgeCases:
             "generated_items": [],
         }
 
-        with pytest.raises(UserError, match="Agent NonExistentAgent not found in agent map"):
+        with pytest.raises(UserError, match="Run state agent not found in agent map"):
             await RunState.from_json(agent, state_json)
 
     @pytest.mark.asyncio

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import abc
+from collections.abc import Mapping
 from typing import Any, ClassVar, Generic, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, model_serializer
 
 from ...exceptions import _raise_data_redacted_error
-from .._mount_security import redact_mount_error_data_sync
+from .._mount_security import (
+    redact_mount_error_data_sync,
+)
 from ..errors import MountConfigError
 from ..manifest import Manifest
 from ..snapshot import SnapshotBase, SnapshotSpec
@@ -234,33 +237,44 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
 
     @staticmethod
     def _deserialize_session_state_payload(
-        payload: dict[str, object],
+        payload: Mapping[str, object],
         state_class: type[SandboxSessionState],
     ) -> SandboxSessionState:
+        from ...exceptions import _replace_data_redacted_process_control_error
         from .._mount_security import (
             _redact_mount_state_validation_error,
             sanitize_raw_session_state_mount_authority,
         )
 
-        safe_error: ValueError | None = None
+        safe_error: BaseException | None = None
+        persisted_payload: dict[str, object] | None = None
         try:
             sanitized, _redacted = sanitize_raw_session_state_mount_authority(payload)
-            if isinstance(sanitized, dict):
+            if not isinstance(sanitized, dict):
+                raise TypeError("sandbox session state payload must be a mapping")
+            persisted_payload = sanitized
+            if isinstance(payload, dict):
                 payload.clear()
                 payload.update(sanitized)
-            state = state_class.model_validate(payload)
-        except Exception as error:
-            safe_error = _redact_mount_state_validation_error(
-                error,
-                message="sandbox session state payload is invalid",
-            )
+                persisted_payload = payload
+            state = state_class.model_validate(persisted_payload)
+        except BaseException as error:
+            safe_error = _replace_data_redacted_process_control_error(error)
+            if safe_error is None:
+                safe_error = _redact_mount_state_validation_error(
+                    error,
+                    message="sandbox session state payload is invalid",
+                )
 
         if safe_error is not None:
-            payload.clear()
+            if isinstance(payload, dict):
+                payload.clear()
             sanitized = cast(Any, None)
+            persisted_payload = None
             state_class = cast(Any, None)
             _raise_data_redacted_error(safe_error)
-        return SandboxSessionState._mark_persisted_path_grants(state, payload=payload)
+        assert persisted_payload is not None
+        return SandboxSessionState._mark_persisted_path_grants(state, payload=persisted_payload)
 
     @abc.abstractmethod
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:

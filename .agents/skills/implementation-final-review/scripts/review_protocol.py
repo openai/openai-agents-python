@@ -425,6 +425,15 @@ def validate_packet(
         raise ProtocolError("Packet schema_version must be integer 1.")
     for dotted_path in REQUIRED_PACKET_TEXT:
         _text(_at(packet, dotted_path), dotted_path)
+    if _at(packet, "verification.eligible_concurrent_gates") != "none":
+        raise ProtocolError(
+            "verification.eligible_concurrent_gates must be 'none'; broad final gates start "
+            "only after clean review."
+        )
+    if _at(packet, "verification.deferred_gates").strip().lower() in SENTINELS:
+        raise ProtocolError(
+            "verification.deferred_gates must list the applicable broad final gates."
+        )
     if _at(packet, "task.risk_tier") not in {"normal", "elevated"}:
         raise ProtocolError("task.risk_tier must be 'normal' or 'elevated'.")
     expected_task_id = _text(expected_task_id, "expected task ID", concrete=True)

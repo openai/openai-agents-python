@@ -103,6 +103,7 @@ class E2BCloudBucketMountStrategy(MountStrategyBase):
         delegate = await self._delegate_for_session(session)
         return await delegate.activate(mount, session, dest, base_dir)
 
+    @redact_mount_error_data
     async def deactivate(
         self,
         mount: Mount,
@@ -113,6 +114,7 @@ class E2BCloudBucketMountStrategy(MountStrategyBase):
         _assert_e2b_session(session)
         await self._delegate().deactivate(mount, session, dest, base_dir)
 
+    @redact_mount_error_data
     async def teardown_for_snapshot(
         self,
         mount: Mount,

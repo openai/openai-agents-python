@@ -149,6 +149,7 @@ class RunloopCloudBucketMountStrategy(MountStrategyBase):
         delegate = await self._delegate_for_session(session)
         return await delegate.activate(mount, session, dest, base_dir)
 
+    @redact_mount_error_data
     async def deactivate(
         self,
         mount: Mount,
@@ -159,6 +160,7 @@ class RunloopCloudBucketMountStrategy(MountStrategyBase):
         _assert_runloop_session(session)
         await self._delegate().deactivate(mount, session, dest, base_dir)
 
+    @redact_mount_error_data
     async def teardown_for_snapshot(
         self,
         mount: Mount,

@@ -98,6 +98,32 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     metafunc.parametrize("external_provider", [None], ids=["unconfigured"])
 
 
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    requested_extra = os.environ.get("OPENAI_AGENTS_INTEGRATION_EXTRA")
+    if requested_extra is None:
+        return
+
+    selected: list[pytest.Item] = []
+    deselected: list[pytest.Item] = []
+    for item in items:
+        if (
+            getattr(item, "originalname", None)
+            != "test_memory_extra_lazy_exports_resolve_to_the_installed_backend"
+        ):
+            selected.append(item)
+            continue
+        callspec = getattr(item, "callspec", None)
+        optional_extra = getattr(callspec, "params", {}).get("optional_extra")
+        if optional_extra == requested_extra:
+            selected.append(item)
+        else:
+            deselected.append(item)
+
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = selected
+
+
 def _strict() -> bool:
     return os.environ.get("OPENAI_AGENTS_INTEGRATION_STRICT", "").lower() in {
         "1",

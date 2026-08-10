@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import Literal, NoReturn
 
 from ....exceptions import _mark_error_data_redacted
-from ....sandbox._mount_security import discard_mount_source_exception, redact_mount_error_data
+from ....sandbox._mount_security import (
+    discard_mount_source_exception,
+    redact_mount_error_data,
+)
 from ....sandbox.entries import Mount, S3Mount
 from ....sandbox.entries.mounts.base import MountStrategyBase
 from ....sandbox.errors import MountCommandError, MountConfigError
@@ -525,7 +528,7 @@ class VercelCloudBucketMountStrategy(MountStrategyBase):
             s3_mount = vercel_session._runtime_trusted_s3_mount(mount_path)
             try:
                 await _mount_s3(s3_mount, vercel_session, mount_path)
-            except (Exception, asyncio.CancelledError) as exc:
+            except BaseException as exc:
                 await vercel_session._runtime_fail_s3_mount_transition(exc)
                 raise
             vercel_session._runtime_record_s3_mount_active(mount_path)
@@ -547,7 +550,7 @@ class VercelCloudBucketMountStrategy(MountStrategyBase):
             return
         try:
             await _unmount_s3(vercel_session, mount_path)
-        except (Exception, asyncio.CancelledError) as exc:
+        except BaseException as exc:
             await vercel_session._runtime_fail_s3_mount_transition(exc)
             raise
         vercel_session._runtime_record_s3_mount_inactive(mount_path)
@@ -565,7 +568,7 @@ class VercelCloudBucketMountStrategy(MountStrategyBase):
             return
         try:
             await _unmount_s3(vercel_session, path)
-        except (Exception, asyncio.CancelledError) as exc:
+        except BaseException as exc:
             await vercel_session._runtime_fail_s3_mount_transition(exc)
             raise
         vercel_session._runtime_record_s3_mount_detached(path)
@@ -584,7 +587,7 @@ class VercelCloudBucketMountStrategy(MountStrategyBase):
         s3_mount = vercel_session._runtime_trusted_s3_mount(path)
         try:
             await _mount_s3(s3_mount, vercel_session, path)
-        except (Exception, asyncio.CancelledError) as exc:
+        except BaseException as exc:
             await vercel_session._runtime_fail_s3_mount_transition(exc)
             raise
         vercel_session._runtime_record_s3_mount_restored(path)

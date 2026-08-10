@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from ....sandbox._mount_security import redact_mount_error_data
 from ....sandbox.entries import GCSMount, Mount, R2Mount, S3Mount
 from ....sandbox.entries.mounts.base import MountStrategyBase
 from ....sandbox.errors import MountConfigError
@@ -36,6 +37,7 @@ class ModalCloudBucketMountStrategy(MountStrategyBase):
         _ = mount
         return False
 
+    @redact_mount_error_data
     async def activate(
         self,
         mount: Mount,
@@ -51,6 +53,7 @@ class ModalCloudBucketMountStrategy(MountStrategyBase):
         _ = (mount, session, dest, base_dir)
         return []
 
+    @redact_mount_error_data
     async def deactivate(
         self,
         mount: Mount,
@@ -66,6 +69,7 @@ class ModalCloudBucketMountStrategy(MountStrategyBase):
         _ = (mount, session, dest, base_dir)
         return None
 
+    @redact_mount_error_data
     async def teardown_for_snapshot(
         self,
         mount: Mount,
@@ -75,6 +79,7 @@ class ModalCloudBucketMountStrategy(MountStrategyBase):
         _ = (mount, session, path)
         return None
 
+    @redact_mount_error_data
     async def restore_after_snapshot(
         self,
         mount: Mount,

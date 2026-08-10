@@ -20,7 +20,7 @@ from ..run_state import (
 from ..tracing import custom_span, get_current_trace
 from ._mount_security import (
     _manifest_has_configured_mount_authority,
-    _replace_mount_operation_error,
+    _replace_protected_mount_error,
     _validate_manifest_mount_provenance,
     redact_mount_error_data,
     validate_manifest_mount_credential_boundaries,
@@ -559,7 +559,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         )
         mount_credential_exposure_policy = processed_manifest._mount_credential_exposure_policy
         for capability in capabilities:
-            safe_error: RuntimeError | None = None
+            safe_error: BaseException | None = None
             try:
                 processed_manifest = capability.process_manifest(processed_manifest)
                 mount_credential_exposure_policy = (
@@ -567,10 +567,10 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                         mount_credential_exposure_policy
                     )
                 )
-            except Exception as error:
+            except BaseException as error:
                 if not _manifest_has_configured_mount_authority(processed_manifest):
                     raise
-                safe_error = _replace_mount_operation_error(error)
+                safe_error = _replace_protected_mount_error(error)
 
             if safe_error is not None:
                 capabilities = []
