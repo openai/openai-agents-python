@@ -33,6 +33,7 @@ _DATA_REDACTED_ATTR = "_agents_data_redacted"
 _DATA_REDACTED_ERROR_MESSAGE = "Error details are redacted."
 _TYPE_NAMESPACE_DESCRIPTOR = cast(Any, type).__dict__["__dict__"]
 _TYPE_MRO_DESCRIPTOR = cast(Any, type).__dict__["__mro__"]
+_SYSTEM_EXIT_CODE_DESCRIPTOR = cast(Any, SystemExit).__dict__["code"]
 
 
 def _mark_error_to_drain_stream_events(error: BaseException) -> None:
@@ -150,6 +151,43 @@ def _detach_data_redacted_error_traceback(error: BaseException) -> None:
             descriptor.__set__(error, None)
 
 
+def _prepare_data_redacted_error(
+    error: BaseException,
+    *,
+    trusted_error_message: str | None = None,
+) -> BaseException:
+    """Detach payload-owned state and return a safe error for a public boundary."""
+    error_type = type(error)
+    process_control_error = _replace_data_redacted_process_control_error(error)
+    if process_control_error is not None:
+        return process_control_error
+    safe_message: str | None = None
+    if error_type is UserError or error_type is ValueError:
+        try:
+            args = cast(Any, BaseException.args).__get__(error, error_type)
+            if isinstance(args, tuple) and len(args) == 1 and isinstance(args[0], str):
+                message = args[0]
+                if message == trusted_error_message:
+                    safe_message = message
+        except BaseException:
+            pass
+
+    _discard_exception_graph(error)
+
+    safe_error: BaseException = RuntimeError(_DATA_REDACTED_ERROR_MESSAGE)
+    if error_type is ModelBehaviorError:
+        safe_error = ModelBehaviorError(_DATA_REDACTED_ERROR_MESSAGE)
+    elif error_type is UserError and safe_message is not None:
+        safe_error = UserError(safe_message)
+    elif error_type is ValueError and safe_message is not None:
+        safe_error = ValueError(safe_message)
+    try:
+        _mark_error_data_redacted(safe_error)
+    except BaseException:
+        pass
+    return safe_error
+
+
 def _replace_data_redacted_process_control_error(
     error: BaseException,
 ) -> BaseException | None:
@@ -163,23 +201,27 @@ def _replace_data_redacted_process_control_error(
         safe_error = KeyboardInterrupt()
     elif not issubclass(error_type, SystemExit):
         return None
+    elif error_type is not SystemExit:
+        safe_error = SystemExit(1)
     else:
         try:
-            code_descriptor = type.__getattribute__(SystemExit, "__dict__")["code"]
-            code = cast(Any, code_descriptor).__get__(error, error_type)
+            effective_code = _SYSTEM_EXIT_CODE_DESCRIPTOR.__get__(error, SystemExit)
         except BaseException:
             safe_error = SystemExit(1)
         else:
-            if code is None:
-                safe_error = SystemExit()
-            elif type(code) is int:
-                safe_error = SystemExit(code)
-            else:
+            if type(effective_code) not in {type(None), bool, int}:
                 safe_error = SystemExit(1)
+            elif effective_code is None:
+                safe_error = SystemExit()
+            else:
+                safe_error = SystemExit(effective_code)
 
     assert safe_error is not None
     _discard_exception_graph(error)
-    _mark_error_data_redacted(safe_error)
+    try:
+        _mark_error_data_redacted(safe_error)
+    except BaseException:
+        pass
     return safe_error
 
 

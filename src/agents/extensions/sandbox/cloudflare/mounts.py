@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from ....sandbox._mount_security import redact_mount_error_data
 from ....sandbox.entries import GCSMount, Mount, R2Mount, S3Mount
 from ....sandbox.entries.mounts.base import MountStrategyBase
 from ....sandbox.errors import MountConfigError
@@ -45,6 +46,7 @@ class CloudflareBucketMountStrategy(MountStrategyBase):
     def validate_mount(self, mount: Mount) -> None:
         _ = self._build_cloudflare_bucket_mount_config(mount)
 
+    @redact_mount_error_data
     async def activate(
         self,
         mount: Mount,
@@ -67,6 +69,7 @@ class CloudflareBucketMountStrategy(MountStrategyBase):
         )
         return []
 
+    @redact_mount_error_data
     async def deactivate(
         self,
         mount: Mount,
@@ -82,6 +85,7 @@ class CloudflareBucketMountStrategy(MountStrategyBase):
         _ = base_dir
         await session.unmount_bucket(mount._resolve_mount_path(session, dest))  # type: ignore[attr-defined]
 
+    @redact_mount_error_data
     async def teardown_for_snapshot(
         self,
         mount: Mount,
@@ -96,6 +100,7 @@ class CloudflareBucketMountStrategy(MountStrategyBase):
         _ = mount
         await session.unmount_bucket(path)  # type: ignore[attr-defined]
 
+    @redact_mount_error_data
     async def restore_after_snapshot(
         self,
         mount: Mount,

@@ -217,6 +217,7 @@ class DaytonaCloudBucketMountStrategy(MountStrategyBase):
         await _ensure_rclone(session)
         return await self._delegate().activate(mount, session, dest, base_dir)
 
+    @redact_mount_error_data
     async def deactivate(
         self,
         mount: Mount,
@@ -227,6 +228,7 @@ class DaytonaCloudBucketMountStrategy(MountStrategyBase):
         _assert_daytona_session(session)
         await self._delegate().deactivate(mount, session, dest, base_dir)
 
+    @redact_mount_error_data
     async def teardown_for_snapshot(
         self,
         mount: Mount,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic
 
@@ -1236,16 +1236,23 @@ class RunContextWrapper(Generic[TContext]):
             record.sticky_scope = sticky_scope
         return record
 
-    def _rebuild_tool_invocations(self, invocations: Any) -> None:
+    def _rebuild_tool_invocations(
+        self,
+        invocations: Any,
+        *,
+        validation_error_factory: Callable[[str], UserError] = UserError,
+    ) -> None:
         """Restore the current-schema canonical tool invocation ledger."""
         self._tool_invocations = {}
         if not isinstance(invocations, Mapping):
-            raise UserError("RunState tool_invocations must be a mapping.")
+            raise validation_error_factory("RunState tool_invocations must be a mapping.")
         for call_id, serialized_invocation in invocations.items():
             if not isinstance(call_id, str) or not call_id:
-                raise UserError("RunState tool_invocations contains an invalid call ID.")
+                raise validation_error_factory(
+                    "RunState tool_invocations contains an invalid call ID."
+                )
             if not isinstance(serialized_invocation, Mapping):
-                raise UserError(f"RunState tool invocation {call_id!r} must be a mapping.")
+                raise validation_error_factory("RunState tool invocation must be a mapping.")
             invocation_type = serialized_invocation.get("type")
             approval_scope = serialized_invocation.get("approval_scope")
             fingerprint = serialized_invocation.get("fingerprint")
@@ -1259,8 +1266,8 @@ class RunContextWrapper(Generic[TContext]):
                 or not isinstance(completed, bool)
                 or (completed and not executed)
             ):
-                raise UserError(
-                    f"RunState tool invocation {call_id!r} contains invalid lifecycle data."
+                raise validation_error_factory(
+                    "RunState tool invocation contains invalid lifecycle data."
                 )
             self._tool_invocations[call_id] = _ToolInvocationRecord(
                 invocation_type=invocation_type,

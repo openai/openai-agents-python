@@ -1266,7 +1266,7 @@ def _strategy_classification(strategy: MountStrategyBase) -> tuple[str, str | No
     return "unknown", None
 
 
-def _redact_mount_serialization_error(error: Exception) -> MountConfigError:
+def _redact_mount_serialization_error(error: BaseException) -> MountConfigError:
     discard_mount_source_exception(error)
     safe_error = MountConfigError(
         message="sandbox session state containing mount authority could not be serialized"
@@ -1275,7 +1275,7 @@ def _redact_mount_serialization_error(error: Exception) -> MountConfigError:
     return safe_error
 
 
-def _redact_mount_state_validation_error(error: Exception, *, message: str) -> ValueError:
+def _redact_mount_state_validation_error(error: BaseException, *, message: str) -> ValueError:
     discard_mount_source_exception(error)
     safe_error = ValueError(message)
     _mark_error_data_redacted(safe_error)
@@ -2213,13 +2213,17 @@ def _run_state_sandbox_envelope_is_valid(payload: object) -> bool:
     )
 
 
-def _sanitize_run_state_sandbox_mount_authority(payload: object) -> tuple[object, bool]:
+def _sanitize_run_state_sandbox_mount_authority(
+    payload: object,
+    *,
+    validation_error_factory: Callable[[str], ValueError] | None = None,
+) -> tuple[object, bool]:
     """Sanitize only the documented sandbox resume-state envelope."""
 
     if not _run_state_sandbox_envelope_is_valid(payload):
         if isinstance(payload, dict | list):
             payload.clear()
-        _raise_invalid_run_state_sandbox_envelope()
+        _raise_invalid_run_state_sandbox_envelope(validation_error_factory=validation_error_factory)
     assert isinstance(payload, Mapping)
     sandbox = copy.deepcopy(dict(payload))
     redacted = False
@@ -2249,15 +2253,24 @@ def _sanitize_run_state_sandbox_mount_authority(payload: object) -> tuple[object
     return sandbox, redacted
 
 
-def sanitize_run_state_sandbox_mount_authority(payload: object) -> tuple[object, bool]:
+def sanitize_run_state_sandbox_mount_authority(
+    payload: object,
+    *,
+    validation_error_factory: Callable[[str], ValueError] | None = None,
+) -> tuple[object, bool]:
     safe_error: ValueError | None = None
     try:
-        return _sanitize_run_state_sandbox_mount_authority(payload)
-    except _InvalidRawMountManifestError as error:
-        safe_error = _redact_mount_state_validation_error(
-            error,
-            message="RunState sandbox resume state contains an invalid manifest",
+        return _sanitize_run_state_sandbox_mount_authority(
+            payload,
+            validation_error_factory=validation_error_factory,
         )
+    except _InvalidRawMountManifestError as error:
+        message = "RunState sandbox resume state contains an invalid manifest"
+        if validation_error_factory is None:
+            safe_error = _redact_mount_state_validation_error(error, message=message)
+        else:
+            discard_mount_source_exception(error)
+            safe_error = validation_error_factory(message)
 
     if isinstance(payload, dict | list):
         payload.clear()
@@ -2266,7 +2279,14 @@ def sanitize_run_state_sandbox_mount_authority(payload: object) -> tuple[object,
     _raise_data_redacted_error(safe_error)
 
 
-def _raise_invalid_run_state_sandbox_envelope() -> NoReturn:
-    error = ValueError("RunState sandbox resume state has an invalid envelope")
-    _mark_error_data_redacted(error)
+def _raise_invalid_run_state_sandbox_envelope(
+    *,
+    validation_error_factory: Callable[[str], ValueError] | None = None,
+) -> NoReturn:
+    message = "RunState sandbox resume state has an invalid envelope"
+    if validation_error_factory is None:
+        error = ValueError(message)
+        _mark_error_data_redacted(error)
+    else:
+        error = validation_error_factory(message)
     _raise_data_redacted_error(error)

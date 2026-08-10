@@ -1,0 +1,59 @@
+{
+  "$schemaVersion": "1.3",
+  "auto_previous_response_id": false,
+  "context": {
+    "approvals": {},
+    "context": {},
+    "context_meta": {
+      "omitted": false,
+      "original_type": "mapping",
+      "requires_deserializer": false,
+      "serialized_via": "mapping"
+    },
+    "usage": {
+      "input_tokens": 0,
+      "input_tokens_details": [
+        {
+          "cached_tokens": 0
+        }
+      ],
+      "output_tokens": 0,
+      "output_tokens_details": [
+        {
+          "reasoning_tokens": 0
+        }
+      ],
+      "request_usage_entries": [],
+      "requests": 0,
+      "total_tokens": 0
+    }
+  },
+  "conversation_id": null,
+  "current_agent": {
+    "name": "compat-agent"
+  },
+  "current_step": null,
+  "current_turn": 0,
+  "current_turn_persisted_item_count": 0,
+  "generated_items": [],
+  "input_guardrail_results": [],
+  "last_model_response": null,
+  "last_processed_response": null,
+  "max_turns": 10,
+  "model_responses": [],
+  "no_active_agent_run": true,
+  "original_input": "historical input",
+  "output_guardrail_results": [],
+  "previous_response_id": null,
+  "reasoning_item_id_policy": null,
+  "session_items": [],
+  "tool_input_guardrail_results": [],
+  "tool_output_guardrail_results": [],
+  "tool_use_tracker": {},
+  "trace": {
+    "id": "trace_d2a749aa8313480eba2c32d382a6a62d",
+    "object": "trace",
+    "tracing_api_key_hash": "367cb46be96fa11da87030dbc0cf83bd0294053ac150e835b916990d2f5e6d0e",
+    "workflow_name": "compatibility trace"
+  }
+}

@@ -64,7 +64,7 @@ def _make_session_state(cls: type[StateT], **overrides: object) -> StateT:
 
 
 def _import_optional_class(module_name: str, class_name: str) -> type[Any]:
-    module = pytest.importorskip(module_name)
+    module = pytest.importorskip(module_name, exc_type=ImportError)
     value = getattr(module, class_name)
     assert isinstance(value, type)
     return cast(type[Any], value)
@@ -341,7 +341,7 @@ def test_extension_sandbox_package_export_surfaces_are_stable(
     module_name: str,
     expected_exports: set[str],
 ) -> None:
-    module = pytest.importorskip(module_name)
+    module = pytest.importorskip(module_name, exc_type=ImportError)
 
     assert set(module.__all__) == expected_exports
     for name in expected_exports:
