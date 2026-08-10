@@ -1,4 +1,48 @@
 {
+  "canonical_imports": [
+    {
+      "canonical_module": "agents",
+      "canonical_name": "InputItem",
+      "module": "agents.items",
+      "name": "InputItem"
+    },
+    {
+      "canonical_module": "agents.extensions.sandbox.modal",
+      "canonical_name": "ModalSandboxClient",
+      "module": "agents.extensions.sandbox",
+      "name": "ModalSandboxClient"
+    },
+    {
+      "canonical_module": "agents.extensions.sandbox.modal",
+      "canonical_name": "ModalSandboxClientOptions",
+      "module": "agents.extensions.sandbox",
+      "name": "ModalSandboxClientOptions"
+    },
+    {
+      "canonical_module": "agents.extensions.sandbox.runloop",
+      "canonical_name": "RunloopSandboxClient",
+      "module": "agents.extensions.sandbox",
+      "name": "RunloopSandboxClient"
+    },
+    {
+      "canonical_module": "agents.extensions.sandbox.runloop",
+      "canonical_name": "RunloopSandboxClientOptions",
+      "module": "agents.extensions.sandbox",
+      "name": "RunloopSandboxClientOptions"
+    },
+    {
+      "canonical_module": "agents.extensions.sandbox.vercel",
+      "canonical_name": "VercelSandboxClient",
+      "module": "agents.extensions.sandbox",
+      "name": "VercelSandboxClient"
+    },
+    {
+      "canonical_module": "agents.extensions.sandbox.vercel",
+      "canonical_name": "VercelSandboxClientOptions",
+      "module": "agents.extensions.sandbox",
+      "name": "VercelSandboxClientOptions"
+    }
+  ],
   "optional_dependencies": {
     "aiohttp": {
       "extra": "cloudflare"
@@ -84,5 +128,31 @@
         "VercelSandboxSessionState": "vercel"
       }
     }
-  }
+  },
+  "public_properties": [
+    {
+      "class_name": "RunState",
+      "module": "agents.run_state",
+      "names": [
+        "pending_input"
+      ]
+    },
+    {
+      "class_name": "RetryPolicyContext",
+      "module": "agents.retry",
+      "names": [
+        "response_started",
+        "replay_safety",
+        "stateful_request"
+      ]
+    },
+    {
+      "class_name": "SandboxSessionState",
+      "module": "agents.sandbox.session.sandbox_session_state",
+      "names": [
+        "mount_authority_redacted",
+        "mount_authority_rebound"
+      ]
+    }
+  ]
 }

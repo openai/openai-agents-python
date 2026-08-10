@@ -95,7 +95,7 @@ def main() -> int:
             current,
             baseline=f"v{version}",
             baseline_commit=_head_commit(),
-            submodule_export_policy=policy.modules,
+            release_policy=policy,
         )
     except ValueError as error:
         raise SystemExit(str(error)) from None
@@ -125,8 +125,8 @@ def main() -> int:
     print(f"Added exports: {sorted(current_exports - previous_exports)!r}")
     print(f"Removed exports: {sorted(previous_exports - current_exports)!r}")
     print(
-        "Review shipped example imports and update canonical_imports or public_modules "
-        "when the release adds an intended submodule path."
+        "Review shipped example imports and update released_api_contract_policy.json when "
+        "the release adds canonical imports, public properties, or public modules."
     )
     return 0
 
