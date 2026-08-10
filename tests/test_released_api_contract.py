@@ -73,8 +73,7 @@ def test_literal_default_contract_preserves_exact_builtin_type(
     assert "changed its released positional parameter prefix" in errors[0]
 
 
-@pytest.mark.allow_call_model_methods
-def test_current_source_preserves_released_public_api_contract() -> None:
+def test_released_api_contract_fixture_matches_installed_version() -> None:
     contract = load_api_contract(CONTRACT)
     assert contract["baseline"] == f"v{version('openai-agents')}"
     assert len(contract["baseline_commit"]) == 40
@@ -115,10 +114,6 @@ def test_current_source_preserves_released_public_api_contract() -> None:
                 ],
             },
         ]
-
-    errors = validate_released_api_contract(contract)
-
-    assert errors == []
 
 
 def test_callable_contract_ignores_typing_aliases() -> None:
@@ -698,20 +693,16 @@ def test_released_enum_contract_freezes_members_and_values() -> None:
     ]
 
 
-def test_public_api_contract_requires_real_export_bindings(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import agents
-
+def test_public_api_contract_requires_real_export_bindings() -> None:
     contract: dict[str, Any] = {
         "required_top_level_exports": ["AgentsException"],
         "public_modules": [],
         "canonical_imports": [],
         "callables": {},
     }
-    monkeypatch.delattr(agents, "AgentsException")
+    agents_module = SimpleNamespace(__all__=["AgentsException"])
 
-    assert validate_released_api_contract(contract) == [
+    assert validate_released_api_contract(contract, agents_module=agents_module) == [
         "Missing released top-level bindings: ['AgentsException']"
     ]
 
@@ -916,11 +907,7 @@ def test_public_api_contract_rejects_same_named_foreign_platform_error(
     assert errors[0].startswith("Failed to import released module agents.platform_specific:")
 
 
-def test_public_api_contract_rejects_required_dataclass_suffix(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import agents
-
+def test_public_api_contract_rejects_required_dataclass_suffix() -> None:
     @dataclass
     class Incompatible:
         value: str
@@ -946,9 +933,9 @@ def test_public_api_contract_rejects_required_dataclass_suffix(
             }
         },
     }
-    monkeypatch.setattr(agents, "ContractExample", Incompatible, raising=False)
+    agents_module = SimpleNamespace(__all__=[], ContractExample=Incompatible)
 
-    assert validate_released_api_contract(contract) == [
+    assert validate_released_api_contract(contract, agents_module=agents_module) == [
         "ContractExample.required_suffix added a required parameter",
         "ContractExample.required_suffix added a required dataclass field",
     ]
@@ -1932,10 +1919,17 @@ def test_repository_release_policy_declares_v020_contract_surfaces() -> None:
     ).unsupported_platforms == ("win32",)
     assert {(entry["module"], entry["name"]) for entry in policy.canonical_imports} == {
         ("agents.items", "InputItem"),
+        ("agents.extensions.sandbox", "ModalCloudBucketMountStrategy"),
         ("agents.extensions.sandbox", "ModalSandboxClient"),
         ("agents.extensions.sandbox", "ModalSandboxClientOptions"),
+        ("agents.extensions.sandbox", "RunloopAfterIdle"),
+        ("agents.extensions.sandbox", "RunloopGatewaySpec"),
+        ("agents.extensions.sandbox", "RunloopLaunchParameters"),
+        ("agents.extensions.sandbox", "RunloopMcpSpec"),
         ("agents.extensions.sandbox", "RunloopSandboxClient"),
         ("agents.extensions.sandbox", "RunloopSandboxClientOptions"),
+        ("agents.extensions.sandbox", "RunloopTunnelConfig"),
+        ("agents.extensions.sandbox", "RunloopUserParameters"),
         ("agents.extensions.sandbox", "VercelSandboxClient"),
         ("agents.extensions.sandbox", "VercelSandboxClientOptions"),
     }

@@ -8,6 +8,12 @@
     },
     {
       "canonical_module": "agents.extensions.sandbox.modal",
+      "canonical_name": "ModalCloudBucketMountStrategy",
+      "module": "agents.extensions.sandbox",
+      "name": "ModalCloudBucketMountStrategy"
+    },
+    {
+      "canonical_module": "agents.extensions.sandbox.modal",
       "canonical_name": "ModalSandboxClient",
       "module": "agents.extensions.sandbox",
       "name": "ModalSandboxClient"
@@ -20,6 +26,30 @@
     },
     {
       "canonical_module": "agents.extensions.sandbox.runloop",
+      "canonical_name": "RunloopAfterIdle",
+      "module": "agents.extensions.sandbox",
+      "name": "RunloopAfterIdle"
+    },
+    {
+      "canonical_module": "agents.extensions.sandbox.runloop",
+      "canonical_name": "RunloopGatewaySpec",
+      "module": "agents.extensions.sandbox",
+      "name": "RunloopGatewaySpec"
+    },
+    {
+      "canonical_module": "agents.extensions.sandbox.runloop",
+      "canonical_name": "RunloopLaunchParameters",
+      "module": "agents.extensions.sandbox",
+      "name": "RunloopLaunchParameters"
+    },
+    {
+      "canonical_module": "agents.extensions.sandbox.runloop",
+      "canonical_name": "RunloopMcpSpec",
+      "module": "agents.extensions.sandbox",
+      "name": "RunloopMcpSpec"
+    },
+    {
+      "canonical_module": "agents.extensions.sandbox.runloop",
       "canonical_name": "RunloopSandboxClient",
       "module": "agents.extensions.sandbox",
       "name": "RunloopSandboxClient"
@@ -29,6 +59,18 @@
       "canonical_name": "RunloopSandboxClientOptions",
       "module": "agents.extensions.sandbox",
       "name": "RunloopSandboxClientOptions"
+    },
+    {
+      "canonical_module": "agents.extensions.sandbox.runloop",
+      "canonical_name": "RunloopTunnelConfig",
+      "module": "agents.extensions.sandbox",
+      "name": "RunloopTunnelConfig"
+    },
+    {
+      "canonical_module": "agents.extensions.sandbox.runloop",
+      "canonical_name": "RunloopUserParameters",
+      "module": "agents.extensions.sandbox",
+      "name": "RunloopUserParameters"
     },
     {
       "canonical_module": "agents.extensions.sandbox.vercel",

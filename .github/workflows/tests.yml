@@ -248,7 +248,7 @@ jobs:
       - name: Install all optional dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
-      - name: Generate prospective release contract
+      - name: Validate source and generate prospective release contract
         if: steps.changes.outputs.run == 'true'
         run: make prepare-prospective-released-api-contract
       - name: Upload prospective release contract
