@@ -15,6 +15,8 @@ from pathlib import Path
 from types import FunctionType, TracebackType
 from typing import Any, cast
 
+from pydantic import BaseModel
+
 
 @dataclasses.dataclass(frozen=True)
 class OptionalDependencyInstallation:
@@ -434,6 +436,27 @@ def _dataclass_field_contract(value: object) -> list[dict[str, object]]:
     return result
 
 
+def _pydantic_model_field_contract(value: object) -> list[dict[str, object]] | None:
+    if not (isinstance(value, type) and issubclass(value, BaseModel)):
+        return None
+    result: list[dict[str, object]] = []
+    for name, field in value.model_fields.items():
+        if name.startswith("_"):
+            continue
+        if field.is_required():
+            default_contract: dict[str, object] = {"kind": "required"}
+        elif field.default_factory is not None:
+            factory = field.default_factory
+            default_contract = {
+                "kind": "factory",
+                "factory": f"{factory.__module__}.{factory.__qualname__}",
+            }
+        else:
+            default_contract = _default_contract(field.default)
+        result.append({"name": name, "default": default_contract})
+    return result
+
+
 def _callable_kind(value: Callable[..., Any]) -> str | None:
     if issubclass(type(value), type):
         return "class"
@@ -574,6 +597,9 @@ def _callable_contract(value: Callable[..., Any]) -> dict[str, Any]:
     }
     if kind == "function":
         contract["execution_kind"] = _function_execution_kind(value)
+    model_fields = _pydantic_model_field_contract(value)
+    if model_fields is not None:
+        contract["model_fields"] = model_fields
     enum_members = _enum_member_contract(value)
     if enum_members is not None:
         contract["enum_members"] = enum_members
@@ -1001,6 +1027,30 @@ def _validate_parameter_contract(
     return errors
 
 
+def _validate_pydantic_model_field_contract(
+    name: str,
+    released: list[dict[str, object]],
+    current: list[dict[str, object]] | None,
+) -> list[str]:
+    errors: list[str] = []
+    current_by_name = {cast(str, entry["name"]): entry for entry in current or []}
+    for entry in released:
+        current_entry = current_by_name.get(cast(str, entry["name"]))
+        if current_entry != entry:
+            errors.append(
+                f"{name}.{entry['name']} changed its released Pydantic model field contract: "
+                f"expected {entry!r}, got {current_entry!r}"
+            )
+    released_names = {entry["name"] for entry in released}
+    for entry in current or []:
+        if entry["name"] in released_names:
+            continue
+        default = entry["default"]
+        if isinstance(default, dict) and default.get("kind") == "required":
+            errors.append(f"{name}.{entry['name']} added a required Pydantic model field")
+    return errors
+
+
 def _import_contract_module(module_name: str, agents_module: Any | None) -> Any:
     if module_name == "agents" and agents_module is not None:
         return agents_module
@@ -1393,6 +1443,15 @@ def validate_released_api_contract(
             default = field["default"]
             if field["init"] and isinstance(default, dict) and default.get("kind") == "required":
                 errors.append(f"{name}.{field['name']} added a required dataclass field")
+        released_model_fields = released.get("model_fields")
+        if released_model_fields is not None:
+            errors.extend(
+                _validate_pydantic_model_field_contract(
+                    name,
+                    cast(list[dict[str, object]], released_model_fields),
+                    _pydantic_model_field_contract(value),
+                )
+            )
         for member_name, released_member in released.get("members", {}).items():
             descriptor = _sdk_public_class_descriptor(value, member_name)
             current_member = _class_member_contract(descriptor)

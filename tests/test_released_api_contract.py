@@ -5,13 +5,13 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import asdict, dataclass
 from enum import Enum
 from importlib.metadata import version
-from inspect import Signature
+from inspect import Parameter, Signature
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 import integration_tests._contract_support as contract_support
 from integration_tests._contract_support import (
@@ -939,6 +939,103 @@ def test_public_api_contract_rejects_required_dataclass_suffix() -> None:
         "ContractExample.required_suffix added a required parameter",
         "ContractExample.required_suffix added a required dataclass field",
     ]
+
+
+def test_callable_contract_tracks_pydantic_model_fields() -> None:
+    class Model(BaseModel):
+        required: str
+        optional: int = 1
+        generated: list[str] = Field(default_factory=list)
+
+    Model.__signature__ = Signature([Parameter("data", kind=Parameter.VAR_KEYWORD)])
+    callable_contract = _callable_contract(Model)
+
+    assert callable_contract["parameters"] == [
+        {"name": "data", "kind": "VAR_KEYWORD", "default": {"kind": "required"}}
+    ]
+    assert callable_contract["model_fields"] == [
+        {"name": "required", "default": {"kind": "required"}},
+        {
+            "name": "optional",
+            "default": {"kind": "literal", "type": "builtins.int", "value": 1},
+        },
+        {
+            "name": "generated",
+            "default": {"kind": "factory", "factory": "builtins.list"},
+        },
+    ]
+
+
+def test_public_api_contract_validates_pydantic_model_fields() -> None:
+    class Released(BaseModel):
+        required: str
+        optional: int = 1
+
+    class Compatible(BaseModel):
+        optional: int = 1
+        required: str
+        added_optional: bool = False
+
+    class Renamed(BaseModel):
+        renamed: str
+        optional: int = 1
+
+    class ChangedDefault(BaseModel):
+        required: str
+        optional: int = 2
+
+    class AddedRequired(BaseModel):
+        required: str
+        optional: int = 1
+        added_required: bool
+
+    opaque_signature = Signature([Parameter("data", kind=Parameter.VAR_KEYWORD)])
+    for model in (Released, Compatible, Renamed, ChangedDefault, AddedRequired):
+        model.__signature__ = opaque_signature
+
+    released_callable = _callable_contract(Released)
+    contract: dict[str, Any] = {
+        "required_top_level_exports": [],
+        "public_modules": [],
+        "canonical_imports": [],
+        "callables": {"Model": released_callable},
+    }
+
+    def validate(model: type[BaseModel]) -> list[str]:
+        return validate_released_api_contract(
+            contract,
+            agents_module=SimpleNamespace(__all__=[], Model=model),
+        )
+
+    assert validate(Compatible) == []
+    assert validate(Renamed) == [
+        "Model.required changed its released Pydantic model field contract: "
+        "expected {'name': 'required', 'default': {'kind': 'required'}}, got None",
+        "Model.renamed added a required Pydantic model field",
+    ]
+    assert validate(ChangedDefault) == [
+        "Model.optional changed its released Pydantic model field contract: "
+        "expected {'name': 'optional', 'default': {'kind': 'literal', "
+        "'type': 'builtins.int', 'value': 1}}, got {'name': 'optional', "
+        "'default': {'kind': 'literal', 'type': 'builtins.int', 'value': 2}}"
+    ]
+    assert validate(AddedRequired) == ["Model.added_required added a required Pydantic model field"]
+
+    legacy_contract = {
+        **contract,
+        "callables": {
+            "Model": {
+                key: value for key, value in released_callable.items() if key != "model_fields"
+            }
+        },
+    }
+    assert (
+        validate_released_api_contract(
+            legacy_contract,
+            agents_module=SimpleNamespace(__all__=[], Model=Renamed),
+        )
+        == []
+    )
 
 
 def test_release_contract_update_freezes_new_exports_and_callables() -> None:
