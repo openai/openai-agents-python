@@ -299,7 +299,7 @@ If your run context is a Pydantic model, dataclass, or custom class, read the te
 
 ### MCP tool outputs: text, images, and other content
 
-When an MCP result uses its content blocks, the SDK forwards text content as text output and maps image content to image-type entries in the tool output. For other MCP content block types, including audio and resource blocks, the SDK forwards a text output whose value is the block's valid JSON serialization. Responses that contain multiple content blocks are forwarded as a list of output items. If `use_structured_content=True` selects non-error `structuredContent`, that structured payload takes precedence over these content blocks.
+When an MCP result uses its content blocks, the SDK forwards text content as text output and maps image content to image-type entries in the tool output. For other MCP content block types, including audio and resource blocks, the SDK forwards a text output whose value is the block's valid JSON serialization. Responses that contain multiple content blocks are forwarded as a list of output items. If `use_structured_content=True` selects a non-empty, non-error `structuredContent` payload, that structured payload takes precedence over these content blocks. Missing or empty structured content falls back to the content blocks.
 
 ## 3. HTTP with SSE MCP servers
 

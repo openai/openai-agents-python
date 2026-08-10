@@ -54,6 +54,8 @@ The result of a voice pipeline run is a [`StreamedAudioResult`][agents.voice.res
 2. [`VoiceStreamEventLifecycle`][agents.voice.events.VoiceStreamEventLifecycle], which informs you of lifecycle events like a turn starting or ending.
 3. [`VoiceStreamEventError`][agents.voice.events.VoiceStreamEventError], which is an error event.
 
+Terminal pipeline errors are raised while the application consumes [`StreamedAudioResult.stream()`][agents.voice.result.StreamedAudioResult.stream]. If the speech-to-text transcription session fails to close after an otherwise clean run, the stream raises that close error instead of waiting indefinitely. If the turn has already failed and closing the transcription session also fails, the stream preserves the original turn error as the primary error.
+
 ```python
 
 result = await pipeline.run(input)
