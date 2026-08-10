@@ -842,8 +842,17 @@ class RunState(Generic[TContext, TAgent]):
             )
 
         if isinstance(raw_context_payload, Mapping):
+            # Convert the values, not just the mapping itself. A shallow ``dict()`` leaves any
+            # Pydantic model or dataclass held in the mapping in place, and ``to_string`` then
+            # fails inside ``json.dumps`` with a bare ``TypeError`` that never mentions the
+            # context. This mirrors what tool outputs already do, so models and dataclasses
+            # survive as structured data rather than as reprs.
+            serialized_mapping = {
+                key: _ensure_json_compatible(_serialize_output_value(value))
+                for key, value in raw_context_payload.items()
+            }
             return (
-                dict(raw_context_payload),
+                serialized_mapping,
                 _build_context_meta(
                     raw_context_payload,
                     serialized_via="mapping",
