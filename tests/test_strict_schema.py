@@ -396,3 +396,139 @@ def test_ref_expansion_bomb_is_rejected():
     }
     with pytest.raises(UserError):
         ensure_strict_json_schema(schema)
+
+
+def test_ref_with_constraining_sibling_is_rejected():
+    # A `$ref` with a *constraining* sibling (anything other than an annotation or a
+    # definition map) is an intersection in JSON Schema 2020-12: the accepted values are
+    # those that satisfy BOTH the referent AND the sibling. Merging parent-wins would
+    # silently drop the referent's own constraints (here `b`) and invert the accepted
+    # set, so strict conversion must reject it loudly instead of shipping a schema that
+    # accepts different values.
+    schema = {
+        "$defs": {
+            "T": {
+                "type": "object",
+                "properties": {"b": {"type": "string"}},
+                "required": ["b"],
+            }
+        },
+        "type": "object",
+        "properties": {
+            "node": {
+                "properties": {"a": {"type": "string"}},
+                "required": ["a"],
+                "$ref": "#/$defs/T",
+            }
+        },
+    }
+
+    with pytest.raises(UserError, match="constraining sibling"):
+        ensure_strict_json_schema(schema)
+
+
+def test_ref_with_constraining_type_sibling_is_rejected():
+    # A `type` sibling on a `$ref` is just as constraining as `properties`/`required`.
+    schema = {
+        "$defs": {
+            "T": {
+                "type": "object",
+                "properties": {"b": {"type": "string"}},
+                "required": ["b"],
+            }
+        },
+        "type": "object",
+        "properties": {"node": {"type": "string", "$ref": "#/$defs/T"}},
+    }
+
+    with pytest.raises(UserError, match="constraining sibling"):
+        ensure_strict_json_schema(schema)
+
+
+def test_ref_with_annotation_sibling_is_still_expanded():
+    # Annotation-only siblings (description/title/... ) do not constrain the accepted
+    # values, so a `$ref` carrying them must keep expanding into the referent.
+    schema = {
+        "$defs": {
+            "T": {
+                "type": "object",
+                "properties": {"b": {"type": "string"}},
+                "required": ["b"],
+            }
+        },
+        "type": "object",
+        "properties": {
+            "node": {"description": "a node", "title": "Node", "$ref": "#/$defs/T"}
+        },
+    }
+
+    result = ensure_strict_json_schema(schema)
+    node = result["properties"]["node"]
+    assert node["type"] == "object"
+    assert node["properties"] == {"b": {"type": "string"}}
+    assert node["required"] == ["b"]
+    assert node["description"] == "a node"
+    assert node["title"] == "Node"
+    assert "$ref" not in node
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        # OpenAPI-style `allOf` over two `$ref`s (a 2-member intersection).
+        {
+            "type": "object",
+            "properties": {
+                "val": {"allOf": [{"$ref": "#/$defs/A"}, {"$ref": "#/$defs/B"}]}
+            },
+            "$defs": {
+                "A": {"type": "object", "properties": {"a": {"type": "string"}}},
+                "B": {"type": "object", "properties": {"b": {"type": "string"}}},
+            },
+        },
+        {"type": "object", "properties": {"val": {"allOf": [{"type": "string"}, {"type": "integer"}]}}},
+        {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}, "uniqueItems": True}}},
+        # Tuple-form `items` (an array instead of a single schema).
+        {"type": "object", "properties": {"pair": {"type": "array", "items": [{"type": "string"}, {"type": "number"}]}}},
+        # Draft 7 `additionalItems` (only meaningful next to a tuple, but rejected standalone).
+        {"type": "object", "properties": {"xs": {"type": "array", "items": {"type": "string"}, "additionalItems": {"type": "string"}}}},
+        # Array with no `items` at all.
+        {"type": "object", "properties": {"xs": {"type": "array"}}},
+        {"type": "object", "properties": {"xs": {"type": "array", "prefixItems": [{"type": "string"}]}}},
+        {"type": "object", "properties": {"obj": {"type": "object", "properties": {"a": {"type": "string"}}, "patternProperties": {"^x": {"type": "string"}}}}},
+        {"type": "object", "properties": {"obj": {"type": "object", "properties": {"a": {"type": "string"}}, "propertyNames": {"pattern": "^a"}}}},
+        {"type": "object", "properties": {"obj": {"type": "object", "properties": {"a": {"type": "string"}}, "unevaluatedProperties": False}}},
+        {"type": "object", "properties": {"val": {"not": {"type": "string"}}}},
+        {"type": "object", "properties": {"val": {"if": {"type": "string"}, "then": {"type": "string"}}}},
+        {"type": "object", "properties": {"xs": {"type": "array", "items": {"type": "number"}, "contains": {"type": "number"}}}},
+        {"type": "object", "properties": {"obj": {"type": "object", "properties": {"a": {"type": "string"}}, "minProperties": 1}}},
+        {"type": "object", "properties": {"obj": {"type": "object", "properties": {"a": {"type": "string"}}, "dependentRequired": {"a": ["b"]}}}},
+        # A `$id` nested below the schema root (root `$id` is allowed as metadata).
+        {"type": "object", "properties": {"x": {"$id": "https://example.com/x", "type": "string"}}},
+    ],
+    ids=[
+        "all-of-ref-ref",
+        "all-of-two-members",
+        "unique-items",
+        "tuple-form-items",
+        "additional-items",
+        "array-without-items",
+        "prefix-items",
+        "pattern-properties",
+        "property-names",
+        "unevaluated-properties",
+        "not",
+        "if-then",
+        "contains",
+        "min-properties",
+        "dependent-required",
+        "nested-id",
+    ],
+)
+def test_non_convertible_shapes_are_rejected(schema):
+    # These shapes cannot be represented in OpenAI's strict mode. Converting them to
+    # strict would either leave an unsupported keyword in place (which the API rejects
+    # at request time) or silently change the accepted values. They must raise so that
+    # the opt-in MCP fallback can serve the original non-strict schema instead.
+    with pytest.raises(UserError):
+        ensure_strict_json_schema(schema)

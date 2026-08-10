@@ -36,6 +36,63 @@ _UNVALIDATED_REF_ERROR = (
     "JSON schema contains a reference whose target was not validated for strict mode."
 )
 
+# Keywords that may legally sit alongside a `$ref` without changing the accepted values:
+# JSON Schema annotation keywords plus definition maps (which are inert metadata). Any
+# other sibling of a `$ref` is a *constraining* keyword (e.g. `properties`, `required`,
+# `type`, `enum`), which JSON Schema 2020-12 combines with the referent as an
+# intersection rather than as an override.
+_REF_ANNOTATION_SIBLINGS = frozenset(
+    {
+        "$comment",
+        "$defs",
+        "default",
+        "definitions",
+        "deprecated",
+        "description",
+        "examples",
+        "readOnly",
+        "title",
+        "writeOnly",
+    }
+)
+
+# Keywords OpenAI's strict mode cannot represent. Mirrors the unsupported-keyword list in
+# the vendor reference implementation (openai-node `toStrictJsonSchema`); a schema that
+# still contains any of these after conversion is not convertible and must be rejected so
+# callers (e.g. the MCP `convert_schemas_to_strict` path) fall back to the original
+# non-strict schema instead of shipping one the API will reject at request time.
+_STRICT_UNSUPPORTED_KEYWORDS = frozenset(
+    {
+        "$anchor",
+        "$dynamicAnchor",
+        "$dynamicRef",
+        "$recursiveAnchor",
+        "$recursiveRef",
+        "allOf",
+        "contains",
+        "contentEncoding",
+        "contentMediaType",
+        "contentSchema",
+        "dependentRequired",
+        "dependentSchemas",
+        "dependencies",
+        "else",
+        "if",
+        "maxContains",
+        "maxProperties",
+        "minContains",
+        "minProperties",
+        "not",
+        "patternProperties",
+        "prefixItems",
+        "propertyNames",
+        "then",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+        "uniqueItems",
+    }
+)
+
 
 class _NodeBudget:
     """Tracks conversion state across the recursion."""
@@ -65,7 +122,7 @@ def ensure_strict_json_schema(
     if schema == {}:
         return copy.deepcopy(_EMPTY_SCHEMA)
     budget = _NodeBudget(_MAX_SCHEMA_NODES, reject_open_objects=_reject_open_objects)
-    return _ensure_strict_root(
+    result = _ensure_strict_root(
         _ensure_strict_json_schema(
             schema,
             path=(),
@@ -73,6 +130,8 @@ def ensure_strict_json_schema(
             budget=budget,
         )
     )
+    _raise_if_strict_unsupported(result)
+    return result
 
 
 def _ensure_strict_root(schema: dict[str, Any]) -> dict[str, Any]:
@@ -92,6 +151,67 @@ def _ensure_strict_root(schema: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
+def _raise_if_strict_unsupported(schema: dict[str, Any], *, path: tuple[str, ...] = ()) -> None:
+    """Raises ``UserError`` if any keyword OpenAI's strict mode cannot represent survived
+    conversion, so callers fall back to the original non-strict schema instead of shipping
+    one the API will reject at request time.
+    """
+    location = "/" + "/".join(path) if path else "<root>"
+    for keyword in _STRICT_UNSUPPORTED_KEYWORDS:
+        if keyword in schema:
+            raise UserError(
+                f"JSON schema at {location} contains keyword `{keyword}` which cannot be "
+                "represented in a strict schema."
+            )
+
+    # Tuple-form `items` (an array of schemas) has no strict-mode equivalent.
+    items = schema.get("items")
+    if is_list(items):
+        raise UserError(
+            f"JSON schema at {location} uses tuple-form `items`, which cannot be represented "
+            "in a strict schema."
+        )
+
+    # Draft 7 `additionalItems` only exists to extend a tuple; the API accepts one schema
+    # per array item and cannot represent it.
+    if "additionalItems" in schema:
+        raise UserError(
+            f"JSON schema at {location} uses keyword `additionalItems`, which cannot be "
+            "represented in a strict schema."
+        )
+
+    # An array with no `items` accepts arbitrary elements and is not strict.
+    typ = schema.get("type")
+    if (typ == "array" or (is_list(typ) and "array" in typ)) and "items" not in schema:
+        raise UserError(
+            f"JSON schema at {location} is an array without `items`, which cannot be "
+            "represented in a strict schema."
+        )
+
+    # A nested `$id` re-identifies a subschema and is not supported outside the root.
+    if path and "$id" in schema:
+        raise UserError(
+            f"JSON schema at {location} contains a nested `$id`, which cannot be represented "
+            "in a strict schema."
+        )
+
+    # Recurse into every schema-bearing container.
+    for container in ("$defs", "definitions", "properties"):
+        subschemas = schema.get(container)
+        if is_dict(subschemas):
+            for name, child in subschemas.items():
+                _raise_if_strict_unsupported(child, path=(*path, container, name))
+    for container in ("items", "additionalProperties", "not", "if", "then", "else"):
+        child = schema.get(container)
+        if is_dict(child):
+            _raise_if_strict_unsupported(child, path=(*path, container))
+    for container in ("anyOf", "oneOf", "allOf"):
+        variants = schema.get(container)
+        if is_list(variants):
+            for i, variant in enumerate(variants):
+                _raise_if_strict_unsupported(variant, path=(*path, container, str(i)))
+
+
 # Adapted from https://github.com/openai/openai-python/blob/main/src/openai/lib/_pydantic.py
 def _ensure_strict_json_schema(
     json_schema: object,
@@ -108,6 +228,19 @@ def _ensure_strict_json_schema(
     if budget is None:
         budget = _NodeBudget(_MAX_SCHEMA_NODES)
     budget.spend()
+
+    # A `$ref` with a *constraining* sibling is an intersection in JSON Schema 2020-12:
+    # a value must satisfy both the referent and the sibling. Inlining it parent-wins
+    # (as the code below does for annotation-only siblings) would silently delete the
+    # referent's own constraints and invert the accepted set, so reject it loudly.
+    if "$ref" in json_schema:
+        constraining_siblings = set(json_schema.keys()) - {"$ref"} - _REF_ANNOTATION_SIBLINGS
+        if constraining_siblings:
+            raise UserError(
+                "JSON schema contains a `$ref` with constraining sibling keyword(s) "
+                f"({', '.join(sorted(constraining_siblings))}) that cannot be represented "
+                "in a strict schema without changing its accepted values."
+            )
 
     defs = json_schema.get("$defs")
     if is_dict(defs):
