@@ -1099,6 +1099,36 @@ async def test_voicepipeline_failing_close_does_not_replace_the_turn_error() -> 
 
 
 @pytest.mark.asyncio
+async def test_voicepipeline_failing_close_after_a_clean_run_reaches_the_consumer() -> None:
+    # A clean run has no error to report, so a failing close is the only thing left that can
+    # release the consumer. Unreported, the result stream waits on a terminal event forever.
+
+    close_error = RuntimeError("close blew up")
+
+    class FailingCloseSession(FakeSession):
+        async def close(self) -> None:
+            raise close_error
+
+    class FailingCloseSTT(FakeSTT):
+        async def create_session(self, *args: Any, **kwargs: Any) -> FailingCloseSession:
+            session = FailingCloseSession()
+            session.outputs = self.outputs
+            return session
+
+    pipeline = VoicePipeline(
+        workflow=FakeWorkflow([["hello"]]),
+        stt_model=FailingCloseSTT(["hello"]),
+        tts_model=FakeTTS(),
+    )
+    result = await pipeline.run(await FakeStreamedAudioInput.get(count=1))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await asyncio.wait_for(extract_events(result), timeout=5)
+
+    assert exc_info.value is close_error
+
+
+@pytest.mark.asyncio
 async def test_voicepipeline_cancelled_consumer_closes_the_session_without_further_tts() -> None:
     # Cancelling the consumer tears down the producer. The transcription session still has to be
     # closed, and the turn the producer had open must not be sent to TTS on the way out.

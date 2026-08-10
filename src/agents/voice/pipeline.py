@@ -134,6 +134,7 @@ class VoicePipeline:
                 disabled=self.config.tracing_disabled,
             ):
                 transcription_session = None
+                reported_error = False
                 try:
                     try:
                         emitted_intro = False
@@ -170,10 +171,22 @@ class VoicePipeline:
                         # would see only the cleanup error.
                         log_model_and_tool_action_error(logger, "Error processing voice turns", e)
                         await output._add_error(e)
+                        reported_error = True
                         raise
                 finally:
                     if transcription_session is not None:
-                        await transcription_session.close()
+                        try:
+                            await transcription_session.close()
+                        except Exception as e:
+                            log_model_and_tool_action_error(
+                                logger, "Error closing voice transcription session", e
+                            )
+                            # Report only if nothing else has, which keeps the turn error's
+                            # precedence. Clean runs and cancelled producers both arrive here
+                            # with no terminal event queued and no other way to be released.
+                            if not reported_error:
+                                await output._add_error(e)
+                            raise
 
                 # Only a clean run reaches here. The error path above has already queued its
                 # terminal event, and a cancelled producer has no consumer left to serve, so
