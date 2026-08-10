@@ -400,7 +400,12 @@ def test_packaging_profile_checks_dependency_present_contract_for_wheel_and_sdis
     ]
     assert all(suite["selection"] == "packaging_dependency" for suite in dependency_suites)
     assert all(
-        suite["additional_env"] == {"OPENAI_AGENTS_INTEGRATION_REQUIRE_OPTIONAL_EXPORTS": "1"}
+        suite["additional_env"]
+        == {
+            "OPENAI_AGENTS_INTEGRATION_REQUIRED_OPTIONAL_DEPENDENCIES": "aiohttp",
+            "OPENAI_AGENTS_INTEGRATION_OPTIONAL_DEPENDENCY_INSTALLATION": "extra cloudflare",
+            "OPENAI_AGENTS_INTEGRATION_REQUIRED_OPTIONAL_EXTRA": "cloudflare",
+        }
         for suite in dependency_suites
     )
     assert all(suite["require_no_skips"] is True for suite in dependency_suites)
@@ -466,8 +471,251 @@ def test_release_profile_enforces_strict_security_for_wheel_and_sdist(
     assert len(dependency_suites) == 2
     assert all(suite["selection"] == "packaging_dependency" for suite in dependency_suites)
     assert all(
-        suite["additional_env"] == {"OPENAI_AGENTS_INTEGRATION_REQUIRE_OPTIONAL_EXPORTS": "1"}
+        suite["additional_env"]
+        == {
+            "OPENAI_AGENTS_INTEGRATION_REQUIRED_OPTIONAL_DEPENDENCIES": "aiohttp",
+            "OPENAI_AGENTS_INTEGRATION_OPTIONAL_DEPENDENCY_INSTALLATION": "extra cloudflare",
+            "OPENAI_AGENTS_INTEGRATION_REQUIRED_OPTIONAL_EXTRA": "cloudflare",
+        }
         for suite in dependency_suites
     )
     assert all(suite["require_no_skips"] is True for suite in dependency_suites)
     assert namespace["STRICT_PROFILES"] == frozenset({"release", "security"})
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_prospective_contract_profile_isolates_each_policy_installation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    platform: str,
+) -> None:
+    namespace = runpy.run_path(str(RUNNER))
+    main = cast(Callable[[], None], namespace["main"])
+    wheel = tmp_path / "candidate.whl"
+    sdist = tmp_path / "candidate.tar.gz"
+    prospective_contract = tmp_path / "prospective-contract.json"
+    prospective_contract.write_text("{}", encoding="utf-8")
+    created: list[tuple[str, Path, str | None, tuple[str, ...]]] = []
+    suites: list[dict[str, Any]] = []
+
+    def fake_build_distributions() -> tuple[Path, Path]:
+        return wheel, sdist
+
+    def fake_create_environment(
+        name: str,
+        distribution: Path,
+        *,
+        extras: bool = False,
+        optional_extra: str | None = None,
+        additional_requirements: tuple[str, ...] = (),
+    ) -> Path:
+        _ = extras
+        created.append((name, distribution, optional_extra, additional_requirements))
+        return tmp_path / name / "python"
+
+    def fake_run_suite(*args: object, **kwargs: Any) -> None:
+        _ = args
+        suites.append(kwargs)
+
+    monkeypatch.setenv("OPENAI_AGENTS_PROSPECTIVE_RELEASE_CONTRACT", str(prospective_contract))
+    monkeypatch.setattr(sys, "argv", [str(RUNNER), "--profile", "prospective-contract"])
+    monkeypatch.setattr(main.__globals__["sys"], "platform", platform)
+    monkeypatch.setitem(main.__globals__, "build_distributions", fake_build_distributions)
+    monkeypatch.setitem(main.__globals__, "create_environment", fake_create_environment)
+    monkeypatch.setitem(main.__globals__, "run_suite", fake_run_suite)
+    monkeypatch.setattr(main.__globals__["shutil"], "rmtree", lambda *args, **kwargs: None)
+
+    main()
+
+    policy = namespace["load_submodule_export_policy"](namespace["CONTRACT_POLICY"])
+    supported_installations = tuple(
+        installation
+        for installation in policy.dependency_installations
+        if installation.is_supported_on_current_platform()
+    )
+    isolated = [entry for entry in created if "-prospective-" in entry[0]]
+    assert len(isolated) == 2 * len(supported_installations)
+    assert all(bool(extra) != bool(requirements) for _, _, extra, requirements in isolated)
+    assert ("wheel-prospective-aiohttp", wheel, "cloudflare", ()) in isolated
+    assert (
+        "wheel-prospective-aiosqlite",
+        wheel,
+        None,
+        ("aiosqlite>=0.21.0",),
+    ) in isolated
+    assert ("sdist-prospective-modal", sdist, "modal", ()) in isolated
+
+    isolated_suites = [suite for suite in suites if "-prospective-" in suite["environment_kind"]]
+    assert len(isolated_suites) == len(isolated)
+    assert all(suite["selection"] == "packaging_dependency" for suite in isolated_suites)
+    assert all(suite["require_no_skips"] is True for suite in isolated_suites)
+    assert {
+        suite["additional_env"]["OPENAI_AGENTS_INTEGRATION_REQUIRED_OPTIONAL_DEPENDENCIES"]
+        for suite in isolated_suites
+    } == {installation.dependency_module for installation in supported_installations}
+    assert {
+        (
+            suite["additional_env"]["OPENAI_AGENTS_INTEGRATION_REQUIRED_OPTIONAL_DEPENDENCIES"],
+            suite["additional_env"].get("OPENAI_AGENTS_INTEGRATION_REQUIRED_OPTIONAL_EXTRA"),
+        )
+        for suite in isolated_suites
+    } == {
+        (installation.dependency_module, installation.extra)
+        for installation in supported_installations
+    }
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_prospective_platform_profile_checks_core_before_combined_optional_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    platform: str,
+) -> None:
+    namespace = runpy.run_path(str(RUNNER))
+    main = cast(Callable[[], None], namespace["main"])
+    wheel = tmp_path / "candidate.whl"
+    sdist = tmp_path / "candidate.tar.gz"
+    prospective_contract = tmp_path / "prospective-contract.json"
+    prospective_contract.write_text("{}", encoding="utf-8")
+    created: list[tuple[str, Path, str | None, tuple[str, ...]]] = []
+    suites: list[dict[str, Any]] = []
+
+    def fake_build_distributions() -> tuple[Path, Path]:
+        return wheel, sdist
+
+    def fake_create_environment(
+        name: str,
+        distribution: Path,
+        *,
+        extras: bool = False,
+        optional_extra: str | None = None,
+        additional_requirements: tuple[str, ...] = (),
+    ) -> Path:
+        _ = extras
+        created.append((name, distribution, optional_extra, additional_requirements))
+        return tmp_path / name / "python"
+
+    def fake_run_suite(*args: object, **kwargs: Any) -> None:
+        _ = args
+        suites.append(kwargs)
+
+    monkeypatch.setenv("OPENAI_AGENTS_PROSPECTIVE_RELEASE_CONTRACT", str(prospective_contract))
+    monkeypatch.setattr(sys, "argv", [str(RUNNER), "--profile", "prospective-platform"])
+    monkeypatch.setattr(main.__globals__["sys"], "platform", platform)
+    monkeypatch.setitem(main.__globals__, "build_distributions", fake_build_distributions)
+    monkeypatch.setitem(main.__globals__, "create_environment", fake_create_environment)
+    monkeypatch.setitem(main.__globals__, "run_suite", fake_run_suite)
+    monkeypatch.setattr(main.__globals__["shutil"], "rmtree", lambda *args, **kwargs: None)
+
+    main()
+
+    policy = namespace["load_submodule_export_policy"](namespace["CONTRACT_POLICY"])
+    supported_installations = tuple(
+        installation
+        for installation in policy.dependency_installations
+        if installation.is_supported_on_current_platform()
+    )
+    expected_extras = ",".join(
+        sorted(
+            {
+                installation.extra
+                for installation in supported_installations
+                if installation.extra is not None
+            }
+        )
+    )
+    expected_requirements = tuple(
+        sorted(
+            {
+                installation.requirement
+                for installation in supported_installations
+                if installation.requirement is not None
+            }
+        )
+    )
+    assert created == [
+        (
+            "wheel-prospective-platform-core",
+            wheel,
+            None,
+            (),
+        ),
+        (
+            "wheel-prospective-platform",
+            wheel,
+            expected_extras,
+            expected_requirements,
+        ),
+    ]
+    assert len(suites) == 2
+    assert suites[0]["environment_kind"] == "wheel-prospective-platform-core"
+    assert suites[0]["selection"] == "packaging_dependency"
+    assert suites[0]["require_no_skips"] is True
+    assert "additional_env" not in suites[0]
+    assert suites[1]["environment_kind"] == "wheel-prospective-platform"
+    assert suites[1]["selection"] == "packaging_dependency"
+    assert suites[1]["require_no_skips"] is True
+    assert suites[1]["additional_env"] == {
+        "OPENAI_AGENTS_INTEGRATION_REQUIRED_OPTIONAL_DEPENDENCIES": ",".join(
+            installation.dependency_module for installation in supported_installations
+        ),
+        "OPENAI_AGENTS_INTEGRATION_OPTIONAL_DEPENDENCY_INSTALLATION": (
+            "policy optional dependencies"
+        ),
+    }
+
+
+def test_prospective_platform_profile_excludes_unsupported_optional_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    namespace = runpy.run_path(str(RUNNER))
+    main = cast(Callable[[], None], namespace["main"])
+    wheel = tmp_path / "candidate.whl"
+    sdist = tmp_path / "candidate.tar.gz"
+    prospective_contract = tmp_path / "prospective-contract.json"
+    prospective_contract.write_text("{}", encoding="utf-8")
+    created: list[tuple[str, Path, str | None, tuple[str, ...]]] = []
+    suites: list[dict[str, Any]] = []
+
+    def fake_create_environment(
+        name: str,
+        distribution: Path,
+        *,
+        extras: bool = False,
+        optional_extra: str | None = None,
+        additional_requirements: tuple[str, ...] = (),
+    ) -> Path:
+        _ = extras
+        created.append((name, distribution, optional_extra, additional_requirements))
+        return tmp_path / name / "python"
+
+    monkeypatch.setenv("OPENAI_AGENTS_PROSPECTIVE_RELEASE_CONTRACT", str(prospective_contract))
+    monkeypatch.setattr(sys, "argv", [str(RUNNER), "--profile", "prospective-platform"])
+    monkeypatch.setattr(main.__globals__["sys"], "platform", "win32")
+    monkeypatch.setitem(main.__globals__, "build_distributions", lambda: (wheel, sdist))
+    monkeypatch.setitem(main.__globals__, "create_environment", fake_create_environment)
+    monkeypatch.setitem(
+        main.__globals__, "run_suite", lambda *args, **kwargs: suites.append(kwargs)
+    )
+    monkeypatch.setattr(main.__globals__["shutil"], "rmtree", lambda *args, **kwargs: None)
+
+    main()
+
+    combined_environment = next(
+        environment for environment in created if environment[0] == "wheel-prospective-platform"
+    )
+    assert "vercel" not in (combined_environment[2] or "").split(",")
+    combined_suite = next(
+        suite for suite in suites if suite["environment_kind"] == "wheel-prospective-platform"
+    )
+    required_dependencies = combined_suite["additional_env"][
+        "OPENAI_AGENTS_INTEGRATION_REQUIRED_OPTIONAL_DEPENDENCIES"
+    ].split(",")
+    assert "vercel" not in required_dependencies
+    assert "aiohttp" in required_dependencies
+    assert (
+        "[integration] skipping optional dependency vercel on unsupported platform win32"
+        in capsys.readouterr().out
+    )

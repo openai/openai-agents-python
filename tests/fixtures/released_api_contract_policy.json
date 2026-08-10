@@ -1,0 +1,88 @@
+{
+  "optional_dependencies": {
+    "aiohttp": {
+      "extra": "cloudflare"
+    },
+    "aiosqlite": {
+      "requirement": "aiosqlite>=0.21.0"
+    },
+    "cryptography": {
+      "extra": "encrypt"
+    },
+    "dapr": {
+      "extra": "dapr"
+    },
+    "modal": {
+      "extra": "modal"
+    },
+    "pymongo": {
+      "extra": "mongodb"
+    },
+    "redis": {
+      "extra": "redis"
+    },
+    "runloop_api_client": {
+      "extra": "runloop"
+    },
+    "sqlalchemy": {
+      "extra": "sqlalchemy"
+    },
+    "vercel": {
+      "extra": "vercel",
+      "unsupported_platforms": [
+        "win32"
+      ]
+    }
+  },
+  "modules": {
+    "agents.extensions.memory": {
+      "optional_bindings": {
+        "AsyncSQLiteSession": "aiosqlite",
+        "DAPR_CONSISTENCY_EVENTUAL": "dapr",
+        "DAPR_CONSISTENCY_STRONG": "dapr",
+        "DaprSession": "dapr",
+        "EncryptedSession": "cryptography",
+        "MongoDBSession": "pymongo",
+        "RedisSession": "redis",
+        "SQLAlchemySession": "sqlalchemy"
+      },
+      "optional_exports": {}
+    },
+    "agents.extensions.sandbox": {
+      "optional_bindings": {},
+      "optional_exports": {
+        "CloudflareBucketMountConfig": "aiohttp",
+        "CloudflareBucketMountStrategy": "aiohttp",
+        "CloudflareSandboxClient": "aiohttp",
+        "CloudflareSandboxClientOptions": "aiohttp",
+        "CloudflareSandboxSession": "aiohttp",
+        "CloudflareSandboxSessionState": "aiohttp",
+        "DEFAULT_RUNLOOP_ROOT_WORKSPACE_ROOT": "runloop_api_client",
+        "DEFAULT_RUNLOOP_WORKSPACE_ROOT": "runloop_api_client",
+        "ModalCloudBucketMountStrategy": "modal",
+        "ModalSandboxClient": "modal",
+        "ModalSandboxClientOptions": "modal",
+        "ModalSandboxSession": "modal",
+        "ModalSandboxSessionState": "modal",
+        "RunloopAfterIdle": "runloop_api_client",
+        "RunloopCloudBucketMountStrategy": "runloop_api_client",
+        "RunloopGatewaySpec": "runloop_api_client",
+        "RunloopLaunchParameters": "runloop_api_client",
+        "RunloopMcpSpec": "runloop_api_client",
+        "RunloopPlatformClient": "runloop_api_client",
+        "RunloopSandboxClient": "runloop_api_client",
+        "RunloopSandboxClientOptions": "runloop_api_client",
+        "RunloopSandboxSession": "runloop_api_client",
+        "RunloopSandboxSessionState": "runloop_api_client",
+        "RunloopTimeouts": "runloop_api_client",
+        "RunloopTunnelConfig": "runloop_api_client",
+        "RunloopUserParameters": "runloop_api_client",
+        "VercelCloudBucketMountStrategy": "vercel",
+        "VercelSandboxClient": "vercel",
+        "VercelSandboxClientOptions": "vercel",
+        "VercelSandboxSession": "vercel",
+        "VercelSandboxSessionState": "vercel"
+      }
+    }
+  }
+}

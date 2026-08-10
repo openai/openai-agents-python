@@ -10,10 +10,19 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from integration_tests._contract_support import (  # noqa: E402
+    SubmoduleExportPolicy,
+    load_submodule_export_policy,
+)
+
 WORKSPACE = ROOT / ".tmp" / "integration-tests"
 DIST = WORKSPACE / "dist"
 RESULTS = WORKSPACE / "results"
 TESTS = ROOT / "integration_tests"
+CONTRACT_POLICY = ROOT / "tests" / "fixtures" / "released_api_contract_policy.json"
+PROSPECTIVE_CONTRACT_ENV = "OPENAI_AGENTS_PROSPECTIVE_RELEASE_CONTRACT"
 EXTRAS = "any-llm,litellm,realtime,voice"
 OPTIONAL_EXTRAS = (
     "any-llm",
@@ -29,6 +38,8 @@ OPTIONAL_EXTRAS = (
 STRICT_PROFILES = frozenset({"release", "security"})
 PROFILES = (
     "packaging",
+    "prospective-contract",
+    "prospective-platform",
     "security",
     "mcp-v1",
     "core",
@@ -352,6 +363,15 @@ def main() -> None:
         help="Include configured direct Anthropic and Gemini providers alongside OpenRouter.",
     )
     args = parser.parse_args()
+    prospective_policy: SubmoduleExportPolicy | None = None
+    if args.profile in {"prospective-contract", "prospective-platform"}:
+        prospective_contract = os.environ.get(PROSPECTIVE_CONTRACT_ENV)
+        if not prospective_contract or not Path(prospective_contract).is_file():
+            raise RuntimeError(
+                "The prospective-contract profile requires "
+                f"{PROSPECTIVE_CONTRACT_ENV} to name an existing contract file."
+            )
+        prospective_policy = load_submodule_export_policy(CONTRACT_POLICY)
     if args.profile in STRICT_PROFILES:
         os.environ["OPENAI_AGENTS_INTEGRATION_STRICT"] = "1"
     shutil.rmtree(RESULTS / args.profile, ignore_errors=True)
@@ -381,6 +401,7 @@ def main() -> None:
 
     if args.profile in {
         "packaging",
+        "prospective-contract",
         "security",
         "core",
         "hosted",
@@ -396,6 +417,7 @@ def main() -> None:
         )
         selections = {
             "packaging": "packaging",
+            "prospective-contract": "packaging",
             "security": "security",
             "core": "packaging or core",
             "hosted": "packaging or hosted",
@@ -434,7 +456,15 @@ def main() -> None:
             profile=args.profile,
         )
 
-    if args.profile in {"packaging", "security", "full", "release", "nightly", "manual"}:
+    if args.profile in {
+        "packaging",
+        "prospective-contract",
+        "security",
+        "full",
+        "release",
+        "nightly",
+        "manual",
+    }:
         python = create_environment(
             "sdist",
             sdist,
@@ -457,6 +487,129 @@ def main() -> None:
             profile=args.profile,
         )
 
+    if args.profile == "prospective-contract":
+        assert prospective_policy is not None
+        for artifact_kind, distribution in (("wheel", wheel), ("sdist", sdist)):
+            for installation in prospective_policy.dependency_installations:
+                if not installation.is_supported_on_current_platform():
+                    print(
+                        "[integration] skipping optional dependency "
+                        f"{installation.dependency_module} on unsupported platform "
+                        f"{sys.platform}",
+                        flush=True,
+                    )
+                    continue
+                dependency_slug = re.sub(r"[^a-z0-9]+", "-", installation.dependency_module.lower())
+                environment_kind = f"{artifact_kind}-prospective-{dependency_slug}"
+                additional_requirements = (
+                    (installation.requirement,) if installation.requirement is not None else ()
+                )
+                python = create_environment(
+                    environment_kind,
+                    distribution,
+                    optional_extra=installation.extra,
+                    additional_requirements=additional_requirements,
+                )
+                installation_description = (
+                    f"extra {installation.extra}"
+                    if installation.extra is not None
+                    else f"requirement {installation.requirement}"
+                )
+                additional_env = {
+                    "OPENAI_AGENTS_INTEGRATION_REQUIRED_OPTIONAL_DEPENDENCIES": (
+                        installation.dependency_module
+                    ),
+                    "OPENAI_AGENTS_INTEGRATION_OPTIONAL_DEPENDENCY_INSTALLATION": (
+                        installation_description
+                    ),
+                }
+                if installation.extra is not None:
+                    additional_env["OPENAI_AGENTS_INTEGRATION_REQUIRED_OPTIONAL_EXTRA"] = (
+                        installation.extra
+                    )
+                run_suite(
+                    python,
+                    wheel,
+                    sdist,
+                    selection="packaging_dependency",
+                    environment_kind=environment_kind,
+                    additional_env=additional_env,
+                    profile=args.profile,
+                    require_no_skips=True,
+                )
+
+    if args.profile == "prospective-platform":
+        assert prospective_policy is not None
+        core_environment_kind = "wheel-prospective-platform-core"
+        core_python = create_environment(core_environment_kind, wheel)
+        run_suite(
+            core_python,
+            wheel,
+            sdist,
+            selection="packaging_dependency",
+            environment_kind=core_environment_kind,
+            profile=args.profile,
+            require_no_skips=True,
+        )
+
+        unsupported_installations = tuple(
+            installation
+            for installation in prospective_policy.dependency_installations
+            if not installation.is_supported_on_current_platform()
+        )
+        for installation in unsupported_installations:
+            print(
+                "[integration] skipping optional dependency "
+                f"{installation.dependency_module} on unsupported platform {sys.platform}",
+                flush=True,
+            )
+        supported_installations = tuple(
+            installation
+            for installation in prospective_policy.dependency_installations
+            if installation.is_supported_on_current_platform()
+        )
+        dependency_extras = sorted(
+            {
+                installation.extra
+                for installation in supported_installations
+                if installation.extra is not None
+            }
+        )
+        dependency_requirements = tuple(
+            sorted(
+                {
+                    installation.requirement
+                    for installation in supported_installations
+                    if installation.requirement is not None
+                }
+            )
+        )
+        dependency_modules = ",".join(
+            installation.dependency_module for installation in supported_installations
+        )
+        environment_kind = "wheel-prospective-platform"
+        python = create_environment(
+            environment_kind,
+            wheel,
+            optional_extra=",".join(dependency_extras) or None,
+            additional_requirements=dependency_requirements,
+        )
+        run_suite(
+            python,
+            wheel,
+            sdist,
+            selection="packaging_dependency",
+            environment_kind=environment_kind,
+            additional_env={
+                "OPENAI_AGENTS_INTEGRATION_REQUIRED_OPTIONAL_DEPENDENCIES": dependency_modules,
+                "OPENAI_AGENTS_INTEGRATION_OPTIONAL_DEPENDENCY_INSTALLATION": (
+                    "policy optional dependencies"
+                ),
+            },
+            profile=args.profile,
+            require_no_skips=True,
+        )
+
     if args.profile in {"packaging", "release"}:
         for artifact_kind, distribution in (("wheel", wheel), ("sdist", sdist)):
             environment_kind = f"{artifact_kind}-cloudflare"
@@ -471,7 +624,13 @@ def main() -> None:
                 sdist,
                 selection="packaging_dependency",
                 environment_kind=environment_kind,
-                additional_env={"OPENAI_AGENTS_INTEGRATION_REQUIRE_OPTIONAL_EXPORTS": "1"},
+                additional_env={
+                    "OPENAI_AGENTS_INTEGRATION_REQUIRED_OPTIONAL_DEPENDENCIES": "aiohttp",
+                    "OPENAI_AGENTS_INTEGRATION_OPTIONAL_DEPENDENCY_INSTALLATION": (
+                        "extra cloudflare"
+                    ),
+                    "OPENAI_AGENTS_INTEGRATION_REQUIRED_OPTIONAL_EXTRA": "cloudflare",
+                },
                 profile=args.profile,
                 require_no_skips=True,
             )

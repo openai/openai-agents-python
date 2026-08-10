@@ -16,10 +16,138 @@ from types import FunctionType, TracebackType
 from typing import Any, cast
 
 
+@dataclasses.dataclass(frozen=True)
+class OptionalDependencyInstallation:
+    dependency_module: str
+    extra: str | None = None
+    requirement: str | None = None
+    unsupported_platforms: tuple[str, ...] = ()
+
+    def is_supported_on_current_platform(self) -> bool:
+        return sys.platform not in self.unsupported_platforms
+
+
+@dataclasses.dataclass(frozen=True)
+class SubmoduleExportPolicy:
+    modules: dict[str, dict[str, dict[str, str]]]
+    dependency_installations: tuple[OptionalDependencyInstallation, ...]
+
+
 def load_api_contract(path: Path) -> dict[str, Any]:
     contract = cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
     _add_legacy_literal_types(contract)
     return contract
+
+
+def load_submodule_export_policy(path: Path) -> SubmoduleExportPolicy:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("submodule export policy must be an object")
+    unknown_top_level_fields = sorted(set(value) - {"modules", "optional_dependencies"})
+    if unknown_top_level_fields:
+        raise ValueError(
+            f"submodule export policy has unknown fields: {unknown_top_level_fields!r}"
+        )
+    modules = value.get("modules")
+    if not isinstance(modules, dict):
+        raise ValueError("submodule export policy modules must be an object keyed by module name")
+    policy: dict[str, dict[str, dict[str, str]]] = {}
+    for module_name, declarations in modules.items():
+        if type(module_name) is not str or not module_name:
+            raise ValueError("submodule export policy module names must be non-empty strings")
+        if not isinstance(declarations, dict):
+            raise ValueError(f"submodule export policy for {module_name} must be an object")
+        unknown_fields = sorted(set(declarations) - {"optional_bindings", "optional_exports"})
+        if unknown_fields:
+            raise ValueError(
+                f"submodule export policy for {module_name} has unknown fields: {unknown_fields!r}"
+            )
+        policy[module_name] = {
+            "optional_bindings": _optional_dependency_modules(
+                declarations.get("optional_bindings", {}), field_name="optional_bindings"
+            ),
+            "optional_exports": _optional_dependency_modules(
+                declarations.get("optional_exports", {}), field_name="optional_exports"
+            ),
+        }
+
+    dependencies = value.get("optional_dependencies")
+    if not isinstance(dependencies, dict):
+        raise ValueError("submodule export policy optional_dependencies must be an object")
+    dependency_installations: list[OptionalDependencyInstallation] = []
+    for module_name, installation in dependencies.items():
+        if type(module_name) is not str or not module_name:
+            raise ValueError("optional dependency module names must be non-empty strings")
+        if not isinstance(installation, dict):
+            raise ValueError(
+                f"optional dependency installation for {module_name} must be an object"
+            )
+        unknown_fields = sorted(
+            set(installation) - {"extra", "requirement", "unsupported_platforms"}
+        )
+        if unknown_fields:
+            raise ValueError(
+                f"optional dependency installation for {module_name} has unknown fields: "
+                f"{unknown_fields!r}"
+            )
+        configured = [field for field in ("extra", "requirement") if field in installation]
+        if len(configured) != 1:
+            raise ValueError(
+                f"optional dependency installation for {module_name} must declare exactly one "
+                "of extra or requirement"
+            )
+        field_name = configured[0]
+        install_value = installation[field_name]
+        if type(install_value) is not str or not install_value:
+            raise ValueError(
+                f"optional dependency installation {field_name} for {module_name} must be a "
+                "non-empty string"
+            )
+        unsupported_platforms = installation.get("unsupported_platforms", [])
+        if (
+            not isinstance(unsupported_platforms, list)
+            or not all(type(platform) is str and platform for platform in unsupported_platforms)
+            or len(unsupported_platforms) != len(set(unsupported_platforms))
+        ):
+            raise ValueError(
+                f"optional dependency installation unsupported_platforms for {module_name} "
+                "must be a list of unique non-empty strings"
+            )
+        dependency_installations.append(
+            OptionalDependencyInstallation(
+                dependency_module=module_name,
+                extra=install_value if field_name == "extra" else None,
+                requirement=install_value if field_name == "requirement" else None,
+                unsupported_platforms=tuple(unsupported_platforms),
+            )
+        )
+
+    referenced_dependencies = {
+        dependency
+        for module_policy in policy.values()
+        for declarations in module_policy.values()
+        for dependency in declarations.values()
+    }
+    missing_installations = sorted(referenced_dependencies - set(dependencies))
+    unused_installations = sorted(set(dependencies) - referenced_dependencies)
+    if missing_installations:
+        raise ValueError(
+            "submodule export policy dependencies are missing installation declarations: "
+            f"{missing_installations!r}"
+        )
+    if unused_installations:
+        raise ValueError(
+            "submodule export policy has unused dependency installation declarations: "
+            f"{unused_installations!r}"
+        )
+    return SubmoduleExportPolicy(
+        modules=policy,
+        dependency_installations=tuple(
+            sorted(
+                dependency_installations, key=lambda installation: installation.dependency_module
+            )
+        ),
+    )
 
 
 def _add_legacy_literal_types(value: object) -> None:
@@ -39,13 +167,15 @@ def _redaction_observables(
     records: Iterable[logging.LogRecord],
 ) -> str:
     values: list[str] = []
-    seen: set[int] = set()
+    seen: dict[int, object] = {}
 
     def visit_exception_state(value: object) -> None:
         value_id = id(value)
         if value_id in seen:
             return
-        seen.add(value_id)
+        # Keep visited objects alive so a later temporary object cannot reuse an id and be
+        # mistaken for a cycle. Traceback frame locals are materialized as temporary dicts.
+        seen[value_id] = value
 
         if isinstance(value, BaseException):
             state = vars(value)
@@ -381,6 +511,7 @@ def build_released_api_contract(
     baseline: str,
     baseline_commit: str,
     agents_module: Any | None = None,
+    submodule_export_policy: Mapping[str, Mapping[str, Mapping[str, str]]] | None = None,
 ) -> dict[str, Any]:
     """Build the next rolling release contract from the current public surface."""
     agents = agents_module or importlib.import_module("agents")
@@ -445,8 +576,40 @@ def build_released_api_contract(
     updated["required_top_level_exports"] = ordered_exports
     updated["callables"] = callables
     excluded_submodule_exports = set(contract.get("submodule_export_exclusions", []))
+    public_modules = list(contract["public_modules"])
+    if submodule_export_policy is not None:
+        invalid_policy_modules = sorted(
+            module_name
+            for module_name in submodule_export_policy
+            if not module_name.startswith("agents.")
+        )
+        if invalid_policy_modules:
+            raise ValueError(
+                "new submodule export policy modules must be under the agents package: "
+                f"{invalid_policy_modules!r}"
+            )
+        released_public_modules = set(public_modules)
+        public_modules.extend(sorted(set(submodule_export_policy) - released_public_modules))
+        unavailable_policy_dependencies = sorted(
+            {
+                dependency_module
+                for module_policy in submodule_export_policy.values()
+                for field_name in ("optional_bindings", "optional_exports")
+                for dependency_module in _optional_dependency_modules(
+                    dict(module_policy.get(field_name, {})), field_name=field_name
+                ).values()
+                if not _optional_dependency_is_available(dependency_module)
+            }
+        )
+        if unavailable_policy_dependencies:
+            raise ValueError(
+                "submodule export policy dependency modules are unavailable: "
+                f"{unavailable_policy_dependencies!r}. Run `make sync` to install all "
+                "optional dependencies, or correct the dependency module names."
+            )
+    updated["public_modules"] = public_modules
     required_submodule_exports: dict[str, dict[str, Any]] = {}
-    for module_name in contract["public_modules"]:
+    for module_name in public_modules:
         if module_name == "agents" or module_name in excluded_submodule_exports:
             continue
         try:
@@ -454,14 +617,19 @@ def build_released_api_contract(
         except Exception as error:
             if _matches_platform_import_error(contract, module_name, error):
                 continue
+            if submodule_export_policy is not None and module_name in submodule_export_policy:
+                raise ValueError(
+                    f"Cannot import submodule export policy module {module_name}: {error!r}"
+                ) from None
             raise
-        previous_module_contract = contract.get("required_submodule_exports", {}).get(
-            module_name, {}
-        )
+        if submodule_export_policy is None:
+            module_policy = contract.get("required_submodule_exports", {}).get(module_name, {})
+        else:
+            module_policy = submodule_export_policy.get(module_name, {})
         module_contract = _submodule_export_contract(
             module,
-            optional_bindings=previous_module_contract.get("optional_bindings", {}),
-            optional_exports=previous_module_contract.get("optional_exports", {}),
+            optional_bindings=module_policy.get("optional_bindings", {}),
+            optional_exports=module_policy.get("optional_exports", {}),
         )
         if module_contract is not None:
             required_submodule_exports[module_name] = module_contract
@@ -644,7 +812,6 @@ def validate_released_api_contract(
     contract: dict[str, Any],
     *,
     agents_module: Any | None = None,
-    require_all_optional_exports: bool = False,
 ) -> list[str]:
     agents = agents_module or importlib.import_module("agents")
     errors: list[str] = []
@@ -718,17 +885,43 @@ def validate_released_api_contract(
                 f"Unable to inspect released {module_name} optional dependencies: {error!r}"
             )
             continue
-        if require_all_optional_exports and unavailable_optional_exports:
-            unavailable = sorted(
-                f"{name} -> {optional_exports[name]}" for name in unavailable_optional_exports
-            )
-            errors.append(
-                f"Required optional dependencies for released {module_name} "
-                f"are unavailable: {unavailable!r}"
-            )
-            continue
+        current_names = set(current["names"])
+        for name in sorted(unavailable_optional_exports & current_names):
+            try:
+                getattr(module, name)
+            except (AttributeError, ImportError):
+                errors.append(
+                    f"Invalid released {module_name} optional dependency declaration: "
+                    f"{name!r} remains in __all__ but its binding is unavailable; "
+                    "declare it in optional_bindings instead of optional_exports"
+                )
+            else:
+                errors.append(
+                    f"Invalid released {module_name} optional dependency declaration: "
+                    f"{name!r} remains in __all__ and its binding resolves; remove its "
+                    "optional declaration or correct its dependency module"
+                )
+        binding_only_names = set(optional_bindings) - set(optional_exports)
+        for name in sorted(unavailable_optional_bindings & binding_only_names):
+            if name not in current_names:
+                errors.append(
+                    f"Invalid released {module_name} optional dependency declaration: "
+                    f"{name!r} is absent from __all__; declare it in optional_exports "
+                    "instead of optional_bindings"
+                )
+                continue
+            try:
+                getattr(module, name)
+            except (AttributeError, ImportError):
+                pass
+            else:
+                errors.append(
+                    f"Invalid released {module_name} optional dependency declaration: "
+                    f"{name!r} remains in __all__ and its binding resolves; remove its "
+                    "optional declaration or correct its dependency module"
+                )
         missing_names = sorted(
-            set(released["names"]) - unavailable_optional_exports - set(current["names"])
+            set(released["names"]) - unavailable_optional_exports - current_names
         )
         if missing_names:
             errors.append(f"Missing released {module_name} exports: {missing_names!r}")

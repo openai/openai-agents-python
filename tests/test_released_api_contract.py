@@ -1,6 +1,8 @@
+import json
+import subprocess
 import sys
 from collections.abc import AsyncIterator, Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
 from importlib.metadata import version
 from pathlib import Path
@@ -20,6 +22,7 @@ from integration_tests._contract_support import (
     _validate_public_property_contract,
     build_released_api_contract,
     load_api_contract,
+    load_submodule_export_policy,
     validate_released_api_contract,
 )
 
@@ -1062,6 +1065,360 @@ def test_release_contract_update_promotes_selected_submodule_exports(
     }
 
 
+def test_release_contract_policy_preserves_new_optional_export_in_core_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = object()
+    optional = object()
+    agents_module = SimpleNamespace(__all__=[])
+    full_submodule = SimpleNamespace(
+        __all__=["Existing", "OptionalBackend"],
+        Existing=existing,
+        OptionalBackend=optional,
+    )
+    core_submodule = SimpleNamespace(__all__=["Existing"], Existing=existing)
+    imported_submodule = full_submodule
+    contract: dict[str, Any] = {
+        "baseline": "v0.19.4",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": [],
+        "public_modules": ["agents.submodule"],
+        "required_submodule_exports": {
+            "agents.submodule": {
+                "names": ["Existing"],
+                "optional_bindings": {},
+                "optional_exports": {},
+            }
+        },
+        "canonical_imports": [],
+        "callables": {},
+    }
+
+    def import_module(module_name: str, _agents_module: object) -> object:
+        return agents_module if module_name == "agents" else imported_submodule
+
+    monkeypatch.setattr(contract_support, "_import_contract_module", import_module)
+    dependency_available = True
+    monkeypatch.setattr(
+        contract_support,
+        "_optional_dependency_is_available",
+        lambda _module_name: dependency_available,
+    )
+    policy = {
+        "agents.submodule": {
+            "optional_bindings": {},
+            "optional_exports": {"OptionalBackend": "missing_optional_backend_dependency"},
+        }
+    }
+
+    updated = build_released_api_contract(
+        contract,
+        baseline="v0.20.0",
+        baseline_commit="b" * 40,
+        agents_module=agents_module,
+        submodule_export_policy=policy,
+    )
+    dependency_available = False
+    imported_submodule = core_submodule
+
+    assert updated["required_submodule_exports"]["agents.submodule"] == {
+        "names": ["Existing", "OptionalBackend"],
+        "optional_bindings": {},
+        "optional_exports": {"OptionalBackend": "missing_optional_backend_dependency"},
+    }
+    assert validate_released_api_contract(updated, agents_module=agents_module) == []
+
+
+def test_release_contract_policy_rejects_unavailable_dependency_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agents_module = SimpleNamespace(__all__=[])
+    submodule = SimpleNamespace(__all__=[])
+    contract: dict[str, Any] = {
+        "baseline": "v0.19.4",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": [],
+        "public_modules": ["agents.submodule"],
+        "canonical_imports": [],
+        "callables": {},
+    }
+    monkeypatch.setattr(
+        contract_support,
+        "_optional_dependency_is_available",
+        lambda _module_name: False,
+    )
+    monkeypatch.setattr(
+        contract_support,
+        "_import_contract_module",
+        lambda module_name, _agents_module: (
+            agents_module if module_name == "agents" else submodule
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="submodule export policy dependency modules are unavailable: "
+        r"\['mistyped_dependency'\]",
+    ):
+        build_released_api_contract(
+            contract,
+            baseline="v0.20.0",
+            baseline_commit="b" * 40,
+            agents_module=agents_module,
+            submodule_export_policy={
+                "agents.submodule": {
+                    "optional_bindings": {},
+                    "optional_exports": {"OptionalBackend": "mistyped_dependency"},
+                }
+            },
+        )
+
+
+def test_release_contract_policy_adds_new_public_optional_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    optional = object()
+    agents_module = SimpleNamespace(__all__=[])
+    submodule = SimpleNamespace(__all__=["OptionalBackend"], OptionalBackend=optional)
+    contract: dict[str, Any] = {
+        "baseline": "v0.19.4",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": [],
+        "public_modules": ["agents"],
+        "canonical_imports": [],
+        "callables": {},
+    }
+    monkeypatch.setattr(
+        contract_support,
+        "_optional_dependency_is_available",
+        lambda _module_name: True,
+    )
+    monkeypatch.setattr(
+        contract_support,
+        "_import_contract_module",
+        lambda module_name, _agents_module: (
+            agents_module if module_name == "agents" else submodule
+        ),
+    )
+
+    updated = build_released_api_contract(
+        contract,
+        baseline="v0.20.0",
+        baseline_commit="b" * 40,
+        agents_module=agents_module,
+        submodule_export_policy={
+            "agents.new_submodule": {
+                "optional_bindings": {},
+                "optional_exports": {"OptionalBackend": "optional_backend"},
+            }
+        },
+    )
+
+    assert updated["public_modules"] == ["agents", "agents.new_submodule"]
+    assert updated["required_submodule_exports"]["agents.new_submodule"] == {
+        "names": ["OptionalBackend"],
+        "optional_bindings": {},
+        "optional_exports": {"OptionalBackend": "optional_backend"},
+    }
+
+
+def test_release_contract_policy_rejects_unimportable_new_public_module() -> None:
+    agents_module = SimpleNamespace(__all__=[])
+    contract: dict[str, Any] = {
+        "baseline": "v0.19.4",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": [],
+        "public_modules": ["agents"],
+        "canonical_imports": [],
+        "callables": {},
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=r"Cannot import submodule export policy module agents\.typo: ModuleNotFoundError",
+    ):
+        build_released_api_contract(
+            contract,
+            baseline="v0.20.0",
+            baseline_commit="b" * 40,
+            agents_module=agents_module,
+            submodule_export_policy={
+                "agents.typo": {"optional_bindings": {}, "optional_exports": {}}
+            },
+        )
+
+
+def test_release_contract_policy_rejects_new_module_outside_agents_package() -> None:
+    agents_module = SimpleNamespace(__all__=[])
+    contract: dict[str, Any] = {
+        "baseline": "v0.19.4",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": [],
+        "public_modules": ["agents"],
+        "canonical_imports": [],
+        "callables": {},
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="new submodule export policy modules must be under the agents package: "
+        r"\['external_package'\]",
+    ):
+        build_released_api_contract(
+            contract,
+            baseline="v0.20.0",
+            baseline_commit="b" * 40,
+            agents_module=agents_module,
+            submodule_export_policy={
+                "external_package": {"optional_bindings": {}, "optional_exports": {}}
+            },
+        )
+
+
+def test_load_submodule_export_policy_rejects_unknown_fields(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        '{"modules": {"agents.submodule": {"optional_export": {}}}, "optional_dependencies": {}}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"submodule export policy for agents.submodule has unknown fields: "
+        r"\['optional_export'\]",
+    ):
+        load_submodule_export_policy(policy_path)
+
+
+def test_load_submodule_export_policy_requires_dependency_installations(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        '{"modules": {"agents.submodule": {"optional_exports": '
+        '{"OptionalBackend": "optional_backend"}}}, "optional_dependencies": {}}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="submodule export policy dependencies are missing installation declarations: "
+        r"\['optional_backend'\]",
+    ):
+        load_submodule_export_policy(policy_path)
+
+
+def test_load_submodule_export_policy_collects_artifact_installations(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        '{"modules": {"agents.submodule": {"optional_bindings": '
+        '{"LazyBinding": "binding_dependency"}, "optional_exports": '
+        '{"ConditionalExport": "export_dependency"}}}, "optional_dependencies": '
+        '{"binding_dependency": {"requirement": "binding-package>=1"}, '
+        '"export_dependency": {"extra": "export-extra"}}}',
+        encoding="utf-8",
+    )
+
+    policy = load_submodule_export_policy(policy_path)
+
+    assert policy.modules == {
+        "agents.submodule": {
+            "optional_bindings": {"LazyBinding": "binding_dependency"},
+            "optional_exports": {"ConditionalExport": "export_dependency"},
+        }
+    }
+    assert [asdict(installation) for installation in policy.dependency_installations] == [
+        {
+            "dependency_module": "binding_dependency",
+            "extra": None,
+            "requirement": "binding-package>=1",
+            "unsupported_platforms": (),
+        },
+        {
+            "dependency_module": "export_dependency",
+            "extra": "export-extra",
+            "requirement": None,
+            "unsupported_platforms": (),
+        },
+    ]
+
+
+def test_load_submodule_export_policy_collects_unsupported_platforms(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        '{"modules": {"agents.submodule": {"optional_exports": '
+        '{"ConditionalExport": "export_dependency"}}}, "optional_dependencies": '
+        '{"export_dependency": {"extra": "export-extra", '
+        '"unsupported_platforms": ["win32"]}}}',
+        encoding="utf-8",
+    )
+
+    policy = load_submodule_export_policy(policy_path)
+
+    assert policy.dependency_installations[0].unsupported_platforms == ("win32",)
+
+
+@pytest.mark.parametrize(
+    "unsupported_platforms",
+    ["win32", [""], ["win32", "win32"]],
+)
+def test_load_submodule_export_policy_rejects_invalid_unsupported_platforms(
+    tmp_path: Path, unsupported_platforms: object
+) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "modules": {
+                    "agents.submodule": {
+                        "optional_exports": {"ConditionalExport": "export_dependency"}
+                    }
+                },
+                "optional_dependencies": {
+                    "export_dependency": {
+                        "extra": "export-extra",
+                        "unsupported_platforms": unsupported_platforms,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must be a list of unique non-empty strings"):
+        load_submodule_export_policy(policy_path)
+
+
+@pytest.mark.parametrize(
+    "protected_path",
+    [
+        CONTRACT,
+        CONTRACT.with_name("released_api_contract_policy.json"),
+    ],
+)
+def test_prospective_output_rejects_contract_input_path(protected_path: Path) -> None:
+    root = CONTRACT.parents[2]
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(root / ".github" / "scripts" / "update_released_api_contract.py"),
+            "--version",
+            version("openai-agents"),
+            "--output",
+            str(protected_path),
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr.strip() == (
+        "--output must not overwrite released API contract inputs: "
+        "tests/fixtures/released_api_contract.json or "
+        "tests/fixtures/released_api_contract_policy.json"
+    )
+
+
 def test_public_api_contract_allows_declared_optional_submodule_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1120,6 +1477,73 @@ def test_public_api_contract_allows_declared_optional_submodule_export(
     assert validate_released_api_contract(contract, agents_module=agents_module) == []
 
 
+def test_public_api_contract_rejects_optional_export_that_remains_in_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agents_module = SimpleNamespace(__all__=[])
+    submodule = SimpleNamespace(__all__=["OptionalBackend"])
+    contract: dict[str, Any] = {
+        "required_top_level_exports": [],
+        "public_modules": ["agents.submodule"],
+        "required_submodule_exports": {
+            "agents.submodule": {
+                "names": ["OptionalBackend"],
+                "optional_bindings": {},
+                "optional_exports": {"OptionalBackend": "missing_optional_backend_dependency"},
+            }
+        },
+        "canonical_imports": [],
+        "callables": {},
+    }
+    monkeypatch.setattr(
+        contract_support,
+        "_import_contract_module",
+        lambda module_name, _agents_module: (
+            agents_module if module_name == "agents" else submodule
+        ),
+    )
+
+    assert validate_released_api_contract(contract, agents_module=agents_module) == [
+        "Invalid released agents.submodule optional dependency declaration: "
+        "'OptionalBackend' remains in __all__ but its binding is unavailable; "
+        "declare it in optional_bindings instead of optional_exports"
+    ]
+
+
+def test_public_api_contract_rejects_optional_binding_absent_from_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agents_module = SimpleNamespace(__all__=[])
+    submodule = SimpleNamespace(__all__=[])
+    contract: dict[str, Any] = {
+        "required_top_level_exports": [],
+        "public_modules": ["agents.submodule"],
+        "required_submodule_exports": {
+            "agents.submodule": {
+                "names": ["OptionalBackend"],
+                "optional_bindings": {"OptionalBackend": "missing_optional_backend_dependency"},
+                "optional_exports": {},
+            }
+        },
+        "canonical_imports": [],
+        "callables": {},
+    }
+    monkeypatch.setattr(
+        contract_support,
+        "_import_contract_module",
+        lambda module_name, _agents_module: (
+            agents_module if module_name == "agents" else submodule
+        ),
+    )
+
+    assert validate_released_api_contract(contract, agents_module=agents_module) == [
+        "Invalid released agents.submodule optional dependency declaration: "
+        "'OptionalBackend' is absent from __all__; declare it in optional_exports "
+        "instead of optional_bindings",
+        "Missing released agents.submodule exports: ['OptionalBackend']",
+    ]
+
+
 def test_public_api_contract_requires_available_optional_submodule_export(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1149,42 +1573,6 @@ def test_public_api_contract_requires_available_optional_submodule_export(
     assert validate_released_api_contract(contract, agents_module=agents_module) == [
         "Missing released agents.submodule exports: ['OptionalBackend']",
         "Missing released agents.submodule bindings: ['OptionalBackend']",
-    ]
-
-
-def test_public_api_contract_requires_declared_dependencies_in_strict_optional_profile(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    agents_module = SimpleNamespace(__all__=[])
-    submodule = SimpleNamespace(__all__=[])
-    contract: dict[str, Any] = {
-        "required_top_level_exports": [],
-        "public_modules": ["agents.submodule"],
-        "required_submodule_exports": {
-            "agents.submodule": {
-                "names": ["OptionalBackend"],
-                "optional_bindings": {},
-                "optional_exports": {"OptionalBackend": "mistyped_dependency_name"},
-            }
-        },
-        "canonical_imports": [],
-        "callables": {},
-    }
-    monkeypatch.setattr(
-        contract_support,
-        "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
-    )
-
-    assert validate_released_api_contract(
-        contract,
-        agents_module=agents_module,
-        require_all_optional_exports=True,
-    ) == [
-        "Required optional dependencies for released agents.submodule are unavailable: "
-        "['OptionalBackend -> mistyped_dependency_name']"
     ]
 
 

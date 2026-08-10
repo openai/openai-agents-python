@@ -16,6 +16,20 @@ check-released-api-contract:
 	@test -n "$(VERSION)" || (echo "VERSION is required, for example VERSION=0.20.0" >&2; exit 2)
 	uv run python .github/scripts/update_released_api_contract.py --version "$(VERSION)" --check
 
+PROSPECTIVE_RELEASED_API_CONTRACT ?= .tmp/prospective_released_api_contract.json
+
+.PHONY: prepare-prospective-released-api-contract
+prepare-prospective-released-api-contract:
+	@version="$$(uv run python -c 'from importlib.metadata import version; print(version("openai-agents"))')"; \
+	uv run python .github/scripts/update_released_api_contract.py \
+		--version "$$version" \
+		--output "$(PROSPECTIVE_RELEASED_API_CONTRACT)"
+
+.PHONY: check-prospective-released-api-contract
+check-prospective-released-api-contract: prepare-prospective-released-api-contract
+	OPENAI_AGENTS_PROSPECTIVE_RELEASE_CONTRACT="$(abspath $(PROSPECTIVE_RELEASED_API_CONTRACT))" \
+		$(MAKE) integration-tests-prospective-contract
+
 .PHONY: format
 format: 
 	uv run ruff format
@@ -102,6 +116,10 @@ integration-tests-manual:
 .PHONY: integration-tests-packaging
 integration-tests-packaging:
 	uv run python .github/scripts/run_integration_tests.py --profile packaging
+
+.PHONY: integration-tests-prospective-contract
+integration-tests-prospective-contract:
+	uv run python .github/scripts/run_integration_tests.py --profile prospective-contract
 
 .PHONY: integration-tests-security
 integration-tests-security:
