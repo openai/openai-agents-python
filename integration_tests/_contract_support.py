@@ -1060,11 +1060,19 @@ def _import_contract_module(module_name: str, agents_module: Any | None) -> Any:
 def _validate_public_property_contract(
     contract: dict[str, Any],
     agents_module: Any | None,
+    *,
+    unsupported_platforms: Mapping[str, tuple[str, ...]] | None = None,
 ) -> list[str]:
     errors: list[str] = []
+    unsupported_platforms = unsupported_platforms or {}
     for entry in contract.get("public_properties", []):
         module_name = entry["module"]
         class_name = entry["class_name"]
+        optional_dependency = _optional_dependency_for_binding(contract, module_name, class_name)
+        if optional_dependency is not None and not _optional_dependency_is_available_for_contract(
+            optional_dependency, unsupported_platforms
+        ):
+            continue
         try:
             module = _import_contract_module(module_name, agents_module)
         except Exception as error:
@@ -1182,7 +1190,13 @@ def validate_released_api_contract(
         errors.append(f"Invalid released optional dependency platform declarations: {error}")
         unsupported_platforms = {}
 
-    errors.extend(_validate_public_property_contract(contract, agents_module))
+    errors.extend(
+        _validate_public_property_contract(
+            contract,
+            agents_module,
+            unsupported_platforms=unsupported_platforms,
+        )
+    )
 
     missing_exports = sorted(set(contract["required_top_level_exports"]) - set(agents.__all__))
     if missing_exports:

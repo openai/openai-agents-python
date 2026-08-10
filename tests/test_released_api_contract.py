@@ -302,6 +302,48 @@ def test_curated_public_property_contract_detects_removed_or_changed_properties(
     ]
 
 
+def test_curated_public_property_contract_honors_optional_dependency_availability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class OptionalClient:
+        pass
+
+    contract: dict[str, Any] = {
+        "required_submodule_exports": {
+            "agents.optional": {
+                "names": ["OptionalClient"],
+                "optional_bindings": {},
+                "optional_exports": {"OptionalClient": "optional_backend"},
+            }
+        },
+        "public_properties": [
+            {
+                "module": "agents.optional",
+                "class_name": "OptionalClient",
+                "names": ["status"],
+            }
+        ],
+    }
+    agents_module = SimpleNamespace(__all__=[])
+    optional_module = SimpleNamespace(OptionalClient=OptionalClient)
+    monkeypatch.setattr(
+        contract_support,
+        "_import_contract_module",
+        lambda module_name, _agents_module: (
+            agents_module if module_name == "agents" else optional_module
+        ),
+    )
+    monkeypatch.setattr(contract_support, "_optional_dependency_is_available", lambda _name: False)
+
+    assert _validate_public_property_contract(contract, agents_module) == []
+
+    monkeypatch.setattr(contract_support, "_optional_dependency_is_available", lambda _name: True)
+
+    assert _validate_public_property_contract(contract, agents_module) == [
+        "agents.optional.OptionalClient.status removed or changed a released public property"
+    ]
+
+
 def test_public_class_member_contract_tracks_only_sdk_owned_inherited_methods() -> None:
     class ExternalBase:
         def external_method(self) -> None:
@@ -2040,6 +2082,16 @@ def test_repository_release_policy_declares_v020_contract_surfaces() -> None:
             "class_name": "RetryPolicyContext",
             "module": "agents.retry",
             "names": ["response_started", "replay_safety", "stateful_request"],
+        },
+        {
+            "class_name": "RunloopPlatformClient",
+            "module": "agents.extensions.sandbox",
+            "names": ["axons", "benchmarks", "blueprints", "network_policies", "secrets"],
+        },
+        {
+            "class_name": "RunloopSandboxClient",
+            "module": "agents.extensions.sandbox",
+            "names": ["platform"],
         },
         {
             "class_name": "SandboxSessionState",

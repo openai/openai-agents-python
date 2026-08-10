@@ -189,6 +189,24 @@
       ]
     },
     {
+      "class_name": "RunloopPlatformClient",
+      "module": "agents.extensions.sandbox",
+      "names": [
+        "axons",
+        "benchmarks",
+        "blueprints",
+        "network_policies",
+        "secrets"
+      ]
+    },
+    {
+      "class_name": "RunloopSandboxClient",
+      "module": "agents.extensions.sandbox",
+      "names": [
+        "platform"
+      ]
+    },
+    {
       "class_name": "SandboxSessionState",
       "module": "agents.sandbox.session.sandbox_session_state",
       "names": [
