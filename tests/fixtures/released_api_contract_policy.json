@@ -152,6 +152,7 @@
         "ModalSandboxSessionState": "modal",
         "RunloopAfterIdle": "runloop_api_client",
         "RunloopCloudBucketMountStrategy": "runloop_api_client",
+        "RunloopExistingSecret": "runloop_api_client",
         "RunloopGatewaySpec": "runloop_api_client",
         "RunloopLaunchParameters": "runloop_api_client",
         "RunloopMcpSpec": "runloop_api_client",

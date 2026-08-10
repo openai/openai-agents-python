@@ -303,7 +303,7 @@ public_blueprints = await client.platform.blueprints.list_public()
 public_benchmarks = await client.platform.benchmarks.list_public()
 ```
 
-`managed_secrets` are stored as Runloop account secrets and only secret references are persisted in session state. The platform facade also exposes Runloop-native helpers for blueprints, benchmarks, secrets, network policies, and axons.
+`managed_secrets` are stored as Runloop account secrets and only secret references are persisted in session state. An entry's value may instead be `RunloopExistingSecret()`, which attaches a secret that is already stored on the account by name, uploading nothing and leaving the stored value untouched. The platform facade also exposes Runloop-native helpers for blueprints, benchmarks, secrets, network policies, and axons.
 
 If you enable `--root`, Runloop launches the devbox with `launch_parameters.user_parameters={"username":"root","uid":0}`. In that mode, the default home and working directory become `/root`, so the example also uses `/root` as its manifest workspace root. If you configure root launch in your own code, either rely on that root-mode default or explicitly choose a `manifest.root` under `/root`.
 ## Blaxel

@@ -422,6 +422,16 @@ class RunloopMcpSpec(BaseModel):
     secret: str = Field(min_length=1)
 
 
+class RunloopExistingSecret(BaseModel):
+    """A `managed_secrets` entry that is already stored on the Runloop account.
+
+    Used in place of a secret value to attach an account secret to the devbox by name,
+    leaving the stored value untouched.
+    """
+
+    model_config = {"frozen": True}
+
+
 def _normalize_runloop_user_parameters(
     user_parameters: RunloopUserParameters | dict[str, object] | None,
 ) -> RunloopUserParameters | None:
@@ -475,7 +485,7 @@ class RunloopSandboxClientOptions(BaseSandboxClientOptions):
     gateways: dict[str, RunloopGatewaySpec] | None = None
     mcp: dict[str, RunloopMcpSpec] | None = None
     metadata: dict[str, str] | None = None
-    managed_secrets: dict[str, str] | None = None
+    managed_secrets: dict[str, str | RunloopExistingSecret] | None = None
 
     def __init__(
         self,
@@ -492,7 +502,7 @@ class RunloopSandboxClientOptions(BaseSandboxClientOptions):
         gateways: dict[str, RunloopGatewaySpec] | None = None,
         mcp: dict[str, RunloopMcpSpec] | None = None,
         metadata: dict[str, str] | None = None,
-        managed_secrets: dict[str, str] | None = None,
+        managed_secrets: dict[str, str | RunloopExistingSecret] | None = None,
         *,
         type: Literal["runloop"] = "runloop",
     ) -> None:
@@ -1482,10 +1492,10 @@ def _runloop_launch_parameters_payload(
     return payload or None
 
 
-async def _upsert_runloop_managed_secrets(
+async def _resolve_runloop_managed_secret_refs(
     sdk: Any,
     *,
-    managed_secrets: dict[str, str] | None,
+    managed_secrets: dict[str, str | RunloopExistingSecret] | None,
     timeout_s: float,
 ) -> dict[str, str]:
     if not managed_secrets:
@@ -1493,13 +1503,14 @@ async def _upsert_runloop_managed_secrets(
 
     secret_refs: dict[str, str] = {}
     for env_var, secret_value in sorted(managed_secrets.items()):
-        try:
-            await sdk.secret.create(name=env_var, value=secret_value, timeout=timeout_s)
-        except Exception as e:
-            if _is_runloop_conflict(e):
-                await sdk.secret.update(env_var, value=secret_value, timeout=timeout_s)
-            else:
-                raise
+        if not isinstance(secret_value, RunloopExistingSecret):
+            try:
+                await sdk.secret.create(name=env_var, value=secret_value, timeout=timeout_s)
+            except Exception as e:
+                if _is_runloop_conflict(e):
+                    await sdk.secret.update(env_var, value=secret_value, timeout=timeout_s)
+                else:
+                    raise
         secret_refs[env_var] = env_var
     return secret_refs
 
@@ -1599,7 +1610,7 @@ class RunloopSandboxClient(BaseSandboxClient[RunloopSandboxClientOptions | None]
         else:
             timeouts = RunloopTimeouts.model_validate(timeouts_in)
 
-        secret_refs = await _upsert_runloop_managed_secrets(
+        secret_refs = await _resolve_runloop_managed_secret_refs(
             self._sdk,
             managed_secrets=resolved_options.managed_secrets,
             timeout_s=timeouts.fast_op_s,

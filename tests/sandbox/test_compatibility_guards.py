@@ -304,6 +304,7 @@ def test_core_sandbox_public_export_surface_is_stable() -> None:
                 "DEFAULT_RUNLOOP_WORKSPACE_ROOT",
                 "DEFAULT_RUNLOOP_ROOT_WORKSPACE_ROOT",
                 "RunloopAfterIdle",
+                "RunloopExistingSecret",
                 "RunloopGatewaySpec",
                 "RunloopLaunchParameters",
                 "RunloopMcpSpec",

@@ -1874,6 +1874,90 @@ class TestRunloopSandbox:
         assert session.state.secret_refs == {"API_KEY": "API_KEY"}
 
     @pytest.mark.asyncio
+    async def test_create_references_existing_managed_secrets_without_uploading_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runloop_module = _load_runloop_module(monkeypatch)
+
+        async with runloop_module.RunloopSandboxClient() as client:
+            session = await client.create(
+                options=runloop_module.RunloopSandboxClientOptions(
+                    managed_secrets={
+                        "SHARED_TOKEN": runloop_module.RunloopExistingSecret(),
+                        "API_KEY": runloop_module.RunloopExistingSecret(),
+                    },
+                )
+            )
+            sdk = _FakeAsyncRunloopSDK.created_instances[-1]
+
+        assert sdk.secret.create_calls == []
+        assert sdk.secret.update_calls == []
+        create_params = sdk.devbox.create_calls[0]
+        assert create_params["secrets"] == {
+            "API_KEY": "API_KEY",
+            "SHARED_TOKEN": "SHARED_TOKEN",
+        }
+        assert session.state.secret_refs == {
+            "API_KEY": "API_KEY",
+            "SHARED_TOKEN": "SHARED_TOKEN",
+        }
+
+    @pytest.mark.asyncio
+    async def test_create_mixes_existing_and_uploaded_managed_secrets(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runloop_module = _load_runloop_module(monkeypatch)
+
+        async with runloop_module.RunloopSandboxClient() as client:
+            session = await client.create(
+                options=runloop_module.RunloopSandboxClientOptions(
+                    managed_secrets={
+                        "API_KEY": "super-secret",
+                        "SHARED_TOKEN": runloop_module.RunloopExistingSecret(),
+                    },
+                )
+            )
+            sdk = _FakeAsyncRunloopSDK.created_instances[-1]
+
+        assert sdk.secret.create_calls == [("API_KEY", "super-secret", {"timeout": 30.0})]
+        assert sdk.secret.update_calls == []
+        assert "SHARED_TOKEN" not in sdk.secret.secrets
+        create_params = sdk.devbox.create_calls[0]
+        assert create_params["secrets"] == {
+            "API_KEY": "API_KEY",
+            "SHARED_TOKEN": "SHARED_TOKEN",
+        }
+        assert session.state.secret_refs == {
+            "API_KEY": "API_KEY",
+            "SHARED_TOKEN": "SHARED_TOKEN",
+        }
+        assert "super-secret" not in json.dumps(session.state.model_dump(mode="json"))
+
+    def test_runloop_client_options_round_trip_existing_managed_secrets(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runloop_module = _load_runloop_module(monkeypatch)
+
+        options = runloop_module.RunloopSandboxClientOptions(
+            managed_secrets={
+                "API_KEY": "super-secret",
+                "SHARED_TOKEN": runloop_module.RunloopExistingSecret(),
+            },
+        )
+
+        restored = runloop_module.RunloopSandboxClientOptions.model_validate(
+            json.loads(json.dumps(options.model_dump(mode="json")))
+        )
+
+        assert restored.managed_secrets == {
+            "API_KEY": "super-secret",
+            "SHARED_TOKEN": runloop_module.RunloopExistingSecret(),
+        }
+
+    @pytest.mark.asyncio
     async def test_resume_and_snapshot_restore_reuse_runloop_native_options(
         self,
         monkeypatch: pytest.MonkeyPatch,
