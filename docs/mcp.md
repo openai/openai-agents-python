@@ -30,6 +30,8 @@ The sections below walk through each option, how to configure it, and when to pr
 
 The Agents SDK supports both major versions of the `mcp` Python package through the dependency range `mcp>=1.19.0,<3`. The installed `mcp` package version is separate from the MCP protocol version negotiated with a server. The Agents SDK detects the installed package major version and adapts stdio, SSE, and Streamable HTTP connections automatically, so ordinary server configuration does not need a version switch.
 
+When MCP Python SDK v2 is installed, the Agents SDK creates the v2 `mcp.Client` with `mode="auto"` around the configured local transport. The client first sends a `server/discover` probe at the newest protocol version supported by the installed MCP SDK. A modern server answers the probe, and the client adopts the result. If an older server does not support `server/discover`, the client falls back to the legacy `initialize` handshake and uses the protocol version negotiated there. Installing MCP Python SDK v2 therefore does not force every connection to use the newest MCP protocol version. See the MCP Python SDK's [protocol version negotiation guide](https://py.sdk.modelcontextprotocol.io/protocol-versions/).
+
 Most applications should let their dependency resolver select a compatible version. If your application must stay on one major version, add an explicit constraint alongside `openai-agents`:
 
 ```bash
@@ -295,9 +297,9 @@ server = MCPServerStreamableHttp(
 
 If your run context is a Pydantic model, dataclass, or custom class, read the tenant ID with attribute access instead.
 
-### MCP tool outputs: text and images
+### MCP tool outputs: text, images, and other content
 
-When an MCP tool returns image content, the SDK automatically maps it to image-type entries in the tool output. Mixed text/image responses are forwarded as a list of output items, so agents can consume MCP image results the same way they consume image output from regular function tools.
+When an MCP result uses its content blocks, the SDK forwards text content as text output and maps image content to image-type entries in the tool output. For other MCP content block types, including audio and resource blocks, the SDK forwards a text output whose value is the block's valid JSON serialization. Responses that contain multiple content blocks are forwarded as a list of output items. If `use_structured_content=True` selects non-error `structuredContent`, that structured payload takes precedence over these content blocks.
 
 ## 3. HTTP with SSE MCP servers
 
@@ -389,7 +391,8 @@ Key behaviors:
 - Failures are tracked in `failed_servers` and `errors`.
 - Set `strict=True` to raise on the first connection failure.
 - Call `reconnect(failed_only=True)` to retry failed servers, or `reconnect(failed_only=False)` to restart all servers.
-- Set `connect_timeout_seconds`, `cleanup_timeout_seconds`, and `connect_in_parallel` to tune lifecycle behavior. Lifecycle timeouts accept positive finite seconds, or `None` to disable them, and are validated both during construction and assignment; zero is rejected because it would create an immediate deadline.
+- Calls to `connect_all()`, `reconnect()`, and `cleanup_all()` are serialized. If one lifecycle operation is already running, another lifecycle operation waits for it to finish instead of connecting or cleaning up the same servers concurrently.
+- Set `connect_timeout_seconds`, `cleanup_timeout_seconds`, and `connect_in_parallel` to tune lifecycle behavior. Both lifecycle timeouts default to 10 seconds. They accept positive finite seconds, or `None` to disable them, and are validated both during construction and assignment; zero is rejected because it would create an immediate deadline.
 
 ## Common server capabilities
 

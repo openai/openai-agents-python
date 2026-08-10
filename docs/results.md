@@ -120,6 +120,8 @@ If a tool needs approval, pending approvals are exposed in [`RunResult.interrupt
 
 Call [`to_state()`][agents.result.RunResult.to_state] to capture a resumable [`RunState`][agents.run_state.RunState], approve or reject the pending items, and then resume with `Runner.run(...)` or `Runner.run_streamed(...)`.
 
+When a [`ToolCallOutputItem`][agents.items.ToolCallOutputItem] output is a Pydantic model or dataclass, `RunState` serializes that output as structured data. `RunState` also traverses dictionaries, lists, and tuples and converts Pydantic models or dataclasses that it encounters in those containers; tuples are restored as lists after a JSON round trip. Other non-JSON-compatible values can fall back to their string representation, so return explicitly JSON-compatible data when an exact custom type must survive serialization.
+
 ```python
 from agents import Agent, Runner
 
