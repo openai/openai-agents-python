@@ -1223,6 +1223,103 @@ def test_release_contract_policy_promotes_canonical_imports_and_public_propertie
     assert updated["callables"]["agents.submodule.NewPublic"] == _callable_contract(NewPublic)
 
 
+def test_release_contract_policy_honors_unsupported_platform_during_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PlatformBinding:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+    agents_module = SimpleNamespace(__all__=[])
+    platform_parent = SimpleNamespace(__all__=[])
+    optional_parent = SimpleNamespace(__all__=[])
+    contract: dict[str, Any] = {
+        "baseline": "v0.19.4",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": [],
+        "public_modules": [
+            "agents",
+            "agents.platform_parent",
+            "agents.platform_child",
+        ],
+        "platform_import_errors": [
+            {
+                "module": "agents.platform_child",
+                "platforms": ["win32"],
+                "error_type": "ImportError",
+                "message_contains": "not supported on Windows",
+            }
+        ],
+        "canonical_imports": [
+            {
+                "canonical_module": "agents.platform_child",
+                "canonical_name": "PlatformBinding",
+                "module": "agents.platform_parent",
+                "name": "PlatformBinding",
+            }
+        ],
+        "callables": {
+            "agents.platform_parent.PlatformBinding": _callable_contract(PlatformBinding)
+        },
+    }
+    provider_entry = {
+        "canonical_module": "agents.optional_impl",
+        "canonical_name": "OptionalProvider",
+        "module": "agents.optional_parent",
+        "name": "OptionalProvider",
+    }
+
+    def import_module(module_name: str, _agents_module: object) -> object:
+        if module_name == "agents":
+            return agents_module
+        if module_name == "agents.platform_parent":
+            return platform_parent
+        if module_name == "agents.platform_child":
+            raise ImportError("Platform binding is not supported on Windows")
+        if module_name == "agents.optional_parent":
+            return optional_parent
+        raise AssertionError(f"Unexpected import: {module_name}")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(contract_support, "_optional_dependency_is_available", lambda _name: False)
+    monkeypatch.setattr(contract_support, "_import_contract_module", import_module)
+
+    updated = build_released_api_contract(
+        contract,
+        baseline="v0.20.0",
+        baseline_commit="b" * 40,
+        agents_module=agents_module,
+        release_policy=_release_policy(
+            {
+                "agents.optional_parent": {
+                    "optional_bindings": {},
+                    "optional_exports": {"OptionalProvider": "optional_backend"},
+                }
+            },
+            dependency_installations=(
+                OptionalDependencyInstallation(
+                    dependency_module="optional_backend",
+                    extra="optional-provider",
+                    unsupported_platforms=("win32",),
+                ),
+            ),
+            canonical_imports=(provider_entry,),
+        ),
+    )
+
+    assert updated["optional_dependency_unsupported_platforms"] == {"optional_backend": ["win32"]}
+    assert provider_entry in updated["canonical_imports"]
+    assert updated["required_submodule_exports"]["agents.optional_parent"] == {
+        "names": ["OptionalProvider"],
+        "optional_bindings": {},
+        "optional_exports": {"OptionalProvider": "optional_backend"},
+    }
+    assert updated["callables"]["agents.platform_parent.PlatformBinding"] == _callable_contract(
+        PlatformBinding
+    )
+    assert "agents.optional_parent.OptionalProvider" not in updated["callables"]
+
+
 def test_public_api_contract_skips_optional_surface_on_frozen_unsupported_platform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1305,6 +1402,42 @@ def test_public_api_contract_allows_present_optional_surface_on_unsupported_plat
     )
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == []
+
+
+def test_public_api_contract_rejects_dangling_optional_export_on_unsupported_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agents_module = SimpleNamespace(__all__=[])
+    submodule = SimpleNamespace(__all__=["OptionalExport"])
+    contract: dict[str, Any] = {
+        "required_top_level_exports": [],
+        "public_modules": ["agents.submodule"],
+        "required_submodule_exports": {
+            "agents.submodule": {
+                "names": ["OptionalExport"],
+                "optional_bindings": {},
+                "optional_exports": {"OptionalExport": "optional_export_dependency"},
+            }
+        },
+        "optional_dependency_unsupported_platforms": {"optional_export_dependency": ["win32"]},
+        "canonical_imports": [],
+        "callables": {},
+    }
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(contract_support, "_optional_dependency_is_available", lambda _name: True)
+    monkeypatch.setattr(
+        contract_support,
+        "_import_contract_module",
+        lambda module_name, _agents_module: (
+            agents_module if module_name == "agents" else submodule
+        ),
+    )
+
+    assert validate_released_api_contract(contract, agents_module=agents_module) == [
+        "Invalid released agents.submodule optional dependency declaration: "
+        "'OptionalExport' remains in __all__ on an unsupported platform but its "
+        "binding is unavailable"
+    ]
 
 
 def test_public_api_contract_requires_optional_surface_on_supported_platform(
@@ -1592,29 +1725,40 @@ def test_load_submodule_export_policy_collects_unsupported_platforms(tmp_path: P
     assert policy.dependency_installations[0].unsupported_platforms == ("win32",)
 
 
-@pytest.mark.allow_call_model_methods
-def test_repository_release_policy_promotes_v020_contract_surfaces() -> None:
+def test_repository_release_policy_declares_v020_contract_surfaces() -> None:
     policy = load_submodule_export_policy(CONTRACT.with_name("released_api_contract_policy.json"))
-    updated = build_released_api_contract(
-        load_api_contract(CONTRACT),
-        baseline="v0.20.0",
-        baseline_commit="b" * 40,
-        release_policy=policy,
-    )
 
-    assert updated["optional_dependency_unsupported_platforms"] == {"vercel": ["win32"]}
-    assert all(entry in updated["canonical_imports"] for entry in policy.canonical_imports)
-    assert all(entry in updated["public_properties"] for entry in policy.public_properties)
-    assert "agents.items.InputItem" not in updated["callables"]
-    assert "InputItem" in updated["callables"]
-    assert {
-        "agents.extensions.sandbox.ModalSandboxClient",
-        "agents.extensions.sandbox.ModalSandboxClientOptions",
-        "agents.extensions.sandbox.RunloopSandboxClient",
-        "agents.extensions.sandbox.RunloopSandboxClientOptions",
-        "agents.extensions.sandbox.VercelSandboxClient",
-        "agents.extensions.sandbox.VercelSandboxClientOptions",
-    }.issubset(updated["callables"])
+    assert next(
+        installation
+        for installation in policy.dependency_installations
+        if installation.dependency_module == "vercel"
+    ).unsupported_platforms == ("win32",)
+    assert {(entry["module"], entry["name"]) for entry in policy.canonical_imports} == {
+        ("agents.items", "InputItem"),
+        ("agents.extensions.sandbox", "ModalSandboxClient"),
+        ("agents.extensions.sandbox", "ModalSandboxClientOptions"),
+        ("agents.extensions.sandbox", "RunloopSandboxClient"),
+        ("agents.extensions.sandbox", "RunloopSandboxClientOptions"),
+        ("agents.extensions.sandbox", "VercelSandboxClient"),
+        ("agents.extensions.sandbox", "VercelSandboxClientOptions"),
+    }
+    assert policy.public_properties == (
+        {
+            "class_name": "RunState",
+            "module": "agents.run_state",
+            "names": ["pending_input"],
+        },
+        {
+            "class_name": "RetryPolicyContext",
+            "module": "agents.retry",
+            "names": ["response_started", "replay_safety", "stateful_request"],
+        },
+        {
+            "class_name": "SandboxSessionState",
+            "module": "agents.sandbox.session.sandbox_session_state",
+            "names": ["mount_authority_redacted", "mount_authority_rebound"],
+        },
+    )
 
 
 @pytest.mark.parametrize(

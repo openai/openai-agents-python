@@ -667,7 +667,15 @@ def _optional_dependency_is_unsupported_for_contract(
 def _optional_dependency_for_binding(
     contract: Mapping[str, Any], module_name: str, binding_name: str
 ) -> str | None:
-    module_contract = contract.get("required_submodule_exports", {}).get(module_name, {})
+    return _optional_dependency_for_binding_in_modules(
+        contract.get("required_submodule_exports", {}), module_name, binding_name
+    )
+
+
+def _optional_dependency_for_binding_in_modules(
+    modules: Mapping[str, Any], module_name: str, binding_name: str
+) -> str | None:
+    module_contract = modules.get(module_name, {})
     for field_name in ("optional_bindings", "optional_exports"):
         dependency_module = module_contract.get(field_name, {}).get(binding_name)
         if dependency_module is not None:
@@ -724,6 +732,15 @@ def build_released_api_contract(
         contract["canonical_imports"],
         release_policy.canonical_imports if release_policy is not None else (),
     )
+    policy_unsupported_platforms = (
+        {
+            installation.dependency_module: installation.unsupported_platforms
+            for installation in release_policy.dependency_installations
+            if installation.unsupported_platforms
+        }
+        if release_policy is not None
+        else {}
+    )
     top_level_callable_ids = {
         id(getattr(agents, name)) for name in callables if not name.startswith("agents.")
     }
@@ -732,8 +749,38 @@ def build_released_api_contract(
         if module_name == "agents":
             continue
         qualified_name = f"{module_name}.{entry['name']}"
-        module = _import_contract_module(module_name, agents_module)
-        value = getattr(module, entry["name"])
+        optional_dependency = (
+            _optional_dependency_for_binding_in_modules(
+                release_policy.modules, module_name, entry["name"]
+            )
+            if release_policy is not None
+            else None
+        )
+        if optional_dependency is not None and not _optional_dependency_is_available_for_contract(
+            optional_dependency, policy_unsupported_platforms
+        ):
+            if qualified_name in contract["callables"]:
+                callables[qualified_name] = deepcopy(contract["callables"][qualified_name])
+            continue
+        try:
+            module = _import_contract_module(module_name, agents_module)
+        except Exception as error:
+            if _matches_platform_import_error(contract, module_name, error):
+                if qualified_name in contract["callables"]:
+                    callables[qualified_name] = deepcopy(contract["callables"][qualified_name])
+                continue
+            raise
+        value = getattr(module, entry["name"], None)
+        if value is None:
+            try:
+                _import_contract_module(entry["canonical_module"], agents_module)
+            except Exception as error:
+                if _matches_platform_import_error(contract, entry["canonical_module"], error):
+                    if qualified_name in contract["callables"]:
+                        callables[qualified_name] = deepcopy(contract["callables"][qualified_name])
+                    continue
+                raise
+            continue
         if id(value) in top_level_callable_ids:
             continue
         kind = _callable_kind(value)
@@ -756,9 +803,8 @@ def build_released_api_contract(
     )
     if release_policy is not None:
         updated["optional_dependency_unsupported_platforms"] = {
-            installation.dependency_module: list(installation.unsupported_platforms)
-            for installation in release_policy.dependency_installations
-            if installation.unsupported_platforms
+            dependency_module: list(platforms)
+            for dependency_module, platforms in policy_unsupported_platforms.items()
         }
     excluded_submodule_exports = set(contract.get("submodule_export_exclusions", []))
     public_modules = list(contract["public_modules"])
@@ -784,7 +830,10 @@ def build_released_api_contract(
                 for dependency_module in _optional_dependency_modules(
                     dict(module_policy.get(field_name, {})), field_name=field_name
                 ).values()
-                if not _optional_dependency_is_available(dependency_module)
+                if not _optional_dependency_is_unsupported_for_contract(
+                    dependency_module, policy_unsupported_platforms
+                )
+                and not _optional_dependency_is_available(dependency_module)
             }
         )
         if unavailable_policy_dependencies:
@@ -812,10 +861,21 @@ def build_released_api_contract(
             module_policy = contract.get("required_submodule_exports", {}).get(module_name, {})
         else:
             module_policy = submodule_export_policy.get(module_name, {})
+        allowed_missing_optional_exports = {
+            name
+            for name, dependency_module in _optional_dependency_modules(
+                dict(module_policy.get("optional_exports", {})),
+                field_name="optional_exports",
+            ).items()
+            if _optional_dependency_is_unsupported_for_contract(
+                dependency_module, policy_unsupported_platforms
+            )
+        }
         module_contract = _submodule_export_contract(
             module,
             optional_bindings=module_policy.get("optional_bindings", {}),
             optional_exports=module_policy.get("optional_exports", {}),
+            allowed_missing_optional_exports=allowed_missing_optional_exports,
         )
         if module_contract is not None:
             required_submodule_exports[module_name] = module_contract
@@ -925,6 +985,7 @@ def _submodule_export_contract(
     *,
     optional_bindings: Mapping[str, str] | None = None,
     optional_exports: Mapping[str, str] | None = None,
+    allowed_missing_optional_exports: Iterable[str] = (),
 ) -> dict[str, Any] | None:
     exports = getattr(module, "__all__", None)
     if exports is None:
@@ -942,11 +1003,19 @@ def _submodule_export_contract(
     )
     optional_binding_names = set(optional_binding_modules)
     optional_export_names = set(optional_export_modules)
-    unknown_optional_names = sorted((optional_binding_names | optional_export_names) - set(names))
+    allowed_missing_names = set(allowed_missing_optional_exports)
+    unknown_optional_names = sorted(
+        (optional_binding_names | optional_export_names) - set(names) - allowed_missing_names
+    )
     if unknown_optional_names:
         raise ValueError(
             f"optional submodule bindings are not exported: {unknown_optional_names!r}"
         )
+    names.extend(
+        name
+        for name in optional_export_modules
+        if name in allowed_missing_names and name not in names
+    )
     return {
         "names": names,
         "optional_bindings": {
@@ -1097,23 +1166,29 @@ def validate_released_api_contract(
             )
             continue
         current_names = set(current["names"])
-        for name in sorted(
-            (unavailable_optional_exports - unsupported_optional_exports) & current_names
-        ):
+        for name in sorted(unavailable_optional_exports & current_names):
             try:
                 getattr(module, name)
             except (AttributeError, ImportError):
-                errors.append(
-                    f"Invalid released {module_name} optional dependency declaration: "
-                    f"{name!r} remains in __all__ but its binding is unavailable; "
-                    "declare it in optional_bindings instead of optional_exports"
-                )
+                if name in unsupported_optional_exports:
+                    errors.append(
+                        f"Invalid released {module_name} optional dependency declaration: "
+                        f"{name!r} remains in __all__ on an unsupported platform but its "
+                        "binding is unavailable"
+                    )
+                else:
+                    errors.append(
+                        f"Invalid released {module_name} optional dependency declaration: "
+                        f"{name!r} remains in __all__ but its binding is unavailable; "
+                        "declare it in optional_bindings instead of optional_exports"
+                    )
             else:
-                errors.append(
-                    f"Invalid released {module_name} optional dependency declaration: "
-                    f"{name!r} remains in __all__ and its binding resolves; remove its "
-                    "optional declaration or correct its dependency module"
-                )
+                if name not in unsupported_optional_exports:
+                    errors.append(
+                        f"Invalid released {module_name} optional dependency declaration: "
+                        f"{name!r} remains in __all__ and its binding resolves; remove its "
+                        "optional declaration or correct its dependency module"
+                    )
         binding_only_names = set(optional_bindings) - set(optional_exports)
         for name in sorted(
             (unavailable_optional_bindings - unsupported_optional_bindings) & binding_only_names
