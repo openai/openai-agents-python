@@ -19,19 +19,48 @@ def _buffer_to_audio_file(
     sample_width: int = 2,
     channels: int = 1,
 ) -> tuple[str, io.BytesIO, str]:
+    if sample_width not in {1, 2, 3, 4}:
+        raise UserError("Sample width must be between 1 and 4 bytes")
+
     if buffer.dtype == np.float32:
-        # convert to int16
-        buffer = np.clip(buffer, -1.0, 1.0)
-        buffer = (buffer * 32767).astype(np.int16)
+        clipped_buffer = np.clip(buffer, -1.0, 1.0)
+        if sample_width == 1:
+            audio_bytes = (
+                np.rint((clipped_buffer.astype(np.float64) + 1.0) * 127.5)
+                .astype(np.uint8)
+                .tobytes()
+            )
+        elif sample_width == 2:
+            # Keep the established float32-to-PCM16 quantization unchanged.
+            audio_bytes = (clipped_buffer * 32767).astype("<i2").tobytes()
+        else:
+            max_sample_value = (1 << (sample_width * 8 - 1)) - 1
+            pcm_buffer = (clipped_buffer.astype(np.float64) * max_sample_value).astype(np.int32)
+            if sample_width == 3:
+                pcm_32 = np.ascontiguousarray(pcm_buffer, dtype="<i4")
+                audio_bytes = pcm_32.view(np.uint8).reshape(-1, 4)[:, :3].tobytes()
+            else:
+                audio_bytes = pcm_buffer.astype("<i4").tobytes()
     elif buffer.dtype != np.int16:
         raise UserError("Buffer must be a numpy array of int16 or float32")
+    elif sample_width == 1:
+        audio_bytes = ((buffer.astype(np.int32) >> 8) + 128).astype(np.uint8).tobytes()
+    else:
+        pcm_buffer = buffer.astype(np.int32) << (8 * (sample_width - 2))
+        if sample_width == 2:
+            audio_bytes = pcm_buffer.astype("<i2").tobytes()
+        elif sample_width == 3:
+            pcm_32 = np.ascontiguousarray(pcm_buffer, dtype="<i4")
+            audio_bytes = pcm_32.view(np.uint8).reshape(-1, 4)[:, :3].tobytes()
+        else:
+            audio_bytes = pcm_buffer.astype("<i4").tobytes()
 
     audio_file = io.BytesIO()
     with wave.open(audio_file, "w") as wav_file:
         wav_file.setnchannels(channels)
         wav_file.setsampwidth(sample_width)
         wav_file.setframerate(frame_rate)
-        wav_file.writeframes(buffer.tobytes())
+        wav_file.writeframes(audio_bytes)
         audio_file.seek(0)
 
     # (filename, bytes, content_type)
