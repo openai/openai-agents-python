@@ -34,6 +34,116 @@ def test_apply_diff_applies_contextual_replacement() -> None:
     assert apply_diff(input_text, diff) == "line1\nupdated\nline3\n"
 
 
+def test_apply_diff_applies_stacked_anchors_from_the_tool_description() -> None:
+    """The worked example the apply_patch tool description gives the model."""
+    input_text = (
+        "\n".join(
+            [
+                "class BaseClass",
+                "    def search():",
+                "        pass",
+                "",
+                "class Subclass",
+                "    def search():",
+                "        pass",
+            ]
+        )
+        + "\n"
+    )
+    diff = "\n".join(
+        [
+            "@@ class BaseClass",
+            "@@     def search():",
+            "-        pass",
+            "+        raise NotImplementedError()",
+            "",
+            "@@ class Subclass",
+            "@@     def search():",
+            "-        pass",
+            "+        raise NotImplementedError()",
+        ]
+    )
+
+    assert (
+        apply_diff(input_text, diff)
+        == "\n".join(
+            [
+                "class BaseClass",
+                "    def search():",
+                "        raise NotImplementedError()",
+                "",
+                "class Subclass",
+                "    def search():",
+                "        raise NotImplementedError()",
+            ]
+        )
+        + "\n"
+    )
+
+
+def test_apply_diff_stacked_anchors_narrow_to_the_named_block() -> None:
+    """The second anchor skips an earlier matching body inside the selected class."""
+    input_text = (
+        "\n".join(
+            [
+                "class First",
+                "    def target():",
+                "        return 0",
+                "",
+                "class Second",
+                "    def helper():",
+                "        pass",
+                "",
+                "    def target():",
+                "        pass",
+            ]
+        )
+        + "\n"
+    )
+    diff = "\n".join(
+        [
+            "@@ class Second",
+            "@@     def target():",
+            "-        pass",
+            "+        return 1",
+        ]
+    )
+
+    assert (
+        apply_diff(input_text, diff)
+        == "\n".join(
+            [
+                "class First",
+                "    def target():",
+                "        return 0",
+                "",
+                "class Second",
+                "    def helper():",
+                "        pass",
+                "",
+                "    def target():",
+                "        return 1",
+            ]
+        )
+        + "\n"
+    )
+
+
+def test_apply_diff_stacked_anchors_stay_advisory_when_unmatched() -> None:
+    """Same rule a single unmatched anchor already follows: locate by context, don't fail."""
+    input_text = "a\nb\n"
+    diff = "\n".join(["@@ nope", "@@ also-nope", "-b", "+B"])
+
+    assert apply_diff(input_text, diff) == "a\nB\n"
+
+
+def test_apply_diff_stacked_anchors_accept_a_trailing_bare_anchor() -> None:
+    input_text = "class Only\n    def run():\n        pass\n"
+    diff = "\n".join(["@@ class Only", "@@", "-        pass", "+        return 1"])
+
+    assert apply_diff(input_text, diff) == "class Only\n    def run():\n        return 1\n"
+
+
 def test_apply_diff_raises_on_context_mismatch() -> None:
     input_text = "one\ntwo\n"
     diff = "\n".join(["@@ -1,2 +1,2 @@", " x", "-two", "+2"])

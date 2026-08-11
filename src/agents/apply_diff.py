@@ -130,19 +130,20 @@ def _parse_update_diff(lines: list[str], input: str) -> ParsedUpdateDiff:
     cursor = 0
 
     while not _is_done(parser, END_SECTION_MARKERS):
-        anchor = _read_str(parser, "@@ ")
-        has_bare_anchor = (
-            anchor == "" and parser.index < len(parser.lines) and parser.lines[parser.index] == "@@"
-        )
-        if has_bare_anchor:
-            parser.index += 1
+        anchors, has_anchor = _read_anchors(parser)
 
-        if not (anchor or has_bare_anchor or cursor == 0):
+        if not (has_anchor or cursor == 0):
             current_line = parser.lines[parser.index] if parser.index < len(parser.lines) else ""
             raise ValueError(f"Invalid Line:\n{current_line}")
 
-        if anchor.strip():
-            cursor = _advance_cursor_to_anchor(anchor, input_lines, cursor, parser)
+        for index, anchor in enumerate(anchors):
+            cursor = _advance_cursor_to_anchor(
+                anchor,
+                input_lines,
+                cursor,
+                parser,
+                force_forward_search=index > 0,
+            )
 
         section = _read_section(parser.lines, parser.index)
         find_result = _find_context(input_lines, section.next_context, cursor, section.eof)
@@ -168,22 +169,62 @@ def _parse_update_diff(lines: list[str], input: str) -> ParsedUpdateDiff:
     return ParsedUpdateDiff(chunks=chunks, fuzz=parser.fuzz)
 
 
+def _read_anchors(parser: ParserState) -> tuple[list[str], bool]:
+    """Consume the ``@@`` header lines that introduce one hunk.
+
+    The patch format lets a hunk carry several stacked headers, so nested code can be
+    located when a single header plus context is still ambiguous::
+
+        @@ class BaseClass
+        @@     def method():
+
+    Returns the non-empty headers in the order they should narrow the search, plus
+    whether a usable header was seen at all.
+    """
+    anchors: list[str] = []
+    has_anchor = False
+
+    while True:
+        start_index = parser.index
+        anchor = _read_str(parser, "@@ ")
+        consumed = parser.index != start_index
+        bare = False
+
+        if not consumed and parser.index < len(parser.lines) and parser.lines[parser.index] == "@@":
+            parser.index += 1
+            consumed = bare = True
+
+        if not consumed:
+            break
+        if anchor or bare:
+            has_anchor = True
+        if anchor.strip():
+            anchors.append(anchor)
+
+    return anchors, has_anchor
+
+
 def _advance_cursor_to_anchor(
     anchor: str,
     input_lines: list[str],
     cursor: int,
     parser: ParserState,
+    *,
+    force_forward_search: bool = False,
 ) -> int:
     found = False
 
-    if not any(line == anchor for line in input_lines[:cursor]):
+    if force_forward_search or not any(line == anchor for line in input_lines[:cursor]):
         for i in range(cursor, len(input_lines)):
             if input_lines[i] == anchor:
                 cursor = i + 1
                 found = True
                 break
 
-    if not found and not any(line.strip() == anchor.strip() for line in input_lines[:cursor]):
+    if not found and (
+        force_forward_search
+        or not any(line.strip() == anchor.strip() for line in input_lines[:cursor])
+    ):
         for i in range(cursor, len(input_lines)):
             if input_lines[i].strip() == anchor.strip():
                 cursor = i + 1

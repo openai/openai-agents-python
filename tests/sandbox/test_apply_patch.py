@@ -50,6 +50,45 @@ async def test_apply_patch_update_uses_anchor_jump() -> None:
 
 
 @pytest.mark.asyncio
+async def test_apply_patch_update_uses_stacked_anchor_jump() -> None:
+    """The tool description tells the model to stack ``@@`` headers when one is ambiguous."""
+    session = ApplyPatchSession()
+    session.files[Path("/workspace/stacked.py")] = (
+        b"class First\n"
+        b"    def target():\n"
+        b"        return 0\n"
+        b"\n"
+        b"class Second\n"
+        b"    def helper():\n"
+        b"        pass\n"
+        b"\n"
+        b"    def target():\n"
+        b"        pass\n"
+    )
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="stacked.py",
+            diff="@@ class Second\n@@     def target():\n-        pass\n+        return 1\n",
+        )
+    )
+
+    assert session.files[Path("/workspace/stacked.py")] == (
+        b"class First\n"
+        b"    def target():\n"
+        b"        return 0\n"
+        b"\n"
+        b"class Second\n"
+        b"    def helper():\n"
+        b"        pass\n"
+        b"\n"
+        b"    def target():\n"
+        b"        return 1\n"
+    )
+
+
+@pytest.mark.asyncio
 async def test_apply_patch_update_matches_end_of_file_context() -> None:
     session = ApplyPatchSession()
     session.files[Path("/workspace/tail.txt")] = b"one\ntwo\nthree\n"
