@@ -87,7 +87,7 @@ See [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] and [`Realti
 
 ### Input transcription settings
 
-Configure input transcription under `audio.input.transcription`. Use `gpt-live-transcribe` for low-latency incremental transcripts, or use `gpt-transcribe` over WebSocket when transcription should begin after an audio turn is committed or when your application needs detected-language output. The Agents SDK forwards the GA transcription context and latency settings in the nested session configuration:
+Configure input transcription under `audio.input.transcription`. Use `gpt-live-transcribe` for low-latency incremental transcripts, or use `gpt-transcribe` over WebSocket when transcription should begin after an audio turn is committed or when your application needs detected-language output. The Agents SDK forwards the model-specific GA transcription settings in the nested session configuration:
 
 ```python
 runner = RealtimeRunner(
@@ -101,6 +101,28 @@ runner = RealtimeRunner(
                         "prompt": "A support call about the OpenAI Agents SDK.",
                         "keywords": ["RunState", "MCPServerManager"],
                         "languages": ["en", "ja"],
+                    },
+                    "turn_detection": None,
+                }
+            }
+        }
+    },
+)
+```
+
+For `gpt-live-transcribe`, `prompt` provides free-form recording context, `keywords` lists literal terms that may occur in the audio, and `languages` lists expected input languages. This model uses plural `languages` instead of singular `language`; do not send both fields.
+
+The OpenAI client version pinned by this SDK supports `delay` only with `gpt-realtime-whisper`. Configure that model's latency and accuracy tradeoff as follows:
+
+```python
+runner = RealtimeRunner(
+    starting_agent=agent,
+    config={
+        "model_settings": {
+            "audio": {
+                "input": {
+                    "transcription": {
+                        "model": "gpt-realtime-whisper",
                         "delay": "low",
                     },
                     "turn_detection": None,
@@ -111,7 +133,7 @@ runner = RealtimeRunner(
 )
 ```
 
-For `gpt-live-transcribe`, `prompt` provides free-form recording context, `keywords` lists literal terms that may occur in the audio, and `languages` lists expected input languages. This model uses plural `languages` instead of singular `language`; do not send both fields. Its `delay` setting accepts `minimal`, `low`, `medium`, `high`, or `xhigh`; lower values can produce earlier partial text, while higher values give the transcription model more audio context and can improve recognition accuracy. Benchmark representative audio instead of assuming fixed timing for any level.
+The `delay` setting accepts `minimal`, `low`, `medium`, `high`, or `xhigh`. Lower values can produce earlier partial text, while higher values give the transcription model more audio context and can improve recognition accuracy. Benchmark representative audio instead of assuming fixed timing for any level.
 
 Use `gpt-transcribe` in a Realtime session over WebSocket only when transcription should begin after a committed audio turn or the application needs detected-language output. The model automatically uses earlier transcribed turns as context. The `gpt-transcribe` completion event reports detected languages in its `languages` output field. This output field is different from the `gpt-live-transcribe` expected-language input shown above.
 
