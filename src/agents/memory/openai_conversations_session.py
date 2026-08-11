@@ -86,6 +86,8 @@ class OpenAIConversationsSession(SessionABC):
         session_id = await self._get_session_id()
 
         session_limit = resolve_session_limit(limit, self.session_settings)
+        if session_limit == 0:
+            return []
 
         all_items = []
         if session_limit is None:

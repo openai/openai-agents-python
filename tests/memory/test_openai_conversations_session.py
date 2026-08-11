@@ -219,6 +219,20 @@ class TestOpenAIConversationsSessionBasicOperations:
     """Test basic CRUD operations with simple mocking."""
 
     @pytest.mark.asyncio
+    async def test_get_items_zero_limit_returns_empty_without_api_call(self, mock_openai_client):
+        """A zero history limit must not be forwarded to the Conversations API."""
+        mock_openai_client.conversations.items.list = MagicMock(
+            side_effect=AssertionError("items.list must not receive limit=0")
+        )
+        session = OpenAIConversationsSession(openai_client=mock_openai_client)
+
+        assert await session.get_items(limit=0) == []
+
+        mock_openai_client.conversations.create.assert_awaited_once_with(items=[])
+        assert session.session_id == "test_conversation_id"
+        mock_openai_client.conversations.items.list.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_add_items_simple(self, mock_openai_client):
         """Test adding items to the conversation."""
         session = OpenAIConversationsSession(
