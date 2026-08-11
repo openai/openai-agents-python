@@ -300,7 +300,7 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
 
         self._refresh_active_servers()
 
-        return self._active_servers
+        return self.active_servers
 
     async def reconnect(self, *, failed_only: bool = True) -> list[MCPServer]:
         """Reconnect servers and return the active list.
@@ -336,7 +336,7 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
                     await self._attempt_connect(server)
         finally:
             self._refresh_active_servers()
-        return self._active_servers
+        return self.active_servers
 
     async def cleanup_all(self) -> None:
         """Cleanup all servers in reverse order."""

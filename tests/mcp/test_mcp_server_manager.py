@@ -1213,6 +1213,21 @@ def test_manager_accepts_one_shot_iterables() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["connect_all", "reconnect"])
+async def test_manager_lifecycle_results_do_not_mutate_active_servers(operation: str) -> None:
+    server = FlakyServer(failures=0)
+    manager = MCPServerManager([server])
+
+    if operation == "reconnect":
+        await manager.connect_all()
+
+    active_servers = await getattr(manager, operation)()
+    active_servers.clear()
+
+    assert manager.active_servers == [server]
+
+
+@pytest.mark.asyncio
 async def test_manager_connects_servers_from_a_one_shot_iterable() -> None:
     server_a = CleanupAwareServer()
     server_b = CleanupAwareServer()
