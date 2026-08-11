@@ -95,12 +95,28 @@ def test_buffer_to_audio_file_rejects_unsupported_sample_width():
         _buffer_to_audio_file(buffer, sample_width=5)
 
 
+def test_audio_input_validates_multichannel_frame_alignment():
+    complete_audio = AudioInput(buffer=np.array([1, 2, 3, 4], dtype=np.int16), channels=2)
+    _, audio_file, _ = complete_audio.to_audio_file()
+    with wave.open(audio_file, "rb") as wav_file:
+        assert wav_file.getnchannels() == 2
+        assert wav_file.getnframes() == 2
+
+    audio_input = AudioInput(buffer=np.array([1, 2, 3], dtype=np.int16), channels=2)
+
+    with pytest.raises(UserError, match="complete channel frames"):
+        audio_input.to_audio_file()
+
+
 def test_buffer_to_audio_file_invalid_dtype():
     # Create a buffer with invalid dtype (float64)
     buffer = np.array([1.0, 2.0, 3.0], dtype=np.float64)
 
     with pytest.raises(UserError, match="Buffer must be a numpy array of int16 or float32"):
         _buffer_to_audio_file(buffer=buffer)
+
+    with pytest.raises(UserError, match="Buffer must be a numpy array of int16 or float32"):
+        _buffer_to_audio_file(buffer=buffer, channels=2)
 
 
 class TestAudioInput:

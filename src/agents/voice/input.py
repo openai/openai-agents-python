@@ -22,6 +22,12 @@ def _buffer_to_audio_file(
     if sample_width not in {1, 2, 3, 4}:
         raise UserError("Sample width must be between 1 and 4 bytes")
 
+    if buffer.dtype not in (np.int16, np.float32):
+        raise UserError("Buffer must be a numpy array of int16 or float32")
+
+    if channels > 0 and buffer.size % channels != 0:
+        raise UserError("Buffer must contain complete channel frames")
+
     if buffer.dtype == np.float32:
         clipped_buffer = np.clip(buffer, -1.0, 1.0)
         if sample_width == 1:
@@ -41,8 +47,6 @@ def _buffer_to_audio_file(
                 audio_bytes = pcm_32.view(np.uint8).reshape(-1, 4)[:, :3].tobytes()
             else:
                 audio_bytes = pcm_buffer.astype("<i4").tobytes()
-    elif buffer.dtype != np.int16:
-        raise UserError("Buffer must be a numpy array of int16 or float32")
     elif sample_width == 1:
         audio_bytes = ((buffer.astype(np.int32) >> 8) + 128).astype(np.uint8).tobytes()
     else:
