@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from inspect import isawaitable
 from typing import Any
 
@@ -569,7 +569,7 @@ async def stream_response_with_retry(
     conversation_id: str | None,
     failed_retry_attempts_out: list[int] | None = None,
     replay_unsafe_request: bool = False,
-) -> AsyncIterator[TResponseStreamEvent]:
+) -> AsyncGenerator[TResponseStreamEvent, None]:
     request_attempt = 1
     policy_attempt = 1
     failed_policy_attempts = 0

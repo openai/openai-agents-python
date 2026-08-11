@@ -654,6 +654,70 @@ async def test_streamed_run_rejects_failed_terminal_response_payload_events_from
     assert result.raw_responses == []
 
 
+def _terminal_failure_event(event_type: str) -> Any:
+    """Build the terminal event the streamed run loop rejects for `event_type`."""
+    if event_type == "response.incomplete":
+        return ResponseIncompleteEvent(
+            response=get_response_obj([], response_id="resp-terminal"),
+            sequence_number=0,
+            type="response.incomplete",
+        )
+    if event_type == "response.failed":
+        return ResponseFailedEvent(
+            response=get_response_obj([], response_id="resp-terminal"),
+            sequence_number=0,
+            type="response.failed",
+        )
+    if event_type == "error":
+        return ResponseErrorEvent(
+            code=None, message="boom", param=None, sequence_number=0, type="error"
+        )
+    # `response.error` is not a literal the SDK models, but the run loop rejects it too.
+    return ResponseErrorEvent.model_construct(
+        code=None, message="boom", param=None, sequence_number=0, type="response.error"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "terminal_event_type",
+    ["response.incomplete", "response.failed", "error", "response.error"],
+)
+async def test_streamed_terminal_failure_closes_the_model_stream(terminal_event_type: str) -> None:
+    """The run loop must close the model stream itself before a terminal failure leaves the loop.
+
+    Comparing the closing task with the iterating one keeps this honest: an abandoned generator
+    is still finalized eventually, but by asyncio's async-generator hook, in another task and
+    context, which is what leaves the response span unended.
+    """
+    iterating_task: asyncio.Task[Any] | None = None
+    closing_task: asyncio.Task[Any] | None = None
+
+    class TerminalFailureModel(Model):
+        async def get_response(self, *args: Any, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+        async def stream_response(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+            nonlocal iterating_task, closing_task
+            iterating_task = asyncio.current_task()
+            try:
+                yield _terminal_failure_event(terminal_event_type)
+            finally:
+                closing_task = asyncio.current_task()
+
+    agent = Agent(name="test", model=TerminalFailureModel())
+    result = Runner.run_streamed(agent, input="test")
+
+    with pytest.raises(ModelBehaviorError, match=terminal_event_type):
+        async for _ in result.stream_events():
+            pass
+
+    assert closing_task is not None and closing_task is iterating_task, (
+        "the run loop must close the model stream in its own task; it was left open or finalized "
+        "later by asyncio's async-generator hook"
+    )
+
+
 @pytest.mark.asyncio
 async def test_subsequent_runs():
     model = FakeModel()

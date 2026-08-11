@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses as _dc
 from collections.abc import Awaitable, Callable
+from contextlib import aclosing
 from functools import partial
 from typing import Any, TypeVar, cast
 from uuid import uuid4
@@ -1871,58 +1872,61 @@ async def run_single_turn_streamed(
         ),
     )
 
-    async for event in model_run_context_stream(retry_stream, tool_use_tracker):
-        streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+    # Raising out of this loop leaves the model stream suspended at its yield, so close it
+    # explicitly instead of waiting for garbage collection to finalize the generator chain.
+    async with aclosing(model_run_context_stream(retry_stream, tool_use_tracker)) as model_events:
+        async for event in model_events:
+            streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
 
-        terminal_response: Response | None = None
-        is_completed_event = False
-        if isinstance(event, ResponseCompletedEvent):
-            is_completed_event = True
-            terminal_response = event.response
-        elif getattr(event, "type", None) in {"response.incomplete", "response.failed"}:
-            event_type = cast(str, event.type)
-            maybe_response = getattr(event, "response", None)
-            raise response_terminal_failure_error(
-                event_type,
-                maybe_response if isinstance(maybe_response, Response) else None,
-            )
-        elif getattr(event, "type", None) in {"error", "response.error"}:
-            raise response_error_event_failure_error(cast(str, event.type), event)
+            terminal_response: Response | None = None
+            is_completed_event = False
+            if isinstance(event, ResponseCompletedEvent):
+                is_completed_event = True
+                terminal_response = event.response
+            elif getattr(event, "type", None) in {"response.incomplete", "response.failed"}:
+                event_type = cast(str, event.type)
+                maybe_response = getattr(event, "response", None)
+                raise response_terminal_failure_error(
+                    event_type,
+                    maybe_response if isinstance(maybe_response, Response) else None,
+                )
+            elif getattr(event, "type", None) in {"error", "response.error"}:
+                raise response_error_event_failure_error(cast(str, event.type), event)
 
-        if terminal_response is not None:
-            if is_completed_event and not terminal_response.output and streamed_response_output:
-                # Some streaming backends emit output items during item.done events while leaving
-                # the terminal response output empty. Preserve those items so the runner can
-                # resolve the completed step correctly.
-                terminal_response.output = list(streamed_response_output)
-            # Always fold retry attempts into usage, even when the terminal response omits
-            # provider usage (common for some Chat Completions / LiteLLM streams). Skipping
-            # apply_retry_attempt_usage here would drop failed-attempt accounting and diverge
-            # from the non-streaming get_response_with_retry path.
-            usage = apply_retry_attempt_usage(
-                (
-                    _response_usage_to_usage(terminal_response.usage)
-                    if terminal_response.usage
-                    # Defaults to zero requests, so adapters that fold several provider
-                    # responses into one and report counts separately are not double-counted.
-                    else Usage(requests=_requests_for_response_without_usage(terminal_response))
-                ),
-                stream_failed_retry_attempts[0],
-            )
-            final_response = ModelResponse(
-                output=terminal_response.output,
-                usage=usage,
-                response_id=terminal_response.id,
-                request_id=getattr(terminal_response, "_request_id", None),
-                raw_usage=(
-                    _extract_raw_usage_snapshot(terminal_response)
-                    if model_settings.preserve_raw_usage is True
-                    else None
-                ),
-            )
+            if terminal_response is not None:
+                if is_completed_event and not terminal_response.output and streamed_response_output:
+                    # Some streaming backends emit output items during item.done events while
+                    # leaving the terminal response output empty. Preserve those items so the
+                    # runner can resolve the completed step correctly.
+                    terminal_response.output = list(streamed_response_output)
+                # Always fold retry attempts into usage, even when the terminal response omits
+                # provider usage (common for some Chat Completions / LiteLLM streams). Skipping
+                # apply_retry_attempt_usage here would drop failed-attempt accounting and diverge
+                # from the non-streaming get_response_with_retry path.
+                usage = apply_retry_attempt_usage(
+                    (
+                        _response_usage_to_usage(terminal_response.usage)
+                        if terminal_response.usage
+                        # Defaults to zero requests, so adapters that fold several provider
+                        # responses into one and report counts separately are not double-counted.
+                        else Usage(requests=_requests_for_response_without_usage(terminal_response))
+                    ),
+                    stream_failed_retry_attempts[0],
+                )
+                final_response = ModelResponse(
+                    output=terminal_response.output,
+                    usage=usage,
+                    response_id=terminal_response.id,
+                    request_id=getattr(terminal_response, "_request_id", None),
+                    raw_usage=(
+                        _extract_raw_usage_snapshot(terminal_response)
+                        if model_settings.preserve_raw_usage is True
+                        else None
+                    ),
+                )
 
-        if isinstance(event, ResponseOutputItemDoneEvent):
-            streamed_response_output.append(event.item)
+            if isinstance(event, ResponseOutputItemDoneEvent):
+                streamed_response_output.append(event.item)
 
     if final_response is None:
         raise ModelBehaviorError("Model did not produce a final response!")

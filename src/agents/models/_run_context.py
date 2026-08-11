@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncGenerator, Iterator
+from contextlib import aclosing, contextmanager
 from contextvars import ContextVar
 from typing import TypeVar
 
@@ -24,9 +24,12 @@ def get_model_run_owner() -> object | None:
 
 
 async def model_run_context_stream(
-    stream: AsyncIterator[T],
+    stream: AsyncGenerator[T, None],
     owner: object,
-) -> AsyncIterator[T]:
+) -> AsyncGenerator[T, None]:
+    # `aclosing` forwards an early `aclose()` on this generator to the delegate, so the
+    # delegate's cleanup runs deterministically instead of waiting for garbage collection.
     with model_run_context(owner):
-        async for item in stream:
-            yield item
+        async with aclosing(stream):
+            async for item in stream:
+                yield item
