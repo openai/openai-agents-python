@@ -1,3 +1,4 @@
+import base64
 import io
 import wave
 
@@ -190,3 +191,39 @@ class TestStreamedAudioInput:
         assert retrieved_audio2 is not None
         assert np.array_equal(retrieved_audio2, audio2)
         assert streamed_input.queue.empty()
+
+
+class TestAudioInputBase64SampleWidth:
+    """`to_base64` must encode at the input's declared width, like `to_audio_file`."""
+
+    @pytest.mark.parametrize("sample_width", [1, 2, 3, 4])
+    @pytest.mark.parametrize("dtype", [np.int16, np.float32])
+    def test_base64_matches_the_wav_frames_for_every_width(self, sample_width, dtype):
+        if dtype is np.int16:
+            buffer = np.array([0, 1000, -1000, 32767, -32768], dtype=np.int16)
+        else:
+            buffer = np.array([0.0, 0.5, -0.5, 1.0, -1.0], dtype=np.float32)
+        audio_input = AudioInput(buffer=buffer, sample_width=sample_width)
+
+        encoded = base64.b64decode(audio_input.to_base64())
+        _, audio_file, _ = audio_input.to_audio_file()
+        audio_file.seek(0)
+        with wave.open(audio_file, "rb") as wav_file:
+            frames = wav_file.readframes(wav_file.getnframes())
+
+        # Same object, same declared width, so the two encodings must agree byte for byte.
+        assert encoded == frames
+        assert len(encoded) == len(buffer) * sample_width
+
+    def test_default_width_encoding_is_unchanged(self):
+        # The 16-bit default must keep producing exactly what it produced before.
+        buffer = np.array([0.0, 0.5, -0.5, 1.0, -1.0], dtype=np.float32)
+        expected = (np.clip(buffer, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+
+        assert base64.b64decode(AudioInput(buffer=buffer).to_base64()) == expected
+
+    def test_invalid_sample_width_is_rejected(self):
+        audio_input = AudioInput(buffer=np.array([1, 2], dtype=np.int16), sample_width=5)
+
+        with pytest.raises(UserError):
+            audio_input.to_base64()

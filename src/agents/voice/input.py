@@ -5,7 +5,6 @@ import base64
 import io
 import wave
 from dataclasses import dataclass
-from typing import cast
 
 from ..exceptions import UserError
 from .imports import np, npt
@@ -13,12 +12,11 @@ from .imports import np, npt
 DEFAULT_SAMPLE_RATE = 24000
 
 
-def _buffer_to_audio_file(
+def _buffer_to_pcm_bytes(
     buffer: npt.NDArray[np.int16 | np.float32 | np.float64],
-    frame_rate: int = DEFAULT_SAMPLE_RATE,
     sample_width: int = 2,
-    channels: int = 1,
-) -> tuple[str, io.BytesIO, str]:
+) -> bytes:
+    """Encode a sample buffer as little-endian PCM at the requested sample width."""
     if sample_width not in {1, 2, 3, 4}:
         raise UserError("Sample width must be between 1 and 4 bytes")
 
@@ -55,6 +53,17 @@ def _buffer_to_audio_file(
         else:
             audio_bytes = pcm_buffer.astype("<i4").tobytes()
 
+    return audio_bytes
+
+
+def _buffer_to_audio_file(
+    buffer: npt.NDArray[np.int16 | np.float32 | np.float64],
+    frame_rate: int = DEFAULT_SAMPLE_RATE,
+    sample_width: int = 2,
+    channels: int = 1,
+) -> tuple[str, io.BytesIO, str]:
+    audio_bytes = _buffer_to_pcm_bytes(buffer, sample_width)
+
     audio_file = io.BytesIO()
     with wave.open(audio_file, "w") as wav_file:
         wav_file.setnchannels(channels)
@@ -90,16 +99,14 @@ class AudioInput:
         return _buffer_to_audio_file(self.buffer, self.frame_rate, self.sample_width, self.channels)
 
     def to_base64(self) -> str:
-        """Returns the audio data as a base64 encoded string."""
-        if self.buffer.dtype == np.float32:
-            # convert to int16 without mutating the caller's buffer
-            int16_buffer = (np.clip(self.buffer, -1.0, 1.0) * 32767).astype(np.int16)
-        elif self.buffer.dtype == np.int16:
-            int16_buffer = cast("npt.NDArray[np.int16]", self.buffer)
-        else:
-            raise UserError("Buffer must be a numpy array of int16 or float32")
+        """Returns the audio data as a base64 encoded string.
 
-        return base64.b64encode(int16_buffer.tobytes()).decode("utf-8")
+        Encoded at this input's ``sample_width``, so the bytes match the frames
+        ``to_audio_file`` writes for the same buffer. The caller's buffer is never mutated.
+        """
+        return base64.b64encode(_buffer_to_pcm_bytes(self.buffer, self.sample_width)).decode(
+            "utf-8"
+        )
 
 
 class StreamedAudioInput:
