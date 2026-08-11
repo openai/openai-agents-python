@@ -1,0 +1,280 @@
+{
+  "$schemaVersion": "1.16",
+  "approval_argument_override_modes": [
+    {
+      "call_id": "approval-override-1",
+      "mode": "execution_only"
+    }
+  ],
+  "auto_previous_response_id": false,
+  "context": {
+    "approvals": {
+      "send_email": {
+        "approved": [
+          "approval-override-1"
+        ],
+        "rejected": []
+      }
+    },
+    "context": {},
+    "context_meta": {
+      "omitted": false,
+      "original_type": "mapping",
+      "requires_deserializer": false,
+      "serialized_via": "mapping"
+    },
+    "tool_invocations": {
+      "approval-override-1": {
+        "approval_scope": "03c0b69e3d8062f4c5ad4a51305b5ac6f32321871b2433b01ea6025ed2565956",
+        "completed": false,
+        "executed": false,
+        "fingerprint": "05d7f7f0356c79296d60ce0ccc75dbb2d5f990eb09664cd7a7a459182cae969a",
+        "type": "function_call"
+      }
+    },
+    "usage": {
+      "input_tokens": 0,
+      "input_tokens_details": [
+        {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        }
+      ],
+      "output_tokens": 0,
+      "output_tokens_details": [
+        {
+          "reasoning_tokens": 0
+        }
+      ],
+      "request_usage_entries": [],
+      "requests": 0,
+      "total_tokens": 0
+    }
+  },
+  "conversation_id": null,
+  "current_agent": {
+    "name": "compat-agent"
+  },
+  "current_step": {
+    "data": {
+      "interruptions": [
+        {
+          "agent": {
+            "name": "compat-agent"
+          },
+          "raw_item": {
+            "arguments": "{\"recipient\": \"bob@example.com\"}",
+            "call_id": "approval-override-1",
+            "id": "fc-override",
+            "name": "send_email",
+            "type": "function_call"
+          },
+          "tool_lookup_key": {
+            "kind": "bare",
+            "name": "send_email"
+          },
+          "tool_name": "send_email",
+          "type": "tool_approval_item"
+        }
+      ],
+      "llm_end_hooks_started": true,
+      "response_accepted": false
+    },
+    "type": "next_step_interruption"
+  },
+  "current_turn": 0,
+  "current_turn_persisted_item_count": 0,
+  "generated_items": [
+    {
+      "agent": {
+        "name": "compat-agent"
+      },
+      "raw_item": {
+        "arguments": "{\"recipient\": \"alice@example.com\"}",
+        "call_id": "approval-override-1",
+        "id": "fc-override",
+        "name": "send_email",
+        "type": "function_call"
+      },
+      "tool_name": "send_email",
+      "type": "tool_call_item"
+    }
+  ],
+  "generated_prompt_cache_key": null,
+  "generated_session_item_indexes": [
+    null
+  ],
+  "input_guardrail_results": [],
+  "last_model_response": {
+    "output": [
+      {
+        "arguments": "{\"recipient\": \"alice@example.com\"}",
+        "call_id": "approval-override-1",
+        "id": "fc-override",
+        "name": "send_email",
+        "type": "function_call"
+      }
+    ],
+    "request_id": null,
+    "response_id": "response-override",
+    "usage": {
+      "input_tokens": 0,
+      "input_tokens_details": [
+        {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        }
+      ],
+      "output_tokens": 0,
+      "output_tokens_details": [
+        {
+          "reasoning_tokens": 0
+        }
+      ],
+      "request_usage_entries": [],
+      "requests": 0,
+      "total_tokens": 0
+    }
+  },
+  "last_processed_response": {
+    "apply_patch_actions": [],
+    "computer_actions": [],
+    "custom_tool_actions": [],
+    "functions": [
+      {
+        "tool": {
+          "description": "",
+          "lookupKey": {
+            "kind": "bare",
+            "name": "send_email"
+          },
+          "name": "send_email",
+          "paramsJsonSchema": {
+            "additionalProperties": false,
+            "properties": {
+              "recipient": {
+                "title": "Recipient",
+                "type": "string"
+              }
+            },
+            "required": [
+              "recipient"
+            ],
+            "title": "send_email_args",
+            "type": "object"
+          }
+        },
+        "tool_call": {
+          "arguments": "{\"recipient\": \"bob@example.com\"}",
+          "call_id": "approval-override-1",
+          "id": "fc-override",
+          "name": "send_email",
+          "type": "function_call"
+        }
+      }
+    ],
+    "handoffs": [],
+    "interruptions": [
+      {
+        "agent": {
+          "name": "compat-agent"
+        },
+        "raw_item": {
+          "arguments": "{\"recipient\": \"bob@example.com\"}",
+          "call_id": "approval-override-1",
+          "id": "fc-override",
+          "name": "send_email",
+          "type": "function_call"
+        },
+        "tool_lookup_key": {
+          "kind": "bare",
+          "name": "send_email"
+        },
+        "tool_name": "send_email",
+        "type": "tool_approval_item"
+      }
+    ],
+    "local_shell_actions": [],
+    "mcp_approval_requests": [],
+    "new_items": [
+      {
+        "agent": {
+          "name": "compat-agent"
+        },
+        "raw_item": {
+          "arguments": "{\"recipient\": \"alice@example.com\"}",
+          "call_id": "approval-override-1",
+          "id": "fc-override",
+          "name": "send_email",
+          "type": "function_call"
+        },
+        "tool_name": "send_email",
+        "type": "tool_call_item"
+      }
+    ],
+    "shell_actions": [],
+    "tools_used": []
+  },
+  "max_turns": 10,
+  "model_responses": [
+    {
+      "output": [
+        {
+          "arguments": "{\"recipient\": \"alice@example.com\"}",
+          "call_id": "approval-override-1",
+          "id": "fc-override",
+          "name": "send_email",
+          "type": "function_call"
+        }
+      ],
+      "request_id": null,
+      "response_id": "response-override",
+      "usage": {
+        "input_tokens": 0,
+        "input_tokens_details": [
+          {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          }
+        ],
+        "output_tokens": 0,
+        "output_tokens_details": [
+          {
+            "reasoning_tokens": 0
+          }
+        ],
+        "request_usage_entries": [],
+        "requests": 0,
+        "total_tokens": 0
+      }
+    }
+  ],
+  "nested_history_owned_session_item_refs": [],
+  "no_active_agent_run": true,
+  "original_input": "historical input",
+  "output_guardrail_results": [],
+  "pending_input": [],
+  "previous_response_id": null,
+  "reasoning_item_id_policy": null,
+  "session_history_mutations": [],
+  "session_items": [
+    {
+      "agent": {
+        "name": "compat-agent"
+      },
+      "raw_item": {
+        "arguments": "{\"recipient\": \"alice@example.com\"}",
+        "call_id": "approval-override-1",
+        "id": "fc-override",
+        "name": "send_email",
+        "type": "function_call"
+      },
+      "tool_name": "send_email",
+      "type": "tool_call_item"
+    }
+  ],
+  "tool_input_guardrail_results": [],
+  "tool_output_guardrail_results": [],
+  "tool_use_tracker": {},
+  "trace": null
+}

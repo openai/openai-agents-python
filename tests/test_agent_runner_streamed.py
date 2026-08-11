@@ -37,6 +37,7 @@ from agents import (
     OutputGuardrailTripwireTriggered,
     RunContextWrapper,
     Runner,
+    RunState,
     SQLiteSession,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
@@ -78,7 +79,7 @@ from .utils.hitl import (
     queue_function_call_and_text,
     resume_streamed_after_first_approval,
 )
-from .utils.simple_session import CountingSession, SimpleListSession
+from .utils.simple_session import CountingSession, RewriteAwareSimpleSession, SimpleListSession
 
 
 def _conversation_locked_error() -> BadRequestError:
@@ -2283,6 +2284,177 @@ async def test_streaming_resume_with_session_does_not_duplicate_items():
 
     assert call_count == 1
     assert output_count == 1
+
+
+@pytest.mark.asyncio
+async def test_streaming_resume_with_durable_override_rewrites_session_history() -> None:
+    async def test_tool(test: str) -> str:
+        return f"result:{test}"
+
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
+    model, agent = make_model_and_agent(name="test", tools=[tool])
+    session = RewriteAwareSimpleSession()
+
+    queue_function_call_and_text(
+        model,
+        get_function_tool_call("test_tool", json.dumps({"test": "foo"}), call_id="call-resume"),
+        followup=[get_text_message("done")],
+    )
+
+    first = Runner.run_streamed(agent, input="Use test_tool", session=session)
+    await consume_stream(first)
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+
+    resumed = Runner.run_streamed(agent, state, session=session)
+    await consume_stream(resumed)
+
+    assert resumed.final_output == "done"
+    saved_items = await session.get_items()
+    assert cast(dict[str, Any], saved_items[1])["arguments"] == json.dumps({"test": "bar"})
+
+
+@pytest.mark.asyncio
+async def test_streaming_durable_override_rewrite_fails_before_tool_execution() -> None:
+    calls: list[str] = []
+
+    async def test_tool(test: str) -> str:
+        calls.append(test)
+        return f"result:{test}"
+
+    class FailingRewriteSession(RewriteAwareSimpleSession):
+        async def apply_history_mutations(self, _args: Any) -> bool:
+            raise RuntimeError("rewrite failed")
+
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
+    model = FakeModel()
+    agent = Agent(name="test", model=model, tools=[tool])
+    session = FailingRewriteSession()
+    model.set_next_output(
+        [get_function_tool_call("test_tool", '{"test":"foo"}', call_id="call-resume")]
+    )
+
+    first = Runner.run_streamed(agent, input="Use test_tool", session=session)
+    await consume_stream(first)
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+
+    resumed = Runner.run_streamed(agent, state, session=session)
+    with pytest.raises(RuntimeError, match="rewrite failed"):
+        await consume_stream(resumed)
+
+    assert calls == []
+    assert state._get_session_history_mutations()
+
+
+@pytest.mark.asyncio
+async def test_streaming_processed_override_mismatch_fails_before_session_rewrite() -> None:
+    calls: list[str] = []
+
+    class TrackingRewriteSession(RewriteAwareSimpleSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.rewrite_calls = 0
+
+        async def apply_history_mutations(self, args: Any) -> bool:
+            self.rewrite_calls += 1
+            return await super().apply_history_mutations(args)
+
+    async def test_tool(test: str) -> str:
+        calls.append(test)
+        return f"result:{test}"
+
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
+    model = FakeModel()
+    agent = Agent(name="test", model=model, tools=[tool])
+    session = TrackingRewriteSession()
+    model.set_next_output(
+        [get_function_tool_call("test_tool", '{"test":"foo"}', call_id="call-resume")]
+    )
+
+    first = Runner.run_streamed(agent, input="Use test_tool", session=session)
+    await consume_stream(first)
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+    serialized = state.to_json()
+    serialized["last_processed_response"]["functions"][0]["tool_call"]["arguments"] = (
+        '{"test":"different"}'
+    )
+
+    with pytest.raises(UserError, match="does not match the pending function call"):
+        await RunState.from_json(agent, serialized)
+
+    assert session.rewrite_calls == 0
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_streaming_durable_override_missing_history_fails_before_tool_execution() -> None:
+    calls: list[str] = []
+
+    async def test_tool(test: str) -> str:
+        calls.append(test)
+        return f"result:{test}"
+
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
+    model = FakeModel()
+    agent = Agent(name="test", model=model, tools=[tool])
+    session = RewriteAwareSimpleSession()
+    model.set_next_output(
+        [get_function_tool_call("test_tool", '{"test":"foo"}', call_id="call-resume")]
+    )
+
+    first = Runner.run_streamed(agent, input="Use test_tool", session=session)
+    await consume_stream(first)
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+    await session.clear_session()
+
+    resumed = Runner.run_streamed(agent, state, session=session)
+    with pytest.raises(ValueError, match="did not match the expected function call"):
+        await consume_stream(resumed)
+
+    assert calls == []
+    assert state._get_session_history_mutations()
+
+
+@pytest.mark.asyncio
+async def test_streaming_resume_supports_execution_only_override_with_previous_response_id() -> (
+    None
+):
+    async def test_tool(test: str) -> str:
+        return f"result:{test}"
+
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[tool],
+        tool_use_behavior="stop_on_first_tool",
+    )
+
+    model.add_multiple_turn_outputs(
+        [[get_function_tool_call("test_tool", json.dumps({"test": "foo"}), call_id="call-resume")]]
+    )
+
+    first = Runner.run_streamed(agent, input="Use test_tool", previous_response_id="resp-root")
+    await consume_stream(first)
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(
+        first.interruptions[0],
+        override_arguments={"test": "bar"},
+        save_override_arguments=False,
+    )
+
+    resumed = Runner.run_streamed(agent, state)
+    await consume_stream(resumed)
+
+    assert resumed.final_output == "result:bar"
 
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])

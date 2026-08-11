@@ -33,11 +33,66 @@ state = RunState(
 @dataclass(frozen=True)
 class Scenario:
     version: str
-    commit: str
+    commit: str | None
     name: str
     code: str
     provenance: str = "historical_writer"
     emitted_version: str | None = None
+    lineage_commit: str | None = None
+
+
+APPROVAL_OVERRIDE_SETUP = """
+from agents.items import ModelResponse, ToolApprovalItem, ToolCallItem
+from agents.run_context import RunContextWrapper
+from agents.run_internal.run_loop import NextStepInterruption, ProcessedResponse, ToolRunFunction
+from agents.tool import function_tool
+from agents.usage import Usage
+from openai.types.responses import ResponseFunctionToolCall
+
+@function_tool(name_override="send_email")
+def send_email(recipient: str) -> str:
+    return f"sent:{recipient}"
+
+agent = Agent(name="compat-agent", tools=[send_email])
+state = RunState(
+    context=RunContextWrapper(context={}),
+    original_input="historical input",
+    starting_agent=agent,
+    max_turns=10,
+)
+raw_item = ResponseFunctionToolCall(
+    type="function_call",
+    id="fc-override",
+    call_id="approval-override-1",
+    name="send_email",
+    arguments=json.dumps({"recipient": "alice@example.com"}),
+)
+tool_call_item = ToolCallItem(agent=agent, raw_item=raw_item)
+approval_item = ToolApprovalItem(
+    agent=agent,
+    raw_item=raw_item,
+    tool_name="send_email",
+)
+state._generated_items = [tool_call_item]
+state._session_items = [ToolCallItem(agent=agent, raw_item=raw_item)]
+state._current_step = NextStepInterruption(interruptions=[approval_item])
+state._model_responses = [
+    ModelResponse(output=[raw_item], usage=Usage(), response_id="response-override")
+]
+state._last_processed_response = ProcessedResponse(
+    new_items=[ToolCallItem(agent=agent, raw_item=raw_item)],
+    handoffs=[],
+    functions=[ToolRunFunction(tool_call=raw_item, function_tool=send_email)],
+    computer_actions=[],
+    local_shell_calls=[],
+    shell_calls=[],
+    apply_patch_calls=[],
+    tools_used=[],
+    mcp_approval_requests=[],
+    interruptions=[approval_item],
+)
+state._mark_generated_items_merged_with_last_processed()
+"""
 
 
 SCENARIOS = (
@@ -387,6 +442,35 @@ approval = ToolApprovalItem(
 state.approve(approval)
 """,
     ),
+    Scenario(
+        "1.16",
+        None,
+        "approval_argument_overrides",
+        APPROVAL_OVERRIDE_SETUP
+        + """
+state.approve(
+    approval_item,
+    override_arguments={"recipient": "bob@example.com"},
+    save_override_arguments=False,
+)
+""",
+        provenance="current_writer",
+        lineage_commit="672358a3c0eef02c15f62c0ba449a63f9581f6ad",
+    ),
+    Scenario(
+        "1.16",
+        None,
+        "durable_approval_argument_overrides",
+        APPROVAL_OVERRIDE_SETUP
+        + """
+state.approve(
+    approval_item,
+    override_arguments={"recipient": "bob@example.com"},
+)
+""",
+        provenance="current_writer",
+        lineage_commit="672358a3c0eef02c15f62c0ba449a63f9581f6ad",
+    ),
 )
 
 
@@ -479,9 +563,7 @@ def _extract(commit: str, destination: Path) -> None:
 
 
 def _generate(scenario: Scenario) -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix=f"run-state-{scenario.version}-") as temp:
-        tree = Path(temp)
-        _extract(scenario.commit, tree)
+    def generate_from_tree(tree: Path) -> dict[str, object]:
         env = dict(os.environ)
         env["UV_DEFAULT_INDEX"] = "https://pypi.org/simple"
         for variable in (
@@ -526,6 +608,14 @@ def _generate(scenario: Scenario) -> dict[str, object]:
             payload["$schemaVersion"] = scenario.version
         return cast(dict[str, object], payload)
 
+    if scenario.commit is None:
+        return generate_from_tree(ROOT)
+
+    with tempfile.TemporaryDirectory(prefix=f"run-state-{scenario.version}-") as temp:
+        tree = Path(temp)
+        _extract(scenario.commit, tree)
+        return generate_from_tree(tree)
+
 
 def main() -> None:
     OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -540,16 +630,20 @@ def main() -> None:
         source = {
             "version": scenario.version,
             "feature": scenario.name,
-            "commit": scenario.commit,
             "fixture": f"features/{filename}",
             "provenance": scenario.provenance,
         }
+        if scenario.commit is not None:
+            source["commit"] = scenario.commit
+        if scenario.lineage_commit is not None:
+            source["lineage_commit"] = scenario.lineage_commit
         if scenario.emitted_version is not None:
             source["emitted_version"] = scenario.emitted_version
             source["note"] = (
                 "The release-boundary schema renumbering introduced this reader version "
-                "without a writer that emitted it. The recorded writer emitted 1.9; only "
-                "the schema label is changed to exercise the canonical compatibility branch."
+                "without a writer that emitted it. The recorded writer emitted "
+                f"{scenario.emitted_version}; only the schema label is changed to exercise "
+                "the canonical compatibility branch."
             )
         feature_sources.append(source)
 

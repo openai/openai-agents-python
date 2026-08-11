@@ -109,6 +109,20 @@
       "fixture": "features/v1_15_canonical_invocation_identity.json",
       "provenance": "historical_writer",
       "version": "1.15"
+    },
+    {
+      "feature": "approval_argument_overrides",
+      "fixture": "features/v1_16_approval_argument_overrides.json",
+      "lineage_commit": "672358a3c0eef02c15f62c0ba449a63f9581f6ad",
+      "provenance": "current_writer",
+      "version": "1.16"
+    },
+    {
+      "feature": "durable_approval_argument_overrides",
+      "fixture": "features/v1_16_durable_approval_argument_overrides.json",
+      "lineage_commit": "672358a3c0eef02c15f62c0ba449a63f9581f6ad",
+      "provenance": "current_writer",
+      "version": "1.16"
     }
   ],
   "resume": {
@@ -162,6 +176,11 @@
     "1.15": {
       "commit": "4720150fde047baa4e88b16082b282bee3a5e87d",
       "fixture": "minimal/v1_15.json"
+    },
+    "1.16": {
+      "fixture": "minimal/v1_16.json",
+      "lineage_commit": "672358a3c0eef02c15f62c0ba449a63f9581f6ad",
+      "provenance": "current_writer"
     },
     "1.2": {
       "commit": "74e8c1e22d7441bd42c58bcd4270937ccc2dca8c",

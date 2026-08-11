@@ -12,7 +12,11 @@ from ..agent_tool_state import set_agent_tool_state_scope
 from ..exceptions import UserError
 from ..guardrail import InputGuardrailResult
 from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
-from ..memory import Session
+from ..memory import (
+    Session,
+    is_server_managed_conversation_session,
+    is_session_history_rewrite_aware_session,
+)
 from ..models.openai_agent_registration import add_openai_harness_id_to_metadata
 from ..result import RunResult
 from ..run_config import RunConfig
@@ -63,6 +67,7 @@ __all__ = [
     "save_turn_items_if_needed",
     "should_cancel_parallel_model_task_on_input_guardrail_trip",
     "update_run_state_for_interruption",
+    "validate_override_history_persistence_support",
 ]
 
 _PARALLEL_INPUT_GUARDRAIL_CANCEL_PATCH_ID = (
@@ -254,6 +259,54 @@ def validate_session_conversation_settings(
     raise UserError(
         "Session persistence cannot be combined with conversation_id, "
         "previous_response_id, or auto_previous_response_id."
+    )
+
+
+def validate_override_history_persistence_support(
+    *,
+    input: str | list[TResponseInputItem] | RunState[Any],
+    session: Session | None,
+    response_history_is_server_managed: bool,
+) -> None:
+    """Fail fast when approval override persistence requirements are not satisfied."""
+    if not isinstance(input, RunState):
+        return
+
+    session_history_is_server_managed = is_server_managed_conversation_session(session)
+    canonical_history_is_server_managed = (
+        response_history_is_server_managed or session_history_is_server_managed
+    )
+
+    if (
+        input._has_pending_execution_only_approval_overrides()
+        and not canonical_history_is_server_managed
+    ):
+        raise UserError(
+            "save_override_arguments=False is only supported when canonical history is managed "
+            "by a server, such as with OpenAIConversationsSession, conversation_id, "
+            "previous_response_id, or auto_previous_response_id."
+        )
+
+    mutations = input._get_session_history_mutations()
+    if not mutations:
+        return
+
+    if canonical_history_is_server_managed:
+        raise UserError(
+            "save_override_arguments requires local canonical history. "
+            "Server-managed conversations cannot persist corrected function_call arguments. "
+            "Pass save_override_arguments=False to apply the override only to the current "
+            "execution."
+        )
+
+    if session is None or is_session_history_rewrite_aware_session(session):
+        return
+
+    raise UserError(
+        "save_override_arguments requires a session that supports expected history rewrites. "
+        "Use SQLiteSession, OpenAIResponsesCompactionSession, or another "
+        "SessionHistoryRewriteAwareSession. The configured session has no safe execution-only "
+        "alternative because it owns the local canonical history."
     )
 
 

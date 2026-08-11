@@ -2126,7 +2126,7 @@ async def resolve_interrupted_turn(
                     continue
                 _add_pending_interruption(original_approval)
                 continue
-            nested_state, nested_item = nested_approval
+            nested_state, nested_item, _outer_tool_call, _pending_result = nested_approval
             nested_context = nested_state._context
             nested_call_id = get_tool_approval_item_call_id(nested_item)
             nested_status = (

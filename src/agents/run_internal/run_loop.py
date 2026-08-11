@@ -152,6 +152,7 @@ from .run_steps import (
 from .session_persistence import (
     _session_get_items,
     admit_pending_input,
+    apply_pending_session_history_mutations,
     commit_server_pending_input,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
@@ -1017,19 +1018,28 @@ async def start_streaming(
 
                     last_model_response = run_state._model_responses[-1]
 
-                    turn_result = await resolve_interrupted_turn(
-                        bindings=current_bindings,
-                        original_input=run_state._original_input,
-                        original_pre_step_items=run_state._generated_items,
-                        new_response=last_model_response,
-                        processed_response=run_state._last_processed_response,
-                        hooks=hooks,
-                        context_wrapper=context_wrapper,
-                        run_config=run_config,
-                        server_manages_conversation=server_conversation_tracker is not None,
-                        run_state=run_state,
-                        error_handlers=error_handlers,
+                    await apply_pending_session_history_mutations(
+                        session,
+                        run_state,
+                        wrapper=context_wrapper,
                     )
+
+                    try:
+                        turn_result = await resolve_interrupted_turn(
+                            bindings=current_bindings,
+                            original_input=run_state._original_input,
+                            original_pre_step_items=run_state._generated_items,
+                            new_response=last_model_response,
+                            processed_response=run_state._last_processed_response,
+                            hooks=hooks,
+                            context_wrapper=context_wrapper,
+                            run_config=run_config,
+                            server_manages_conversation=server_conversation_tracker is not None,
+                            run_state=run_state,
+                            error_handlers=error_handlers,
+                        )
+                    finally:
+                        run_state._clear_executed_approval_argument_overrides()
 
                     tool_use_tracker.record_processed_response(
                         current_agent, run_state._last_processed_response

@@ -8,7 +8,7 @@ import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -67,7 +67,7 @@ from agents.items import (
     TResponseInputItem,
 )
 from agents.lifecycle import RunHooks
-from agents.memory import SessionSettings
+from agents.memory import OpenAIResponsesCompactionSession, SessionSettings
 from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.run import AgentRunner, get_default_agent_runner, set_default_agent_runner
 from agents.run_config import _default_trace_include_sensitive_data
@@ -110,8 +110,14 @@ from .test_responses import (
     get_text_message,
 )
 from .utils.factories import make_run_state
-from .utils.hitl import make_context_wrapper, make_model_and_agent, make_shell_call
-from .utils.simple_session import CountingSession, IdStrippingSession, SimpleListSession
+from .utils.hitl import consume_stream, make_context_wrapper, make_model_and_agent, make_shell_call
+from .utils.simple_session import (
+    CountingSession,
+    IdStrippingSession,
+    RewriteAwareSimpleSession,
+    ServerManagedSimpleSession,
+    SimpleListSession,
+)
 
 
 class _DummyRunItem:
@@ -1837,6 +1843,1137 @@ async def test_resumed_state_updates_agent_after_handoff() -> None:
         "handoff should switch approvals to the delegate agent"
     )
     assert state._current_agent is delegate
+
+
+@pytest.mark.asyncio
+async def test_resume_with_durable_override_rewrites_local_session_history() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        return f"result:{test}"
+
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    session = RewriteAwareSimpleSession()
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "approval_tool", json.dumps({"test": "foo"}), call_id="call-1"
+                )
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    first = await Runner.run(agent, input="user_message", session=session)
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+
+    resumed = await Runner.run(agent, state, session=session)
+
+    assert resumed.final_output == "done"
+    assert cast(Any, resumed.raw_responses[0].output[0]).arguments == json.dumps({"test": "foo"})
+    saved_items = await session.get_items()
+    assert saved_items[1]["type"] == "function_call"
+    assert cast(dict[str, Any], saved_items[1])["arguments"] == json.dumps({"test": "bar"})
+    assert saved_items[2]["type"] == "function_call_output"
+    assert saved_items[2]["call_id"] == "call-1"
+    assert state.to_json()["approval_argument_override_modes"] == []
+
+
+async def _run_approval_recovery_case(
+    agent: Agent[Any],
+    input: str | RunState[Any, Agent[Any]],
+    *,
+    streamed: bool,
+    run_config: RunConfig | None = None,
+    session: RewriteAwareSimpleSession | None = None,
+    previous_response_id: str | None = "resp-root",
+) -> Any:
+    if streamed:
+        result = Runner.run_streamed(
+            agent,
+            input,
+            session=session,
+            previous_response_id=previous_response_id,
+            run_config=run_config,
+        )
+        await consume_stream(result)
+        return result
+    return await Runner.run(
+        agent,
+        input,
+        session=session,
+        previous_response_id=previous_response_id,
+        run_config=run_config,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_execution_only_override_failure_state_roundtrips(streamed: bool) -> None:
+    @function_tool(needs_approval=True, failure_error_function=None)
+    async def failing_tool(value: str) -> str:
+        raise RuntimeError(f"failed:{value}")
+
+    model = FakeModel()
+    model.set_next_output(
+        [
+            get_function_tool_call(
+                "failing_tool",
+                json.dumps({"value": "original"}),
+                call_id="call-failure",
+            )
+        ]
+    )
+    agent = Agent(name="approval_agent", model=model, tools=[failing_tool])
+    first = await _run_approval_recovery_case(agent, "go", streamed=streamed)
+    state = first.to_state()
+    state.approve(
+        first.interruptions[0],
+        override_arguments={"value": "corrected"},
+        save_override_arguments=False,
+    )
+
+    with pytest.raises(UserError, match="Error running tool failing_tool: failed:corrected"):
+        await _run_approval_recovery_case(agent, state, streamed=streamed)
+
+    restored = await RunState.from_json(agent, state.to_json())
+    assert restored.to_json()["approval_argument_override_modes"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_execution_only_override_cancelled_state_roundtrips(streamed: bool) -> None:
+    started = asyncio.Event()
+
+    @function_tool(needs_approval=True, failure_error_function=None)
+    async def blocking_tool(value: str) -> str:
+        started.set()
+        await asyncio.Event().wait()
+        return value
+
+    model = FakeModel()
+    model.set_next_output(
+        [
+            get_function_tool_call(
+                "blocking_tool",
+                json.dumps({"value": "original"}),
+                call_id="call-cancelled",
+            )
+        ]
+    )
+    agent = Agent(name="approval_agent", model=model, tools=[blocking_tool])
+    first = await _run_approval_recovery_case(agent, "go", streamed=streamed)
+    state = first.to_state()
+    state.approve(
+        first.interruptions[0],
+        override_arguments={"value": "corrected"},
+        save_override_arguments=False,
+    )
+
+    if streamed:
+        resumed = Runner.run_streamed(agent, state, previous_response_id="resp-root")
+        consumer = asyncio.create_task(consume_stream(resumed))
+        await started.wait()
+        resumed.cancel(mode="immediate")
+        await consumer
+    else:
+        task = asyncio.create_task(Runner.run(agent, state, previous_response_id="resp-root"))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    restored = await RunState.from_json(agent, state.to_json())
+    assert restored.to_json()["approval_argument_override_modes"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_execution_only_multi_call_partial_failure_preserves_unstarted_mode(
+    streamed: bool,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    @function_tool(needs_approval=True, failure_error_function=None)
+    async def failing_tool(value: str) -> str:
+        calls.append(("failing", value))
+        raise RuntimeError(f"failed:{value}")
+
+    @function_tool(needs_approval=True, failure_error_function=None)
+    async def pending_tool(value: str) -> str:
+        calls.append(("pending", value))
+        return value
+
+    model = FakeModel()
+    model.set_next_output(
+        [
+            get_function_tool_call(
+                "failing_tool",
+                json.dumps({"value": "original-failure"}),
+                call_id="call-failure",
+            ),
+            get_function_tool_call(
+                "pending_tool",
+                json.dumps({"value": "original-pending"}),
+                call_id="call-pending",
+            ),
+        ]
+    )
+    agent = Agent(
+        name="approval_agent",
+        model=model,
+        tools=[failing_tool, pending_tool],
+    )
+    run_config = RunConfig(tool_execution=ToolExecutionConfig(max_function_tool_concurrency=1))
+    first = await _run_approval_recovery_case(
+        agent,
+        "go",
+        streamed=streamed,
+        run_config=run_config,
+    )
+    state = first.to_state()
+    for interruption in first.interruptions:
+        state.approve(
+            interruption,
+            override_arguments={
+                "value": (
+                    "corrected-failure"
+                    if interruption.tool_name == "failing_tool"
+                    else "corrected-pending"
+                )
+            },
+            save_override_arguments=False,
+        )
+
+    with pytest.raises(UserError, match="Error running tool failing_tool: failed:corrected"):
+        await _run_approval_recovery_case(
+            agent,
+            state,
+            streamed=streamed,
+            run_config=run_config,
+        )
+
+    assert calls == [("failing", "corrected-failure")]
+    assert state.to_json()["approval_argument_override_modes"] == [
+        {"call_id": "call-pending", "mode": "execution_only"}
+    ]
+    restored = await RunState.from_json(agent, state.to_json())
+    assert restored.to_json()["approval_argument_override_modes"] == [
+        {"call_id": "call-pending", "mode": "execution_only"}
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_durable_multi_call_partial_failure_preserves_unstarted_override(
+    streamed: bool,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    @function_tool(needs_approval=True, failure_error_function=None)
+    async def failing_tool(value: str) -> str:
+        calls.append(("failing", value))
+        raise RuntimeError(f"failed:{value}")
+
+    @function_tool(needs_approval=True, failure_error_function=None)
+    async def pending_tool(value: str) -> str:
+        calls.append(("pending", value))
+        return value
+
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "failing_tool",
+                    json.dumps({"value": "original-failure"}),
+                    call_id="call-failure",
+                ),
+                get_function_tool_call(
+                    "pending_tool",
+                    json.dumps({"value": "original-pending"}),
+                    call_id="call-pending",
+                ),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="approval_agent",
+        model=model,
+        tools=[failing_tool, pending_tool],
+    )
+    session = RewriteAwareSimpleSession()
+    run_config = RunConfig(tool_execution=ToolExecutionConfig(max_function_tool_concurrency=1))
+    first = await _run_approval_recovery_case(
+        agent,
+        "go",
+        streamed=streamed,
+        run_config=run_config,
+        session=session,
+        previous_response_id=None,
+    )
+    state = first.to_state()
+    for interruption in first.interruptions:
+        state.approve(
+            interruption,
+            override_arguments={
+                "value": (
+                    "corrected-failure"
+                    if interruption.tool_name == "failing_tool"
+                    else "corrected-pending"
+                )
+            },
+        )
+
+    with pytest.raises(UserError, match="Error running tool failing_tool: failed:corrected"):
+        await _run_approval_recovery_case(
+            agent,
+            state,
+            streamed=streamed,
+            run_config=run_config,
+            session=session,
+            previous_response_id=None,
+        )
+
+    assert calls == [("failing", "corrected-failure")]
+    serialized = state.to_json()
+    assert serialized["approval_argument_override_modes"] == [
+        {"call_id": "call-pending", "mode": "durable"}
+    ]
+    assert [mutation["call_id"] for mutation in serialized["session_history_mutations"]] == [
+        "call-pending"
+    ]
+
+    restored = await RunState.from_json(agent, serialized)
+    assert restored.to_json()["approval_argument_override_modes"] == [
+        {"call_id": "call-pending", "mode": "durable"}
+    ]
+    assert [
+        mutation["call_id"] for mutation in restored.to_json()["session_history_mutations"]
+    ] == ["call-pending"]
+
+    with pytest.raises(
+        ModelBehaviorError,
+        match="A tool call already executed, but its output was not committed",
+    ):
+        await _run_approval_recovery_case(
+            agent,
+            restored,
+            streamed=streamed,
+            run_config=run_config,
+            session=session,
+            previous_response_id=None,
+        )
+
+    assert calls == [("failing", "corrected-failure")]
+    assert [
+        mutation["call_id"] for mutation in restored.to_json()["session_history_mutations"]
+    ] == ["call-pending"]
+
+
+class _TrackingRewriteSession(RewriteAwareSimpleSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rewrite_calls = 0
+
+    async def apply_history_mutations(self, args: Any) -> bool:
+        self.rewrite_calls += 1
+        return await super().apply_history_mutations(args)
+
+
+async def _build_nested_approval_override_state(
+    case_id: str,
+) -> tuple[Agent[Any], RunState[Any, Agent[Any]], _TrackingRewriteSession, list[str]]:
+    calls: list[str] = []
+
+    @function_tool(needs_approval=True)
+    async def inner_tool(value: str) -> str:
+        calls.append(value)
+        return value
+
+    nested_model = FakeModel()
+    nested_agent = Agent(name="nested", model=nested_model, tools=[inner_tool])
+    nested_model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "inner_tool",
+                    json.dumps({"value": "original"}),
+                    call_id=f"inner-call-{case_id}",
+                )
+            ],
+            [get_text_message("nested done")],
+        ]
+    )
+
+    session = _TrackingRewriteSession()
+    run_config = RunConfig(tracing_disabled=True)
+    outer_model = FakeModel()
+    outer_agent = Agent(
+        name="outer",
+        model=outer_model,
+        tools=[
+            nested_agent.as_tool(
+                tool_name="nested_tool",
+                tool_description="Run the nested agent.",
+                needs_approval=True,
+                session=session,
+                run_config=run_config,
+                failure_error_function=None,
+            )
+        ],
+    )
+    outer_model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "nested_tool",
+                    json.dumps({"input": "go"}),
+                    call_id=f"outer-call-{case_id}",
+                )
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    first = await Runner.run(outer_agent, "start", run_config=run_config)
+    first_state = first.to_state()
+    first_state.approve(first.interruptions[0], always_approve=True)
+    second = await Runner.run(outer_agent, first_state, run_config=run_config)
+    assert second.interruptions
+    return outer_agent, second.to_state(), session, calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "serialized"])
+async def test_nested_durable_override_rewrites_local_session_history(
+    round_trip: bool,
+) -> None:
+    outer_agent, state, session, calls = await _build_nested_approval_override_state(
+        f"durable-{round_trip}"
+    )
+    state.approve(state.get_interruptions()[0], override_arguments={"value": "corrected"})
+    if round_trip:
+        state = await RunState.from_json(outer_agent, state.to_json())
+
+    resumed = await Runner.run(
+        outer_agent,
+        state,
+        run_config=RunConfig(tracing_disabled=True),
+    )
+
+    assert resumed.final_output == "done"
+    assert resumed.interruptions == []
+    assert calls == ["corrected"]
+    assert session.rewrite_calls == 1
+    saved_calls = [
+        item
+        for item in await session.get_items()
+        if isinstance(item, dict) and item.get("type") == "function_call"
+    ]
+    assert len(saved_calls) == 1
+    assert saved_calls[0]["arguments"] == json.dumps({"value": "corrected"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "serialized"])
+async def test_nested_execution_only_override_rejects_local_session_history(
+    round_trip: bool,
+) -> None:
+    outer_agent, state, session, calls = await _build_nested_approval_override_state(
+        f"execution-only-{round_trip}"
+    )
+    state.approve(
+        state.get_interruptions()[0],
+        override_arguments={"value": "corrected"},
+        save_override_arguments=False,
+    )
+    if round_trip:
+        state = await RunState.from_json(outer_agent, state.to_json())
+
+    with pytest.raises(UserError, match="save_override_arguments=False is only supported"):
+        await Runner.run(
+            outer_agent,
+            state,
+            run_config=RunConfig(tracing_disabled=True),
+        )
+
+    assert calls == []
+    assert session.rewrite_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_invalid_nested_override_preserves_cached_run_result() -> None:
+    from agents.agent_tool_state import peek_agent_tool_run_result
+
+    outer_agent, state, _session, calls = await _build_nested_approval_override_state(
+        "invalid-override"
+    )
+    assert state._last_processed_response is not None
+    outer_call = state._last_processed_response.functions[0].tool_call
+    pending_result = peek_agent_tool_run_result(
+        outer_call,
+        scope_id=state._agent_tool_state_scope_id,
+    )
+    assert pending_result is not None
+
+    with pytest.raises(UserError, match="cannot be used together with always_approve"):
+        state.approve(
+            state.get_interruptions()[0],
+            always_approve=True,
+            override_arguments={"value": "corrected"},
+        )
+
+    assert (
+        peek_agent_tool_run_result(
+            outer_call,
+            scope_id=state._agent_tool_state_scope_id,
+        )
+        is pending_result
+    )
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "serialized"])
+async def test_nested_execution_only_sync_cancellation_state_roundtrips(
+    round_trip: bool,
+) -> None:
+    from agents.agent_tool_state import peek_agent_tool_run_result
+
+    config = RunConfig(tracing_disabled=True)
+    case_id = "serialized" if round_trip else "live"
+    tool_started = asyncio.Event()
+    tool_stopped = asyncio.Event()
+    calls: list[str] = []
+
+    @function_tool(needs_approval=True, failure_error_function=None)
+    async def inner_tool(value: str) -> str:
+        calls.append(value)
+        tool_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            tool_stopped.set()
+        return value
+
+    nested_model = FakeModel()
+    nested_agent = Agent(name="nested", model=nested_model, tools=[inner_tool])
+    nested_model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "inner_tool",
+                    json.dumps({"value": "original"}),
+                    call_id=f"inner-call-{case_id}",
+                )
+            ],
+            [get_text_message("nested done")],
+        ]
+    )
+
+    outer_model = FakeModel()
+    outer_agent = Agent(
+        name="outer",
+        model=outer_model,
+        tools=[
+            nested_agent.as_tool(
+                tool_name="nested_tool",
+                tool_description="Run the nested agent.",
+                needs_approval=True,
+                session=ServerManagedSimpleSession(),
+                run_config=config,
+                failure_error_function=None,
+            )
+        ],
+    )
+    outer_model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "nested_tool",
+                    json.dumps({"input": "go"}),
+                    call_id=f"outer-call-{case_id}",
+                )
+            ],
+            [get_text_message("outer done")],
+        ]
+    )
+
+    first = await Runner.run(outer_agent, "go", run_config=config)
+    state = first.to_state()
+    state.approve(first.interruptions[0], always_approve=True)
+    second = await Runner.run(outer_agent, state, run_config=config)
+    state = second.to_state()
+    state.approve(
+        state.get_interruptions()[0],
+        override_arguments={"value": "corrected"},
+        save_override_arguments=False,
+    )
+    if round_trip:
+        state = await RunState.from_json(outer_agent, state.to_json())
+
+    resume_task = asyncio.create_task(Runner.run(outer_agent, state, run_config=config))
+    try:
+        await asyncio.wait_for(tool_started.wait(), timeout=2)
+        resume_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await resume_task
+
+        immediate_payload = state.to_json()
+        nested_payload = immediate_payload["last_processed_response"]["functions"][0][
+            "agent_run_state"
+        ]
+        assert nested_payload["approval_argument_override_modes"] == []
+        inner_invocation = nested_payload["context"]["tool_invocations"][f"inner-call-{case_id}"]
+        assert inner_invocation["executed"] is True
+        assert inner_invocation["completed"] is False
+
+        restored = await RunState.from_json(outer_agent, immediate_payload)
+        assert restored._last_processed_response is not None
+        restored_outer_call = restored._last_processed_response.functions[0].tool_call
+        assert (
+            peek_agent_tool_run_result(
+                restored_outer_call,
+                scope_id=restored._agent_tool_state_scope_id,
+            )
+            is not None
+        )
+    finally:
+        if not resume_task.done():
+            resume_task.cancel()
+            await asyncio.gather(resume_task, return_exceptions=True)
+        await asyncio.wait_for(tool_stopped.wait(), timeout=2)
+
+    assert calls == ["corrected"]
+
+
+@pytest.mark.asyncio
+async def test_durable_override_rewrite_fails_before_tool_execution() -> None:
+    calls: list[str] = []
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        calls.append(test)
+        return f"result:{test}"
+
+    class FailingRewriteSession(RewriteAwareSimpleSession):
+        async def apply_history_mutations(self, _args: Any) -> bool:
+            raise RuntimeError("rewrite failed")
+
+    model = FakeModel()
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    session = FailingRewriteSession()
+    model.set_next_output(
+        [get_function_tool_call("approval_tool", '{"test":"foo"}', call_id="call-1")]
+    )
+
+    first = await Runner.run(agent, input="user_message", session=session)
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+
+    with pytest.raises(RuntimeError, match="rewrite failed"):
+        await Runner.run(agent, state, session=session)
+
+    assert calls == []
+    assert state._get_session_history_mutations()
+
+
+@pytest.mark.asyncio
+async def test_durable_override_missing_history_fails_before_tool_execution() -> None:
+    calls: list[str] = []
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        calls.append(test)
+        return f"result:{test}"
+
+    model = FakeModel()
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    session = RewriteAwareSimpleSession()
+    model.set_next_output(
+        [get_function_tool_call("approval_tool", '{"test":"foo"}', call_id="call-1")]
+    )
+
+    first = await Runner.run(agent, input="user_message", session=session)
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+    await session.clear_session()
+
+    with pytest.raises(ValueError, match="did not match the expected function call"):
+        await Runner.run(agent, state, session=session)
+
+    assert calls == []
+    assert state._get_session_history_mutations()
+
+
+@pytest.mark.asyncio
+async def test_durable_override_requires_rewrite_confirmation_before_tool_execution() -> None:
+    calls: list[str] = []
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        calls.append(test)
+        return f"result:{test}"
+
+    class UnconfirmedRewriteSession(RewriteAwareSimpleSession):
+        async def apply_history_mutations(self, _args: Any) -> bool:
+            return False
+
+    model = FakeModel()
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    session = UnconfirmedRewriteSession()
+    model.set_next_output(
+        [get_function_tool_call("approval_tool", '{"test":"foo"}', call_id="call-1")]
+    )
+
+    first = await Runner.run(agent, input="user_message", session=session)
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+
+    with pytest.raises(UserError, match="did not confirm that every target call was rewritten"):
+        await Runner.run(agent, state, session=session)
+
+    assert calls == []
+    assert state._get_session_history_mutations()
+
+
+@pytest.mark.asyncio
+async def test_malformed_durable_override_state_fails_before_tool_execution() -> None:
+    calls: list[str] = []
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        calls.append(test)
+        return f"result:{test}"
+
+    model = FakeModel()
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    session = RewriteAwareSimpleSession()
+    model.set_next_output(
+        [get_function_tool_call("approval_tool", '{"test":"foo"}', call_id="call-1")]
+    )
+    first = await Runner.run(agent, input="user_message", session=session)
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+    serialized = state.to_json()
+    serialized["session_history_mutations"][0]["replacement"] = None
+
+    with pytest.raises(UserError, match="invalid function-call replacement"):
+        await RunState.from_json(agent, serialized)
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_missing_durable_override_mutation_fails_before_tool_execution() -> None:
+    calls: list[str] = []
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        calls.append(test)
+        return f"result:{test}"
+
+    model = FakeModel()
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    session = RewriteAwareSimpleSession()
+    model.set_next_output(
+        [get_function_tool_call("approval_tool", '{"test":"foo"}', call_id="call-1")]
+    )
+    first = await Runner.run(agent, input="user_message", session=session)
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+    serialized = state.to_json()
+    serialized["session_history_mutations"] = []
+
+    with pytest.raises(UserError, match="is inconsistent with pending function calls"):
+        await RunState.from_json(agent, serialized)
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_mismatched_durable_override_state_fails_before_tool_execution() -> None:
+    calls: list[str] = []
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        calls.append(test)
+        return f"result:{test}"
+
+    model = FakeModel()
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    session = RewriteAwareSimpleSession()
+    model.set_next_output(
+        [get_function_tool_call("approval_tool", '{"test":"foo"}', call_id="call-1")]
+    )
+    first = await Runner.run(agent, input="user_message", session=session)
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+    serialized = state.to_json()
+    serialized["session_history_mutations"][0]["replacement"]["arguments"] = '{"test":"different"}'
+
+    with pytest.raises(UserError, match="does not match the pending function call"):
+        await RunState.from_json(agent, serialized)
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_processed_durable_override_mismatch_fails_before_session_rewrite() -> None:
+    calls: list[str] = []
+
+    class TrackingRewriteSession(RewriteAwareSimpleSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.rewrite_calls = 0
+
+        async def apply_history_mutations(self, args: Any) -> bool:
+            self.rewrite_calls += 1
+            return await super().apply_history_mutations(args)
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        calls.append(test)
+        return f"result:{test}"
+
+    model = FakeModel()
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    session = TrackingRewriteSession()
+    model.set_next_output(
+        [get_function_tool_call("approval_tool", '{"test":"foo"}', call_id="call-1")]
+    )
+    first = await Runner.run(agent, input="user_message", session=session)
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+    serialized = state.to_json()
+    serialized["last_processed_response"]["functions"][0]["tool_call"]["arguments"] = (
+        '{"test":"different"}'
+    )
+
+    with pytest.raises(UserError, match="does not match the pending function call"):
+        await RunState.from_json(agent, serialized)
+
+    assert session.rewrite_calls == 0
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remove_canonical_call", [False, True])
+async def test_unmarked_execution_only_override_state_fails_before_tool_execution(
+    remove_canonical_call: bool,
+) -> None:
+    calls: list[str] = []
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        calls.append(test)
+        return f"result:{test}"
+
+    model = FakeModel()
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    session = SimpleListSession()
+    model.set_next_output(
+        [get_function_tool_call("approval_tool", '{"test":"foo"}', call_id="call-1")]
+    )
+    first = await Runner.run(agent, input="user_message", session=session)
+    state = first.to_state()
+    state.approve(
+        first.interruptions[0],
+        override_arguments={"test": "bar"},
+        save_override_arguments=False,
+    )
+    serialized = state.to_json()
+    serialized["approval_argument_override_modes"] = []
+    if remove_canonical_call:
+        serialized["generated_items"] = []
+        serialized["generated_session_item_indexes"] = []
+
+    with pytest.raises(UserError, match="is inconsistent with pending function calls"):
+        await RunState.from_json(agent, serialized)
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_execution_only_override_without_server_managed_history() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        return f"result:{test}"
+
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "approval_tool", json.dumps({"test": "foo"}), call_id="call-1"
+                )
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    first = await Runner.run(agent, input="user_message")
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(
+        first.interruptions[0],
+        override_arguments={"test": "bar"},
+        save_override_arguments=False,
+    )
+
+    with pytest.raises(UserError, match="save_override_arguments=False is only supported"):
+        await Runner.run(agent, state)
+
+
+@pytest.mark.asyncio
+async def test_resume_supports_execution_only_override_with_server_managed_session() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        return f"result:{test}"
+
+    agent = Agent(
+        name="approval_agent",
+        model=model,
+        tools=[approval_tool],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    session = ServerManagedSimpleSession()
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "approval_tool", json.dumps({"test": "foo"}), call_id="call-1"
+                )
+            ],
+        ]
+    )
+
+    first = await Runner.run(agent, input="user_message", session=session)
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(
+        first.interruptions[0],
+        override_arguments={"test": "bar"},
+        save_override_arguments=False,
+    )
+
+    resumed = await Runner.run(agent, state, session=session)
+
+    assert resumed.final_output == "result:bar"
+    saved_items = await session.get_items()
+    assert cast(dict[str, Any], saved_items[1])["arguments"] == json.dumps({"test": "foo"})
+    assert state.to_json()["approval_argument_override_modes"] == []
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_durable_override_with_server_managed_session() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        return f"result:{test}"
+
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    session = ServerManagedSimpleSession()
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "approval_tool", json.dumps({"test": "foo"}), call_id="call-1"
+                )
+            ],
+        ]
+    )
+
+    first = await Runner.run(agent, input="user_message", session=session)
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+
+    with pytest.raises(UserError, match="Server-managed conversations cannot persist"):
+        await Runner.run(agent, state, session=session)
+
+
+@pytest.mark.asyncio
+async def test_resume_supports_execution_only_override_with_previous_response_id() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        return f"result:{test}"
+
+    agent = Agent(
+        name="approval_agent",
+        model=model,
+        tools=[approval_tool],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "approval_tool", json.dumps({"test": "foo"}), call_id="call-1"
+                )
+            ],
+        ]
+    )
+
+    first = await Runner.run(agent, input="user_message", previous_response_id="resp-root")
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(
+        first.interruptions[0],
+        override_arguments={"test": "bar"},
+        save_override_arguments=False,
+    )
+
+    resumed = await Runner.run(agent, state)
+
+    assert resumed.final_output == "result:bar"
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_durable_override_for_non_rewrite_aware_session() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        return f"result:{test}"
+
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    session = SimpleListSession()
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "approval_tool", json.dumps({"test": "foo"}), call_id="call-1"
+                )
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    first = await Runner.run(agent, input="user_message", session=session)
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+
+    with pytest.raises(UserError, match="supports expected history rewrites"):
+        await Runner.run(agent, state, session=session)
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_method_only_history_rewrite_session() -> None:
+    """A method-name collision must not opt a session into expected rewrites."""
+
+    class MethodOnlyRewriteSession(SimpleListSession):
+        async def apply_history_mutations(self, _args: Any) -> bool:
+            return True
+
+    model = FakeModel()
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        return f"result:{test}"
+
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    session = MethodOnlyRewriteSession()
+    model.set_next_output(
+        [get_function_tool_call("approval_tool", '{"test":"foo"}', call_id="call-1")]
+    )
+
+    first = await Runner.run(agent, input="user_message", session=session)
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+
+    with pytest.raises(UserError, match="supports expected history rewrites"):
+        await Runner.run(agent, state, session=session)
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_dynamically_forwarded_rewrite_capability() -> None:
+    """A transforming proxy must explicitly implement compatible rewrite semantics."""
+
+    class ForwardingSession:
+        def __init__(self) -> None:
+            self.session_id = "forwarding"
+            self.underlying_session = RewriteAwareSimpleSession(self.session_id)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.underlying_session, name)
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        return f"result:{test}"
+
+    model = FakeModel()
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    session = ForwardingSession()
+    model.set_next_output(
+        [get_function_tool_call("approval_tool", '{"test":"foo"}', call_id="call-1")]
+    )
+
+    first = await Runner.run(agent, input="user_message", session=cast(Any, session))
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+
+    with pytest.raises(UserError, match="supports expected history rewrites"):
+        await Runner.run(agent, state, session=cast(Any, session))
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_dynamically_forwarded_server_managed_capability() -> None:
+    """A transforming proxy must explicitly declare server-managed history semantics."""
+    calls: list[str] = []
+
+    class ForwardingSession:
+        def __init__(self) -> None:
+            self.session_id = "forwarding-server"
+            self.underlying_session = ServerManagedSimpleSession(self.session_id)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.underlying_session, name)
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        calls.append(test)
+        return f"result:{test}"
+
+    model = FakeModel()
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    session = ForwardingSession()
+    model.set_next_output(
+        [get_function_tool_call("approval_tool", '{"test":"foo"}', call_id="call-1")]
+    )
+    first = await Runner.run(agent, input="user_message", session=cast(Any, session))
+    state = first.to_state()
+    state.approve(
+        first.interruptions[0],
+        override_arguments={"test": "bar"},
+        save_override_arguments=False,
+    )
+
+    with pytest.raises(UserError, match="save_override_arguments=False is only supported"):
+        await Runner.run(agent, state, session=cast(Any, session))
+
+    assert calls == []
 
 
 class Foo(TypedDict):
@@ -3841,6 +4978,100 @@ async def test_save_result_to_session_does_not_increment_counter_when_nothing_sa
 
     assert run_state._current_turn_persisted_item_count == 0
     assert session.saved_items == []
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_session_does_not_compact_empty_no_override_save() -> None:
+    client = MagicMock()
+    client.responses.compact = AsyncMock()
+    session = OpenAIResponsesCompactionSession(
+        session_id="test",
+        underlying_session=SimpleListSession(),
+        client=client,
+        should_trigger_compaction=lambda _: True,
+    )
+    agent = Agent(name="agent", model=FakeModel())
+    approval_item = ToolApprovalItem(
+        agent=agent,
+        raw_item={"type": "function_call", "call_id": "call-1", "name": "tool"},
+    )
+    run_state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [approval_item]),
+        run_state,
+        response_id="resp-test",
+    )
+
+    assert saved_count == 0
+    assert await session.get_items() == []
+    client.responses.compact.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_session_compacts_empty_save_and_retains_history_mutation() -> None:
+    class CompactingRewriteSession(RewriteAwareSimpleSession):
+        def __init__(self, history: list[TResponseInputItem]) -> None:
+            super().__init__(history=history)
+            self.compaction_calls = 0
+
+        async def run_compaction(self, _args: Any = None) -> None:
+            self.compaction_calls += 1
+
+    original_call = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "tool",
+            "arguments": '{"value":"old"}',
+        },
+    )
+    session = CompactingRewriteSession([original_call])
+    agent = Agent(name="agent", model=FakeModel())
+    approval_item = ToolApprovalItem(agent=agent, raw_item=original_call)
+    run_state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+    run_state._session_history_mutations.append(
+        {
+            "type": "replace_function_call",
+            "call_id": "call-1",
+            "expected": original_call,
+            "replacement": {
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "tool",
+                "arguments": '{"value":"new"}',
+            },
+        }
+    )
+    run_state._approval_argument_override_modes["call-1"] = "durable"
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [approval_item]),
+        run_state,
+        response_id="resp-test",
+    )
+
+    assert saved_count == 0
+    assert session.compaction_calls == 1
+    assert [mutation["call_id"] for mutation in run_state._get_session_history_mutations()] == [
+        "call-1"
+    ]
+    assert cast(dict[str, Any], (await session.get_items())[0])["arguments"] == '{"value":"new"}'
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 """Tests for session memory functionality."""
 
 import asyncio
+import json
 import sqlite3
 import tempfile
 import threading
@@ -10,9 +11,158 @@ from typing import Any, cast
 import pytest
 
 from agents import Agent, RunConfig, Runner, SessionSettings, SQLiteSession, TResponseInputItem
+from agents.memory import SessionHistoryMutation, apply_session_history_mutations
 from agents.memory.sqlite_session import _await_mutation
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
+
+
+class _RecordingLock:
+    def __init__(self, lock):
+        self._lock = lock
+        self.enter_count = 0
+
+    def __enter__(self):
+        self.enter_count += 1
+        return self._lock.__enter__()
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._lock.__exit__(exc_type, exc, tb)
+
+
+def test_history_mutation_rewrites_only_latest_expected_reused_call_id() -> None:
+    earlier_call = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "reused-call",
+            "name": "tool",
+            "arguments": '{"value":"earlier"}',
+        },
+    )
+    expected_call = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "reused-call",
+            "name": "tool",
+            "arguments": '{"value":"current"}',
+        },
+    )
+    replacement_call = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "reused-call",
+            "name": "tool",
+            "arguments": '{"value":"corrected"}',
+        },
+    )
+    items: list[TResponseInputItem] = [
+        earlier_call,
+        {"role": "user", "content": "later"},
+        expected_call,
+    ]
+    mutation: SessionHistoryMutation = {
+        "type": "replace_function_call",
+        "call_id": "reused-call",
+        "expected": expected_call,
+        "replacement": replacement_call,
+    }
+
+    rewritten = apply_session_history_mutations(items, [mutation])
+
+    assert rewritten == [earlier_call, {"role": "user", "content": "later"}, replacement_call]
+    assert apply_session_history_mutations(rewritten, [mutation]) == rewritten
+
+
+def test_history_mutation_rejects_divergent_reused_call_id() -> None:
+    expected_call = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "reused-call",
+            "name": "tool",
+            "arguments": '{"value":"expected"}',
+        },
+    )
+    persisted_call = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "reused-call",
+            "name": "tool",
+            "arguments": '{"value":"different"}',
+        },
+    )
+    replacement_call = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "reused-call",
+            "name": "tool",
+            "arguments": '{"value":"corrected"}',
+        },
+    )
+
+    with pytest.raises(ValueError, match="did not match the expected function call"):
+        apply_session_history_mutations(
+            [persisted_call],
+            [
+                {
+                    "type": "replace_function_call",
+                    "call_id": "reused-call",
+                    "expected": expected_call,
+                    "replacement": replacement_call,
+                }
+            ],
+        )
+
+
+@pytest.mark.parametrize("older_arguments", ['{"value":"expected"}', '{"value":"corrected"}'])
+def test_history_mutation_rejects_newer_divergent_reused_call_id(
+    older_arguments: str,
+) -> None:
+    """A newer same-ID call is the only eligible canonical mutation target."""
+    expected_call = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "reused-call",
+            "name": "tool",
+            "arguments": '{"value":"expected"}',
+        },
+    )
+    replacement_call = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "reused-call",
+            "name": "tool",
+            "arguments": '{"value":"corrected"}',
+        },
+    )
+    older_call = cast(
+        TResponseInputItem,
+        {**expected_call, "arguments": older_arguments},
+    )
+    newer_call = cast(
+        TResponseInputItem,
+        {**expected_call, "arguments": '{"value":"divergent"}'},
+    )
+
+    with pytest.raises(ValueError, match="did not match the expected function call"):
+        apply_session_history_mutations(
+            [older_call, newer_call],
+            [
+                {
+                    "type": "replace_function_call",
+                    "call_id": "reused-call",
+                    "expected": expected_call,
+                    "replacement": replacement_call,
+                }
+            ],
+        )
 
 
 @pytest.mark.asyncio
@@ -809,6 +959,190 @@ async def test_sqlite_session_failed_add_items_releases_write_lock():
         await session.add_items([{"role": "user", "content": "after failure"}])
         assert [item.get("content") for item in await session.get_items()] == ["after failure"]
 
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_apply_history_mutations_uses_file_lock():
+    """File-backed history rewrites should reuse the session lock."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_rewrite_lock.db"
+        session = SQLiteSession("rewrite_lock_test", db_path)
+        function_call: TResponseInputItem = {
+            "type": "function_call",
+            "call_id": "call-1",
+            "id": "fc_1",
+            "name": "test_tool",
+            "arguments": '{"value":"before"}',
+        }
+        replacement: TResponseInputItem = {
+            "type": "function_call",
+            "call_id": "call-1",
+            "id": "fc_1",
+            "name": "test_tool",
+            "arguments": '{"value":"after"}',
+        }
+
+        await session.add_items([function_call])
+        recording_lock = _RecordingLock(session._lock)
+        session.__dict__["_lock"] = recording_lock
+
+        await session.apply_history_mutations(
+            {
+                "mutations": [
+                    {
+                        "type": "replace_function_call",
+                        "call_id": "call-1",
+                        "expected": function_call,
+                        "replacement": replacement,
+                    }
+                ]
+            }
+        )
+        assert recording_lock.enter_count == 1
+
+        retrieved = await session.get_items()
+        assert retrieved == [replacement]
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_history_rewrite_requires_matching_target():
+    """A missing mutation target should leave SQLite history unchanged."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        session = SQLiteSession("rewrite_missing_test", Path(temp_dir) / "rewrite_missing.db")
+        function_call: TResponseInputItem = {
+            "type": "function_call",
+            "call_id": "call-1",
+            "id": "fc_1",
+            "name": "test_tool",
+            "arguments": '{"value":"before"}',
+        }
+        await session.add_items([function_call])
+
+        with pytest.raises(ValueError, match="did not match the expected function call"):
+            await session.apply_history_mutations(
+                {
+                    "mutations": [
+                        {
+                            "type": "replace_function_call",
+                            "call_id": "missing-call",
+                            "expected": {
+                                "type": "function_call",
+                                "call_id": "missing-call",
+                                "id": "fc_missing",
+                                "name": "test_tool",
+                                "arguments": '{"value":"before"}',
+                            },
+                            "replacement": {
+                                "type": "function_call",
+                                "call_id": "missing-call",
+                                "id": "fc_missing",
+                                "name": "test_tool",
+                                "arguments": '{"value":"after"}',
+                            },
+                        }
+                    ]
+                }
+            )
+
+        assert await session.get_items() == [function_call]
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_history_rewrite_rejects_newer_divergent_reused_call_id():
+    """SQLite should not rewrite an older call shadowed by a newer same-ID call."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        session = SQLiteSession("rewrite_reused_test", Path(temp_dir) / "rewrite_reused.db")
+        expected_call: TResponseInputItem = {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "test_tool",
+            "arguments": '{"value":"expected"}',
+        }
+        divergent_call: TResponseInputItem = {
+            **expected_call,
+            "arguments": '{"value":"divergent"}',
+        }
+        replacement_call: TResponseInputItem = {
+            **expected_call,
+            "arguments": '{"value":"corrected"}',
+        }
+        original_items = [expected_call, divergent_call]
+        await session.add_items(original_items)
+
+        with pytest.raises(ValueError, match="did not match the expected function call"):
+            await session.apply_history_mutations(
+                {
+                    "mutations": [
+                        {
+                            "type": "replace_function_call",
+                            "call_id": "call-1",
+                            "expected": expected_call,
+                            "replacement": replacement_call,
+                        }
+                    ]
+                }
+            )
+
+        assert await session.get_items() == original_items
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_history_rewrite_preserves_unrelated_corrupt_rows():
+    """A targeted rewrite should not delete an unrelated undecodable record."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        session = SQLiteSession("rewrite_corrupt_test", Path(temp_dir) / "rewrite_corrupt.db")
+        function_call: TResponseInputItem = {
+            "type": "function_call",
+            "call_id": "call-1",
+            "id": "fc_1",
+            "name": "test_tool",
+            "arguments": '{"value":"before"}',
+        }
+        replacement = cast(
+            TResponseInputItem,
+            {
+                "type": "function_call",
+                "call_id": "call-1",
+                "id": "fc_1",
+                "name": "test_tool",
+                "arguments": '{"value":"after"}',
+            },
+        )
+        await session.add_items([function_call])
+        with session._write_connection() as conn:
+            conn.execute(
+                f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
+                (session.session_id, "not-json"),
+            )
+            conn.commit()
+
+        await session.apply_history_mutations(
+            {
+                "mutations": [
+                    {
+                        "type": "replace_function_call",
+                        "call_id": "call-1",
+                        "expected": function_call,
+                        "replacement": replacement,
+                    }
+                ]
+            }
+        )
+
+        with session._write_connection() as conn:
+            rows = [
+                row[0]
+                for row in conn.execute(
+                    f"SELECT message_data FROM {session.messages_table} "
+                    "WHERE session_id = ? ORDER BY id",
+                    (session.session_id,),
+                ).fetchall()
+            ]
+        assert rows == [json.dumps(replacement), "not-json"]
         session.close()
 
 
