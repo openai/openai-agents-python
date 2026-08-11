@@ -45,6 +45,8 @@ from agents import (
     Tool,
     TResponseInputItem,
     __version__,
+    function_tool,
+    handoff,
     trace,
 )
 from agents.exceptions import UserError
@@ -279,6 +281,48 @@ async def test_user_agent_header_any_llm_chat(override_ua: str | None, monkeypat
             HEADERS_OVERRIDE.reset(token)
 
     assert provider.chat_calls[0]["extra_headers"]["User-Agent"] == expected_ua
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parallel_tool_calls", [True, False])
+@pytest.mark.parametrize("tool_source", ["none", "function", "handoff"])
+async def test_any_llm_chat_only_forwards_parallel_tool_calls_with_converted_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    parallel_tool_calls: bool,
+    tool_source: str,
+) -> None:
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=_chat_completion("Hello"))
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(
+        model="openrouter/openai/gpt-5.4-mini",
+        api="chat_completions",
+    )
+
+    tools: list[Tool] = (
+        [function_tool(lambda: "ok", name_override="test_tool")]
+        if tool_source == "function"
+        else []
+    )
+    handoffs = [handoff(Agent(name="handoff"))] if tool_source == "handoff" else []
+
+    await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(parallel_tool_calls=parallel_tool_calls),
+        tools=tools,
+        output_schema=None,
+        handoffs=handoffs,
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    expected_parallel_tool_calls = parallel_tool_calls if tool_source != "none" else None
+    call = provider.chat_calls[0]
+    assert call["parallel_tool_calls"] is expected_parallel_tool_calls
+    assert (call["tools"] is not None) is (tool_source != "none")
 
 
 @pytest.mark.allow_call_model_methods
