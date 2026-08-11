@@ -1,24 +1,19 @@
 from __future__ import annotations
 
-import json
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, cast
 
 import pytest
-from openai.types.responses import ResponseFunctionToolCall
 
 from agents import (
     Agent,
-    Model,
-    ModelResponse,
     ModelSettings,
     OpenAIConversationsSession,
     Runner,
-    Usage,
     function_tool,
 )
-from agents.items import TResponseInputItem, TResponseStreamEvent
+from agents.items import TResponseInputItem
+from agents.testing import ModelCall, ModelStep, ScriptedModel, function_call
 from tests.test_responses import get_text_message
 from tests.utils.hitl import HITL_REJECTION_MSG
 from tests.utils.simple_session import SimpleListSession
@@ -69,67 +64,32 @@ class ScenarioResult:
     items: list[TResponseInputItem]
 
 
-class ScenarioModel(Model):
-    def __init__(self) -> None:
-        self._counter = 0
+def make_scenario_model() -> ScriptedModel:
+    call_counter = 0
 
-    async def get_response(
-        self,
-        system_instructions: str | None,
-        input: str | list[TResponseInputItem],
-        model_settings: ModelSettings,
-        tools: list[Any],
-        output_schema: Any,
-        handoffs: list[Any],
-        tracing: Any,
-        *,
-        previous_response_id: str | None,
-        conversation_id: str | None,
-        prompt: Any | None,
-    ) -> ModelResponse:
-        if input_has_rejection(input):
-            return ModelResponse(
-                output=[get_text_message(HITL_REJECTION_MSG)],
-                usage=Usage(),
-                response_id="resp-test",
-            )
-        tool_choice = model_settings.tool_choice
+    def respond(call: ModelCall):
+        nonlocal call_counter
+        if input_has_rejection(call.input):
+            return [get_text_message(HITL_REJECTION_MSG)]
+        tool_choice = call.model_settings.tool_choice
         tool_name = tool_choice if isinstance(tool_choice, str) else TOOL_ECHO
-        self._counter += 1
-        call_id = f"call_{self._counter}"
-        query = extract_user_message(input)
-        tool_call = ResponseFunctionToolCall(
-            type="function_call",
-            name=tool_name,
-            call_id=call_id,
-            arguments=json.dumps({"query": query}),
-        )
-        return ModelResponse(output=[tool_call], usage=Usage(), response_id="resp-test")
+        call_counter += 1
+        return [
+            function_call(
+                tool_name,
+                {"query": extract_user_message(call.input)},
+                call_id=f"call_{call_counter}",
+            )
+        ]
 
-    async def stream_response(
-        self,
-        system_instructions: str | None,
-        input: str | list[TResponseInputItem],
-        model_settings: ModelSettings,
-        tools: list[Any],
-        output_schema: Any,
-        handoffs: list[Any],
-        tracing: Any,
-        *,
-        previous_response_id: str | None,
-        conversation_id: str | None,
-        prompt: Any | None,
-    ) -> AsyncIterator[TResponseStreamEvent]:
-        if False:
-            yield cast(TResponseStreamEvent, {})
-        raise RuntimeError("Streaming is not supported in this scenario.")
+    return ScriptedModel([ModelStep.respond(respond) for _ in range(4)])
 
 
 @pytest.mark.asyncio
 async def test_memory_session_hitl_scenario() -> None:
     execute_counts.clear()
     session = SimpleListSession(session_id="memory")
-    model = ScenarioModel()
+    model = make_scenario_model()
 
     steps = [
         ScenarioStep(
@@ -233,7 +193,7 @@ async def test_openai_conversations_session_hitl_scenario() -> None:
     rehydrated_session = OpenAIConversationsSession(
         conversation_id="conv_test", openai_client=typed_client
     )
-    model = ScenarioModel()
+    model = make_scenario_model()
 
     steps = [
         ScenarioStep(
@@ -280,7 +240,7 @@ async def test_openai_conversations_session_hitl_scenario() -> None:
 
 async def run_scenario_step(
     session: Any,
-    model: ScenarioModel,
+    model: ScriptedModel,
     step: ScenarioStep,
 ) -> ScenarioResult:
     agent = Agent(

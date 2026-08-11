@@ -17,6 +17,7 @@ from agents.run_internal.run_steps import ToolRunCustom
 from agents.run_internal.tool_actions import CustomToolAction
 from agents.sandbox.capabilities.tools import SandboxApplyPatchTool
 from agents.sandbox.types import User
+from agents.testing import scripted_sandbox_session
 from tests.sandbox._apply_patch_test_session import (
     ApplyPatchSession,
     UserRecordingApplyPatchSession,
@@ -26,7 +27,7 @@ from tests.utils.hitl import make_context_wrapper
 
 class TestSandboxApplyPatchTool:
     def test_exposes_custom_apply_patch_tool(self) -> None:
-        tool = SandboxApplyPatchTool(session=ApplyPatchSession())
+        tool = SandboxApplyPatchTool(session=scripted_sandbox_session())
 
         assert isinstance(tool, CustomTool)
         assert tool.name == "apply_patch"
@@ -36,7 +37,7 @@ class TestSandboxApplyPatchTool:
         assert tool.tool_config["format"]["syntax"] == "lark"
 
     def test_converter_uses_sandbox_custom_apply_patch_tool_config(self) -> None:
-        tool = SandboxApplyPatchTool(session=ApplyPatchSession())
+        tool = SandboxApplyPatchTool(session=scripted_sandbox_session())
 
         converted = Converter.convert_tools([tool], handoffs=[])
 
@@ -55,7 +56,9 @@ class TestSandboxApplyPatchTool:
         ) -> bool:
             return operation.type != "create_file"
 
-        tool = SandboxApplyPatchTool(session=ApplyPatchSession(), needs_approval=needs_approval)
+        tool = SandboxApplyPatchTool(
+            session=scripted_sandbox_session(), needs_approval=needs_approval
+        )
 
         assert cast(object, tool.needs_approval) is needs_approval
         assert cast(object, tool.operation_needs_approval) is needs_approval
@@ -67,7 +70,7 @@ class TestSandboxApplyPatchTool:
         ) -> bool:
             return operation.type == "delete_file"
 
-        tool = SandboxApplyPatchTool(session=ApplyPatchSession())
+        tool = SandboxApplyPatchTool(session=scripted_sandbox_session())
         tool.needs_approval = needs_approval
 
         result = await _execute_custom_tool_call(
@@ -147,7 +150,7 @@ class TestSandboxApplyPatchTool:
 
     @pytest.mark.asyncio
     async def test_invalid_patch_input_surfaces_tool_error_after_approval_precheck(self) -> None:
-        tool = SandboxApplyPatchTool(session=ApplyPatchSession(), needs_approval=True)
+        tool = SandboxApplyPatchTool(session=scripted_sandbox_session(), needs_approval=True)
 
         result = await _execute_custom_tool_call(
             tool,

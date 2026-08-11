@@ -5,8 +5,8 @@ from mcp.types import ListResourcesResult, ReadResourceResult
 
 from agents import Agent, Runner
 from agents.mcp import MCPServer, MCPToolMetaResolver
+from agents.testing import ScriptedModel
 
-from ..fake_model import FakeModel
 from ..test_responses import get_text_message
 from .model_compat import ListResourceTemplatesResult
 
@@ -173,13 +173,11 @@ async def test_agent_with_prompt_instructions():
     instructions = prompt_result.messages[0].content.text
 
     # Create agent with prompt-generated instructions
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="prompt_agent", instructions=instructions, model=model, mcp_servers=[server])
 
     # Mock model response
-    model.add_multiple_turn_outputs(
-        [[get_text_message("Code analysis complete. Found security vulnerability.")]]
-    )
+    model.extend([[get_text_message("Code analysis complete. Found security vulnerability.")]])
 
     # Run the agent
     result = await Runner.run(agent, input="Review this code: def unsafe_exec(cmd): os.system(cmd)")
@@ -211,12 +209,12 @@ async def test_agent_with_prompt_instructions_streaming(streaming: bool):
     instructions = prompt_result.messages[0].content.text
 
     # Create agent
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="streaming_prompt_agent", instructions=instructions, model=model, mcp_servers=[server]
     )
 
-    model.add_multiple_turn_outputs([[get_text_message("Security analysis complete.")]])
+    model.extend([[get_text_message("Security analysis complete.")]])
 
     if streaming:
         streaming_result = Runner.run_streamed(agent, input="Review code")

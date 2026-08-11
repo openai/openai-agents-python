@@ -24,8 +24,8 @@ from agents import (
 from agents.guardrail import input_guardrail, output_guardrail
 from agents.result import RunResultStreaming
 from agents.run_internal.guardrails import run_input_guardrails, run_input_guardrails_with_queue
+from agents.testing import ScriptedModel
 
-from .fake_model import FakeModel
 from .test_responses import get_function_tool_call, get_text_message
 from .testing_processor import fetch_events
 
@@ -365,14 +365,14 @@ async def test_parallel_guardrail_runs_concurrently_with_agent():
             tripwire_triggered=False,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_agent",
         instructions="Reply with 'hello'",
         input_guardrails=[parallel_check],
         model=model,
     )
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
 
     result = await Runner.run(agent, "test input")
 
@@ -380,7 +380,7 @@ async def test_parallel_guardrail_runs_concurrently_with_agent():
     assert result.final_output is not None
     assert len(result.input_guardrail_results) == 1
     assert result.input_guardrail_results[0].output.output_info == "parallel_ok"
-    assert model.first_turn_args is not None, "Model should have been called in parallel mode"
+    assert bool(model.calls), "Model should have been called in parallel mode"
 
 
 @pytest.mark.asyncio
@@ -399,14 +399,14 @@ async def test_parallel_guardrail_runs_concurrently_with_agent_streaming():
             tripwire_triggered=False,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="streaming_agent",
         instructions="Reply with 'hello'",
         input_guardrails=[parallel_check],
         model=model,
     )
-    model.set_next_output([get_text_message("hello from stream")])
+    model.enqueue([get_text_message("hello from stream")])
 
     result = Runner.run_streamed(agent, "test input")
 
@@ -416,7 +416,7 @@ async def test_parallel_guardrail_runs_concurrently_with_agent_streaming():
 
     assert guardrail_executed is True
     assert received_events is True
-    assert model.first_turn_args is not None, "Model should have been called in parallel mode"
+    assert bool(model.calls), "Model should have been called in parallel mode"
 
 
 @pytest.mark.asyncio
@@ -435,21 +435,21 @@ async def test_blocking_guardrail_prevents_agent_execution():
             tripwire_triggered=True,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_agent",
         instructions="Reply with 'hello'",
         input_guardrails=[blocking_check],
         model=model,
     )
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
 
     with pytest.raises(InputGuardrailTripwireTriggered) as exc_info:
         await Runner.run(agent, "test input")
 
     assert guardrail_executed is True
     assert exc_info.value.guardrail_result.output.output_info == "security_violation"
-    assert model.first_turn_args is None, "Model should not have been called"
+    assert not model.calls, "Model should not have been called"
 
 
 @pytest.mark.asyncio
@@ -468,14 +468,14 @@ async def test_blocking_guardrail_prevents_agent_execution_streaming():
             tripwire_triggered=True,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="streaming_agent",
         instructions="Reply with a long message",
         input_guardrails=[blocking_check],
         model=model,
     )
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
 
     result = Runner.run_streamed(agent, "test input")
 
@@ -484,7 +484,7 @@ async def test_blocking_guardrail_prevents_agent_execution_streaming():
             pass
 
     assert guardrail_executed is True
-    assert model.first_turn_args is None, "Model should not have been called"
+    assert not model.calls, "Model should not have been called"
 
 
 @pytest.mark.asyncio
@@ -516,7 +516,7 @@ async def test_parallel_guardrail_may_not_prevent_tool_execution():
             tripwire_triggered=True,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="agent_with_tools",
         instructions="Call the fast_tool immediately",
@@ -524,8 +524,8 @@ async def test_parallel_guardrail_may_not_prevent_tool_execution():
         input_guardrails=[slow_parallel_check],
         model=model,
     )
-    model.set_next_output([get_function_tool_call("fast_tool", arguments="{}")])
-    model.set_next_output([get_text_message("done")])
+    model.enqueue([get_function_tool_call("fast_tool", arguments="{}")])
+    model.enqueue([get_text_message("done")])
 
     with pytest.raises(InputGuardrailTripwireTriggered):
         await Runner.run(agent, "trigger guardrail")
@@ -534,7 +534,7 @@ async def test_parallel_guardrail_may_not_prevent_tool_execution():
     assert tool_was_executed is True, (
         "Expected tool to execute before slow parallel guardrail triggered"
     )
-    assert model.first_turn_args is not None, "Model should have been called in parallel mode"
+    assert bool(model.calls), "Model should have been called in parallel mode"
 
 
 @pytest.mark.asyncio
@@ -553,7 +553,7 @@ async def test_parallel_guardrail_trip_cancels_model_task():
             tripwire_triggered=True,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     original_get_response = model.get_response
 
     async def slow_get_response(*args, **kwargs):
@@ -573,7 +573,7 @@ async def test_parallel_guardrail_trip_cancels_model_task():
         input_guardrails=[tripwire_after_model_starts],
         model=model,
     )
-    model.set_next_output([get_text_message("should_not_finish")])
+    model.enqueue([get_text_message("should_not_finish")])
 
     with patch.object(model, "get_response", side_effect=slow_get_response):
         with pytest.raises(InputGuardrailTripwireTriggered):
@@ -600,7 +600,7 @@ async def test_parallel_guardrail_trip_compat_mode_does_not_cancel_model_task():
             tripwire_triggered=True,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     original_get_response = model.get_response
 
     async def slow_get_response(*args, **kwargs):
@@ -620,7 +620,7 @@ async def test_parallel_guardrail_trip_compat_mode_does_not_cancel_model_task():
         input_guardrails=[tripwire_after_model_starts],
         model=model,
     )
-    model.set_next_output([get_text_message("should_finish_without_cancel")])
+    model.enqueue([get_text_message("should_finish_without_cancel")])
 
     with patch.object(model, "get_response", side_effect=slow_get_response):
         with patch(
@@ -663,7 +663,7 @@ async def test_model_error_cancels_parallel_input_guardrail_task():
             guardrail_cancelled.set()
             raise
 
-    model = FakeModel()
+    model = ScriptedModel()
 
     async def boom_get_response(*args, **kwargs):
         # Only blow up once the guardrail is genuinely mid-flight.
@@ -704,7 +704,7 @@ async def test_parallel_guardrail_non_tripwire_error_not_swallowed():
         await asyncio.wait_for(model_started.wait(), timeout=1)
         raise ValueError("guardrail boom")
 
-    model = FakeModel()
+    model = ScriptedModel()
     original_get_response = model.get_response
 
     async def slow_get_response(*args, **kwargs):
@@ -724,7 +724,7 @@ async def test_parallel_guardrail_non_tripwire_error_not_swallowed():
         input_guardrails=[raising_parallel_check],
         model=model,
     )
-    model.set_next_output([get_text_message("should_not_finish")])
+    model.enqueue([get_text_message("should_not_finish")])
 
     with patch.object(model, "get_response", side_effect=slow_get_response):
         with pytest.raises(ValueError, match="guardrail boom"):
@@ -748,7 +748,7 @@ async def test_parallel_guardrail_error_cancels_streaming_model():
         await asyncio.wait_for(model_started.wait(), timeout=1)
         raise ValueError("guardrail boom")
 
-    model = FakeModel()
+    model = ScriptedModel()
 
     async def blocking_stream_response(*args, **kwargs):
         model_started.set()
@@ -797,7 +797,7 @@ async def test_model_error_before_guardrail_error_preserves_stream_finalization(
         await asyncio.wait_for(raise_guardrail_error.wait(), timeout=1)
         raise ValueError("guardrail boom")
 
-    class BlockingCleanupFakeModel(FakeModel):
+    class BlockingCleanupScriptedModel(ScriptedModel):
         async def _cleanup_on_run_end(self, owner: object) -> None:
             model_cleanup_started.set()
             try:
@@ -807,8 +807,8 @@ async def test_model_error_before_guardrail_error_preserves_stream_finalization(
                 model_cleanup_cancelled.set()
                 raise
 
-    model = BlockingCleanupFakeModel(tracing_enabled=True)
-    model.set_next_output(RuntimeError("model boom"))
+    model = BlockingCleanupScriptedModel(emit_traces=True)
+    model.enqueue(RuntimeError("model boom"))
 
     agent = Agent(
         name="streaming_model_error_agent",
@@ -875,7 +875,7 @@ async def test_parallel_guardrail_may_not_prevent_tool_execution_streaming():
             tripwire_triggered=True,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="agent_with_tools",
         instructions="Call the fast_tool immediately",
@@ -883,8 +883,8 @@ async def test_parallel_guardrail_may_not_prevent_tool_execution_streaming():
         input_guardrails=[slow_parallel_check],
         model=model,
     )
-    model.set_next_output([get_function_tool_call("fast_tool", arguments="{}")])
-    model.set_next_output([get_text_message("done")])
+    model.enqueue([get_function_tool_call("fast_tool", arguments="{}")])
+    model.enqueue([get_text_message("done")])
 
     result = Runner.run_streamed(agent, "trigger guardrail")
 
@@ -896,7 +896,7 @@ async def test_parallel_guardrail_may_not_prevent_tool_execution_streaming():
     assert tool_was_executed is True, (
         "Expected tool to execute before slow parallel guardrail triggered"
     )
-    assert model.first_turn_args is not None, "Model should have been called in parallel mode"
+    assert bool(model.calls), "Model should have been called in parallel mode"
 
 
 @pytest.mark.asyncio
@@ -922,7 +922,7 @@ async def test_parallel_guardrail_trip_before_tool_execution_stops_streaming_tur
             tripwire_triggered=True,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     original_stream_response = model.stream_response
 
     async def delayed_stream_response(*args, **kwargs):
@@ -939,8 +939,8 @@ async def test_parallel_guardrail_trip_before_tool_execution_stops_streaming_tur
         input_guardrails=[tripwire_before_tool_execution],
         model=model,
     )
-    model.set_next_output([get_function_tool_call("dangerous_tool", arguments="{}")])
-    model.set_next_output([get_text_message("done")])
+    model.enqueue([get_function_tool_call("dangerous_tool", arguments="{}")])
+    model.enqueue([get_text_message("done")])
 
     with patch.object(model, "stream_response", side_effect=delayed_stream_response):
         result = Runner.run_streamed(agent, "trigger guardrail")
@@ -952,7 +952,7 @@ async def test_parallel_guardrail_trip_before_tool_execution_stops_streaming_tur
     assert model_started.is_set() is True
     assert guardrail_tripped.is_set() is True
     assert tool_was_executed is False
-    assert model.first_turn_args is not None, "Model should have been called in parallel mode"
+    assert bool(model.calls), "Model should have been called in parallel mode"
 
 
 @pytest.mark.asyncio
@@ -996,7 +996,7 @@ async def test_parallel_guardrail_trip_with_slow_cancel_sibling_stops_streaming_
             slow_cancel_finished.set()
             raise
 
-    model = FakeModel()
+    model = ScriptedModel()
     original_stream_response = model.stream_response
 
     async def delayed_stream_response(*args, **kwargs):
@@ -1013,8 +1013,8 @@ async def test_parallel_guardrail_trip_with_slow_cancel_sibling_stops_streaming_
         input_guardrails=[tripwire_before_tool_execution, slow_to_cancel_guardrail],
         model=model,
     )
-    model.set_next_output([get_function_tool_call("dangerous_tool", arguments="{}")])
-    model.set_next_output([get_text_message("done")])
+    model.enqueue([get_function_tool_call("dangerous_tool", arguments="{}")])
+    model.enqueue([get_text_message("done")])
 
     with patch.object(model, "stream_response", side_effect=delayed_stream_response):
         result = Runner.run_streamed(agent, "trigger guardrail")
@@ -1033,7 +1033,7 @@ async def test_parallel_guardrail_trip_with_slow_cancel_sibling_stops_streaming_
     assert slow_cancel_started.is_set() is True
     assert slow_cancel_finished.is_set() is True
     assert tool_was_executed is False
-    assert model.first_turn_args is not None, "Model should have been called in parallel mode"
+    assert bool(model.calls), "Model should have been called in parallel mode"
 
 
 @pytest.mark.asyncio
@@ -1059,7 +1059,7 @@ async def test_blocking_guardrail_prevents_tool_execution():
             tripwire_triggered=True,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="agent_with_tools",
         instructions="Call the dangerous_tool immediately",
@@ -1067,14 +1067,14 @@ async def test_blocking_guardrail_prevents_tool_execution():
         input_guardrails=[security_check],
         model=model,
     )
-    model.set_next_output([get_function_tool_call("dangerous_tool", arguments="{}")])
+    model.enqueue([get_function_tool_call("dangerous_tool", arguments="{}")])
 
     with pytest.raises(InputGuardrailTripwireTriggered):
         await Runner.run(agent, "trigger guardrail")
 
     assert guardrail_executed is True
     assert tool_was_executed is False
-    assert model.first_turn_args is None, "Model should not have been called"
+    assert not model.calls, "Model should not have been called"
 
 
 @pytest.mark.asyncio
@@ -1100,7 +1100,7 @@ async def test_blocking_guardrail_prevents_tool_execution_streaming():
             tripwire_triggered=True,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="agent_with_tools",
         instructions="Call the dangerous_tool immediately",
@@ -1108,7 +1108,7 @@ async def test_blocking_guardrail_prevents_tool_execution_streaming():
         input_guardrails=[security_check],
         model=model,
     )
-    model.set_next_output([get_function_tool_call("dangerous_tool", arguments="{}")])
+    model.enqueue([get_function_tool_call("dangerous_tool", arguments="{}")])
 
     result = Runner.run_streamed(agent, "trigger guardrail")
 
@@ -1118,7 +1118,7 @@ async def test_blocking_guardrail_prevents_tool_execution_streaming():
 
     assert guardrail_executed is True
     assert tool_was_executed is False
-    assert model.first_turn_args is None, "Model should not have been called"
+    assert not model.calls, "Model should not have been called"
 
 
 @pytest.mark.asyncio
@@ -1137,20 +1137,20 @@ async def test_parallel_guardrail_passes_agent_continues():
             tripwire_triggered=False,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_agent",
         instructions="Reply with 'success'",
         input_guardrails=[parallel_check],
         model=model,
     )
-    model.set_next_output([get_text_message("success")])
+    model.enqueue([get_text_message("success")])
 
     result = await Runner.run(agent, "test input")
 
     assert guardrail_executed is True
     assert result.final_output is not None
-    assert model.first_turn_args is not None, "Model should have been called"
+    assert bool(model.calls), "Model should have been called"
 
 
 @pytest.mark.asyncio
@@ -1169,14 +1169,14 @@ async def test_parallel_guardrail_passes_agent_continues_streaming():
             tripwire_triggered=False,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_agent",
         instructions="Reply with 'success'",
         input_guardrails=[parallel_check],
         model=model,
     )
-    model.set_next_output([get_text_message("success")])
+    model.enqueue([get_text_message("success")])
 
     result = Runner.run_streamed(agent, "test input")
 
@@ -1186,7 +1186,7 @@ async def test_parallel_guardrail_passes_agent_continues_streaming():
 
     assert guardrail_executed is True
     assert received_events is True
-    assert model.first_turn_args is not None, "Model should have been called"
+    assert bool(model.calls), "Model should have been called"
 
 
 @pytest.mark.asyncio
@@ -1205,20 +1205,20 @@ async def test_blocking_guardrail_passes_agent_continues():
             tripwire_triggered=False,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_agent",
         instructions="Reply with 'success'",
         input_guardrails=[blocking_check],
         model=model,
     )
-    model.set_next_output([get_text_message("success")])
+    model.enqueue([get_text_message("success")])
 
     result = await Runner.run(agent, "test input")
 
     assert guardrail_executed is True
     assert result.final_output is not None
-    assert model.first_turn_args is not None, "Model should have been called after guardrail passed"
+    assert bool(model.calls), "Model should have been called after guardrail passed"
 
 
 @pytest.mark.asyncio
@@ -1237,14 +1237,14 @@ async def test_blocking_guardrail_passes_agent_continues_streaming():
             tripwire_triggered=False,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_agent",
         instructions="Reply with 'success'",
         input_guardrails=[blocking_check],
         model=model,
     )
-    model.set_next_output([get_text_message("success")])
+    model.enqueue([get_text_message("success")])
 
     result = Runner.run_streamed(agent, "test input")
 
@@ -1254,7 +1254,7 @@ async def test_blocking_guardrail_passes_agent_continues_streaming():
 
     assert guardrail_executed is True
     assert received_events is True
-    assert model.first_turn_args is not None, "Model should have been called after guardrail passed"
+    assert bool(model.calls), "Model should have been called after guardrail passed"
 
 
 @pytest.mark.asyncio
@@ -1289,7 +1289,7 @@ async def test_mixed_blocking_and_parallel_guardrails():
             tripwire_triggered=False,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
 
     original_get_response = model.get_response
 
@@ -1306,7 +1306,7 @@ async def test_mixed_blocking_and_parallel_guardrails():
         input_guardrails=[blocking_check, parallel_check],
         model=model,
     )
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
 
     with patch.object(model, "get_response", side_effect=tracked_get_response):
         result = await Runner.run(agent, "test input")
@@ -1324,9 +1324,7 @@ async def test_mixed_blocking_and_parallel_guardrails():
         "Model called while parallel guardrail still running"
     )
     assert parallel_finished.is_set() is True, "Parallel guardrail should have completed"
-    assert model.first_turn_args is not None, (
-        "Model should have been called after blocking guardrails passed"
-    )
+    assert bool(model.calls), "Model should have been called after blocking guardrails passed"
 
 
 @pytest.mark.asyncio
@@ -1361,7 +1359,7 @@ async def test_mixed_blocking_and_parallel_guardrails_streaming():
             tripwire_triggered=False,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
 
     original_stream_response = model.stream_response
 
@@ -1379,7 +1377,7 @@ async def test_mixed_blocking_and_parallel_guardrails_streaming():
         input_guardrails=[blocking_check, parallel_check],
         model=model,
     )
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
 
     with patch.object(model, "stream_response", side_effect=tracked_stream_response):
         result = Runner.run_streamed(agent, "test input")
@@ -1399,9 +1397,7 @@ async def test_mixed_blocking_and_parallel_guardrails_streaming():
         "Model called while parallel guardrail still running"
     )
     assert parallel_finished.is_set() is True, "Parallel guardrail should have completed"
-    assert model.first_turn_args is not None, (
-        "Model should have been called after blocking guardrails passed"
-    )
+    assert bool(model.calls), "Model should have been called after blocking guardrails passed"
 
 
 @pytest.mark.asyncio
@@ -1432,7 +1428,7 @@ async def test_multiple_blocking_guardrails_complete_before_agent():
             tripwire_triggered=False,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
 
     original_get_response = model.get_response
 
@@ -1446,7 +1442,7 @@ async def test_multiple_blocking_guardrails_complete_before_agent():
         input_guardrails=[first_blocking_check, second_blocking_check],
         model=model,
     )
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
 
     with patch.object(model, "get_response", side_effect=tracked_get_response):
         result = await Runner.run(agent, "test input")
@@ -1466,9 +1462,7 @@ async def test_multiple_blocking_guardrails_complete_before_agent():
     assert timestamps["second_blocking_end"] <= timestamps["model_called"], (
         "Second blocking guardrail must complete before model is called"
     )
-    assert model.first_turn_args is not None, (
-        "Model should have been called after all blocking guardrails passed"
-    )
+    assert bool(model.calls), "Model should have been called after all blocking guardrails passed"
 
 
 @pytest.mark.asyncio
@@ -1499,7 +1493,7 @@ async def test_multiple_blocking_guardrails_complete_before_agent_streaming():
             tripwire_triggered=False,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
 
     original_stream_response = model.stream_response
 
@@ -1514,7 +1508,7 @@ async def test_multiple_blocking_guardrails_complete_before_agent_streaming():
         input_guardrails=[first_blocking_check, second_blocking_check],
         model=model,
     )
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
 
     with patch.object(model, "stream_response", side_effect=tracked_stream_response):
         result = Runner.run_streamed(agent, "test input")
@@ -1536,9 +1530,7 @@ async def test_multiple_blocking_guardrails_complete_before_agent_streaming():
     assert timestamps["second_blocking_end"] <= timestamps["model_called"], (
         "Second blocking guardrail must complete before model is called"
     )
-    assert model.first_turn_args is not None, (
-        "Model should have been called after all blocking guardrails passed"
-    )
+    assert bool(model.calls), "Model should have been called after all blocking guardrails passed"
 
 
 @pytest.mark.asyncio
@@ -1575,14 +1567,14 @@ async def test_multiple_blocking_guardrails_one_triggers():
             tripwire_triggered=True,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="multi_blocking_agent",
         instructions="Reply with 'hello'",
         input_guardrails=[first_blocking_check, second_blocking_check],
         model=model,
     )
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
 
     with pytest.raises(InputGuardrailTripwireTriggered):
         await Runner.run(agent, "test input")
@@ -1593,9 +1585,7 @@ async def test_multiple_blocking_guardrails_one_triggers():
     assert "first_blocking_end" in timestamps
     assert "second_blocking_start" in timestamps
     assert "second_blocking_end" in timestamps
-    assert model.first_turn_args is None, (
-        "Model should not have been called when guardrail triggered"
-    )
+    assert not model.calls, "Model should not have been called when guardrail triggered"
 
 
 @pytest.mark.asyncio
@@ -1632,14 +1622,14 @@ async def test_multiple_blocking_guardrails_one_triggers_streaming():
             tripwire_triggered=True,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="multi_blocking_agent",
         instructions="Reply with 'hello'",
         input_guardrails=[first_blocking_check, second_blocking_check],
         model=model,
     )
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
 
     result = Runner.run_streamed(agent, "test input")
 
@@ -1653,9 +1643,7 @@ async def test_multiple_blocking_guardrails_one_triggers_streaming():
     assert "first_blocking_end" in timestamps
     assert "second_blocking_start" in timestamps
     assert "second_blocking_end" in timestamps
-    assert model.first_turn_args is None, (
-        "Model should not have been called when guardrail triggered"
-    )
+    assert not model.calls, "Model should not have been called when guardrail triggered"
 
 
 @pytest.mark.asyncio
@@ -1685,22 +1673,22 @@ async def test_guardrail_via_agent_and_run_config_equivalent():
             tripwire_triggered=False,
         )
 
-    model1 = FakeModel()
+    model1 = ScriptedModel()
     agent_with_guardrail = Agent(
         name="test_agent",
         instructions="Reply with 'hello'",
         input_guardrails=[agent_level_check],
         model=model1,
     )
-    model1.set_next_output([get_text_message("hello")])
+    model1.enqueue([get_text_message("hello")])
 
-    model2 = FakeModel()
+    model2 = ScriptedModel()
     agent_without_guardrail = Agent(
         name="test_agent",
         instructions="Reply with 'hello'",
         model=model2,
     )
-    model2.set_next_output([get_text_message("hello")])
+    model2.enqueue([get_text_message("hello")])
     run_config = RunConfig(input_guardrails=[config_level_check])
 
     result1 = await Runner.run(agent_with_guardrail, "test input")
@@ -1714,8 +1702,8 @@ async def test_guardrail_via_agent_and_run_config_equivalent():
     assert result2.input_guardrail_results[0].output.output_info == "config_level_passed"
     assert result1.final_output is not None
     assert result2.final_output is not None
-    assert model1.first_turn_args is not None
-    assert model2.first_turn_args is not None
+    assert bool(model1.calls)
+    assert bool(model2.calls)
 
 
 @pytest.mark.asyncio
@@ -1760,14 +1748,14 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger():
             slow_guardrail_cancelled = True
             raise
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_agent",
         instructions="Reply with 'hello'",
         input_guardrails=[fast_guardrail_that_triggers, slow_guardrail_that_should_be_cancelled],
         model=model,
     )
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
 
     with pytest.raises(InputGuardrailTripwireTriggered):
         await asyncio.wait_for(Runner.run(agent, "test input"), timeout=5)
@@ -1780,9 +1768,7 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger():
     assert slow_guardrail_executed is False, "Slow guardrail should NOT have completed execution"
 
     # Verify agent never started
-    assert model.first_turn_args is None, (
-        "Model should not have been called when guardrail triggered"
-    )
+    assert not model.calls, "Model should not have been called when guardrail triggered"
 
 
 @pytest.mark.asyncio
@@ -1827,14 +1813,14 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger_streaming():
             slow_guardrail_cancelled = True
             raise
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_agent",
         instructions="Reply with 'hello'",
         input_guardrails=[fast_guardrail_that_triggers, slow_guardrail_that_should_be_cancelled],
         model=model,
     )
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
 
     result = Runner.run_streamed(agent, "test input")
 
@@ -1853,9 +1839,7 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger_streaming():
     assert slow_guardrail_executed is False, "Slow guardrail should NOT have completed execution"
 
     # Verify agent never started
-    assert model.first_turn_args is None, (
-        "Model should not have been called when guardrail triggered"
-    )
+    assert not model.calls, "Model should not have been called when guardrail triggered"
 
 
 @pytest.mark.asyncio
@@ -1882,7 +1866,7 @@ async def test_streaming_input_guardrail_exception_awaits_cancelled_siblings():
         await slow_started.wait()
         raise RuntimeError("guardrail failed")
 
-    agent = Agent(name="test_agent", model=FakeModel())
+    agent = Agent(name="test_agent", model=ScriptedModel())
     context = RunContextWrapper(context=None)
     streamed_result = RunResultStreaming(
         "test input",
@@ -2021,7 +2005,7 @@ def _ordered_input_guardrails(
     ]
 
 
-def _tripwire_agent(model: FakeModel, *, run_in_parallel: bool) -> Agent[Any]:
+def _tripwire_agent(model: ScriptedModel, *, run_in_parallel: bool) -> Agent[Any]:
     return Agent(
         name="guardrail_results_agent",
         model=model,
@@ -2039,8 +2023,8 @@ def _result_names(results: list[Any]) -> list[str]:
 @pytest.mark.parametrize("run_in_parallel", [False, True])
 async def test_input_guardrail_tripwire_reports_results(run_in_parallel: bool):
     """Runner.run() reports every completed guardrail result on the raised tripwire."""
-    model = FakeModel()
-    model.set_next_output([get_text_message("hello")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("hello")])
 
     with pytest.raises(InputGuardrailTripwireTriggered) as exc_info:
         await Runner.run(_tripwire_agent(model, run_in_parallel=run_in_parallel), "test input")
@@ -2055,8 +2039,8 @@ async def test_input_guardrail_tripwire_reports_results(run_in_parallel: bool):
 @pytest.mark.parametrize("run_in_parallel", [False, True])
 async def test_input_guardrail_tripwire_reports_results_streamed(run_in_parallel: bool):
     """The streamed path reports the same results, including on the streamed result object."""
-    model = FakeModel()
-    model.set_next_output([get_text_message("hello")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("hello")])
 
     result = Runner.run_streamed(
         _tripwire_agent(model, run_in_parallel=run_in_parallel), "test input"
@@ -2073,8 +2057,8 @@ async def test_input_guardrail_tripwire_reports_results_streamed(run_in_parallel
 
 def test_input_guardrail_tripwire_reports_results_sync():
     """Runner.run_sync() matches the async entry points."""
-    model = FakeModel()
-    model.set_next_output([get_text_message("hello")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("hello")])
 
     with pytest.raises(InputGuardrailTripwireTriggered) as exc_info:
         Runner.run_sync(_tripwire_agent(model, run_in_parallel=False), "test input")
@@ -2087,8 +2071,8 @@ def test_input_guardrail_tripwire_reports_results_sync():
 @pytest.mark.asyncio
 async def test_input_guardrail_results_reported_on_success():
     """Passing guardrails still land on the successful result exactly once."""
-    model = FakeModel()
-    model.set_next_output([get_text_message("hello")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("hello")])
     agent = Agent(
         name="guardrail_results_agent",
         model=model,
@@ -2134,8 +2118,8 @@ async def test_input_guardrail_exception_reports_completed_results_streamed(
     run_in_parallel: bool,
 ):
     """A streamed guardrail raising a non-tripwire error still reports earlier results."""
-    model = FakeModel()
-    model.set_next_output([get_text_message("hello")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("hello")])
     agent = Agent(
         name="guardrail_results_agent",
         model=model,
@@ -2180,7 +2164,7 @@ def _ordered_output_guardrails(
     ]
 
 
-def _output_tripwire_agent(model: FakeModel) -> Agent[Any]:
+def _output_tripwire_agent(model: ScriptedModel) -> Agent[Any]:
     return Agent(
         name="output_guardrail_results_agent",
         model=model,
@@ -2191,8 +2175,8 @@ def _output_tripwire_agent(model: FakeModel) -> Agent[Any]:
 @pytest.mark.asyncio
 async def test_output_guardrail_tripwire_reports_results():
     """Runner.run() reports every completed output guardrail result on the raised tripwire."""
-    model = FakeModel()
-    model.set_next_output([get_text_message("hello")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("hello")])
 
     with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
         await Runner.run(_output_tripwire_agent(model), "test input")
@@ -2206,8 +2190,8 @@ async def test_output_guardrail_tripwire_reports_results():
 @pytest.mark.asyncio
 async def test_output_guardrail_tripwire_reports_results_streamed():
     """The streamed path reports the same results, including on the streamed result object."""
-    model = FakeModel()
-    model.set_next_output([get_text_message("hello")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("hello")])
 
     result = Runner.run_streamed(_output_tripwire_agent(model), "test input")
     with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
@@ -2222,8 +2206,8 @@ async def test_output_guardrail_tripwire_reports_results_streamed():
 
 def test_output_guardrail_tripwire_reports_results_sync():
     """Runner.run_sync() matches the async entry points."""
-    model = FakeModel()
-    model.set_next_output([get_text_message("hello")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("hello")])
 
     with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
         Runner.run_sync(_output_tripwire_agent(model), "test input")
@@ -2236,8 +2220,8 @@ def test_output_guardrail_tripwire_reports_results_sync():
 @pytest.mark.asyncio
 async def test_output_guardrail_results_reported_on_success():
     """Passing output guardrails still land on the successful result exactly once."""
-    model = FakeModel()
-    model.set_next_output([get_text_message("hello")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("hello")])
     agent = Agent(
         name="output_guardrail_results_agent",
         model=model,
@@ -2270,8 +2254,8 @@ async def test_output_guardrail_exception_reports_completed_results():
 @pytest.mark.asyncio
 async def test_output_guardrail_exception_reports_completed_results_streamed():
     """A streamed output guardrail raising a non-tripwire error still reports earlier results."""
-    model = FakeModel()
-    model.set_next_output([get_text_message("hello")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("hello")])
     agent = Agent(
         name="output_guardrail_results_agent",
         model=model,

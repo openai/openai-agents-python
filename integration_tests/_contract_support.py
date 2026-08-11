@@ -1712,7 +1712,7 @@ async def validate_historical_resume_behavior(
 
     from agents import Agent, Runner, RunState, function_tool
     from agents.items import ToolCallOutputItem, TResponseOutputItem
-    from integration_tests._fake_model import QueuedFakeModel
+    from agents.testing import ModelStep, ScriptedModel
 
     invocation_count = 0
     if feature == "canonical_invocation_identity":
@@ -1771,7 +1771,9 @@ async def validate_historical_resume_behavior(
         ],
     )
     model_turns.append([final_message])
-    model = QueuedFakeModel(model_turns)
+    model = ScriptedModel(
+        [ModelStep(output=turn, response_id="queued-fake-response") for turn in model_turns]
+    )
     agent = Agent(name="compat-agent", model=model, tools=[tool])
     payload = json.loads(path.read_text(encoding="utf-8"))
     restored = await RunState.from_json(agent, payload)

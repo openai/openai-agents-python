@@ -96,11 +96,12 @@ from agents.run_internal.session_persistence import (
 from agents.run_internal.tool_execution import execute_approved_tools
 from agents.run_internal.tool_use_tracker import AgentToolUseTracker
 from agents.run_state import RunState
+from agents.testing import ModelStep, ScriptedModel
 from agents.tool import ComputerTool, FunctionToolResult, HostedMCPTool, ShellTool, function_tool
 from agents.tool_context import ToolContext
 from agents.usage import Usage
 
-from .fake_model import FakeModel
+from .model_test_helpers import get_exact_output_stream_step
 from .test_responses import (
     get_final_output_message,
     get_function_tool,
@@ -182,7 +183,7 @@ async def _run_agent_with_optional_streaming(
 @pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.asyncio
 async def test_persistent_hosted_mcp_approval_does_not_cross_servers(streamed: bool) -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     server_a = HostedMCPTool(
         tool_config=Mcp(
             type="mcp",
@@ -197,27 +198,28 @@ async def test_persistent_hosted_mcp_approval_does_not_cross_servers(streamed: b
             server_url="https://server-b.example/mcp",
         )
     )
-    model.add_multiple_turn_outputs(
+    outputs = [
         [
-            [
-                McpApprovalRequest(
-                    id="request-a",
-                    type="mcp_approval_request",
-                    arguments="{}",
-                    name="lookup_account",
-                    server_label="server-a",
-                )
-            ],
-            [
-                McpApprovalRequest(
-                    id="request-b",
-                    type="mcp_approval_request",
-                    arguments="{}",
-                    name="lookup_account",
-                    server_label="server-b",
-                )
-            ],
-        ]
+            McpApprovalRequest(
+                id="request-a",
+                type="mcp_approval_request",
+                arguments="{}",
+                name="lookup_account",
+                server_label="server-a",
+            )
+        ],
+        [
+            McpApprovalRequest(
+                id="request-b",
+                type="mcp_approval_request",
+                arguments="{}",
+                name="lookup_account",
+                server_label="server-b",
+            )
+        ],
+    ]
+    model.extend(
+        [get_exact_output_stream_step(output) for output in outputs] if streamed else outputs
     )
     agent = Agent(name="test", model=model, tools=[server_a, server_b])
 
@@ -251,7 +253,7 @@ async def test_run_reports_derived_agent_name_collisions_before_model_call(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
-    model = FakeModel(initial_output=[get_text_message("done")])
+    model = ScriptedModel(steps=[[get_text_message("done")]])
     billing = Agent(name="Billing Agent")
     normalized_billing = Agent(name="billing agent")
     if surface == "agent_tool":
@@ -298,8 +300,8 @@ async def test_run_reports_derived_agent_name_collisions_before_model_call(
                 run_config=run_config,
             )
 
-        assert model.first_turn_args is None
-        assert not model.last_turn_args
+        assert not model.calls
+        assert not model.calls
     else:
         with caplog.at_level("WARNING", logger="openai.agents"):
             await _run_agent_with_optional_streaming(
@@ -309,7 +311,7 @@ async def test_run_reports_derived_agent_name_collisions_before_model_call(
                 run_config=run_config,
             )
 
-        assert model.first_turn_args is not None
+        assert bool(model.calls)
         collision_messages = [
             message for message in caplog.messages if message.startswith("Ambiguous ")
         ]
@@ -337,8 +339,8 @@ async def test_run_warns_and_keeps_last_duplicate_function_tool(
         calls.append("second")
         return "second"
 
-    model = FakeModel(initial_output=[get_function_tool_call("lookup", "{}")])
-    model.set_next_output([get_text_message("done")])
+    model = ScriptedModel(steps=[[get_function_tool_call("lookup", "{}")]])
+    model.enqueue([get_text_message("done")])
     agent = Agent(name="agent", model=model, tools=[first_lookup, second_lookup])
 
     with caplog.at_level("WARNING", logger="openai.agents"):
@@ -349,8 +351,8 @@ async def test_run_warns_and_keeps_last_duplicate_function_tool(
         )
 
     assert calls == ["second"]
-    assert model.first_turn_args is not None
-    assert model.first_turn_args["tools"] == [second_lookup]
+    assert bool(model.calls)
+    assert model.calls[0].tools == [second_lookup]
     collision_messages = [
         message for message in caplog.messages if message.startswith("Ambiguous ")
     ]
@@ -448,7 +450,7 @@ async def test_run_rejects_duplicate_function_tools_in_error_mode(streamed: bool
     def second_lookup() -> str:
         return "second"
 
-    model = FakeModel(initial_output=[get_text_message("done")])
+    model = ScriptedModel(steps=[[get_text_message("done")]])
     agent = Agent(name="agent", model=model, tools=[first_lookup, second_lookup])
 
     with pytest.raises(
@@ -462,7 +464,7 @@ async def test_run_rejects_duplicate_function_tools_in_error_mode(streamed: bool
             run_config=RunConfig(tool_name_collision_policy="error"),
         )
 
-    assert model.first_turn_args is None
+    assert not model.calls
 
 
 @pytest.mark.asyncio
@@ -471,7 +473,7 @@ async def test_run_warns_once_for_repeated_source_agent_name(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
-    model = FakeModel(initial_output=[get_text_message("done")])
+    model = ScriptedModel(steps=[[get_text_message("done")]])
     agent = Agent(
         name="orchestrator",
         model=model,
@@ -493,8 +495,8 @@ async def test_run_warns_once_for_repeated_source_agent_name(
         "tools. Assign a unique routed name to every colliding function tool with "
         "`name_override=`, `tool_name=`, or a namespace."
     ]
-    assert model.first_turn_args is not None
-    assert model.first_turn_args["tools"] == [agent.tools[-1]]
+    assert bool(model.calls)
+    assert model.calls[0].tools == [agent.tools[-1]]
 
 
 def test_multiway_mixed_collision_reports_every_owner_must_be_unique(
@@ -532,9 +534,9 @@ def test_multiway_mixed_collision_reports_every_owner_must_be_unique(
 @pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.asyncio
 async def test_handoff_enablement_uses_initialized_turn_context(streamed: bool) -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     target = Agent(name="target", model=model)
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_handoff_tool_call(target)],
             [get_text_message("done")],
@@ -1004,12 +1006,12 @@ def _find_reasoning_input_item(
 
 @pytest.mark.asyncio
 async def test_simple_first_run():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
     )
-    model.set_next_output([get_text_message("first")])
+    model.enqueue([get_text_message("first")])
 
     result = await Runner.run(agent, input="test")
     assert result.input == "test"
@@ -1021,7 +1023,7 @@ async def test_simple_first_run():
 
     assert len(result.to_input_list()) == 2, "should have original input and generated item"
 
-    model.set_next_output([get_text_message("second")])
+    model.enqueue([get_text_message("second")])
 
     result = await Runner.run(
         agent, input=[get_text_input_item("message"), get_text_input_item("another_message")]
@@ -1034,19 +1036,19 @@ async def test_simple_first_run():
 
 @pytest.mark.asyncio
 async def test_subsequent_runs():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
     )
-    model.set_next_output([get_text_message("third")])
+    model.enqueue([get_text_message("third")])
 
     result = await Runner.run(agent, input="test")
     assert result.input == "test"
     assert len(result.new_items) == 1, "exactly one item should be generated"
     assert len(result.to_input_list()) == 2, "should have original input and generated item"
 
-    model.set_next_output([get_text_message("fourth")])
+    model.enqueue([get_text_message("fourth")])
 
     result = await Runner.run(agent, input=result.to_input_list())
     assert len(result.input) == 2, f"should have previous input but got {result.input}"
@@ -1060,14 +1062,14 @@ async def test_subsequent_runs():
 
 @pytest.mark.asyncio
 async def test_tool_call_runs():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         tools=[get_function_tool("foo", "tool_result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [get_text_message("a_message"), get_function_tool_call("foo", json.dumps({"a": "b"}))],
@@ -1098,7 +1100,7 @@ async def test_parallel_tool_call_with_cancelled_sibling_reaches_final_output() 
     async def _cancel_tool() -> str:
         raise asyncio.CancelledError("tool-cancelled")
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
@@ -1108,7 +1110,7 @@ async def test_parallel_tool_call_with_cancelled_sibling_reaches_final_output() 
         ],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 get_function_tool_call("ok_tool", "{}", call_id="call_ok"),
@@ -1123,7 +1125,7 @@ async def test_parallel_tool_call_with_cancelled_sibling_reaches_final_output() 
     assert result.final_output == "final answer"
     assert len(result.raw_responses) == 2
 
-    second_turn_input = cast(list[dict[str, Any]], model.last_turn_args["input"])
+    second_turn_input = cast(list[dict[str, Any]], model.calls[-1].input)
     tool_outputs = [
         item for item in second_turn_input if item.get("type") == "function_call_output"
     ]
@@ -1144,14 +1146,14 @@ async def test_single_tool_call_with_cancelled_tool_reaches_final_output() -> No
     async def _cancel_tool() -> str:
         raise asyncio.CancelledError("tool-cancelled")
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         tools=[function_tool(_cancel_tool, name_override="cancel_tool")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("cancel_tool", "{}", call_id="call_cancel")],
             [get_text_message("final answer")],
@@ -1163,7 +1165,7 @@ async def test_single_tool_call_with_cancelled_tool_reaches_final_output() -> No
     assert result.final_output == "final answer"
     assert len(result.raw_responses) == 2
 
-    second_turn_input = cast(list[dict[str, Any]], model.last_turn_args["input"])
+    second_turn_input = cast(list[dict[str, Any]], model.calls[-1].input)
     tool_outputs = [
         item for item in second_turn_input if item.get("type") == "function_call_output"
     ]
@@ -1180,14 +1182,14 @@ async def test_single_tool_call_with_cancelled_tool_reaches_final_output() -> No
 
 @pytest.mark.asyncio
 async def test_reasoning_item_id_policy_omits_follow_up_reasoning_ids() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         tools=[get_function_tool("foo", "tool_result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 ResponseReasoningItem(
@@ -1208,7 +1210,7 @@ async def test_reasoning_item_id_policy_omits_follow_up_reasoning_ids() -> None:
     )
 
     assert result.final_output == "done"
-    second_request_reasoning = _find_reasoning_input_item(model.last_turn_args.get("input"))
+    second_request_reasoning = _find_reasoning_input_item(model.calls[-1].input)
     assert second_request_reasoning is not None
     assert "id" not in second_request_reasoning
 
@@ -1219,14 +1221,14 @@ async def test_reasoning_item_id_policy_omits_follow_up_reasoning_ids() -> None:
 
 @pytest.mark.asyncio
 async def test_call_model_input_filter_can_reintroduce_reasoning_ids() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         tools=[get_function_tool("foo", "tool_result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 ResponseReasoningItem(
@@ -1260,7 +1262,7 @@ async def test_call_model_input_filter_can_reintroduce_reasoning_ids() -> None:
     )
 
     assert result.final_output == "done"
-    second_request_reasoning = _find_reasoning_input_item(model.last_turn_args.get("input"))
+    second_request_reasoning = _find_reasoning_input_item(model.calls[-1].input)
     assert second_request_reasoning is not None
     assert second_request_reasoning.get("id") == "rs_reintroduced"
 
@@ -1269,8 +1271,8 @@ async def test_call_model_input_filter_can_reintroduce_reasoning_ids() -> None:
     assert "id" not in history_reasoning
 
 
-class _RevokedReasoningIdModel(FakeModel):
-    """FakeModel that 404s like the Responses API when a revoked reasoning ID is replayed."""
+class _RevokedReasoningIdModel(ScriptedModel):
+    """ScriptedModel that 404s like the Responses API when a revoked reasoning ID is replayed."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -1319,7 +1321,7 @@ async def test_omit_policy_strips_reasoning_ids_already_stored_in_the_session() 
     session = SQLiteSession("issue-2020")
 
     # Turn 1 predates the mitigation, so the session records the reasoning ID.
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 ResponseReasoningItem(id="rs_triage", type="reasoning", summary=[]),
@@ -1338,7 +1340,7 @@ async def test_omit_policy_strips_reasoning_ids_already_stored_in_the_session() 
     model.revoked_reasoning_ids.add("rs_triage")
 
     # Turn 2 opts into the documented mitigation for this failure.
-    model.add_multiple_turn_outputs([[get_text_message("done")]])
+    model.extend([[get_text_message("done")]])
     second = await Runner.run(
         triage,
         input="anything else?",
@@ -1347,14 +1349,14 @@ async def test_omit_policy_strips_reasoning_ids_already_stored_in_the_session() 
     )
 
     assert second.final_output == "done"
-    replayed_reasoning = _find_reasoning_input_item(model.last_turn_args.get("input"))
+    replayed_reasoning = _find_reasoning_input_item(model.calls[-1].input)
     assert replayed_reasoning is not None
     assert "id" not in replayed_reasoning
 
 
 @pytest.mark.asyncio
 async def test_resumed_run_uses_serialized_reasoning_item_id_policy() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
 
     @function_tool(name_override="approval_tool", needs_approval=True)
     def approval_tool() -> str:
@@ -1366,7 +1368,7 @@ async def test_resumed_run_uses_serialized_reasoning_item_id_policy() -> None:
         tools=[approval_tool],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 ResponseReasoningItem(
@@ -1398,14 +1400,14 @@ async def test_resumed_run_uses_serialized_reasoning_item_id_policy() -> None:
     resumed = await Runner.run(agent, restored_state)
     assert resumed.final_output == "done"
 
-    second_request_reasoning = _find_reasoning_input_item(model.last_turn_args.get("input"))
+    second_request_reasoning = _find_reasoning_input_item(model.calls[-1].input)
     assert second_request_reasoning is not None
     assert "id" not in second_request_reasoning
 
 
 @pytest.mark.asyncio
 async def test_pending_approval_skips_tool_input_guardrails_by_default() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     guardrail_runs = 0
 
     @tool_input_guardrail
@@ -1423,7 +1425,7 @@ async def test_pending_approval_skips_tool_input_guardrails_by_default() -> None
         return "ok"
 
     agent = Agent(name="test", model=model, tools=[approval_tool])
-    model.set_next_output([get_function_tool_call("approval_tool", "{}", call_id="call_default")])
+    model.enqueue([get_function_tool_call("approval_tool", "{}", call_id="call_default")])
 
     result = await Runner.run(agent, "hello")
 
@@ -1434,7 +1436,7 @@ async def test_pending_approval_skips_tool_input_guardrails_by_default() -> None
 
 @pytest.mark.asyncio
 async def test_pre_approval_tool_input_guardrails_can_reject_before_pending_approval() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     executed = False
 
     @tool_input_guardrail
@@ -1452,7 +1454,7 @@ async def test_pre_approval_tool_input_guardrails_can_reject_before_pending_appr
         return "ok"
 
     agent = Agent(name="test", model=model, tools=[approval_tool])
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("approval_tool", "{}", call_id="call_reject")],
             [get_text_message("done")],
@@ -1479,7 +1481,7 @@ async def test_pre_approval_tool_input_guardrails_can_reject_before_pending_appr
 
 @pytest.mark.asyncio
 async def test_pre_approval_tool_input_guardrails_rerun_after_resume() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     guardrail_runs = 0
     executed = 0
 
@@ -1500,7 +1502,7 @@ async def test_pre_approval_tool_input_guardrails_rerun_after_resume() -> None:
         return "ok"
 
     agent = Agent(name="test", model=model, tools=[approval_tool])
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("approval_tool", "{}", call_id="call_resume")],
             [get_text_message("done")],
@@ -1530,7 +1532,7 @@ async def test_pre_approval_tool_input_guardrails_rerun_after_resume() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_call_context_includes_current_agent() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     captured_contexts: list[ToolContext[Any]] = []
 
     @function_tool(name_override="foo")
@@ -1544,7 +1546,7 @@ async def test_tool_call_context_includes_current_agent() -> None:
         tools=[foo],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("foo", "{}")],
             [get_text_message("done")],
@@ -1560,7 +1562,7 @@ async def test_tool_call_context_includes_current_agent() -> None:
 
 @pytest.mark.asyncio
 async def test_handoffs():
-    model = FakeModel()
+    model = ScriptedModel()
     agent_1 = Agent(
         name="test",
         model=model,
@@ -1576,7 +1578,7 @@ async def test_handoffs():
         tools=[get_function_tool("some_function", "result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a tool call
             [get_function_tool_call("some_function", json.dumps({"a": "b"}))],
@@ -1600,7 +1602,7 @@ async def test_handoffs():
 
 @pytest.mark.asyncio
 async def test_nested_handoff_filters_model_input_but_preserves_session_items():
-    model = FakeModel()
+    model = ScriptedModel()
     delegate = Agent(
         name="delegate",
         model=model,
@@ -1612,7 +1614,7 @@ async def test_nested_handoff_filters_model_input_but_preserves_session_items():
         tools=[get_function_tool("some_function", "result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a tool call.
             [get_function_tool_call("some_function", json.dumps({"a": "b"}))],
@@ -1665,7 +1667,7 @@ async def test_nested_handoff_filters_model_input_but_preserves_session_items():
 
 @pytest.mark.asyncio
 async def test_nested_handoff_filters_reasoning_items_from_model_input():
-    model = FakeModel()
+    model = ScriptedModel()
     delegate = Agent(
         name="delegate",
         model=model,
@@ -1676,7 +1678,7 @@ async def test_nested_handoff_filters_reasoning_items_from_model_input():
         handoffs=[delegate],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 ResponseReasoningItem(
@@ -1719,7 +1721,7 @@ async def test_nested_handoff_filters_reasoning_items_from_model_input():
 
 @pytest.mark.asyncio
 async def test_resume_preserves_filtered_model_input_after_handoff():
-    model = FakeModel()
+    model = ScriptedModel()
 
     @function_tool(name_override="approval_tool", needs_approval=True)
     def approval_tool() -> str:
@@ -1737,7 +1739,7 @@ async def test_resume_preserves_filtered_model_input_after_handoff():
         tools=[get_function_tool("some_function", "result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 get_function_tool_call(
@@ -1795,7 +1797,7 @@ async def test_resume_preserves_filtered_model_input_after_handoff():
 
 @pytest.mark.asyncio
 async def test_resumed_state_updates_agent_after_handoff() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
 
     @function_tool(name_override="triage_tool", needs_approval=True)
     def triage_tool() -> str:
@@ -1817,7 +1819,7 @@ async def test_resumed_state_updates_agent_after_handoff() -> None:
         tools=[triage_tool],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("triage_tool", "{}", call_id="triage-1")],
             [get_text_message("handoff"), get_handoff_tool_call(delegate)],
@@ -1845,7 +1847,7 @@ class Foo(TypedDict):
 
 @pytest.mark.asyncio
 async def test_structured_output():
-    model = FakeModel()
+    model = ScriptedModel()
     agent_1 = Agent(
         name="test",
         model=model,
@@ -1860,7 +1862,7 @@ async def test_structured_output():
         handoffs=[agent_1],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a tool call
             [
@@ -1921,7 +1923,7 @@ def remove_new_items(handoff_input_data: HandoffInputData) -> HandoffInputData:
 
 @pytest.mark.asyncio
 async def test_handoff_filters():
-    model = FakeModel()
+    model = ScriptedModel()
     agent_1 = Agent(
         name="test",
         model=model,
@@ -1937,7 +1939,7 @@ async def test_handoff_filters():
         ],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_text_message("1"), get_text_message("2"), get_handoff_tool_call(agent_1)],
             [get_text_message("last")],
@@ -1955,7 +1957,7 @@ async def test_handoff_filters():
 
 @pytest.mark.asyncio
 async def test_opt_in_handoff_history_nested_and_filters_respected():
-    model = FakeModel()
+    model = ScriptedModel()
     agent_1 = Agent(
         name="delegate",
         model=model,
@@ -1966,7 +1968,7 @@ async def test_opt_in_handoff_history_nested_and_filters_respected():
         handoffs=[agent_1],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_text_message("triage summary"), get_handoff_tool_call(agent_1)],
             [get_text_message("resolution")],
@@ -1991,12 +1993,12 @@ async def test_opt_in_handoff_history_nested_and_filters_respected():
     assert _input_message_text(result.input[1]) == "triage summary"
     handoff_summary = _input_message_text(result.input[2])
     assert "transfer_to_delegate" in handoff_summary
-    delegate_input = model.last_turn_args["input"]
+    delegate_input = model.calls[-1].input
     assert isinstance(delegate_input, list)
     assert len(delegate_input) == 3
     assert _input_message_text(delegate_input[1]) == "triage summary"
 
-    passthrough_model = FakeModel()
+    passthrough_model = ScriptedModel()
     delegate = Agent(name="delegate", model=passthrough_model)
 
     def passthrough_filter(data: HandoffInputData) -> HandoffInputData:
@@ -2008,7 +2010,7 @@ async def test_opt_in_handoff_history_nested_and_filters_respected():
         handoffs=[handoff(delegate, input_filter=passthrough_filter)],
     )
 
-    passthrough_model.add_multiple_turn_outputs(
+    passthrough_model.extend(
         [
             [get_text_message("triage summary"), get_handoff_tool_call(delegate)],
             [get_text_message("resolution")],
@@ -2028,8 +2030,8 @@ async def test_opt_in_handoff_history_nested_and_filters_respected():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
 async def test_falsey_per_handoff_input_filter_takes_precedence(streamed: bool) -> None:
-    triage_model = FakeModel()
-    delegate_model = FakeModel()
+    triage_model = ScriptedModel()
+    delegate_model = ScriptedModel()
     delegate = Agent(name="delegate", model=delegate_model)
 
     class FalseyInputFilter:
@@ -2053,8 +2055,8 @@ async def test_falsey_per_handoff_input_filter_takes_precedence(streamed: bool) 
         model=triage_model,
         handoffs=[handoff(delegate, input_filter=per_handoff_filter)],
     )
-    triage_model.add_multiple_turn_outputs([[get_handoff_tool_call(delegate)]])
-    delegate_model.add_multiple_turn_outputs([[get_text_message("done")]])
+    triage_model.extend([[get_handoff_tool_call(delegate)]])
+    delegate_model.extend([[get_text_message("done")]])
 
     result = await _run_agent_with_optional_streaming(
         triage,
@@ -2073,21 +2075,17 @@ async def test_falsey_per_handoff_input_filter_takes_precedence(streamed: bool) 
 
 @pytest.mark.asyncio
 async def test_opt_in_handoff_history_accumulates_across_multiple_handoffs():
-    triage_model = FakeModel()
-    delegate_model = FakeModel()
-    closer_model = FakeModel()
+    triage_model = ScriptedModel()
+    delegate_model = ScriptedModel()
+    closer_model = ScriptedModel()
 
     closer = Agent(name="closer", model=closer_model)
     delegate = Agent(name="delegate", model=delegate_model, handoffs=[closer])
     triage = Agent(name="triage", model=triage_model, handoffs=[delegate])
 
-    triage_model.add_multiple_turn_outputs(
-        [[get_text_message("triage summary"), get_handoff_tool_call(delegate)]]
-    )
-    delegate_model.add_multiple_turn_outputs(
-        [[get_text_message("delegate update"), get_handoff_tool_call(closer)]]
-    )
-    closer_model.add_multiple_turn_outputs([[get_text_message("resolution")]])
+    triage_model.extend([[get_text_message("triage summary"), get_handoff_tool_call(delegate)]])
+    delegate_model.extend([[get_text_message("delegate update"), get_handoff_tool_call(closer)]])
+    closer_model.extend([[get_text_message("resolution")]])
 
     result = await Runner.run(
         triage,
@@ -2096,8 +2094,8 @@ async def test_opt_in_handoff_history_accumulates_across_multiple_handoffs():
     )
 
     assert result.final_output == "resolution"
-    assert closer_model.first_turn_args is not None
-    closer_input = closer_model.first_turn_args["input"]
+    assert bool(closer_model.calls)
+    closer_input = closer_model.calls[0].input
     assert isinstance(closer_input, list)
     summary = _as_message(closer_input[0])
     assert summary["role"] == "assistant"
@@ -2121,8 +2119,8 @@ async def test_server_managed_handoff_history_auto_disables_with_warning(
     nest_source: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    triage_model = FakeModel()
-    delegate_model = FakeModel()
+    triage_model = ScriptedModel()
+    delegate_model = ScriptedModel()
     delegate = Agent(name="delegate", model=delegate_model)
 
     run_config = RunConfig()
@@ -2134,10 +2132,8 @@ async def test_server_managed_handoff_history_auto_disables_with_warning(
         run_config = RunConfig(nest_handoff_history=True)
 
     triage = Agent(name="triage", model=triage_model, handoffs=triage_handoffs)
-    triage_model.add_multiple_turn_outputs(
-        [[get_text_message("triage summary"), get_handoff_tool_call(delegate)]]
-    )
-    delegate_model.add_multiple_turn_outputs([[get_text_message("done")]])
+    triage_model.extend([[get_text_message("triage summary"), get_handoff_tool_call(delegate)]])
+    delegate_model.extend([[get_text_message("done")]])
 
     with caplog.at_level("WARNING", logger="openai.agents"):
         result = await _run_agent_with_optional_streaming(
@@ -2150,8 +2146,8 @@ async def test_server_managed_handoff_history_auto_disables_with_warning(
 
     assert result.final_output == "done"
     assert "do not support nest_handoff_history" in caplog.text
-    assert delegate_model.first_turn_args is not None
-    delegate_input = delegate_model.first_turn_args["input"]
+    assert bool(delegate_model.calls)
+    delegate_input = delegate_model.calls[0].input
     assert isinstance(delegate_input, list)
     assert len(delegate_input) == 1
     handoff_output = delegate_input[0]
@@ -2172,8 +2168,8 @@ async def test_server_managed_handoff_input_filters_still_raise(
     streamed: bool,
     filter_source: str,
 ) -> None:
-    triage_model = FakeModel()
-    delegate_model = FakeModel()
+    triage_model = ScriptedModel()
+    delegate_model = ScriptedModel()
     delegate = Agent(name="delegate", model=delegate_model)
 
     def passthrough_filter(data: HandoffInputData) -> HandoffInputData:
@@ -2188,10 +2184,8 @@ async def test_server_managed_handoff_input_filters_still_raise(
         run_config = RunConfig(handoff_input_filter=passthrough_filter)
 
     triage = Agent(name="triage", model=triage_model, handoffs=triage_handoffs)
-    triage_model.add_multiple_turn_outputs(
-        [[get_text_message("triage summary"), get_handoff_tool_call(delegate)]]
-    )
-    delegate_model.add_multiple_turn_outputs([[get_text_message("done")]])
+    triage_model.extend([[get_text_message("triage summary"), get_handoff_tool_call(delegate)]])
+    delegate_model.extend([[get_text_message("done")]])
 
     with pytest.raises(
         UserError,
@@ -2205,14 +2199,14 @@ async def test_server_managed_handoff_input_filters_still_raise(
             auto_previous_response_id=True,
         )
 
-    assert delegate_model.first_turn_args is None
+    assert not delegate_model.calls
 
 
 @pytest.mark.asyncio
 async def test_async_input_filter_supported():
     # DO NOT rename this without updating pyproject.toml
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent_1 = Agent(
         name="test",
         model=model,
@@ -2239,7 +2233,7 @@ async def test_async_input_filter_supported():
         ],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_text_message("1"), get_text_message("2"), get_handoff_tool_call(agent_1)],
             [get_text_message("last")],
@@ -2252,7 +2246,7 @@ async def test_async_input_filter_supported():
 
 @pytest.mark.asyncio
 async def test_invalid_input_filter_fails():
-    model = FakeModel()
+    model = ScriptedModel()
     agent_1 = Agent(
         name="test",
         model=model,
@@ -2280,7 +2274,7 @@ async def test_invalid_input_filter_fails():
         ],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_text_message("1"), get_text_message("2"), get_handoff_tool_call(agent_1)],
             [get_text_message("last")],
@@ -2293,7 +2287,7 @@ async def test_invalid_input_filter_fails():
 
 @pytest.mark.asyncio
 async def test_non_callable_input_filter_causes_error():
-    model = FakeModel()
+    model = ScriptedModel()
     agent_1 = Agent(
         name="test",
         model=model,
@@ -2318,7 +2312,7 @@ async def test_non_callable_input_filter_causes_error():
         ],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_text_message("1"), get_text_message("2"), get_handoff_tool_call(agent_1)],
             [get_text_message("last")],
@@ -2337,7 +2331,7 @@ async def test_handoff_on_input():
         nonlocal call_output
         call_output = data["bar"]
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent_1 = Agent(
         name="test",
         model=model,
@@ -2355,7 +2349,7 @@ async def test_handoff_on_input():
         ],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 get_text_message("1"),
@@ -2381,7 +2375,7 @@ async def test_async_handoff_on_input():
         nonlocal call_output
         call_output = data["bar"]
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent_1 = Agent(
         name="test",
         model=model,
@@ -2399,7 +2393,7 @@ async def test_async_handoff_on_input():
         ],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 get_text_message("1"),
@@ -2475,8 +2469,8 @@ async def test_input_guardrail_tripwire_triggered_causes_exception():
     agent = Agent(
         name="test", input_guardrails=[InputGuardrail(guardrail_function=guardrail_function)]
     )
-    model = FakeModel()
-    model.set_next_output([get_text_message("user_message")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("user_message")])
 
     with pytest.raises(InputGuardrailTripwireTriggered):
         await Runner.run(agent, input="user_message")
@@ -2496,8 +2490,8 @@ async def test_input_guardrail_tripwire_does_not_save_assistant_message_to_sessi
 
     session = SimpleListSession()
 
-    model = FakeModel()
-    model.set_next_output([get_text_message("should_not_be_saved")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("should_not_be_saved")])
 
     agent = Agent(
         name="test",
@@ -3335,7 +3329,7 @@ async def test_prepare_input_with_openai_conversation_callback_keeps_user_ids_di
 @pytest.mark.asyncio
 async def test_persist_session_items_for_guardrail_trip_uses_original_input_when_missing() -> None:
     session = SimpleListSession()
-    agent = Agent(name="agent", model=FakeModel())
+    agent = Agent(name="agent", model=ScriptedModel())
     run_state: RunState[Any] = RunState(
         context=RunContextWrapper(context={}),
         original_input="input",
@@ -3430,8 +3424,8 @@ async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
     )
     locked_error.code = "conversation_locked"
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs([locked_error, [get_text_message("ok")]])
+    model = ScriptedModel()
+    model.extend([locked_error, [get_text_message("ok")]])
     agent = Agent(name="test", model=model)
 
     result = await get_new_response(
@@ -3460,8 +3454,8 @@ async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
 async def test_non_streamed_model_retry_does_not_rewind_committed_session_input(
     tmp_path: Path, session_backend: str
 ) -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             APIConnectionError(
                 message="connection error",
@@ -3503,9 +3497,9 @@ async def test_non_streamed_model_retry_does_not_rewind_committed_session_input(
 
 @pytest.mark.asyncio
 async def test_get_new_response_uses_agent_retry_settings() -> None:
-    model = FakeModel()
-    model.set_hardcoded_usage(Usage(requests=1))
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.set_default_usage(Usage(requests=1))
+    model.extend(
         [
             APIConnectionError(
                 message="connection error",
@@ -3819,7 +3813,7 @@ def test_collect_retry_owned_tail_serializations_returns_empty_for_empty_session
 @pytest.mark.asyncio
 async def test_save_result_to_session_does_not_increment_counter_when_nothing_saved() -> None:
     session = SimpleListSession()
-    agent = Agent(name="agent", model=FakeModel())
+    agent = Agent(name="agent", model=ScriptedModel())
     approval_item = ToolApprovalItem(
         agent=agent,
         raw_item={"type": "function_call", "call_id": "call-1", "name": "tool"},
@@ -3846,7 +3840,7 @@ async def test_save_result_to_session_does_not_increment_counter_when_nothing_sa
 @pytest.mark.asyncio
 async def test_save_result_to_session_returns_count_and_updates_state() -> None:
     session = SimpleListSession()
-    agent = Agent(name="agent", model=FakeModel())
+    agent = Agent(name="agent", model=ScriptedModel())
     run_state: RunState[Any] = RunState(
         context=RunContextWrapper(context={}),
         original_input="input",
@@ -3898,7 +3892,7 @@ async def test_save_result_to_session_counts_sanitized_openai_items() -> None:
             return None
 
     session = DummyOpenAIConversationsSession()
-    agent = Agent(name="agent", model=FakeModel())
+    agent = Agent(name="agent", model=ScriptedModel())
     run_state: RunState[Any] = RunState(
         context=RunContextWrapper(context={}),
         original_input="input",
@@ -3933,7 +3927,7 @@ async def test_save_result_to_session_counts_sanitized_openai_items() -> None:
 @pytest.mark.asyncio
 async def test_save_result_to_session_omits_reasoning_ids_when_policy_is_omit() -> None:
     session = SimpleListSession()
-    agent = Agent(name="agent", model=FakeModel())
+    agent = Agent(name="agent", model=ScriptedModel())
     run_state: RunState[Any] = RunState(
         context=RunContextWrapper(context={}),
         original_input="input",
@@ -3985,7 +3979,7 @@ async def test_save_result_to_openai_conversation_preserves_reasoning_id_when_po
             return None
 
     session = DummyOpenAIConversationsSession()
-    agent = Agent(name="agent", model=FakeModel())
+    agent = Agent(name="agent", model=ScriptedModel())
     run_state: RunState[Any] = RunState(
         context=RunContextWrapper(context={}),
         original_input="input",
@@ -4040,7 +4034,7 @@ async def test_save_result_to_openai_conversation_drops_unpersistable_reasoning_
             return None
 
     session = DummyOpenAIConversationsSession()
-    agent = Agent(name="agent", model=FakeModel())
+    agent = Agent(name="agent", model=ScriptedModel())
     run_state: RunState[Any] = RunState(
         context=RunContextWrapper(context={}),
         original_input="input",
@@ -4131,7 +4125,7 @@ async def test_save_result_to_openai_conversation_drops_placeholder_id_reasoning
             return None
 
     session = DummyOpenAIConversationsSession()
-    agent = Agent(name="agent", model=FakeModel())
+    agent = Agent(name="agent", model=ScriptedModel())
     # Chat Completions providers have no server-assigned reasoning ID, so the SDK stamps its
     # own placeholder. That placeholder is not a server identity, so the item is no more
     # persistable than one with no ID at all.
@@ -4177,7 +4171,7 @@ async def test_save_result_to_openai_conversation_strips_placeholder_reasoning_i
             return None
 
     session = DummyOpenAIConversationsSession()
-    agent = Agent(name="agent", model=FakeModel())
+    agent = Agent(name="agent", model=ScriptedModel())
     placeholder_reasoning = ReasoningItem(
         agent=agent,
         raw_item=ResponseReasoningItem(
@@ -4205,7 +4199,7 @@ async def test_save_result_to_openai_conversation_strips_placeholder_reasoning_i
 @pytest.mark.asyncio
 async def test_save_result_to_session_keeps_tool_call_payload_api_safe() -> None:
     session = SimpleListSession()
-    agent = Agent(name="agent", model=FakeModel())
+    agent = Agent(name="agent", model=ScriptedModel())
     tool_call = ToolCallItem(
         agent=agent,
         raw_item=ResponseFunctionToolCall(
@@ -4349,7 +4343,7 @@ async def test_session_persists_only_new_step_items(monkeypatch: pytest.MonkeyPa
     """Ensure only per-turn new_step_items are persisted to the session."""
 
     session = SimpleListSession()
-    agent = Agent(name="agent", model=FakeModel())
+    agent = Agent(name="agent", model=ScriptedModel())
 
     pre_item = _DummyRunItem(
         {"type": "message", "role": "assistant", "content": "old"}, "message_output_item"
@@ -4442,13 +4436,13 @@ async def test_output_guardrail_tripwire_triggered_causes_exception():
             tripwire_triggered=True,
         )
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
         model=model,
     )
-    model.set_next_output([get_text_message("user_message")])
+    model.enqueue([get_text_message("user_message")])
 
     with pytest.raises(OutputGuardrailTripwireTriggered):
         await Runner.run(agent, input="user_message")
@@ -4461,8 +4455,8 @@ def test_output_guardrail_tripwire_does_not_save_assistant_message_to_session_sy
         return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
 
     session = SimpleListSession()
-    model = FakeModel()
-    model.set_next_output([get_text_message("should_not_be_saved")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("should_not_be_saved")])
     agent = Agent(
         name="test",
         model=model,
@@ -4487,8 +4481,8 @@ async def test_output_guardrail_error_preserves_final_output_in_session() -> Non
         raise RuntimeError("guardrail failed")
 
     session = SimpleListSession()
-    model = FakeModel()
-    model.set_next_output([get_text_message("preserved_on_guardrail_error")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("preserved_on_guardrail_error")])
     agent = Agent(
         name="test",
         model=model,
@@ -4517,8 +4511,8 @@ async def test_output_guardrail_cancellation_preserves_final_output_in_session()
         raise AssertionError("unreachable")
 
     session = SimpleListSession()
-    model = FakeModel()
-    model.set_next_output([get_text_message("preserved_on_guardrail_cancellation")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("preserved_on_guardrail_cancellation")])
     agent = Agent(
         name="test",
         model=model,
@@ -4551,8 +4545,8 @@ async def test_resumed_final_output_persists_once_after_passing_output_guardrail
         return f"result:{a}"
 
     session = SimpleListSession()
-    model = FakeModel()
-    model.set_next_output([get_function_tool_call("foo", json.dumps({"a": "b"}))])
+    model = ScriptedModel()
+    model.enqueue([get_function_tool_call("foo", json.dumps({"a": "b"}))])
     agent = Agent(
         name="test",
         model=model,
@@ -4569,7 +4563,7 @@ async def test_resumed_final_output_persists_once_after_passing_output_guardrail
     state = streamed.to_state()
     state._current_turn_persisted_item_count = 2
 
-    model.set_next_output([get_text_message("accepted_final")])
+    model.enqueue([get_text_message("accepted_final")])
     resumed = await Runner.run(agent, state, session=session)
     assert resumed.final_output == "accepted_final"
 
@@ -4605,8 +4599,8 @@ async def test_resumed_final_tool_persists_call_and_output_after_output_guardrai
         return "committed-result"
 
     session = SimpleListSession()
-    model = FakeModel()
-    model.set_next_output([get_function_tool_call("commit_tool", "{}", call_id="call-first")])
+    model = ScriptedModel()
+    model.enqueue([get_function_tool_call("commit_tool", "{}", call_id="call-first")])
     agent = Agent(
         name="test",
         model=model,
@@ -4623,7 +4617,7 @@ async def test_resumed_final_tool_persists_call_and_output_after_output_guardrai
     assert state._current_turn_persisted_item_count == 2
 
     agent.tool_use_behavior = "stop_on_first_tool"
-    model.set_next_output([get_function_tool_call("commit_tool", "{}", call_id="call-second")])
+    model.enqueue([get_function_tool_call("commit_tool", "{}", call_id="call-second")])
 
     if tripwire_triggered:
         with pytest.raises(OutputGuardrailTripwireTriggered):
@@ -4661,8 +4655,8 @@ async def test_input_guardrail_no_tripwire_continues_execution():
             tripwire_triggered=False,  # Doesn't trigger tripwire
         )
 
-    model = FakeModel()
-    model.set_next_output([get_text_message("response")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("response")])
 
     agent = Agent(
         name="test",
@@ -4687,8 +4681,8 @@ async def test_output_guardrail_no_tripwire_continues_execution():
             tripwire_triggered=False,  # Doesn't trigger tripwire
         )
 
-    model = FakeModel()
-    model.set_next_output([get_text_message("response")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("response")])
 
     agent = Agent(
         name="test",
@@ -4717,7 +4711,7 @@ async def test_tool_use_behavior_first_output():
         def __bool__(self) -> bool:
             return False
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
@@ -4726,7 +4720,7 @@ async def test_tool_use_behavior_first_output():
         output_type=FalsyAgentOutputSchema(Foo),
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [
@@ -4755,7 +4749,7 @@ def custom_tool_use_behavior(
 
 @pytest.mark.asyncio
 async def test_tool_use_behavior_custom_function():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
@@ -4763,7 +4757,7 @@ async def test_tool_use_behavior_custom_function():
         tool_use_behavior=custom_tool_use_behavior,
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [
@@ -4787,12 +4781,12 @@ async def test_tool_use_behavior_custom_function():
 
 @pytest.mark.asyncio
 async def test_model_settings_override():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test", model=model, model_settings=ModelSettings(temperature=1.0, max_tokens=1000)
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 get_text_message("a_message"),
@@ -4807,20 +4801,20 @@ async def test_model_settings_override():
     )
 
     # temperature is overridden by Runner.run, but max_tokens is not
-    assert model.last_turn_args["model_settings"].temperature == 0.5
-    assert model.last_turn_args["model_settings"].max_tokens == 1000
+    assert model.calls[-1].model_settings.temperature == 0.5
+    assert model.calls[-1].model_settings.max_tokens == 1000
 
 
 @pytest.mark.asyncio
 async def test_previous_response_id_passed_between_runs():
     """Test that previous_response_id is passed to the model on subsequent runs."""
-    model = FakeModel()
-    model.set_next_output([get_text_message("done")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("done")])
     agent = Agent(name="test", model=model)
 
-    assert model.last_turn_args.get("previous_response_id") is None
+    assert not model.calls
     await Runner.run(agent, input="test", previous_response_id="resp-non-streamed-test")
-    assert model.last_turn_args.get("previous_response_id") == "resp-non-streamed-test"
+    assert model.calls[-1].previous_response_id == "resp-non-streamed-test"
 
 
 @pytest.mark.asyncio
@@ -4833,8 +4827,8 @@ async def test_previous_response_id_passed_between_runs():
     ],
 )
 async def test_run_rejects_session_with_server_managed_conversation(run_kwargs: dict[str, Any]):
-    model = FakeModel()
-    model.set_next_output([get_text_message("done")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("done")])
     agent = Agent(name="test", model=model)
     session = SimpleListSession()
 
@@ -4844,7 +4838,7 @@ async def test_run_rejects_session_with_server_managed_conversation(run_kwargs: 
 
 @pytest.mark.asyncio
 async def test_run_rejects_session_with_resumed_conversation_state():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
     session = SimpleListSession()
     context_wrapper = RunContextWrapper(context=None)
@@ -4871,8 +4865,8 @@ async def test_run_rejects_session_with_resumed_conversation_state():
 async def test_run_streamed_rejects_session_with_server_managed_conversation(
     run_kwargs: dict[str, Any],
 ):
-    model = FakeModel()
-    model.set_next_output([get_text_message("done")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("done")])
     agent = Agent(name="test", model=model)
     session = SimpleListSession()
 
@@ -4882,7 +4876,7 @@ async def test_run_streamed_rejects_session_with_server_managed_conversation(
 
 @pytest.mark.asyncio
 async def test_run_streamed_rejects_session_with_resumed_conversation_state():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
     session = SimpleListSession()
     context_wrapper = RunContextWrapper(context=None)
@@ -4901,14 +4895,14 @@ async def test_run_streamed_rejects_session_with_resumed_conversation_state():
 async def test_multi_turn_previous_response_id_passed_between_runs():
     """Test that previous_response_id is passed to the model on subsequent runs."""
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         tools=[get_function_tool("foo", "tool_result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [get_text_message("a_message"), get_function_tool_call("foo", json.dumps({"a": "b"}))],
@@ -4917,41 +4911,41 @@ async def test_multi_turn_previous_response_id_passed_between_runs():
         ]
     )
 
-    assert model.last_turn_args.get("previous_response_id") is None
+    assert not model.calls
     await Runner.run(agent, input="test", previous_response_id="resp-test-123")
-    assert model.last_turn_args.get("previous_response_id") == "resp-789"
+    assert model.calls[-1].previous_response_id == "resp-789"
 
 
 @pytest.mark.asyncio
 async def test_previous_response_id_passed_between_runs_streamed():
     """Test that previous_response_id is passed to the model on subsequent streamed runs."""
-    model = FakeModel()
-    model.set_next_output([get_text_message("done")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("done")])
     agent = Agent(
         name="test",
         model=model,
     )
 
-    assert model.last_turn_args.get("previous_response_id") is None
+    assert not model.calls
     result = Runner.run_streamed(agent, input="test", previous_response_id="resp-stream-test")
     async for _ in result.stream_events():
         pass
 
-    assert model.last_turn_args.get("previous_response_id") == "resp-stream-test"
+    assert model.calls[-1].previous_response_id == "resp-stream-test"
 
 
 @pytest.mark.asyncio
 async def test_previous_response_id_passed_between_runs_streamed_multi_turn():
     """Test that previous_response_id is passed to the model on subsequent streamed runs."""
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         tools=[get_function_tool("foo", "tool_result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [get_text_message("a_message"), get_function_tool_call("foo", json.dumps({"a": "b"}))],
@@ -4960,25 +4954,25 @@ async def test_previous_response_id_passed_between_runs_streamed_multi_turn():
         ]
     )
 
-    assert model.last_turn_args.get("previous_response_id") is None
+    assert not model.calls
     result = Runner.run_streamed(agent, input="test", previous_response_id="resp-stream-test")
     async for _ in result.stream_events():
         pass
 
-    assert model.last_turn_args.get("previous_response_id") == "resp-789"
+    assert model.calls[-1].previous_response_id == "resp-789"
 
 
 @pytest.mark.asyncio
 async def test_conversation_id_only_sends_new_items_multi_turn():
     """Test that conversation_id mode only sends new items on subsequent turns."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         tools=[get_function_tool("test_func", "tool_result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [
@@ -5003,8 +4997,8 @@ async def test_conversation_id_only_sends_new_items_multi_turn():
     assert result.final_output == "done"
 
     # Check the first call - it should include the original input since generated_items is empty
-    assert model.first_turn_args is not None
-    first_input = model.first_turn_args["input"]
+    assert bool(model.calls)
+    first_input = model.calls[0].input
 
     # First call should include the original user input
     assert isinstance(first_input, list)
@@ -5016,7 +5010,7 @@ async def test_conversation_id_only_sends_new_items_multi_turn():
     assert user_message.get("content") == "user_message"
 
     # Check the input from the last turn (third turn after function execution)
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
 
     # In conversation_id mode, the third turn should only contain the tool output
     assert isinstance(last_input, list)
@@ -5031,14 +5025,14 @@ async def test_conversation_id_only_sends_new_items_multi_turn():
 @pytest.mark.asyncio
 async def test_conversation_id_only_sends_new_items_multi_turn_streamed():
     """Test that conversation_id mode only sends new items on subsequent turns (streamed mode)."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         tools=[get_function_tool("test_func", "tool_result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [
@@ -5066,8 +5060,8 @@ async def test_conversation_id_only_sends_new_items_multi_turn_streamed():
     assert result.final_output == "done"
 
     # Check the first call - it should include the original input since generated_items is empty
-    assert model.first_turn_args is not None
-    first_input = model.first_turn_args["input"]
+    assert bool(model.calls)
+    first_input = model.calls[0].input
 
     # First call should include the original user input
     assert isinstance(first_input, list)
@@ -5079,7 +5073,7 @@ async def test_conversation_id_only_sends_new_items_multi_turn_streamed():
     assert user_message.get("content") == "user_message"
 
     # Check the input from the last turn (third turn after function execution)
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
 
     # In conversation_id mode, the third turn should only contain the tool output
     assert isinstance(last_input, list)
@@ -5095,14 +5089,14 @@ async def test_conversation_id_only_sends_new_items_multi_turn_streamed():
 async def test_previous_response_id_only_sends_new_items_multi_turn():
     """Test that previous_response_id mode only sends new items and updates
     previous_response_id between turns."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         tools=[get_function_tool("test_func", "tool_result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
@@ -5117,8 +5111,8 @@ async def test_previous_response_id_only_sends_new_items_multi_turn():
     assert result.final_output == "done"
 
     # Check the first call - it should include the original input since generated_items is empty
-    assert model.first_turn_args is not None
-    first_input = model.first_turn_args["input"]
+    assert bool(model.calls)
+    first_input = model.calls[0].input
 
     # First call should include the original user input
     assert isinstance(first_input, list)
@@ -5130,7 +5124,7 @@ async def test_previous_response_id_only_sends_new_items_multi_turn():
     assert user_message.get("content") == "user_message"
 
     # Check the input from the last turn (second turn after function execution)
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
 
     # In previous_response_id mode, the third turn should only contain the tool output
     assert isinstance(last_input, list)
@@ -5141,19 +5135,13 @@ async def test_previous_response_id_only_sends_new_items_multi_turn():
     assert tool_result_item.get("type") == "function_call_output"
     assert tool_result_item.get("call_id") is not None
 
-    # Verify that previous_response_id is modified according to fake_model behavior
-    assert model.last_turn_args.get("previous_response_id") == "resp-789"
+    # Verify that previous_response_id is modified according to the scripted model behavior.
+    assert model.calls[-1].previous_response_id == "resp-789"
 
 
 @pytest.mark.asyncio
 async def test_previous_response_id_retry_does_not_resend_initial_input_multi_turn():
-    class StatefulRetrySafeFakeModel(FakeModel):
-        def get_retry_advice(self, request):
-            if request.previous_response_id or request.conversation_id:
-                return ModelRetryAdvice(suggested=True, replay_safety="safe")
-            return None
-
-    model = StatefulRetrySafeFakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
@@ -5166,11 +5154,14 @@ async def test_previous_response_id_retry_does_not_resend_initial_input_multi_tu
         ),
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
-            APIConnectionError(
-                message="connection error",
-                request=httpx.Request("POST", "https://example.com"),
+            ModelStep.raise_error(
+                APIConnectionError(
+                    message="connection error",
+                    request=httpx.Request("POST", "https://example.com"),
+                ),
+                retry_advice=ModelRetryAdvice(suggested=True, replay_safety="safe"),
             ),
             [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
             [get_text_message("done")],
@@ -5182,7 +5173,7 @@ async def test_previous_response_id_retry_does_not_resend_initial_input_multi_tu
     )
     assert result.final_output == "done"
 
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
     assert isinstance(last_input, list)
     assert len(last_input) == 1
     assert last_input[0].get("type") == "function_call_output"
@@ -5192,27 +5183,24 @@ async def test_previous_response_id_retry_does_not_resend_initial_input_multi_tu
 async def test_auto_previous_response_id_retries_when_policy_approves_unsafe_replay():
     seen: list[RetryPolicyContext] = []
 
-    class StatefulRetryUnsafeFakeModel(FakeModel):
-        def get_retry_advice(self, request):
-            if request.previous_response_id or request.conversation_id:
-                return ModelRetryAdvice(
-                    suggested=False,
-                    replay_safety="unsafe",
-                    response_started=True,
-                )
-            return None
-
     def policy(context: RetryPolicyContext) -> RetryDecision:
         seen.append(context)
         return RetryDecision(retry=True, approve_unsafe_replay=True)
 
-    model = StatefulRetryUnsafeFakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_function_tool_call("test_func", '{"arg": "foo"}')],
-            APIConnectionError(
-                message="connection closed after response processing started",
-                request=httpx.Request("POST", "https://example.com"),
+            ModelStep.raise_error(
+                APIConnectionError(
+                    message="connection closed after response processing started",
+                    request=httpx.Request("POST", "https://example.com"),
+                ),
+                retry_advice=ModelRetryAdvice(
+                    suggested=False,
+                    replay_safety="unsafe",
+                    response_started=True,
+                ),
             ),
             [get_text_message("done")],
         ]
@@ -5241,14 +5229,14 @@ async def test_auto_previous_response_id_retries_when_policy_approves_unsafe_rep
 async def test_previous_response_id_only_sends_new_items_multi_turn_streamed():
     """Test that previous_response_id mode only sends new items and updates
     previous_response_id between turns (streamed mode)."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         tools=[get_function_tool("test_func", "tool_result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
@@ -5266,8 +5254,8 @@ async def test_previous_response_id_only_sends_new_items_multi_turn_streamed():
     assert result.final_output == "done"
 
     # Check the first call - it should include the original input since generated_items is empty
-    assert model.first_turn_args is not None
-    first_input = model.first_turn_args["input"]
+    assert bool(model.calls)
+    first_input = model.calls[0].input
 
     # First call should include the original user input
     assert isinstance(first_input, list)
@@ -5279,7 +5267,7 @@ async def test_previous_response_id_only_sends_new_items_multi_turn_streamed():
     assert user_message.get("content") == "user_message"
 
     # Check the input from the last turn (second turn after function execution)
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
 
     # In previous_response_id mode, the third turn should only contain the tool output
     assert isinstance(last_input, list)
@@ -5290,19 +5278,13 @@ async def test_previous_response_id_only_sends_new_items_multi_turn_streamed():
     assert tool_result_item.get("type") == "function_call_output"
     assert tool_result_item.get("call_id") is not None
 
-    # Verify that previous_response_id is modified according to fake_model behavior
-    assert model.last_turn_args.get("previous_response_id") == "resp-789"
+    # Verify that previous_response_id is modified according to the scripted model behavior.
+    assert model.calls[-1].previous_response_id == "resp-789"
 
 
 @pytest.mark.asyncio
 async def test_previous_response_id_retry_does_not_resend_initial_input_multi_turn_streamed():
-    class StatefulRetrySafeFakeModel(FakeModel):
-        def get_retry_advice(self, request):
-            if request.previous_response_id or request.conversation_id:
-                return ModelRetryAdvice(suggested=True, replay_safety="safe")
-            return None
-
-    model = StatefulRetrySafeFakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
@@ -5315,11 +5297,14 @@ async def test_previous_response_id_retry_does_not_resend_initial_input_multi_tu
         ),
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
-            APIConnectionError(
-                message="connection error",
-                request=httpx.Request("POST", "https://example.com"),
+            ModelStep.raise_error(
+                APIConnectionError(
+                    message="connection error",
+                    request=httpx.Request("POST", "https://example.com"),
+                ),
+                retry_advice=ModelRetryAdvice(suggested=True, replay_safety="safe"),
             ),
             [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
             [get_text_message("done")],
@@ -5334,7 +5319,7 @@ async def test_previous_response_id_retry_does_not_resend_initial_input_multi_tu
 
     assert result.final_output == "done"
 
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
     assert isinstance(last_input, list)
     assert len(last_input) == 1
     assert last_input[0].get("type") == "function_call_output"
@@ -5343,14 +5328,14 @@ async def test_previous_response_id_retry_does_not_resend_initial_input_multi_tu
 @pytest.mark.asyncio
 async def test_default_send_all_items():
     """Test that without conversation_id or previous_response_id, all items are sent."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         tools=[get_function_tool("test_func", "tool_result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
@@ -5365,7 +5350,7 @@ async def test_default_send_all_items():
     assert result.final_output == "done"
 
     # Check the input from the last turn (second turn after function execution)
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
 
     # In default, the second turn should contain ALL items:
     # 1. Original user message
@@ -5403,14 +5388,14 @@ async def test_default_send_all_items():
 async def test_default_send_all_items_streamed():
     """Test that without conversation_id or previous_response_id, all items are sent
     (streamed mode)."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         tools=[get_function_tool("test_func", "tool_result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
@@ -5428,7 +5413,7 @@ async def test_default_send_all_items_streamed():
     assert result.final_output == "done"
 
     # Check the input from the last turn (second turn after function execution)
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
 
     # In default mode, the second turn should contain ALL items:
     # 1. Original user message
@@ -5464,13 +5449,13 @@ async def test_default_send_all_items_streamed():
 
 @pytest.mark.asyncio
 async def test_default_multi_turn_drops_orphan_hosted_shell_calls() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="hosted-shell",
         model=model,
         tools=[ShellTool(environment={"type": "container_auto"})],
     )
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [make_shell_call("call_shell_1", id_value="shell_1", commands=["echo hi"])],
             [get_text_message("done")],
@@ -5481,7 +5466,7 @@ async def test_default_multi_turn_drops_orphan_hosted_shell_calls() -> None:
 
     assert result.final_output == "done"
 
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
     assert isinstance(last_input, list)
     assert len(last_input) == 1
     assert not any(
@@ -5493,7 +5478,7 @@ async def test_default_multi_turn_drops_orphan_hosted_shell_calls() -> None:
 
 @pytest.mark.asyncio
 async def test_manual_pending_shell_call_input_is_preserved_non_streamed() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="manual-shell",
         model=model,
@@ -5503,7 +5488,7 @@ async def test_manual_pending_shell_call_input_is_preserved_non_streamed() -> No
         TResponseInputItem,
         make_shell_call("manual_shell", id_value="shell_1", commands=["echo hi"]),
     )
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("test_func", '{"arg": "foo"}')],
             [get_text_message("done")],
@@ -5513,15 +5498,15 @@ async def test_manual_pending_shell_call_input_is_preserved_non_streamed() -> No
     result = await Runner.run(agent, input=[pending_shell_call])
 
     assert result.final_output == "done"
-    assert isinstance(model.first_turn_args, dict)
+    assert bool(model.calls)
     assert any(
         isinstance(item, dict)
         and item.get("type") == "shell_call"
         and item.get("call_id") == "manual_shell"
-        for item in model.first_turn_args["input"]
+        for item in model.calls[0].input
     )
 
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
     assert isinstance(last_input, list)
     assert any(
         isinstance(item, dict)
@@ -5533,7 +5518,7 @@ async def test_manual_pending_shell_call_input_is_preserved_non_streamed() -> No
 
 @pytest.mark.asyncio
 async def test_manual_pending_shell_call_input_is_preserved_non_streamed_with_session() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="manual-shell",
         model=model,
@@ -5544,7 +5529,7 @@ async def test_manual_pending_shell_call_input_is_preserved_non_streamed_with_se
         TResponseInputItem,
         make_shell_call("manual_shell", id_value="shell_1", commands=["echo hi"]),
     )
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("test_func", '{"arg": "foo"}')],
             [get_text_message("done")],
@@ -5554,15 +5539,15 @@ async def test_manual_pending_shell_call_input_is_preserved_non_streamed_with_se
     result = await Runner.run(agent, input=[pending_shell_call], session=session)
 
     assert result.final_output == "done"
-    assert isinstance(model.first_turn_args, dict)
+    assert bool(model.calls)
     assert any(
         isinstance(item, dict)
         and item.get("type") == "shell_call"
         and item.get("call_id") == "manual_shell"
-        for item in model.first_turn_args["input"]
+        for item in model.calls[0].input
     )
 
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
     assert isinstance(last_input, list)
     assert any(
         isinstance(item, dict)
@@ -5574,15 +5559,17 @@ async def test_manual_pending_shell_call_input_is_preserved_non_streamed_with_se
 
 @pytest.mark.asyncio
 async def test_default_multi_turn_streamed_drops_orphan_hosted_shell_calls() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="hosted-shell",
         model=model,
         tools=[ShellTool(environment={"type": "container_auto"})],
     )
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
-            [make_shell_call("call_shell_1", id_value="shell_1", commands=["echo hi"])],
+            get_exact_output_stream_step(
+                [make_shell_call("call_shell_1", id_value="shell_1", commands=["echo hi"])]
+            ),
             [get_text_message("done")],
         ]
     )
@@ -5593,7 +5580,7 @@ async def test_default_multi_turn_streamed_drops_orphan_hosted_shell_calls() -> 
 
     assert result.final_output == "done"
 
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
     assert isinstance(last_input, list)
     assert len(last_input) == 1
     assert not any(
@@ -5605,20 +5592,20 @@ async def test_default_multi_turn_streamed_drops_orphan_hosted_shell_calls() -> 
 
 @pytest.mark.asyncio
 async def test_manual_pending_shell_call_input_is_preserved_streamed() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="manual-shell", model=model)
     pending_shell_call = cast(
         TResponseInputItem,
         make_shell_call("manual_shell", id_value="shell_1", commands=["echo hi"]),
     )
-    model.set_next_output([get_text_message("done")])
+    model.enqueue([get_text_message("done")])
 
     result = Runner.run_streamed(agent, input=[pending_shell_call])
     async for _ in result.stream_events():
         pass
 
     assert result.final_output == "done"
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
     assert isinstance(last_input, list)
     assert any(
         isinstance(item, dict)
@@ -5630,21 +5617,21 @@ async def test_manual_pending_shell_call_input_is_preserved_streamed() -> None:
 
 @pytest.mark.asyncio
 async def test_manual_pending_shell_call_input_is_preserved_streamed_with_session() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="manual-shell", model=model)
     session = SimpleListSession()
     pending_shell_call = cast(
         TResponseInputItem,
         make_shell_call("manual_shell", id_value="shell_1", commands=["echo hi"]),
     )
-    model.set_next_output([get_text_message("done")])
+    model.enqueue([get_text_message("done")])
 
     result = Runner.run_streamed(agent, input=[pending_shell_call], session=session)
     async for _ in result.stream_events():
         pass
 
     assert result.final_output == "done"
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
     assert isinstance(last_input, list)
     assert any(
         isinstance(item, dict)
@@ -5658,14 +5645,14 @@ async def test_manual_pending_shell_call_input_is_preserved_streamed_with_sessio
 async def test_auto_previous_response_id_multi_turn():
     """Test that auto_previous_response_id=True enables
     chaining from the first internal turn."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         tools=[get_function_tool("test_func", "tool_result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
@@ -5678,8 +5665,8 @@ async def test_auto_previous_response_id_multi_turn():
     assert result.final_output == "done"
 
     # Check the first call
-    assert model.first_turn_args is not None
-    first_input = model.first_turn_args["input"]
+    assert bool(model.calls)
+    first_input = model.calls[0].input
 
     # First call should include the original user input
     assert isinstance(first_input, list)
@@ -5691,10 +5678,10 @@ async def test_auto_previous_response_id_multi_turn():
     assert user_message.get("content") == "user_message"
 
     # With auto_previous_response_id=True, first call should NOT have previous_response_id
-    assert model.first_turn_args.get("previous_response_id") is None
+    assert model.calls[0].previous_response_id is None
 
     # Check the input from the second turn (after function execution)
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
 
     # With auto_previous_response_id=True, the second turn should only contain the tool output
     assert isinstance(last_input, list)
@@ -5707,21 +5694,21 @@ async def test_auto_previous_response_id_multi_turn():
 
     # With auto_previous_response_id=True, second call should have
     # previous_response_id set to the first response
-    assert model.last_turn_args.get("previous_response_id") == "resp-789"
+    assert model.calls[-1].previous_response_id == "resp-789"
 
 
 @pytest.mark.asyncio
 async def test_auto_previous_response_id_multi_turn_streamed():
     """Test that auto_previous_response_id=True enables
     chaining from the first internal turn (streamed mode)."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         tools=[get_function_tool("test_func", "tool_result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
@@ -5737,8 +5724,8 @@ async def test_auto_previous_response_id_multi_turn_streamed():
     assert result.final_output == "done"
 
     # Check the first call
-    assert model.first_turn_args is not None
-    first_input = model.first_turn_args["input"]
+    assert bool(model.calls)
+    first_input = model.calls[0].input
 
     # First call should include the original user input
     assert isinstance(first_input, list)
@@ -5750,10 +5737,10 @@ async def test_auto_previous_response_id_multi_turn_streamed():
     assert user_message.get("content") == "user_message"
 
     # With auto_previous_response_id=True, first call should NOT have previous_response_id
-    assert model.first_turn_args.get("previous_response_id") is None
+    assert model.calls[0].previous_response_id is None
 
     # Check the input from the second turn (after function execution)
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
 
     # With auto_previous_response_id=True, the second turn should only contain the tool output
     assert isinstance(last_input, list)
@@ -5766,21 +5753,21 @@ async def test_auto_previous_response_id_multi_turn_streamed():
 
     # With auto_previous_response_id=True, second call should have
     # previous_response_id set to the first response
-    assert model.last_turn_args.get("previous_response_id") == "resp-789"
+    assert model.calls[-1].previous_response_id == "resp-789"
 
 
 @pytest.mark.asyncio
 async def test_without_previous_response_id_and_auto_previous_response_id_no_chaining():
     """Test that without previous_response_id and auto_previous_response_id,
     internal turns don't chain."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         tools=[get_function_tool("test_func", "tool_result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
@@ -5794,8 +5781,8 @@ async def test_without_previous_response_id_and_auto_previous_response_id_no_cha
     assert result.final_output == "done"
 
     # Check the first call
-    assert model.first_turn_args is not None
-    first_input = model.first_turn_args["input"]
+    assert bool(model.calls)
+    first_input = model.calls[0].input
 
     # First call should include the original user input
     assert isinstance(first_input, list)
@@ -5807,10 +5794,10 @@ async def test_without_previous_response_id_and_auto_previous_response_id_no_cha
     assert user_message.get("content") == "user_message"
 
     # First call should NOT have previous_response_id
-    assert model.first_turn_args.get("previous_response_id") is None
+    assert model.calls[0].previous_response_id is None
 
     # Check the input from the second turn (after function execution)
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
 
     # Without passing previous_response_id and auto_previous_response_id,
     # the second turn should contain all items (no chaining):
@@ -5819,13 +5806,13 @@ async def test_without_previous_response_id_and_auto_previous_response_id_no_cha
     assert len(last_input) == 4  # User message, assistant message, function call, and tool result
 
     # Second call should also NOT have previous_response_id (no chaining)
-    assert model.last_turn_args.get("previous_response_id") is None
+    assert model.calls[-1].previous_response_id is None
 
 
 @pytest.mark.asyncio
 async def test_dynamic_tool_addition_run() -> None:
     """Test that tools can be added to an agent during a run."""
-    model = FakeModel()
+    model = ScriptedModel()
 
     executed: dict[str, bool] = {"called": False}
 
@@ -5843,7 +5830,7 @@ async def test_dynamic_tool_addition_run() -> None:
 
     agent.tools.append(add_tool)
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("add_tool", json.dumps({}), call_id="call-add-tool")],
             [get_function_tool_call("tool2", json.dumps({}), call_id="call-tool-two")],
@@ -5859,9 +5846,9 @@ async def test_dynamic_tool_addition_run() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_not_found_behavior_returns_error_to_model() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("missing_tool", "{}", call_id="call_missing")],
             [get_text_message("recovered")],
@@ -5875,7 +5862,7 @@ async def test_tool_not_found_behavior_returns_error_to_model() -> None:
     )
 
     assert result.final_output == "recovered"
-    second_turn_input = model.last_turn_args["input"]
+    second_turn_input = model.calls[-1].input
     assert isinstance(second_turn_input, list)
     tool_outputs = [
         item
@@ -5893,9 +5880,9 @@ async def test_tool_not_found_behavior_returns_error_to_model() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_not_found_behavior_uses_tool_error_formatter() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("missing_tool", "{}", call_id="call_missing")],
             [get_text_message("recovered")],
@@ -5920,7 +5907,7 @@ async def test_tool_not_found_behavior_uses_tool_error_formatter() -> None:
 
     assert result.final_output == "recovered"
     assert seen_kinds == ["tool_not_found"]
-    second_turn_input = model.last_turn_args["input"]
+    second_turn_input = model.calls[-1].input
     assert isinstance(second_turn_input, list)
     tool_outputs = [
         item
@@ -5938,7 +5925,7 @@ async def test_tool_not_found_behavior_uses_tool_error_formatter() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_not_found_behavior_handles_mixed_function_tool_calls() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     calls: list[str] = []
 
     @function_tool(name_override="known_tool")
@@ -5952,7 +5939,7 @@ async def test_tool_not_found_behavior_handles_mixed_function_tool_calls() -> No
         tools=[known_tool],
         tool_use_behavior="run_llm_again",
     )
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 get_function_tool_call("missing_tool", "{}", call_id="call_missing"),
@@ -5970,7 +5957,7 @@ async def test_tool_not_found_behavior_handles_mixed_function_tool_calls() -> No
 
     assert calls == ["known_tool"]
     assert result.final_output == "done"
-    second_turn_input = model.last_turn_args["input"]
+    second_turn_input = model.calls[-1].input
     assert isinstance(second_turn_input, list)
     tool_outputs = {
         item.get("call_id"): item.get("output")
@@ -6009,9 +5996,9 @@ async def test_session_add_items_called_multiple_times_for_multi_turn_completion
         )
 
         # Patch the model to simulate two tool calls and a final message
-        model = FakeModel()
+        model = ScriptedModel()
         orchestrator_agent.model = model
-        model.add_multiple_turn_outputs(
+        model.extend(
             [
                 # First turn: tool call
                 [get_function_tool_call("echo_tool", json.dumps({"text": "foo"}), call_id="1")],
@@ -6080,7 +6067,7 @@ async def test_session_add_items_called_multiple_times_for_multi_turn_completion
 @pytest.mark.asyncio
 async def test_execute_approved_tools_with_non_function_tool():
     """Test _execute_approved_tools handles non-FunctionTool."""
-    model = FakeModel()
+    model = ScriptedModel()
 
     # Create a computer tool (not a FunctionTool)
     class MockComputer(Computer):
@@ -6401,7 +6388,7 @@ async def test_execute_approved_tools_does_not_resolve_explicit_namespaced_tool_
         description="Billing tools",
         tools=[function_tool(billing_lookup, name_override="lookup_account")],
     )[0]
-    agent = Agent(name="TestAgent", model=FakeModel(), tools=[crm_tool, billing_tool])
+    agent = Agent(name="TestAgent", model=ScriptedModel(), tools=[crm_tool, billing_tool])
 
     tool_call = get_function_tool_call("lookup_account", "{}", call_id="call-ambiguous")
     assert isinstance(tool_call, ResponseFunctionToolCall)
@@ -6429,7 +6416,7 @@ async def test_execute_approved_tools_does_not_fallback_from_namespaced_approval
         return "bare"
 
     bare_tool = function_tool(bare_lookup, name_override="lookup_account")
-    agent = Agent(name="TestAgent", model=FakeModel(), tools=[bare_tool])
+    agent = Agent(name="TestAgent", model=ScriptedModel(), tools=[bare_tool])
 
     tool_call = get_function_tool_call(
         "lookup_account",
@@ -6473,7 +6460,7 @@ async def test_execute_approved_tools_prefers_visible_top_level_function_over_de
         name_override="lookup_account",
         defer_loading=True,
     )
-    agent = Agent(name="TestAgent", model=FakeModel(), tools=[visible_tool, deferred_tool])
+    agent = Agent(name="TestAgent", model=ScriptedModel(), tools=[visible_tool, deferred_tool])
 
     tool_call = get_function_tool_call("lookup_account", "{}", call_id="call-visible")
     assert isinstance(tool_call, ResponseFunctionToolCall)
@@ -6516,7 +6503,7 @@ async def test_execute_approved_tools_uses_internal_lookup_key_for_deferred_top_
         name_override="lookup_account",
         defer_loading=True,
     )
-    agent = Agent(name="TestAgent", model=FakeModel(), tools=[visible_tool, deferred_tool])
+    agent = Agent(name="TestAgent", model=ScriptedModel(), tools=[visible_tool, deferred_tool])
 
     tool_call = get_function_tool_call(
         "lookup_account",
@@ -6557,7 +6544,7 @@ async def test_deferred_collision_rejection_prefers_explicit_message() -> None:
         name_override="lookup_account",
         defer_loading=True,
     )
-    agent = Agent(name="TestAgent", model=FakeModel(), tools=[visible_tool, deferred_tool])
+    agent = Agent(name="TestAgent", model=ScriptedModel(), tools=[visible_tool, deferred_tool])
 
     tool_call = get_function_tool_call(
         "lookup_account",
@@ -6606,7 +6593,7 @@ async def test_execute_approved_tools_uses_last_duplicate_top_level_function():
 
     first_tool = function_tool(first_lookup, name_override="lookup_account")
     second_tool = function_tool(second_lookup, name_override="lookup_account")
-    agent = Agent(name="TestAgent", model=FakeModel(), tools=[first_tool, second_tool])
+    agent = Agent(name="TestAgent", model=ScriptedModel(), tools=[first_tool, second_tool])
 
     tool_call = get_function_tool_call("lookup_account", "{}", call_id="call-shadow")
     assert isinstance(tool_call, ResponseFunctionToolCall)

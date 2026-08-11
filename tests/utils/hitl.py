@@ -11,8 +11,7 @@ from agents.items import ToolApprovalItem, ToolCallOutputItem, TResponseOutputIt
 from agents.run_context import RunContextWrapper
 from agents.run_internal.run_loop import NextStepInterruption, SingleStepResult
 from agents.run_state import RunState as RunStateClass
-
-from ..fake_model import FakeModel
+from agents.testing import ScriptedModel
 
 HITL_REJECTION_MSG = "Tool execution was not approved."
 
@@ -38,13 +37,13 @@ class PendingScenario:
 
 async def roundtrip_interruptions_via_run(
     agent: Agent[Any],
-    model: FakeModel,
+    model: ScriptedModel,
     raw_call: Any,
     *,
     user_input: str = "test",
 ) -> list[ToolApprovalItem]:
     """Run once with a tool call, serialize state, and deserialize it."""
-    model.set_next_output([raw_call])
+    model.enqueue([raw_call])
     result = await Runner.run(agent, user_input)
     assert result.interruptions, "expected an interruption"
     state = result.to_state()
@@ -54,7 +53,7 @@ async def roundtrip_interruptions_via_run(
 
 async def assert_roundtrip_tool_name(
     agent: Agent[Any],
-    model: FakeModel,
+    model: ScriptedModel,
     raw_call: TResponseOutputItem,
     expected_tool_name: str,
     *,
@@ -143,7 +142,7 @@ async def run_and_resume(
     user_input: str,
 ) -> RunResult:
     """Run once, then resume from the produced state."""
-    model.set_next_output([raw_call])
+    model.enqueue([raw_call])
     first = await Runner.run(agent, user_input)
     return await Runner.run(agent, first.to_state())
 
@@ -193,10 +192,10 @@ async def run_and_resume_after_approval(
     user_input: str,
 ) -> RunResult:
     """Run, approve the first interruption, and resume."""
-    model.set_next_output([raw_call])
+    model.enqueue([raw_call])
     first = await Runner.run(agent, user_input)
     state = approve_first_interruption(first, always_approve=True)
-    model.set_next_output([final_output])
+    model.enqueue([final_output])
     return await Runner.run(agent, state)
 
 
@@ -319,20 +318,20 @@ def make_function_tool_call(
 
 
 def queue_function_call_and_text(
-    model: FakeModel,
+    model: ScriptedModel,
     function_call: TResponseOutputItem,
     *,
     first_turn_extra: Sequence[TResponseOutputItem] | None = None,
     followup: Sequence[TResponseOutputItem] | None = None,
 ) -> None:
-    """Queue a function call turn followed by a follow-up turn on the fake model."""
+    """Queue a function call turn followed by a follow-up turn on the scripted model."""
     raw_type = (
         function_call.get("type")
         if isinstance(function_call, dict)
         else getattr(function_call, "type", None)
     )
     assert raw_type == "function_call", "queue_function_call_and_text expects a function call item"
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [function_call, *(first_turn_extra or [])],
             list(followup or []),
@@ -349,7 +348,7 @@ async def run_and_resume_with_mutation(
     mutate_state: Callable[[RunStateClass[Any, Agent[Any]], ToolApprovalItem], None] | None = None,
 ) -> tuple[RunResult, RunResult]:
     """Run until interruption, optionally mutate state, then resume."""
-    model.add_multiple_turn_outputs(turn_outputs)
+    model.extend(turn_outputs)
     first = await Runner.run(agent, input=user_input)
     assert first.interruptions, "expected an approval interruption"
     state = first.to_state()
@@ -454,9 +453,9 @@ def make_model_and_agent(
     *,
     tools: Sequence[Any] | None = None,
     name: str = "TestAgent",
-) -> tuple[FakeModel, Agent[Any]]:
-    """Build a FakeModel with a paired Agent for HITL tests."""
-    model = FakeModel()
+) -> tuple[ScriptedModel, Agent[Any]]:
+    """Build a ScriptedModel with a paired Agent for HITL tests."""
+    model = ScriptedModel()
     agent = make_agent(model=model, tools=tools, name=name)
     return model, agent
 

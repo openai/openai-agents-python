@@ -2,7 +2,8 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from inline_snapshot import snapshot
 
-from ..fake_model import FakeModel
+from agents.testing import ScriptedModel
+
 from ..test_responses import get_text_message
 from .streaming_app import agent, app
 
@@ -14,9 +15,9 @@ async def test_streaming_context():
     leading to a tracing error because the context was closed in the wrong context. This test
     ensures that this actually works.
     """
-    model = FakeModel()
+    model = ScriptedModel()
     agent.model = model
-    model.set_next_output([get_text_message("done")])
+    model.enqueue([get_text_message("done")])
 
     transport = ASGITransport(app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:

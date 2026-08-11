@@ -32,9 +32,10 @@ from agents.run_internal import run_loop
 from agents.run_internal.agent_bindings import bind_public_agent
 from agents.run_internal.run_loop import get_output_schema
 from agents.run_internal.tool_execution import execute_function_tool_calls
-from tests.fake_model import FakeModel
+from agents.testing import ScriptedModel
 from tests.mcp.helpers import FakeMCPServer
 from tests.mcp.model_compat import Tool as MCPTool
+from tests.model_test_helpers import get_exact_output_stream_step
 from tests.test_responses import get_function_tool_call, get_text_message
 from tests.utils.factories import make_run_state, make_tool_call, roundtrip_state
 
@@ -70,14 +71,14 @@ def _make_hosted_mcp_list_tools(server_label: str, tool_name: str) -> McpListToo
 
 @pytest.mark.asyncio
 async def test_runner_attaches_function_tool_origin_to_call_and_output_items() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
 
     @function_tool(name_override="lookup_account")
     def lookup_account() -> str:
         return "account"
 
     agent = Agent(name="tool-origin-agent", model=model, tools=[lookup_account])
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("lookup_account", json.dumps({}), call_id="call_lookup")],
             [get_text_message("done")],
@@ -93,14 +94,14 @@ async def test_runner_attaches_function_tool_origin_to_call_and_output_items() -
 
 @pytest.mark.asyncio
 async def test_rejected_function_tool_output_preserves_tool_origin() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
 
     @function_tool(name_override="approval_tool", needs_approval=True)
     def approval_tool() -> str:
         raise AssertionError("The tool should not run when rejected.")
 
     agent = Agent(name="approval-agent", model=model, tools=[approval_tool])
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("approval_tool", json.dumps({}), call_id="call_approval")],
             [get_text_message("done")],
@@ -138,7 +139,7 @@ def test_tool_call_output_item_preserves_positional_type_argument() -> None:
 
 @pytest.mark.asyncio
 async def test_runner_attaches_local_mcp_tool_origin_to_call_and_output_items() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     server = FakeMCPServer(
         server_name="docs_server",
         tools=[
@@ -151,7 +152,7 @@ async def test_runner_attaches_local_mcp_tool_origin_to_call_and_output_items() 
         ],
     )
     agent = Agent(name="mcp-agent", model=model, mcp_servers=[server])
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("search_docs", json.dumps({}), call_id="call_search_docs")],
             [get_text_message("done")],
@@ -172,13 +173,13 @@ async def test_local_mcp_tool_origin_hides_url_credentials_in_run_state() -> Non
         "?api_key=SECRET_QS_KEY#SECRET_FRAGMENT"
     )
     safe_server_name = "streamable_http: https://mcp.example.test:8443/mcp"
-    model = FakeModel()
+    model = ScriptedModel()
     server = FakeMCPServer(
         server_name=raw_server_name,
         tools=[MCPTool(name="search_docs", inputSchema={})],
     )
     agent = Agent(name="mcp-agent", model=model, mcp_servers=[server])
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("search_docs", json.dumps({}), call_id="call_search_docs")],
             [get_text_message("done")],
@@ -199,7 +200,7 @@ async def test_local_mcp_tool_origin_hides_url_credentials_in_run_state() -> Non
 
 @pytest.mark.asyncio
 async def test_streamed_tool_call_item_includes_local_mcp_origin() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     server = FakeMCPServer(
         server_name="docs_server",
         tools=[
@@ -212,7 +213,7 @@ async def test_streamed_tool_call_item_includes_local_mcp_origin() -> None:
         ],
     )
     agent = Agent(name="stream-mcp-agent", model=model, mcp_servers=[server])
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("search_docs", json.dumps({}), call_id="call_stream_search")],
             [get_text_message("done")],
@@ -287,7 +288,7 @@ def test_process_model_response_attaches_hosted_mcp_tool_origin() -> None:
 
 @pytest.mark.asyncio
 async def test_streamed_tool_call_item_includes_hosted_mcp_origin() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     hosted_tool = HostedMCPTool(
         tool_config=cast(
             Any,
@@ -299,19 +300,21 @@ async def test_streamed_tool_call_item_includes_hosted_mcp_origin() -> None:
         )
     )
     agent = Agent(name="stream-hosted-mcp", model=model, tools=[hosted_tool])
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
-            [
-                _make_hosted_mcp_list_tools("docs_server", "search_docs"),
-                McpCall(
-                    id="mcp_call_stream_1",
-                    arguments="{}",
-                    name="search_docs",
-                    server_label="docs_server",
-                    type="mcp_call",
-                    status="completed",
-                ),
-            ],
+            get_exact_output_stream_step(
+                [
+                    _make_hosted_mcp_list_tools("docs_server", "search_docs"),
+                    McpCall(
+                        id="mcp_call_stream_1",
+                        arguments="{}",
+                        name="search_docs",
+                        server_label="docs_server",
+                        type="mcp_call",
+                        status="completed",
+                    ),
+                ]
+            ),
             [get_text_message("done")],
         ]
     )

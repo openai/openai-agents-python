@@ -46,9 +46,9 @@ from agents import (
 from agents.items import ToolCallOutputItem
 from agents.run_internal import run_loop
 from agents.run_internal.run_loop import ComputerAction, ToolRunComputerAction
+from agents.testing import ScriptedModel
 from agents.tool import ComputerToolSafetyCheckData
 
-from .fake_model import FakeModel
 from .test_responses import get_text_message
 from .testing_processor import SPAN_PROCESSOR_TESTING
 
@@ -639,8 +639,8 @@ async def test_runner_trace_lists_ga_computer_tool_name() -> None:
         pending_safety_checks=[],
         status="completed",
     )
-    model = FakeModel(tracing_enabled=True)
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel(emit_traces=True)
+    model.extend(
         [
             [tool_call],
             [get_text_message("done")],

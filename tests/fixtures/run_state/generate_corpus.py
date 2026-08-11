@@ -446,7 +446,7 @@ PENDING_TOOL_APPROVAL = Scenario(
 import asyncio
 
 from agents import Runner, function_tool
-from tests.fake_model import FakeModel
+from agents.testing import ScriptedModel
 from tests.test_responses import get_function_tool_call
 
 @function_tool(needs_approval=True)
@@ -454,8 +454,8 @@ def historical_approval(account_id: str) -> str:
     return f"approved:{account_id}"
 
 async def produce_pending_state():
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [[get_function_tool_call(
             "historical_approval",
             '{"account_id":"account-1"}',

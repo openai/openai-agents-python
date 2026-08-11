@@ -5,8 +5,8 @@ from mcp.types import Tool as MCPTool
 
 from agents import Agent, RunContextWrapper, Runner
 from agents.exceptions import UserError
+from agents.testing import ScriptedModel
 
-from ..fake_model import FakeModel
 from ..test_responses import get_function_tool_call, get_text_message
 from ..utils.hitl import queue_function_call_and_text, resume_after_first_approval
 from .helpers import FakeMCPServer
@@ -19,7 +19,7 @@ async def test_mcp_require_approval_pauses_and_resumes():
     server = FakeMCPServer(require_approval="always")
     server.add_tool("add", {"type": "object", "properties": {}})
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="TestAgent", model=model, mcp_servers=[server])
 
     queue_function_call_and_text(
@@ -51,7 +51,7 @@ async def test_mcp_require_approval_tool_lists():
     server = FakeMCPServer(require_approval=require_approval)
     server.add_tool("add", {"type": "object", "properties": {}})
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="TestAgent", model=model, mcp_servers=[server])
 
     queue_function_call_and_text(
@@ -76,7 +76,7 @@ async def test_mcp_require_approval_tool_mapping():
     server = FakeMCPServer(require_approval=require_approval)
     server.add_tool("add", {"type": "object", "properties": {}})
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="TestAgent", model=model, mcp_servers=[server])
 
     queue_function_call_and_text(
@@ -102,7 +102,7 @@ async def test_mcp_require_approval_mapping_allows_policy_keyword_tool_names():
     server.add_tool("always", {"type": "object", "properties": {}})
     server.add_tool("never", {"type": "object", "properties": {}})
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="TestAgent", model=model, mcp_servers=[server])
 
     queue_function_call_and_text(
@@ -167,7 +167,7 @@ async def test_mcp_require_approval_callable_can_allow_and_block_by_tool_name():
     server.add_tool("guarded", {"type": "object", "properties": {}})
     server.add_tool("safe", {"type": "object", "properties": {}})
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="TestAgent", model=model, mcp_servers=[server])
 
     queue_function_call_and_text(
@@ -212,7 +212,7 @@ async def test_mcp_require_approval_async_callable_uses_run_context():
     server = FakeMCPServer(require_approval=require_approval)
     server.add_tool("conditional", {"type": "object", "properties": {}})
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="TestAgent", model=model, mcp_servers=[server])
 
     queue_function_call_and_text(

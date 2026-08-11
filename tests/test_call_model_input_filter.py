@@ -6,8 +6,8 @@ import pytest
 
 from agents import Agent, RunConfig, Runner, TResponseInputItem, UserError
 from agents.run import CallModelData, ModelInputData
+from agents.testing import ScriptedModel
 
-from .fake_model import FakeModel
 from .test_responses import get_text_input_item, get_text_message
 from .testing_processor import fetch_span_errors
 
@@ -16,11 +16,11 @@ SENSITIVE_ERROR_MESSAGE = "sensitive-filter-error"
 
 @pytest.mark.asyncio
 async def test_call_model_input_filter_sync_non_streamed() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
 
     # Prepare model output
-    model.set_next_output([get_text_message("ok")])
+    model.enqueue([get_text_message("ok")])
 
     def filter_fn(data: CallModelData[Any]) -> ModelInputData:
         mi = data.model_data
@@ -33,19 +33,19 @@ async def test_call_model_input_filter_sync_non_streamed() -> None:
         run_config=RunConfig(call_model_input_filter=filter_fn),
     )
 
-    assert model.last_turn_args["system_instructions"] == "filtered-sync"
-    assert isinstance(model.last_turn_args["input"], list)
-    assert len(model.last_turn_args["input"]) == 2
-    assert model.last_turn_args["input"][-1]["content"] == "added-sync"
+    assert model.calls[-1].system_instructions == "filtered-sync"
+    assert isinstance(model.calls[-1].input, list)
+    assert len(model.calls[-1].input) == 2
+    assert model.calls[-1].input[-1]["content"] == "added-sync"
 
 
 @pytest.mark.asyncio
 async def test_call_model_input_filter_async_streamed() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
 
     # Prepare model output
-    model.set_next_output([get_text_message("ok")])
+    model.enqueue([get_text_message("ok")])
 
     async def filter_fn(data: CallModelData[Any]) -> ModelInputData:
         mi = data.model_data
@@ -60,15 +60,15 @@ async def test_call_model_input_filter_async_streamed() -> None:
     async for _ in result.stream_events():
         pass
 
-    assert model.last_turn_args["system_instructions"] == "filtered-async"
-    assert isinstance(model.last_turn_args["input"], list)
-    assert len(model.last_turn_args["input"]) == 2
-    assert model.last_turn_args["input"][-1]["content"] == "added-async"
+    assert model.calls[-1].system_instructions == "filtered-async"
+    assert isinstance(model.calls[-1].input, list)
+    assert len(model.calls[-1].input) == 2
+    assert model.calls[-1].input[-1]["content"] == "added-async"
 
 
 @pytest.mark.asyncio
 async def test_call_model_input_filter_invalid_return_type_raises() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
 
     def invalid_filter(_data: CallModelData[Any]):
@@ -99,7 +99,7 @@ async def test_call_model_input_filter_error_respects_sensitive_data_setting(
 
     with pytest.raises(ValueError, match=SENSITIVE_ERROR_MESSAGE):
         await Runner.run(
-            Agent(name="test", model=FakeModel(tracing_enabled=False)),
+            Agent(name="test", model=ScriptedModel(emit_traces=False)),
             input="start",
             run_config=RunConfig(
                 call_model_input_filter=filter_fn,
@@ -117,9 +117,9 @@ async def test_call_model_input_filter_error_respects_sensitive_data_setting(
 
 @pytest.mark.asyncio
 async def test_call_model_input_filter_prefers_latest_duplicate_outputs_non_streamed() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
-    model.set_next_output([get_text_message("ok")])
+    model.enqueue([get_text_message("ok")])
 
     duplicate_old = cast(
         TResponseInputItem,
@@ -152,7 +152,7 @@ async def test_call_model_input_filter_prefers_latest_duplicate_outputs_non_stre
 
     outputs = [
         item
-        for item in model.last_turn_args["input"]
+        for item in model.calls[-1].input
         if item.get("type") == "function_call_output" and item.get("call_id") == "dup-call"
     ]
     assert len(outputs) == 1
@@ -161,9 +161,9 @@ async def test_call_model_input_filter_prefers_latest_duplicate_outputs_non_stre
 
 @pytest.mark.asyncio
 async def test_call_model_input_filter_prefers_latest_duplicate_outputs_streamed() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
-    model.set_next_output([get_text_message("ok")])
+    model.enqueue([get_text_message("ok")])
 
     duplicate_old = cast(
         TResponseInputItem,
@@ -198,7 +198,7 @@ async def test_call_model_input_filter_prefers_latest_duplicate_outputs_streamed
 
     outputs = [
         item
-        for item in model.last_turn_args["input"]
+        for item in model.calls[-1].input
         if item.get("type") == "function_call_output" and item.get("call_id") == "dup-call-stream"
     ]
     assert len(outputs) == 1
@@ -294,9 +294,9 @@ def _sent_item_types(sent_input: Any) -> list[str | None]:
 
 @pytest.mark.asyncio
 async def test_call_model_input_filter_keeps_duplicate_item_order_non_streamed() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
-    model.set_next_output([get_text_message("ok")])
+    model.enqueue([get_text_message("ok")])
 
     def filter_fn(data: CallModelData[Any]) -> ModelInputData:
         return ModelInputData(
@@ -312,7 +312,7 @@ async def test_call_model_input_filter_keeps_duplicate_item_order_non_streamed()
 
     # Collapsing the repeated call must not move it behind its output; the Responses API
     # rejects a function_call_output whose function_call has not been sent yet.
-    assert _sent_item_types(model.last_turn_args["input"]) == [
+    assert _sent_item_types(model.calls[-1].input) == [
         "function_call",
         "function_call_output",
     ]
@@ -320,9 +320,9 @@ async def test_call_model_input_filter_keeps_duplicate_item_order_non_streamed()
 
 @pytest.mark.asyncio
 async def test_call_model_input_filter_keeps_duplicate_item_order_streamed() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
-    model.set_next_output([get_text_message("ok")])
+    model.enqueue([get_text_message("ok")])
 
     async def filter_fn(data: CallModelData[Any]) -> ModelInputData:
         return ModelInputData(
@@ -338,7 +338,7 @@ async def test_call_model_input_filter_keeps_duplicate_item_order_streamed() -> 
     async for _ in result.stream_events():
         pass
 
-    assert _sent_item_types(model.last_turn_args["input"]) == [
+    assert _sent_item_types(model.calls[-1].input) == [
         "function_call",
         "function_call_output",
     ]
@@ -346,9 +346,9 @@ async def test_call_model_input_filter_keeps_duplicate_item_order_streamed() -> 
 
 @pytest.mark.asyncio
 async def test_call_model_input_filter_keeps_duplicate_output_order_non_streamed() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
-    model.set_next_output([get_text_message("ok")])
+    model.enqueue([get_text_message("ok")])
 
     def filter_fn(data: CallModelData[Any]) -> ModelInputData:
         return ModelInputData(
@@ -362,18 +362,18 @@ async def test_call_model_input_filter_keeps_duplicate_output_order_non_streamed
         run_config=RunConfig(call_model_input_filter=filter_fn),
     )
 
-    assert _sent_item_types(model.last_turn_args["input"]) == [
+    assert _sent_item_types(model.calls[-1].input) == [
         "function_call",
         "function_call_output",
     ]
-    assert model.last_turn_args["input"][-1]["output"] == "new"
+    assert model.calls[-1].input[-1]["output"] == "new"
 
 
 @pytest.mark.asyncio
 async def test_call_model_input_filter_keeps_duplicate_output_order_streamed() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
-    model.set_next_output([get_text_message("ok")])
+    model.enqueue([get_text_message("ok")])
 
     async def filter_fn(data: CallModelData[Any]) -> ModelInputData:
         return ModelInputData(
@@ -389,18 +389,18 @@ async def test_call_model_input_filter_keeps_duplicate_output_order_streamed() -
     async for _ in result.stream_events():
         pass
 
-    assert _sent_item_types(model.last_turn_args["input"]) == [
+    assert _sent_item_types(model.calls[-1].input) == [
         "function_call",
         "function_call_output",
     ]
-    assert model.last_turn_args["input"][-1]["output"] == "new"
+    assert model.calls[-1].input[-1]["output"] == "new"
 
 
 @pytest.mark.asyncio
 async def test_call_model_input_filter_keeps_reasoning_before_required_follower() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
-    model.set_next_output([get_text_message("ok")])
+    model.enqueue([get_text_message("ok")])
 
     def filter_fn(data: CallModelData[Any]) -> ModelInputData:
         return ModelInputData(
@@ -414,12 +414,10 @@ async def test_call_model_input_filter_keeps_reasoning_before_required_follower(
         run_config=RunConfig(call_model_input_filter=filter_fn),
     )
 
-    assert _sent_item_types(model.last_turn_args["input"]) == [
+    assert _sent_item_types(model.calls[-1].input) == [
         "reasoning",
         "function_call",
     ]
-    reasoning_items = [
-        item for item in model.last_turn_args["input"] if item.get("type") == "reasoning"
-    ]
+    reasoning_items = [item for item in model.calls[-1].input if item.get("type") == "reasoning"]
     assert len(reasoning_items) == 1
     assert reasoning_items[0]["summary"] == [{"type": "summary_text", "text": "new"}]

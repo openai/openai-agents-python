@@ -17,6 +17,7 @@ from tests.testing_processor import fetch_events, fetch_span_errors
 try:
     from agents.voice import (
         AudioInput,
+        StreamedAudioInput,
         StreamedAudioResult,
         STTModelSettings,
         TTSModelSettings,
@@ -27,14 +28,14 @@ try:
         VoiceStreamEventLifecycle,
     )
 
-    from .fake_models import (
-        FakeSession,
-        FakeStreamedAudioInput,
-        FakeSTT,
-        FakeTTS,
-        FakeWorkflow,
-    )
     from .helpers import extract_events
+    from .pipeline_test_models import (
+        QueuedSTTModel,
+        QueuedTranscriptionSession,
+        QueuedVoiceWorkflow,
+        StreamedAudioInputFactory,
+        ZeroPcmTTSModel,
+    )
 except ImportError:
     pass
 
@@ -57,7 +58,7 @@ class _ProviderVoicePipelineConfig(VoicePipelineConfig):
 
 def test_streamed_audio_result_odd_length_buffer_int16() -> None:
     result = StreamedAudioResult(
-        FakeTTS(),
+        ZeroPcmTTSModel(),
         TTSModelSettings(dtype=np.int16),
         VoicePipelineConfig(),
     )
@@ -75,7 +76,7 @@ async def test_streamed_audio_result_raises_falsy_task_exception() -> None:
             return False
 
     result = StreamedAudioResult(
-        FakeTTS(),
+        ZeroPcmTTSModel(),
         TTSModelSettings(),
         VoicePipelineConfig(),
     )
@@ -99,7 +100,7 @@ async def test_streamed_audio_result_raises_falsy_task_exception() -> None:
 @pytest.mark.asyncio
 async def test_streamed_audio_result_propagates_consumer_cancellation(monkeypatch) -> None:
     result = StreamedAudioResult(
-        FakeTTS(),
+        ZeroPcmTTSModel(),
         TTSModelSettings(),
         VoicePipelineConfig(),
     )
@@ -139,7 +140,7 @@ async def test_streamed_audio_result_preserves_cancellation_when_cleanup_fails(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     result = StreamedAudioResult(
-        FakeTTS(),
+        ZeroPcmTTSModel(),
         TTSModelSettings(),
         VoicePipelineConfig(),
     )
@@ -182,7 +183,7 @@ async def test_streamed_audio_result_preserves_cancellation_when_cleanup_fails(
 @pytest.mark.asyncio
 async def test_streamed_audio_result_closes_owned_tasks_after_yield() -> None:
     result = StreamedAudioResult(
-        FakeTTS(),
+        ZeroPcmTTSModel(),
         TTSModelSettings(),
         VoicePipelineConfig(),
     )
@@ -228,7 +229,7 @@ async def test_streamed_audio_result_closes_owned_tasks_after_yield() -> None:
 @pytest.mark.asyncio
 async def test_streamed_audio_result_closes_gracefully_after_session_end_yield() -> None:
     result = StreamedAudioResult(
-        FakeTTS(),
+        ZeroPcmTTSModel(),
         TTSModelSettings(),
         VoicePipelineConfig(),
     )
@@ -281,7 +282,7 @@ async def test_streamed_audio_result_propagates_cancellation_when_terminal_clean
     monkeypatch,
 ) -> None:
     result = StreamedAudioResult(
-        FakeTTS(),
+        ZeroPcmTTSModel(),
         TTSModelSettings(),
         VoicePipelineConfig(),
     )
@@ -330,7 +331,7 @@ async def test_streamed_audio_result_aclose_surfaces_terminal_producer_error(
     monkeypatch,
 ) -> None:
     result = StreamedAudioResult(
-        FakeTTS(),
+        ZeroPcmTTSModel(),
         TTSModelSettings(),
         VoicePipelineConfig(),
     )
@@ -386,7 +387,7 @@ async def test_streamed_audio_result_surfaces_completed_terminal_producer_error(
     close_early: bool,
 ) -> None:
     result = StreamedAudioResult(
-        FakeTTS(),
+        ZeroPcmTTSModel(),
         TTSModelSettings(),
         VoicePipelineConfig(),
     )
@@ -458,10 +459,10 @@ def test_voice_pipeline_config_rejects_unknown_dictionary_settings(
 
 @pytest.mark.asyncio
 async def test_voicepipeline_normalizes_nested_dictionary_config() -> None:
-    fake_stt = FakeSTT(["first"])
-    fake_tts = FakeTTS()
+    fake_stt = QueuedSTTModel(["first"])
+    fake_tts = ZeroPcmTTSModel()
     pipeline = VoicePipeline(
-        workflow=FakeWorkflow([["out_1"]]),
+        workflow=QueuedVoiceWorkflow([["out_1"]]),
         stt_model=fake_stt,
         tts_model=fake_tts,
         config={
@@ -478,9 +479,31 @@ async def test_voicepipeline_normalizes_nested_dictionary_config() -> None:
     await fake_tts.verify_audio("out_1", audio_chunks[0])
 
 
+@pytest.mark.asyncio
+async def test_queued_stt_model_shares_static_and_streamed_transcription_queue() -> None:
+    stt = QueuedSTTModel(["static", "streamed"])
+
+    transcription = await stt.transcribe(
+        AudioInput(buffer=np.zeros(2, dtype=np.int16)),
+        settings=STTModelSettings(),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+    session = await stt.create_session(
+        StreamedAudioInput(),
+        settings=STTModelSettings(),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+    streamed_transcriptions = [turn async for turn in session.transcribe_turns()]
+
+    assert transcription == "static"
+    assert streamed_transcriptions == ["streamed"]
+
+
 def test_streamed_audio_result_odd_length_buffer_float32() -> None:
     result = StreamedAudioResult(
-        FakeTTS(),
+        ZeroPcmTTSModel(),
         TTSModelSettings(dtype=np.float32),
         VoicePipelineConfig(),
     )
@@ -494,7 +517,7 @@ def test_streamed_audio_result_odd_length_buffer_float32() -> None:
 
 @pytest.mark.asyncio
 async def test_streamed_audio_result_preserves_cross_chunk_sample_boundaries() -> None:
-    class SplitSampleTTS(FakeTTS):
+    class SplitSampleTTS(ZeroPcmTTSModel):
         async def run(self, text: str, settings: TTSModelSettings):
             del text, settings
             yield b"\x01"
@@ -533,7 +556,7 @@ async def test_streamed_audio_error_respects_sensitive_data_setting(
     trace_include_sensitive_data: bool,
     expected_error: str,
 ) -> None:
-    class FailingTTS(FakeTTS):
+    class FailingTTS(ZeroPcmTTSModel):
         async def run(self, text: str, settings: TTSModelSettings):
             del text, settings
             raise RuntimeError("sensitive-tts-error")
@@ -564,7 +587,7 @@ async def test_streamed_audio_error_respects_sensitive_data_setting(
 async def test_streamed_audio_dispatcher_handles_stream_failure() -> None:
     """A failed _stream_audio task must not leave _dispatch_audio blocked forever."""
 
-    class FailingTTS(FakeTTS):
+    class FailingTTS(ZeroPcmTTSModel):
         async def run(self, text: str, settings: TTSModelSettings):
             del text, settings
             raise RuntimeError("tts-failure")
@@ -613,7 +636,7 @@ async def test_voice_pipeline_awaits_task_cleanup_after_tts_failure() -> None:
     second_segment_started = asyncio.Event()
     second_segment_stopped = asyncio.Event()
 
-    class FailingTTS(FakeTTS):
+    class FailingTTS(ZeroPcmTTSModel):
         async def run(self, text: str, settings: TTSModelSettings):
             del settings
             if text == "first":
@@ -631,8 +654,8 @@ async def test_voice_pipeline_awaits_task_cleanup_after_tts_failure() -> None:
         return text, ""
 
     pipeline = VoicePipeline(
-        workflow=FakeWorkflow([["first", "second"]]),
-        stt_model=FakeSTT(["user input"]),
+        workflow=QueuedVoiceWorkflow([["first", "second"]]),
+        stt_model=QueuedSTTModel(["user input"]),
         tts_model=FailingTTS(),
         config=VoicePipelineConfig(tts_settings=TTSModelSettings(text_splitter=split_immediately)),
     )
@@ -675,7 +698,7 @@ async def test_streamed_audio_dispatcher_blocks_until_work_is_available() -> Non
     def split_immediately(text: str) -> tuple[str, str]:
         return text, ""
 
-    fake_tts = FakeTTS()
+    fake_tts = ZeroPcmTTSModel()
     result = StreamedAudioResult(
         fake_tts,
         TTSModelSettings(buffer_size=1, text_splitter=split_immediately),
@@ -716,7 +739,7 @@ async def test_streamed_audio_dispatcher_blocks_until_work_is_available() -> Non
 async def test_streamed_audio_result_synthesizes_short_custom_splitter_chunk() -> None:
     texts: list[str] = []
 
-    class RecordingTTS(FakeTTS):
+    class RecordingTTS(ZeroPcmTTSModel):
         async def run(self, text: str, settings: TTSModelSettings):
             texts.append(text)
             yield np.zeros(2, dtype=np.int16).tobytes()
@@ -745,7 +768,7 @@ async def test_streamed_audio_result_synthesizes_short_custom_splitter_chunk() -
 async def test_streamed_audio_result_ignores_empty_custom_splitter_chunk() -> None:
     texts: list[str] = []
 
-    class RecordingTTS(FakeTTS):
+    class RecordingTTS(ZeroPcmTTSModel):
         async def run(self, text: str, settings: TTSModelSettings):
             texts.append(text)
             yield np.zeros(2, dtype=np.int16).tobytes()
@@ -774,9 +797,9 @@ async def test_streamed_audio_result_ignores_empty_custom_splitter_chunk() -> No
 async def test_voicepipeline_run_single_turn() -> None:
     # Single turn. Should produce a single audio output, which is the TTS output for "out_1".
 
-    fake_stt = FakeSTT(["first"])
-    workflow = FakeWorkflow([["out_1"]])
-    fake_tts = FakeTTS()
+    fake_stt = QueuedSTTModel(["first"])
+    workflow = QueuedVoiceWorkflow([["out_1"]])
+    fake_tts = ZeroPcmTTSModel()
     config = VoicePipelineConfig(tts_settings=TTSModelSettings(buffer_size=1))
     pipeline = VoicePipeline(
         workflow=workflow, stt_model=fake_stt, tts_model=fake_tts, config=config
@@ -797,12 +820,12 @@ async def test_voicepipeline_run_single_turn() -> None:
 async def test_voicepipeline_streamed_audio_input() -> None:
     # Multi turn. Should produce 2 audio outputs, which are the TTS outputs of "out_1" and "out_2"
 
-    fake_stt = FakeSTT(["first", "second"])
-    workflow = FakeWorkflow([["out_1"], ["out_2"]])
-    fake_tts = FakeTTS()
+    fake_stt = QueuedSTTModel(["first", "second"])
+    workflow = QueuedVoiceWorkflow([["out_1"], ["out_2"]])
+    fake_tts = ZeroPcmTTSModel()
     pipeline = VoicePipeline(workflow=workflow, stt_model=fake_stt, tts_model=fake_tts)
 
-    streamed_audio_input = await FakeStreamedAudioInput.get(count=2)
+    streamed_audio_input = await StreamedAudioInputFactory.get(count=2)
 
     result = await pipeline.run(streamed_audio_input)
     events, audio_chunks = await extract_events(result)
@@ -825,7 +848,7 @@ def _never_complete(text: str) -> tuple[str, str]:
     return "", text
 
 
-class _RecordingTTS(FakeTTS):
+class _RecordingTTS(ZeroPcmTTSModel):
     """Records every text handed to TTS so a test can assert no work was started."""
 
     def __init__(self) -> None:
@@ -841,12 +864,12 @@ class _RecordingTTS(FakeTTS):
 async def test_voicepipeline_streamed_audio_input_without_turns() -> None:
     # Zero turns. The session still has to end, otherwise `stream()` waits on the queue forever.
 
-    fake_stt = FakeSTT([])
-    workflow = FakeWorkflow()
-    fake_tts = FakeTTS()
+    fake_stt = QueuedSTTModel([])
+    workflow = QueuedVoiceWorkflow()
+    fake_tts = ZeroPcmTTSModel()
     pipeline = VoicePipeline(workflow=workflow, stt_model=fake_stt, tts_model=fake_tts)
 
-    streamed_audio_input = await FakeStreamedAudioInput.get(count=0)
+    streamed_audio_input = await StreamedAudioInputFactory.get(count=0)
 
     result = await pipeline.run(streamed_audio_input)
     # The timeout bounds the failure mode under test, which is a stream that never terminates.
@@ -862,7 +885,7 @@ async def test_voicepipeline_delivers_on_start_output_during_startup() -> None:
 
     intro_delivered = asyncio.Event()
 
-    class GatedSession(FakeSession):
+    class GatedSession(QueuedTranscriptionSession):
         async def transcribe_turns(self) -> AsyncIterator[str]:
             # Released only once the greeting has been fully delivered. If the intro turn were
             # left open until session end, this would never be released and the test times out.
@@ -870,13 +893,13 @@ async def test_voicepipeline_delivers_on_start_output_during_startup() -> None:
             for t in self.outputs:
                 yield t
 
-    class GatedSTT(FakeSTT):
+    class GatedSTT(QueuedSTTModel):
         async def create_session(self, *args: Any, **kwargs: Any) -> GatedSession:
             session = GatedSession()
             session.outputs = self.outputs
             return session
 
-    class GreetingWorkflow(FakeWorkflow):
+    class GreetingWorkflow(QueuedVoiceWorkflow):
         async def on_start(self) -> AsyncIterator[str]:
             yield "Hello there"
 
@@ -889,7 +912,7 @@ async def test_voicepipeline_delivers_on_start_output_during_startup() -> None:
         tts_model=_RecordingTTS(),
         config=config,
     )
-    result = await pipeline.run(await FakeStreamedAudioInput.get(count=0))
+    result = await pipeline.run(await StreamedAudioInputFactory.get(count=0))
 
     events: list[str] = []
 
@@ -915,15 +938,15 @@ async def test_voicepipeline_on_start_output_is_its_own_turn() -> None:
     # so this pins that the greeting is finalized as its own turn and the first user response still
     # gets its own turn_started rather than being folded into an intro that is still open.
 
-    class ImmediateSession(FakeSession):
+    class ImmediateSession(QueuedTranscriptionSession):
         async def transcribe_turns(self) -> AsyncIterator[str]:
             yield "hello"
 
-    class ImmediateSTT(FakeSTT):
+    class ImmediateSTT(QueuedSTTModel):
         async def create_session(self, *args: Any, **kwargs: Any) -> ImmediateSession:
             return ImmediateSession()
 
-    class GreetingWorkflow(FakeWorkflow):
+    class GreetingWorkflow(QueuedVoiceWorkflow):
         async def on_start(self) -> AsyncIterator[str]:
             yield "Hello there"
 
@@ -940,7 +963,7 @@ async def test_voicepipeline_on_start_output_is_its_own_turn() -> None:
         tts_model=recording_tts,
         config=config,
     )
-    result = await pipeline.run(await FakeStreamedAudioInput.get(count=1))
+    result = await pipeline.run(await StreamedAudioInputFactory.get(count=1))
 
     events, _ = await asyncio.wait_for(extract_events(result), timeout=5)
 
@@ -963,11 +986,11 @@ async def test_voicepipeline_failed_turn_closes_the_session_without_further_tts(
 
     closed = asyncio.Event()
 
-    class ClosingSession(FakeSession):
+    class ClosingSession(QueuedTranscriptionSession):
         async def close(self) -> None:
             closed.set()
 
-    class ClosingSTT(FakeSTT):
+    class ClosingSTT(QueuedSTTModel):
         async def create_session(self, *args: Any, **kwargs: Any) -> ClosingSession:
             session = ClosingSession()
             session.outputs = self.outputs
@@ -975,7 +998,7 @@ async def test_voicepipeline_failed_turn_closes_the_session_without_further_tts(
 
     error = RuntimeError("workflow blew up")
 
-    class FailingWorkflow(FakeWorkflow):
+    class FailingWorkflow(QueuedVoiceWorkflow):
         async def run(self, _: str) -> AsyncIterator[str]:
             yield "partial"
             raise error
@@ -990,7 +1013,7 @@ async def test_voicepipeline_failed_turn_closes_the_session_without_further_tts(
         tts_model=recording_tts,
         config=config,
     )
-    result = await pipeline.run(await FakeStreamedAudioInput.get(count=1))
+    result = await pipeline.run(await StreamedAudioInputFactory.get(count=1))
 
     with pytest.raises(RuntimeError) as exc_info:
         await asyncio.wait_for(extract_events(result), timeout=5)
@@ -1011,19 +1034,19 @@ async def test_voicepipeline_error_waits_for_the_session_close_before_cleanup() 
     release_close = asyncio.Event()
     close_finished = asyncio.Event()
 
-    class BlockingCloseSession(FakeSession):
+    class BlockingCloseSession(QueuedTranscriptionSession):
         async def close(self) -> None:
             close_started.set()
             await release_close.wait()
             close_finished.set()
 
-    class BlockingCloseSTT(FakeSTT):
+    class BlockingCloseSTT(QueuedSTTModel):
         async def create_session(self, *args: Any, **kwargs: Any) -> BlockingCloseSession:
             session = BlockingCloseSession()
             session.outputs = self.outputs
             return session
 
-    class FailingWorkflow(FakeWorkflow):
+    class FailingWorkflow(QueuedVoiceWorkflow):
         async def run(self, _: str) -> AsyncIterator[str]:
             yield "partial"
             raise turn_error
@@ -1038,7 +1061,7 @@ async def test_voicepipeline_error_waits_for_the_session_close_before_cleanup() 
         tts_model=recording_tts,
         config=config,
     )
-    result = await pipeline.run(await FakeStreamedAudioInput.get(count=1))
+    result = await pipeline.run(await StreamedAudioInputFactory.get(count=1))
 
     consumer = asyncio.create_task(extract_events(result))
     await asyncio.wait_for(close_started.wait(), timeout=5)
@@ -1070,17 +1093,17 @@ async def test_voicepipeline_failing_close_does_not_replace_the_turn_error() -> 
     turn_error = RuntimeError("workflow blew up")
     close_error = RuntimeError("close blew up")
 
-    class FailingCloseSession(FakeSession):
+    class FailingCloseSession(QueuedTranscriptionSession):
         async def close(self) -> None:
             raise close_error
 
-    class FailingCloseSTT(FakeSTT):
+    class FailingCloseSTT(QueuedSTTModel):
         async def create_session(self, *args: Any, **kwargs: Any) -> FailingCloseSession:
             session = FailingCloseSession()
             session.outputs = self.outputs
             return session
 
-    class FailingWorkflow(FakeWorkflow):
+    class FailingWorkflow(QueuedVoiceWorkflow):
         async def run(self, _: str) -> AsyncIterator[str]:
             raise turn_error
             yield ""
@@ -1088,9 +1111,9 @@ async def test_voicepipeline_failing_close_does_not_replace_the_turn_error() -> 
     pipeline = VoicePipeline(
         workflow=FailingWorkflow(),
         stt_model=FailingCloseSTT(["hello"]),
-        tts_model=FakeTTS(),
+        tts_model=ZeroPcmTTSModel(),
     )
-    result = await pipeline.run(await FakeStreamedAudioInput.get(count=1))
+    result = await pipeline.run(await StreamedAudioInputFactory.get(count=1))
 
     with pytest.raises(RuntimeError) as exc_info:
         await asyncio.wait_for(extract_events(result), timeout=5)
@@ -1105,22 +1128,22 @@ async def test_voicepipeline_failing_close_after_a_clean_run_reaches_the_consume
 
     close_error = RuntimeError("close blew up")
 
-    class FailingCloseSession(FakeSession):
+    class FailingCloseSession(QueuedTranscriptionSession):
         async def close(self) -> None:
             raise close_error
 
-    class FailingCloseSTT(FakeSTT):
+    class FailingCloseSTT(QueuedSTTModel):
         async def create_session(self, *args: Any, **kwargs: Any) -> FailingCloseSession:
             session = FailingCloseSession()
             session.outputs = self.outputs
             return session
 
     pipeline = VoicePipeline(
-        workflow=FakeWorkflow([["hello"]]),
+        workflow=QueuedVoiceWorkflow([["hello"]]),
         stt_model=FailingCloseSTT(["hello"]),
-        tts_model=FakeTTS(),
+        tts_model=ZeroPcmTTSModel(),
     )
-    result = await pipeline.run(await FakeStreamedAudioInput.get(count=1))
+    result = await pipeline.run(await StreamedAudioInputFactory.get(count=1))
 
     with pytest.raises(RuntimeError) as exc_info:
         await asyncio.wait_for(extract_events(result), timeout=5)
@@ -1136,7 +1159,7 @@ async def test_voicepipeline_cancelled_consumer_closes_the_session_without_furth
     closed = asyncio.Event()
     buffered = asyncio.Event()
 
-    class ClosingSession(FakeSession):
+    class ClosingSession(QueuedTranscriptionSession):
         async def transcribe_turns(self) -> AsyncIterator[str]:
             yield "hello"
             await asyncio.Event().wait()
@@ -1144,11 +1167,11 @@ async def test_voicepipeline_cancelled_consumer_closes_the_session_without_furth
         async def close(self) -> None:
             closed.set()
 
-    class ClosingSTT(FakeSTT):
+    class ClosingSTT(QueuedSTTModel):
         async def create_session(self, *args: Any, **kwargs: Any) -> ClosingSession:
             return ClosingSession()
 
-    class BufferingWorkflow(FakeWorkflow):
+    class BufferingWorkflow(QueuedVoiceWorkflow):
         async def run(self, _: str) -> AsyncIterator[str]:
             yield "partial"
             buffered.set()
@@ -1164,7 +1187,7 @@ async def test_voicepipeline_cancelled_consumer_closes_the_session_without_furth
         tts_model=recording_tts,
         config=config,
     )
-    result = await pipeline.run(await FakeStreamedAudioInput.get(count=1))
+    result = await pipeline.run(await StreamedAudioInputFactory.get(count=1))
 
     consumer = asyncio.create_task(extract_events(result))
     await asyncio.wait_for(buffered.wait(), timeout=5)
@@ -1181,9 +1204,9 @@ async def test_voicepipeline_run_single_turn_split_words() -> None:
     # Single turn. Should produce multiple audio outputs, which are the TTS outputs of "foo bar baz"
     # split into words and then "foo2 bar2 baz2" split into words.
 
-    fake_stt = FakeSTT(["first"])
-    workflow = FakeWorkflow([["foo bar baz"]])
-    fake_tts = FakeTTS(strategy="split_words")
+    fake_stt = QueuedSTTModel(["first"])
+    workflow = QueuedVoiceWorkflow([["foo bar baz"]])
+    fake_tts = ZeroPcmTTSModel(strategy="split_words")
     config = VoicePipelineConfig(tts_settings=TTSModelSettings(buffer_size=1))
     pipeline = VoicePipeline(
         workflow=workflow, stt_model=fake_stt, tts_model=fake_tts, config=config
@@ -1207,14 +1230,14 @@ async def test_voicepipeline_run_multi_turn_split_words() -> None:
     # Multi turn. Should produce multiple audio outputs, which are the TTS outputs of "foo bar baz"
     # split into words.
 
-    fake_stt = FakeSTT(["first", "second"])
-    workflow = FakeWorkflow([["foo bar baz"], ["foo2 bar2 baz2"]])
-    fake_tts = FakeTTS(strategy="split_words")
+    fake_stt = QueuedSTTModel(["first", "second"])
+    workflow = QueuedVoiceWorkflow([["foo bar baz"], ["foo2 bar2 baz2"]])
+    fake_tts = ZeroPcmTTSModel(strategy="split_words")
     config = VoicePipelineConfig(tts_settings=TTSModelSettings(buffer_size=1))
     pipeline = VoicePipeline(
         workflow=workflow, stt_model=fake_stt, tts_model=fake_tts, config=config
     )
-    streamed_audio_input = await FakeStreamedAudioInput.get(count=6)
+    streamed_audio_input = await StreamedAudioInputFactory.get(count=6)
     result = await pipeline.run(streamed_audio_input)
     events, audio_chunks = await extract_events(result)
     assert events == [
@@ -1239,9 +1262,9 @@ async def test_voicepipeline_run_multi_turn_split_words() -> None:
 async def test_voicepipeline_float32() -> None:
     # Single turn. Should produce a single audio output, which is the TTS output for "out_1".
 
-    fake_stt = FakeSTT(["first"])
-    workflow = FakeWorkflow([["out_1"]])
-    fake_tts = FakeTTS()
+    fake_stt = QueuedSTTModel(["first"])
+    workflow = QueuedVoiceWorkflow([["out_1"]])
+    fake_tts = ZeroPcmTTSModel()
     config = VoicePipelineConfig(tts_settings=TTSModelSettings(buffer_size=1, dtype=np.float32))
     pipeline = VoicePipeline(
         workflow=workflow, stt_model=fake_stt, tts_model=fake_tts, config=config
@@ -1267,9 +1290,9 @@ async def test_voicepipeline_transform_data() -> None:
     ) -> npt.NDArray[np.int16]:
         return data_chunk.astype(np.int16)
 
-    fake_stt = FakeSTT(["first"])
-    workflow = FakeWorkflow([["out_1"]])
-    fake_tts = FakeTTS()
+    fake_stt = QueuedSTTModel(["first"])
+    workflow = QueuedVoiceWorkflow([["out_1"]])
+    fake_tts = ZeroPcmTTSModel()
     config = VoicePipelineConfig(
         tts_settings=TTSModelSettings(
             buffer_size=1,
@@ -1292,7 +1315,7 @@ async def test_voicepipeline_transform_data() -> None:
     await fake_tts.verify_audio("out_1", audio_chunks[0], dtype=np.int16)
 
 
-class _BlockingWorkflow(FakeWorkflow):
+class _BlockingWorkflow(QueuedVoiceWorkflow):
     def __init__(self, gate: asyncio.Event):
         super().__init__()
         self._gate = gate
@@ -1302,7 +1325,7 @@ class _BlockingWorkflow(FakeWorkflow):
         yield "out_1"
 
 
-class _FailingWorkflow(FakeWorkflow):
+class _FailingWorkflow(QueuedVoiceWorkflow):
     def __init__(self, error: BaseException):
         super().__init__()
         self.error = error
@@ -1312,7 +1335,7 @@ class _FailingWorkflow(FakeWorkflow):
         yield ""  # pragma: no cover
 
 
-class _OnStartYieldThenFailWorkflow(FakeWorkflow):
+class _OnStartYieldThenFailWorkflow(QueuedVoiceWorkflow):
     def __init__(self, outputs: list[list[str]], error: BaseException | None = None):
         super().__init__(outputs)
         self.error = error or RuntimeError("boom")
@@ -1324,8 +1347,8 @@ class _OnStartYieldThenFailWorkflow(FakeWorkflow):
 
 @pytest.mark.asyncio
 async def test_voicepipeline_trace_not_finished_before_single_turn_completes() -> None:
-    fake_stt = FakeSTT(["first"])
-    fake_tts = FakeTTS()
+    fake_stt = QueuedSTTModel(["first"])
+    fake_tts = ZeroPcmTTSModel()
     gate = asyncio.Event()
     workflow = _BlockingWorkflow(gate)
     config = VoicePipelineConfig(tts_settings=TTSModelSettings(buffer_size=1))
@@ -1348,12 +1371,12 @@ async def test_voicepipeline_trace_not_finished_before_single_turn_completes() -
 
 @pytest.mark.asyncio
 async def test_voicepipeline_trace_finishes_after_multi_turn_processing() -> None:
-    fake_stt = FakeSTT(["first", "second"])
-    workflow = FakeWorkflow([["out_1"], ["out_2"]])
-    fake_tts = FakeTTS()
+    fake_stt = QueuedSTTModel(["first", "second"])
+    workflow = QueuedVoiceWorkflow([["out_1"], ["out_2"]])
+    fake_tts = ZeroPcmTTSModel()
     pipeline = VoicePipeline(workflow=workflow, stt_model=fake_stt, tts_model=fake_tts)
 
-    streamed_audio_input = await FakeStreamedAudioInput.get(count=2)
+    streamed_audio_input = await StreamedAudioInputFactory.get(count=2)
     result = await pipeline.run(streamed_audio_input)
     await extract_events(result)
     assert fetch_events()[-1] == "trace_end"
@@ -1361,12 +1384,12 @@ async def test_voicepipeline_trace_finishes_after_multi_turn_processing() -> Non
 
 @pytest.mark.asyncio
 async def test_voicepipeline_multi_turn_on_start_exception_does_not_abort() -> None:
-    fake_stt = FakeSTT(["first"])
+    fake_stt = QueuedSTTModel(["first"])
     workflow = _OnStartYieldThenFailWorkflow([["out_1"]])
-    fake_tts = FakeTTS()
+    fake_tts = ZeroPcmTTSModel()
     pipeline = VoicePipeline(workflow=workflow, stt_model=fake_stt, tts_model=fake_tts)
 
-    streamed_audio_input = await FakeStreamedAudioInput.get(count=1)
+    streamed_audio_input = await StreamedAudioInputFactory.get(count=1)
     result = await pipeline.run(streamed_audio_input)
     events, _ = await extract_events(result)
 
@@ -1397,10 +1420,10 @@ async def test_voice_on_start_errors_apply_model_and_tool_logging_policies(
     error.__cause__ = cause
     pipeline = VoicePipeline(
         workflow=_OnStartYieldThenFailWorkflow([["out_1"]], error),
-        stt_model=FakeSTT(["first"]),
-        tts_model=FakeTTS(),
+        stt_model=QueuedSTTModel(["first"]),
+        tts_model=ZeroPcmTTSModel(),
     )
-    streamed_audio_input = await FakeStreamedAudioInput.get(count=1)
+    streamed_audio_input = await StreamedAudioInputFactory.get(count=1)
     caplog.set_level(logging.WARNING, logger="openai.agents")
 
     result = await pipeline.run(streamed_audio_input)
@@ -1466,11 +1489,11 @@ async def test_voice_workflow_errors_apply_model_and_tool_logging_policies(
     error = RuntimeError("SECRET_VOICE_TOOL_PAYLOAD")
     pipeline = VoicePipeline(
         workflow=_FailingWorkflow(error),
-        stt_model=FakeSTT(["first"]),
-        tts_model=FakeTTS(),
+        stt_model=QueuedSTTModel(["first"]),
+        tts_model=ZeroPcmTTSModel(),
     )
     audio_input = (
-        await FakeStreamedAudioInput.get(count=1)
+        await StreamedAudioInputFactory.get(count=1)
         if streamed
         else AudioInput(buffer=np.zeros(2, dtype=np.int16))
     )

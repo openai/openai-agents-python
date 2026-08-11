@@ -2,8 +2,8 @@ import pytest
 
 from agents import Agent, ModelSettings, Runner
 from agents.run_internal.run_loop import AgentToolUseTracker, maybe_reset_tool_choice
+from agents.testing import ScriptedModel
 
-from .fake_model import FakeModel
 from .test_responses import get_function_tool, get_function_tool_call, get_text_message
 
 
@@ -75,9 +75,9 @@ class TestToolChoiceReset:
         run works correctly and doesn't get stuck in an infinite loop. Also verify that tool_choice
         remains "required" between runs.
         """
-        # Set up our fake model with responses for two runs
-        fake_model = FakeModel()
-        fake_model.add_multiple_turn_outputs(
+        # Set up the scripted model with responses for two runs.
+        scripted_model = ScriptedModel()
+        scripted_model.extend(
             [[get_text_message("First run response")], [get_text_message("Second run response")]]
         )
 
@@ -85,7 +85,7 @@ class TestToolChoiceReset:
         custom_tool = get_function_tool("custom_tool")
         agent = Agent(
             name="test_agent",
-            model=fake_model,
+            model=scripted_model,
             tools=[custom_tool],
             model_settings=ModelSettings(tool_choice="required"),
         )
@@ -93,14 +93,14 @@ class TestToolChoiceReset:
         # First run should work correctly and preserve tool_choice
         result1 = await Runner.run(agent, "first run")
         assert result1.final_output == "First run response"
-        assert fake_model.last_turn_args["model_settings"].tool_choice == "required", (
+        assert scripted_model.calls[-1].model_settings.tool_choice == "required", (
             "tool_choice should stay required"
         )
 
         # Second run should also work correctly with tool_choice still required
         result2 = await Runner.run(agent, "second run")
         assert result2.final_output == "Second run response"
-        assert fake_model.last_turn_args["model_settings"].tool_choice == "required", (
+        assert scripted_model.calls[-1].model_settings.tool_choice == "required", (
             "tool_choice should stay required"
         )
 
@@ -110,9 +110,9 @@ class TestToolChoiceReset:
         Test scenario 2: When using required tool_choice with stop_at_tool_names behavior, ensure
         it correctly stops at the specified tool
         """
-        # Set up fake model to return a tool call for second_tool
-        fake_model = FakeModel()
-        fake_model.set_next_output([get_function_tool_call("second_tool", "{}")])
+        # Set up the scripted model to return a tool call for second_tool.
+        scripted_model = ScriptedModel()
+        scripted_model.enqueue([get_function_tool_call("second_tool", "{}")])
 
         # Create agent with two tools and tool_choice="required" and stop_at_tool behavior
         first_tool = get_function_tool("first_tool", return_value="first tool result")
@@ -120,7 +120,7 @@ class TestToolChoiceReset:
 
         agent = Agent(
             name="test_agent",
-            model=fake_model,
+            model=scripted_model,
             tools=[first_tool, second_tool],
             model_settings=ModelSettings(tool_choice="required"),
             tool_use_behavior={"stop_at_tool_names": ["second_tool"]},
@@ -136,9 +136,9 @@ class TestToolChoiceReset:
         Test scenario 3: When using a specific tool choice name, ensure it doesn't cause infinite
         loops.
         """
-        # Set up fake model to return a text message
-        fake_model = FakeModel()
-        fake_model.set_next_output([get_text_message("Test message")])
+        # Set up the scripted model to return a text message.
+        scripted_model = ScriptedModel()
+        scripted_model.enqueue([get_text_message("Test message")])
 
         # Create agent with specific tool_choice
         tool1 = get_function_tool("tool1")
@@ -147,7 +147,7 @@ class TestToolChoiceReset:
 
         agent = Agent(
             name="test_agent",
-            model=fake_model,
+            model=scripted_model,
             tools=[tool1, tool2, tool3],
             model_settings=ModelSettings(tool_choice="tool1"),  # Specific tool
         )
@@ -162,9 +162,9 @@ class TestToolChoiceReset:
         Test scenario 4: When using required tool_choice with only one tool, ensure it doesn't cause
         infinite loops.
         """
-        # Set up fake model to return a tool call followed by a text message
-        fake_model = FakeModel()
-        fake_model.add_multiple_turn_outputs(
+        # Set up the scripted model to return a tool call followed by a text message.
+        scripted_model = ScriptedModel()
+        scripted_model.extend(
             [
                 # First call returns a tool call
                 [get_function_tool_call("custom_tool", "{}")],
@@ -177,7 +177,7 @@ class TestToolChoiceReset:
         custom_tool = get_function_tool("custom_tool", return_value="tool result")
         agent = Agent(
             name="test_agent",
-            model=fake_model,
+            model=scripted_model,
             tools=[custom_tool],
             model_settings=ModelSettings(tool_choice="required"),
         )
@@ -191,9 +191,9 @@ class TestToolChoiceReset:
         """
         Test scenario 5: When agent.reset_tool_choice is False, ensure tool_choice is not reset.
         """
-        # Set up fake model to return a tool call followed by a text message
-        fake_model = FakeModel()
-        fake_model.add_multiple_turn_outputs(
+        # Set up the scripted model to return a tool call followed by a text message.
+        scripted_model = ScriptedModel()
+        scripted_model.extend(
             [
                 # First call returns a tool call
                 [get_function_tool_call("custom_tool", "{}")],
@@ -206,7 +206,7 @@ class TestToolChoiceReset:
         custom_tool = get_function_tool("custom_tool", return_value="tool result")
         agent = Agent(
             name="test_agent",
-            model=fake_model,
+            model=scripted_model,
             tools=[custom_tool],
             model_settings=ModelSettings(tool_choice="required"),
             reset_tool_choice=False,
@@ -214,4 +214,4 @@ class TestToolChoiceReset:
 
         await Runner.run(agent, "test")
 
-        assert fake_model.last_turn_args["model_settings"].tool_choice == "required"
+        assert scripted_model.calls[-1].model_settings.tool_choice == "required"

@@ -7,7 +7,7 @@ import pytest
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
 from agents import Agent, Runner
-from tests.fake_model import FakeModel
+from agents.testing import ScriptedModel
 
 
 def _make_message(text: str) -> ResponseOutputMessage:
@@ -22,8 +22,8 @@ def _make_message(text: str) -> ResponseOutputMessage:
 
 @pytest.mark.asyncio
 async def test_agent_is_released_after_run() -> None:
-    fake_model = FakeModel(initial_output=[_make_message("Paris")])
-    agent = Agent(name="leak-test-agent", instructions="Answer questions.", model=fake_model)
+    scripted_model = ScriptedModel(steps=[[_make_message("Paris")]])
+    agent = Agent(name="leak-test-agent", instructions="Answer questions.", model=scripted_model)
     agent_ref = weakref.ref(agent)
 
     # Running the agent should not leave behind strong references once the result goes out of scope.

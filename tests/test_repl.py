@@ -1,8 +1,8 @@
 import pytest
 
 from agents import Agent, run_demo_loop
+from agents.testing import ScriptedModel
 
-from .fake_model import FakeModel
 from .test_responses import (
     get_function_tool,
     get_function_tool_call,
@@ -14,8 +14,8 @@ from .test_responses import (
 
 @pytest.mark.asyncio
 async def test_run_demo_loop_conversation(monkeypatch, capsys):
-    model = FakeModel()
-    model.add_multiple_turn_outputs([[get_text_message("hello")], [get_text_message("good")]])
+    model = ScriptedModel()
+    model.extend([[get_text_message("hello")], [get_text_message("good")]])
 
     agent = Agent(name="test", model=model)
 
@@ -27,7 +27,7 @@ async def test_run_demo_loop_conversation(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "hello" in output
     assert "good" in output
-    assert model.last_turn_args["input"] == [
+    assert model.calls[-1].input == [
         get_text_input_item("Hi"),
         get_text_message("hello").model_dump(exclude_unset=True),
         get_text_input_item("How are you?"),
@@ -36,7 +36,7 @@ async def test_run_demo_loop_conversation(monkeypatch, capsys):
 
 @pytest.mark.asyncio
 async def test_run_demo_loop_streaming(monkeypatch, capsys):
-    model = FakeModel()
+    model = ScriptedModel()
     target_agent = Agent(name="target", model=model)
     agent = Agent(
         name="test",
@@ -47,7 +47,7 @@ async def test_run_demo_loop_streaming(monkeypatch, capsys):
 
     # A single user turn that exercises every streamed event branch:
     # a tool call, the tool output, a handoff (agent update), then a text answer.
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("foo", "{}")],
             [get_handoff_tool_call(target_agent)],
@@ -69,7 +69,7 @@ async def test_run_demo_loop_streaming(monkeypatch, capsys):
 
 @pytest.mark.asyncio
 async def test_run_demo_loop_exits_on_eof(monkeypatch, capsys):
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
 
     def raise_eof(_=" > ") -> str:
@@ -80,13 +80,13 @@ async def test_run_demo_loop_exits_on_eof(monkeypatch, capsys):
     await run_demo_loop(agent, stream=False)
 
     # The loop should terminate cleanly without ever invoking the model.
-    assert model.last_turn_args == {}
+    assert not model.calls
 
 
 @pytest.mark.asyncio
 async def test_run_demo_loop_skips_empty_input(monkeypatch, capsys):
-    model = FakeModel()
-    model.add_multiple_turn_outputs([[get_text_message("hello")]])
+    model = ScriptedModel()
+    model.extend([[get_text_message("hello")]])
     agent = Agent(name="test", model=model)
 
     # Empty lines are ignored; only the non-empty input reaches the runner.
@@ -97,4 +97,4 @@ async def test_run_demo_loop_skips_empty_input(monkeypatch, capsys):
 
     output = capsys.readouterr().out
     assert "hello" in output
-    assert model.last_turn_args["input"] == [get_text_input_item("Hi")]
+    assert model.calls[-1].input == [get_text_input_item("Hi")]

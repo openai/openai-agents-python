@@ -18,8 +18,8 @@ from agents import (
     UserError,
 )
 from agents.stream_events import RunItemStreamEvent
+from agents.testing import ScriptedModel
 
-from .fake_model import FakeModel
 from .test_responses import (
     get_function_tool,
     get_function_tool_call,
@@ -30,7 +30,7 @@ from .test_responses import (
 
 @pytest.mark.asyncio
 async def test_non_streamed_max_turns():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_1",
         model=model,
@@ -39,7 +39,7 @@ async def test_non_streamed_max_turns():
 
     func_output = json.dumps({"a": "b"})
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_text_message("1"), get_function_tool_call("some_function", func_output, "1")],
             [get_text_message("2"), get_function_tool_call("some_function", func_output, "2")],
@@ -54,7 +54,7 @@ async def test_non_streamed_max_turns():
 
 @pytest.mark.asyncio
 async def test_non_streamed_max_turns_none_disables_limit():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_1",
         model=model,
@@ -63,7 +63,7 @@ async def test_non_streamed_max_turns_none_disables_limit():
 
     func_output = json.dumps({"a": "b"})
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_text_message("1"), get_function_tool_call("some_function", func_output, "1")],
             [get_text_message("2"), get_function_tool_call("some_function", func_output, "2")],
@@ -81,7 +81,7 @@ async def test_non_streamed_max_turns_none_disables_limit():
 
 @pytest.mark.asyncio
 async def test_streamed_max_turns():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_1",
         model=model,
@@ -89,7 +89,7 @@ async def test_streamed_max_turns():
     )
     func_output = json.dumps({"a": "b"})
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 get_text_message("1"),
@@ -121,7 +121,7 @@ async def test_streamed_max_turns():
 
 @pytest.mark.asyncio
 async def test_streamed_max_turns_none_disables_limit():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_1",
         model=model,
@@ -129,7 +129,7 @@ async def test_streamed_max_turns_none_disables_limit():
     )
     func_output = json.dumps({"a": "b"})
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_text_message("1"), get_function_tool_call("some_function", func_output, "1")],
             [get_text_message("2"), get_function_tool_call("some_function", func_output, "2")],
@@ -157,19 +157,19 @@ class FooModel(BaseModel):
 
 @pytest.mark.asyncio
 async def test_non_streamed_structured_output_refusal_raises_without_retry():
-    model = FakeModel(initial_output=[get_refusal_message("I cannot help with that request.")])
+    model = ScriptedModel(steps=[[get_refusal_message("I cannot help with that request.")]])
     agent = Agent(name="test_1", model=model, output_type=FooModel)
 
     with pytest.raises(ModelRefusalError) as exc_info:
         await Runner.run(agent, input="user_message", max_turns=3)
 
     assert exc_info.value.refusal == "I cannot help with that request."
-    assert not model.turn_outputs
+    assert model.remaining_steps == 0
 
 
 @pytest.mark.asyncio
 async def test_non_streamed_refusal_handler_returns_structured_output():
-    model = FakeModel(initial_output=[get_refusal_message("I cannot help with that request.")])
+    model = ScriptedModel(steps=[[get_refusal_message("I cannot help with that request.")]])
     agent = Agent(name="test_1", model=model, output_type=FooModel)
 
     def handler(data):
@@ -194,7 +194,7 @@ async def test_non_streamed_refusal_handler_returns_structured_output():
 
 @pytest.mark.asyncio
 async def test_non_streamed_refusal_handler_can_skip_history():
-    model = FakeModel(initial_output=[get_refusal_message("I cannot help with that request.")])
+    model = ScriptedModel(steps=[[get_refusal_message("I cannot help with that request.")]])
     agent = Agent(name="test_1", model=model)
 
     result = await Runner.run(
@@ -214,7 +214,7 @@ async def test_non_streamed_refusal_handler_can_skip_history():
 
 @pytest.mark.asyncio
 async def test_streamed_refusal_handler_returns_output():
-    model = FakeModel(initial_output=[get_refusal_message("I cannot help with that request.")])
+    model = ScriptedModel(steps=[[get_refusal_message("I cannot help with that request.")]])
     agent = Agent(name="test_1", model=model)
 
     result = Runner.run_streamed(
@@ -237,7 +237,7 @@ async def test_streamed_refusal_handler_returns_output():
 
 @pytest.mark.asyncio
 async def test_structured_output_non_streamed_max_turns():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_1",
         model=model,
@@ -245,7 +245,7 @@ async def test_structured_output_non_streamed_max_turns():
         tools=[get_function_tool("tool_1", "result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("tool_1")],
             [get_function_tool_call("tool_1")],
@@ -260,7 +260,7 @@ async def test_structured_output_non_streamed_max_turns():
 
 @pytest.mark.asyncio
 async def test_structured_output_streamed_max_turns():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_1",
         model=model,
@@ -268,7 +268,7 @@ async def test_structured_output_streamed_max_turns():
         tools=[get_function_tool("tool_1", "result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("tool_1")],
             [get_function_tool_call("tool_1")],
@@ -285,7 +285,7 @@ async def test_structured_output_streamed_max_turns():
 
 @pytest.mark.asyncio
 async def test_structured_output_max_turns_handler_invalid_output():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_1",
         model=model,
@@ -303,7 +303,7 @@ async def test_structured_output_max_turns_handler_invalid_output():
 
 @pytest.mark.asyncio
 async def test_structured_output_max_turns_handler_pydantic_output():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_1",
         model=model,
@@ -324,7 +324,7 @@ async def test_structured_output_max_turns_handler_pydantic_output():
 
 @pytest.mark.asyncio
 async def test_structured_output_max_turns_handler_list_output():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_1",
         model=model,
@@ -344,7 +344,7 @@ async def test_structured_output_max_turns_handler_list_output():
 
 @pytest.mark.asyncio
 async def test_non_streamed_max_turns_handler_returns_output():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test_1", model=model)
 
     result = await Runner.run(
@@ -364,7 +364,7 @@ async def test_non_streamed_max_turns_handler_returns_output():
 
 @pytest.mark.asyncio
 async def test_non_streamed_max_turns_handler_skip_history():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test_1", model=model)
 
     result = await Runner.run(
@@ -385,7 +385,7 @@ async def test_non_streamed_max_turns_handler_skip_history():
 
 @pytest.mark.asyncio
 async def test_non_streamed_max_turns_handler_raw_output():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test_1", model=model)
 
     result = await Runner.run(
@@ -401,7 +401,7 @@ async def test_non_streamed_max_turns_handler_raw_output():
 
 @pytest.mark.asyncio
 async def test_non_streamed_max_turns_handler_raw_dict_output():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test_1", model=model)
 
     result = await Runner.run(
@@ -416,7 +416,7 @@ async def test_non_streamed_max_turns_handler_raw_dict_output():
 
 @pytest.mark.asyncio
 async def test_streamed_max_turns_handler_returns_output():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test_1", model=model)
 
     result = Runner.run_streamed(
@@ -439,7 +439,7 @@ async def test_streamed_max_turns_handler_returns_output():
 
 @pytest.mark.asyncio
 async def test_streamed_max_turns_handler_pydantic_output():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_1",
         model=model,
@@ -466,7 +466,7 @@ async def test_streamed_max_turns_handler_pydantic_output():
 
 @pytest.mark.asyncio
 async def test_streamed_max_turns_handler_list_output():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_1",
         model=model,
@@ -492,15 +492,13 @@ async def test_streamed_max_turns_handler_list_output():
 
 async def _run_max_turns_handler_with_session(streamed: bool) -> list[str]:
     """Run one tool turn, trip max turns, and return the session's persisted item types."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test_1",
         model=model,
         tools=[get_function_tool("some_function", "result")],
     )
-    model.add_multiple_turn_outputs(
-        [[get_function_tool_call("some_function", json.dumps({"a": "b"}))]]
-    )
+    model.extend([[get_function_tool_call("some_function", json.dumps({"a": "b"}))]])
     session = SQLiteSession("max-turns-handler", ":memory:")
     try:
         if streamed:

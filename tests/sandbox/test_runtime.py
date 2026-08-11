@@ -97,10 +97,10 @@ from agents.sandbox.session.sandbox_session_state import SandboxSessionState
 from agents.sandbox.snapshot import LocalSnapshotSpec, NoopSnapshot, SnapshotBase
 from agents.sandbox.types import ExecResult
 from agents.stream_events import RunItemStreamEvent
+from agents.testing import ScriptedModel, scripted_sandbox_session
 from agents.tool import FunctionTool, Tool
 from agents.tool_context import ToolContext
 from agents.tracing import trace
-from tests.fake_model import FakeModel
 from tests.test_responses import (
     get_final_output_message,
     get_function_tool,
@@ -1516,7 +1516,7 @@ def _unix_local_run_config(
 
 @pytest.mark.asyncio
 async def test_runner_merges_sandbox_instructions_and_tools() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     capability_tool = get_function_tool("capability_tool", "ok")
     capability = _RecordingCapability(
         instruction_text="Capability instructions.",
@@ -1564,8 +1564,8 @@ async def test_runner_merges_sandbox_instructions_and_tools() -> None:
     assert client.create_kwargs["options"] == {"image": "sandbox"}
     assert isinstance(client.create_kwargs["snapshot"], LocalSnapshotSpec)
 
-    assert model.first_turn_args is not None
-    assert model.first_turn_args["system_instructions"] == (
+    assert bool(model.calls)
+    assert model.calls[0].system_instructions == (
         f"{get_default_sandbox_instructions()}\n\n"
         "# Agent instructions\n\n"
         "Additional instructions.\n\n"
@@ -1573,9 +1573,9 @@ async def test_runner_merges_sandbox_instructions_and_tools() -> None:
         "Capability instructions.\n\n"
         f"{runtime_agent_preparation_module._filesystem_instructions(manifest)}"
     )
-    assert [tool.name for tool in model.first_turn_args["tools"]] == ["capability_tool"]
+    assert [tool.name for tool in model.calls[0].tools] == ["capability_tool"]
 
-    input_items = model.first_turn_args["input"]
+    input_items = model.calls[0].input
     assert isinstance(input_items, list)
     assert _extract_user_text(input_items[0]) == "hello"
 
@@ -1603,7 +1603,7 @@ def test_filesystem_instructions_omit_extra_path_grants() -> None:
 
 @pytest.mark.asyncio
 async def test_runner_adds_run_as_user_to_created_manifest_without_default_manifest() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     session = _FakeSession(Manifest())
     client = _FakeClient(session)
     run_as = User(name="sandbox-user")
@@ -1629,7 +1629,7 @@ async def test_runner_adds_run_as_user_to_created_manifest_without_default_manif
 
 @pytest.mark.asyncio
 async def test_runner_uses_default_sandbox_prompt_when_instructions_missing() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     capability = _RecordingCapability(instruction_text="Capability instructions.")
     session = _FakeSession(Manifest())
     client = _FakeClient(session)
@@ -1646,21 +1646,21 @@ async def test_runner_uses_default_sandbox_prompt_when_instructions_missing() ->
     )
 
     assert result.final_output == "done"
-    assert model.first_turn_args is not None
+    assert bool(model.calls)
     expected_instructions = (
         f"{get_default_sandbox_instructions()}\n\n"
         "# Sandbox capability instructions\n\n"
         "Capability instructions.\n\n"
         f"{runtime_agent_preparation_module._filesystem_instructions(session.state.manifest)}"
     )
-    assert model.first_turn_args["system_instructions"] == (expected_instructions)
+    assert model.calls[0].system_instructions == (expected_instructions)
 
 
 @pytest.mark.asyncio
 async def test_runner_handles_missing_default_sandbox_prompt_resource(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     capability = _RecordingCapability(instruction_text="Capability instructions.")
     session = _FakeSession(Manifest())
     client = _FakeClient(session)
@@ -1686,8 +1686,8 @@ async def test_runner_handles_missing_default_sandbox_prompt_resource(
         runtime_agent_preparation_module.get_default_sandbox_instructions.cache_clear()
 
     assert result.final_output == "done"
-    assert model.first_turn_args is not None
-    assert model.first_turn_args["system_instructions"] == (
+    assert bool(model.calls)
+    assert model.calls[0].system_instructions == (
         "# Agent instructions\n\n"
         "Additional instructions.\n\n"
         "# Sandbox capability instructions\n\n"
@@ -1698,7 +1698,7 @@ async def test_runner_handles_missing_default_sandbox_prompt_resource(
 
 @pytest.mark.asyncio
 async def test_runner_dynamic_instructions_do_not_override_default_sandbox_prompt() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     capability = _RecordingCapability(instruction_text="Capability instructions.")
     session = _FakeSession(Manifest())
     client = _FakeClient(session)
@@ -1723,8 +1723,8 @@ async def test_runner_dynamic_instructions_do_not_override_default_sandbox_promp
     )
 
     assert result.final_output == "done"
-    assert model.first_turn_args is not None
-    assert model.first_turn_args["system_instructions"] == (
+    assert bool(model.calls)
+    assert model.calls[0].system_instructions == (
         f"{get_default_sandbox_instructions()}\n\n"
         "# Sandbox capability instructions\n\n"
         "Capability instructions.\n\n"
@@ -1734,7 +1734,7 @@ async def test_runner_dynamic_instructions_do_not_override_default_sandbox_promp
 
 @pytest.mark.asyncio
 async def test_runner_base_instructions_override_default_sandbox_prompt() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     capability = _RecordingCapability(instruction_text="Capability instructions.")
     session = _FakeSession(Manifest())
     client = _FakeClient(session)
@@ -1753,8 +1753,8 @@ async def test_runner_base_instructions_override_default_sandbox_prompt() -> Non
     )
 
     assert result.final_output == "done"
-    assert model.first_turn_args is not None
-    assert model.first_turn_args["system_instructions"] == (
+    assert bool(model.calls)
+    assert model.calls[0].system_instructions == (
         "Custom base instructions.\n\n"
         "# Agent instructions\n\n"
         "Additional instructions.\n\n"
@@ -1766,7 +1766,7 @@ async def test_runner_base_instructions_override_default_sandbox_prompt() -> Non
 
 @pytest.mark.asyncio
 async def test_runner_adds_remote_mount_policy_instructions() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     manifest = Manifest(
         entries={
             "remote": S3Mount(
@@ -1791,8 +1791,8 @@ async def test_runner_adds_remote_mount_policy_instructions() -> None:
     )
 
     assert result.final_output == "done"
-    assert model.first_turn_args is not None
-    system_instructions = model.first_turn_args["system_instructions"]
+    assert bool(model.calls)
+    system_instructions = model.calls[0].system_instructions
     assert isinstance(system_instructions, str)
     expected_policy_pattern = re.escape(REMOTE_MOUNT_POLICY)
     expected_policy_pattern = expected_policy_pattern.replace(
@@ -1821,7 +1821,7 @@ async def test_runner_adds_remote_mount_policy_instructions() -> None:
 
 @pytest.mark.asyncio
 async def test_runner_adds_remote_mount_policy_for_non_ephemeral_mounts() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     manifest = Manifest(
         entries={
             "remote": S3Mount(
@@ -1847,15 +1847,15 @@ async def test_runner_adds_remote_mount_policy_for_non_ephemeral_mounts() -> Non
     )
 
     assert result.final_output == "done"
-    assert model.first_turn_args is not None
-    system_instructions = model.first_turn_args["system_instructions"]
+    assert bool(model.calls)
+    system_instructions = model.calls[0].system_instructions
     assert isinstance(system_instructions, str)
     assert "- /workspace/remote (mounted in read-only mode)" in system_instructions
 
 
 @pytest.mark.asyncio
 async def test_runner_applies_compaction_capability_to_input_and_model_settings() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     session = _FakeSession(Manifest())
     client = _FakeClient(session)
     agent = SandboxAgent(
@@ -1878,9 +1878,9 @@ async def test_runner_applies_compaction_capability_to_input_and_model_settings(
     )
 
     assert result.final_output == "done"
-    assert model.first_turn_args is not None
-    assert model.first_turn_args["input"] == input_items[1:]
-    model_settings = model.first_turn_args["model_settings"]
+    assert bool(model.calls)
+    assert model.calls[0].input == input_items[1:]
+    model_settings = model.calls[0].model_settings
     assert isinstance(model_settings, ModelSettings)
     assert model_settings.extra_args == {
         "context_management": [
@@ -1894,7 +1894,7 @@ async def test_runner_applies_compaction_capability_to_input_and_model_settings(
 
 @pytest.mark.asyncio
 async def test_runner_marks_writable_remote_mounts_in_policy() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     manifest = Manifest(
         entries={
             "remote": S3Mount(
@@ -1920,8 +1920,8 @@ async def test_runner_marks_writable_remote_mounts_in_policy() -> None:
     )
 
     assert result.final_output == "done"
-    assert model.first_turn_args is not None
-    system_instructions = model.first_turn_args["system_instructions"]
+    assert bool(model.calls)
+    system_instructions = model.calls[0].system_instructions
     assert isinstance(system_instructions, str)
     assert "- /workspace/remote (mounted in read+write mode)" in system_instructions
     assert "Use `apply_patch` directly for text edits on read+write mounts." in system_instructions
@@ -1933,7 +1933,7 @@ async def test_runner_marks_writable_remote_mounts_in_policy() -> None:
 
 @pytest.mark.asyncio
 async def test_runner_uses_manifest_remote_mount_command_allowlist_override() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     manifest = Manifest(
         entries={
             "remote": S3Mount(
@@ -1959,8 +1959,8 @@ async def test_runner_uses_manifest_remote_mount_command_allowlist_override() ->
     )
 
     assert result.final_output == "done"
-    assert model.first_turn_args is not None
-    system_instructions = model.first_turn_args["system_instructions"]
+    assert bool(model.calls)
+    system_instructions = model.calls[0].system_instructions
     assert isinstance(system_instructions, str)
     assert "Only use these commands on remote mounts:" in system_instructions
     assert "`ls`, `cp`" in system_instructions
@@ -1970,7 +1970,7 @@ async def test_runner_uses_manifest_remote_mount_command_allowlist_override() ->
 async def test_runner_requires_sandbox_config_for_sandbox_agent() -> None:
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
     )
 
@@ -1980,7 +1980,7 @@ async def test_runner_requires_sandbox_config_for_sandbox_agent() -> None:
 
 @pytest.mark.asyncio
 async def test_runner_streamed_cleans_runner_owned_session() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     session = _FakeSession(Manifest())
     client = _FakeClient(session)
     agent = SandboxAgent(
@@ -2023,7 +2023,7 @@ async def test_runner_streamed_guardrail_trip_blocks_runner_owned_sandbox_creati
     client = _FakeClient(session)
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
         input_guardrails=[
             InputGuardrail(
@@ -2047,7 +2047,7 @@ async def test_runner_streamed_guardrail_trip_blocks_runner_owned_sandbox_creati
 
 @pytest.mark.asyncio
 async def test_runner_does_not_close_injected_sandbox_session() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     default_manifest = Manifest(entries={"default.txt": File(content=b"default")})
     session_manifest = Manifest(entries={"session.txt": File(content=b"session")})
     injected_session = _FakeSession(session_manifest)
@@ -2075,15 +2075,15 @@ async def test_runner_does_not_close_injected_sandbox_session() -> None:
     assert injected_session.shutdown_calls == 0
     assert injected_session.close_dependency_calls == 0
 
-    assert model.first_turn_args is not None
-    input_items = model.first_turn_args["input"]
+    assert bool(model.calls)
+    input_items = model.calls[0].input
     assert isinstance(input_items, str) or isinstance(input_items, list)
     assert injected_session.state.manifest.entries == session_manifest.entries
 
 
 @pytest.mark.asyncio
 async def test_runner_does_not_restart_running_injected_sandbox_session() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     injected_session = _FakeSession(Manifest(entries={"session.txt": File(content=b"session")}))
     injected_session._running = True
     agent = SandboxAgent(
@@ -2110,7 +2110,7 @@ async def test_runner_guardrail_trip_blocks_runner_owned_sandbox_creation() -> N
     client = _FakeClient(session)
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
         input_guardrails=[
             InputGuardrail(
@@ -2136,7 +2136,7 @@ async def test_runner_guardrail_trip_blocks_running_injected_session_mutation() 
     live_session._running = True
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
         capabilities=[_ManifestMutationCapability()],
         input_guardrails=[
@@ -2167,7 +2167,7 @@ async def test_runner_streamed_guardrail_trip_blocks_running_injected_session_mu
     live_session._running = True
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
         capabilities=[_ManifestMutationCapability()],
         input_guardrails=[
@@ -2196,7 +2196,7 @@ async def test_runner_streamed_guardrail_trip_blocks_running_injected_session_mu
 
 @pytest.mark.asyncio
 async def test_runner_uses_public_sandbox_agent_for_dynamic_instructions() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     session = _FakeSession(Manifest())
     client = _FakeClient(session)
     seen_agents: list[Agent[Any]] = []
@@ -2221,8 +2221,8 @@ async def test_runner_uses_public_sandbox_agent_for_dynamic_instructions() -> No
 
     assert result.final_output == "done"
     assert seen_agents == [agent]
-    assert model.first_turn_args is not None
-    assert model.first_turn_args["system_instructions"] == (
+    assert bool(model.calls)
+    assert model.calls[0].system_instructions == (
         f"{get_default_sandbox_instructions()}\n\n"
         "# Agent instructions\n\n"
         "Saw public agent.\n\n"
@@ -2242,7 +2242,7 @@ async def test_runner_uses_public_sandbox_agent_for_dynamic_prompts() -> None:
 
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
         prompt=dynamic_prompt,
         capabilities=[_RecordingCapability(instruction_text="Capability instructions.")],
@@ -2257,7 +2257,7 @@ async def test_runner_uses_public_sandbox_agent_for_dynamic_prompts() -> None:
 
     streamed_agent = SandboxAgent(
         name="streamed-sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("streamed done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("streamed done")]]),
         instructions="Base instructions.",
         prompt=dynamic_prompt,
         capabilities=[_RecordingCapability(instruction_text="Capability instructions.")],
@@ -2284,7 +2284,7 @@ async def test_runner_uses_public_agent_for_call_model_input_filter() -> None:
 
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
         capabilities=[_RecordingCapability(instruction_text="Capability instructions.")],
     )
@@ -2315,7 +2315,7 @@ async def test_runner_streamed_uses_public_agent_for_call_model_input_filter() -
 
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
         capabilities=[_RecordingCapability(instruction_text="Capability instructions.")],
     )
@@ -2340,9 +2340,9 @@ async def test_runner_streamed_uses_public_agent_for_call_model_input_filter() -
 
 @pytest.mark.asyncio
 async def test_runner_reuses_prepared_sandbox_agent_across_turns_for_tool_choice_reset() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     tool = get_function_tool("capability_tool", "ok")
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("capability_tool", json.dumps({}))],
             [get_final_output_message("done")],
@@ -2361,15 +2361,15 @@ async def test_runner_reuses_prepared_sandbox_agent_across_turns_for_tool_choice
     result = await Runner.run(agent, "hello", run_config=_sandbox_run_config(client))
 
     assert result.final_output == "done"
-    assert model.first_turn_args is not None
-    assert model.first_turn_args["model_settings"].tool_choice == "required"
-    assert model.last_turn_args["model_settings"].tool_choice is None
+    assert bool(model.calls)
+    assert model.calls[0].model_settings.tool_choice == "required"
+    assert model.calls[-1].model_settings.tool_choice is None
 
 
 @pytest.mark.asyncio
 async def test_runner_rebuilds_sandbox_resources_for_handoff_target_agent() -> None:
-    triage_model = FakeModel()
-    worker_model = FakeModel(initial_output=[get_final_output_message("done")])
+    triage_model = ScriptedModel()
+    worker_model = ScriptedModel(steps=[[get_final_output_message("done")]])
     client = _ManifestSessionClient()
     triage_manifest = Manifest(entries={"README.md": File(content=b"Triage workspace")})
     worker_manifest = Manifest(entries={"README.md": File(content=b"Worker workspace")})
@@ -2388,7 +2388,7 @@ async def test_runner_rebuilds_sandbox_resources_for_handoff_target_agent() -> N
         capabilities=[_ManifestInstructionsCapability()],
         handoffs=[worker],
     )
-    triage_model.turn_outputs = [[get_handoff_tool_call(worker)]]
+    triage_model.enqueue([get_handoff_tool_call(worker)])
 
     result = await Runner.run(
         triage,
@@ -2404,8 +2404,8 @@ async def test_runner_rebuilds_sandbox_resources_for_handoff_target_agent() -> N
         client.created_manifests[0].entries["README.md"]
         != client.created_manifests[1].entries["README.md"]
     )
-    assert worker_model.first_turn_args is not None
-    assert worker_model.first_turn_args["system_instructions"] == (
+    assert bool(worker_model.calls)
+    assert worker_model.calls[0].system_instructions == (
         f"{get_default_sandbox_instructions()}\n\n"
         "# Agent instructions\n\n"
         "Worker instructions.\n\n"
@@ -2418,8 +2418,8 @@ async def test_runner_rebuilds_sandbox_resources_for_handoff_target_agent() -> N
 @pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
 @pytest.mark.asyncio
 async def test_context_rewrite_releases_removed_nested_history_ownership(streamed: bool) -> None:
-    triage_model = FakeModel()
-    worker_model = FakeModel(initial_output=[get_final_output_message("done")])
+    triage_model = ScriptedModel()
+    worker_model = ScriptedModel(steps=[[get_final_output_message("done")]])
     client = _ManifestSessionClient()
     worker = SandboxAgent(
         name="worker",
@@ -2434,9 +2434,9 @@ async def test_context_rewrite_releases_removed_nested_history_ownership(streame
         capabilities=[],
         handoffs=[worker],
     )
-    triage_model.turn_outputs = [
-        [get_final_output_message("handoff message"), get_handoff_tool_call(worker)]
-    ]
+    triage_model.extend(
+        [[get_final_output_message("handoff message"), get_handoff_tool_call(worker)]]
+    )
     run_config = RunConfig(
         sandbox=SandboxRunConfig(client=client),
         nest_handoff_history=True,
@@ -2463,8 +2463,8 @@ async def test_context_rewrite_releases_removed_nested_history_ownership(streame
 async def test_context_rebuild_retains_unambiguous_nested_history_ownership(
     streamed: bool,
 ) -> None:
-    triage_model = FakeModel()
-    worker_model = FakeModel(initial_output=[get_final_output_message("done")])
+    triage_model = ScriptedModel()
+    worker_model = ScriptedModel(steps=[[get_final_output_message("done")]])
     client = _ManifestSessionClient()
     worker = SandboxAgent(
         name="worker",
@@ -2479,9 +2479,9 @@ async def test_context_rebuild_retains_unambiguous_nested_history_ownership(
         capabilities=[],
         handoffs=[worker],
     )
-    triage_model.turn_outputs = [
-        [get_final_output_message("handoff message"), get_handoff_tool_call(worker)]
-    ]
+    triage_model.extend(
+        [[get_final_output_message("handoff message"), get_handoff_tool_call(worker)]]
+    )
     run_config = RunConfig(
         sandbox=SandboxRunConfig(client=client),
         nest_handoff_history=True,
@@ -2506,8 +2506,8 @@ async def test_context_rebuild_retains_unambiguous_nested_history_ownership(
 
 @pytest.mark.asyncio
 async def test_runner_resumed_handoff_materializes_manifest_for_new_sandbox_agent() -> None:
-    triage_model = FakeModel()
-    worker_model = FakeModel(initial_output=[get_final_output_message("done")])
+    triage_model = ScriptedModel()
+    worker_model = ScriptedModel(steps=[[get_final_output_message("done")]])
     client = _ManifestSessionClient()
 
     @function_tool(name_override="approval_tool", needs_approval=True)
@@ -2532,7 +2532,7 @@ async def test_runner_resumed_handoff_materializes_manifest_for_new_sandbox_agen
         capabilities=[_ManifestInstructionsCapability()],
         handoffs=[worker],
     )
-    triage_model.add_multiple_turn_outputs(
+    triage_model.extend(
         [
             [get_function_tool_call("approval_tool", json.dumps({}), call_id="call_resume")],
             [get_handoff_tool_call(worker)],
@@ -2558,8 +2558,8 @@ async def test_runner_resumed_handoff_materializes_manifest_for_new_sandbox_agen
     assert resumed.final_output == "done"
     assert len(client.created_manifests) == 2
     assert client.created_manifests[1] is not None
-    assert worker_model.first_turn_args is not None
-    assert worker_model.first_turn_args["system_instructions"] == (
+    assert bool(worker_model.calls)
+    assert worker_model.calls[0].system_instructions == (
         f"{get_default_sandbox_instructions()}\n\n"
         "# Agent instructions\n\n"
         "Worker instructions.\n\n"
@@ -2779,7 +2779,7 @@ async def test_unix_local_persist_workspace_excludes_mounted_directory_contents(
 async def test_runner_allows_fresh_unix_local_sessions_without_options() -> None:
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
     )
 
@@ -2818,7 +2818,7 @@ async def test_unix_local_runner_cleanup_preserves_resumed_caller_owned_workspac
     state = cast(UnixLocalSandboxSessionState, created.state)
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
     )
 
@@ -2918,7 +2918,7 @@ async def test_runner_streamed_ignores_sandbox_cleanup_failures_after_success() 
     client = _FakeClient(session)
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
     )
 
@@ -2936,7 +2936,7 @@ async def test_runner_omits_sandbox_resume_state_when_cleanup_fails() -> None:
     client = _FakeClient(session)
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
     )
 
@@ -2955,7 +2955,7 @@ async def test_runner_clears_sandbox_session_from_non_streamed_results_after_cle
     client = _FakeClient(session)
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
     )
 
@@ -2971,7 +2971,7 @@ async def test_runner_streamed_cleans_sandbox_once_after_stream_completion() -> 
     client = _FakeClient(session)
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
     )
 
@@ -3002,7 +3002,7 @@ async def test_runner_uses_public_agent_for_non_streaming_output_guardrails() ->
 
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
         capabilities=[_RecordingCapability(instruction_text="Capability instructions.")],
         output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
@@ -3023,7 +3023,7 @@ async def test_runner_streamed_immediate_cancel_skips_waiting_for_sandbox_cleanu
     client = _FakeClient(session)
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
     )
 
@@ -3048,8 +3048,8 @@ async def test_runner_streamed_run_loop_task_waits_for_sandbox_cleanup_and_persi
     stop_gate = asyncio.Event()
     session = _PersistingStopSession(Manifest(), stop_gate)
     client = _FakeClient(session)
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_final_output_message("done")],
             [get_final_output_message("again")],
@@ -3114,8 +3114,8 @@ async def test_runner_persists_workspace_and_tool_choice_state_across_sandbox_re
     def approval_tool() -> str:
         return "approved"
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [
                 get_function_tool_call(
@@ -3165,8 +3165,8 @@ async def test_runner_persists_workspace_and_tool_choice_state_across_sandbox_re
     }
 
     state_json = state.to_json()
-    resumed_model = FakeModel()
-    resumed_model.add_multiple_turn_outputs(
+    resumed_model = ScriptedModel()
+    resumed_model.extend(
         [
             [
                 get_function_tool_call(
@@ -3196,7 +3196,7 @@ async def test_runner_persists_workspace_and_tool_choice_state_across_sandbox_re
     )
 
     assert resumed.final_output == "done"
-    assert resumed_model.last_turn_args["model_settings"].tool_choice is None
+    assert resumed_model.calls[-1].model_settings.tool_choice is None
     assert any(
         isinstance(item, ToolCallOutputItem)
         and item.output == "persist me"
@@ -3214,8 +3214,8 @@ async def test_runner_restores_all_sandbox_agents_from_run_state_across_handoffs
     def approval_tool() -> str:
         return "approved"
 
-    triage_model = FakeModel()
-    worker_model = FakeModel()
+    triage_model = ScriptedModel()
+    worker_model = ScriptedModel()
     worker = SandboxAgent(
         name="worker",
         model=worker_model,
@@ -3230,7 +3230,7 @@ async def test_runner_restores_all_sandbox_agents_from_run_state_across_handoffs
         handoffs=[worker],
     )
     worker.handoffs = [triage]
-    triage_model.add_multiple_turn_outputs(
+    triage_model.extend(
         [
             [
                 get_function_tool_call(
@@ -3242,7 +3242,7 @@ async def test_runner_restores_all_sandbox_agents_from_run_state_across_handoffs
             [get_handoff_tool_call(worker)],
         ]
     )
-    worker_model.add_multiple_turn_outputs(
+    worker_model.extend(
         [
             [get_function_tool_call("approval_tool", json.dumps({}), call_id="call_approval")],
         ]
@@ -3264,8 +3264,8 @@ async def test_runner_restores_all_sandbox_agents_from_run_state_across_handoffs
     assert set(sessions_by_agent) == {triage.name, worker.name}
 
     state_json = state.to_json()
-    resumed_triage_model = FakeModel()
-    resumed_worker_model = FakeModel()
+    resumed_triage_model = ScriptedModel()
+    resumed_worker_model = ScriptedModel()
     resumed_worker = SandboxAgent(
         name="worker",
         model=resumed_worker_model,
@@ -3280,8 +3280,8 @@ async def test_runner_restores_all_sandbox_agents_from_run_state_across_handoffs
         handoffs=[resumed_worker],
     )
     resumed_worker.handoffs = [resumed_triage]
-    resumed_worker_model.add_multiple_turn_outputs([[get_handoff_tool_call(resumed_triage)]])
-    resumed_triage_model.add_multiple_turn_outputs(
+    resumed_worker_model.extend([[get_handoff_tool_call(resumed_triage)]])
+    resumed_triage_model.extend(
         [
             [
                 get_function_tool_call(
@@ -3320,8 +3320,8 @@ async def test_runner_serializes_unique_sandbox_resume_keys_for_duplicate_agent_
     def approval_tool() -> str:
         return "approved"
 
-    first_model = FakeModel()
-    second_model = FakeModel()
+    first_model = ScriptedModel()
+    second_model = ScriptedModel()
     first = SandboxAgent(
         name="sandbox",
         model=first_model,
@@ -3336,7 +3336,7 @@ async def test_runner_serializes_unique_sandbox_resume_keys_for_duplicate_agent_
     )
     first.handoffs = [second]
     second.handoffs = [first]
-    first_model.add_multiple_turn_outputs(
+    first_model.extend(
         [
             [
                 get_function_tool_call(
@@ -3356,7 +3356,7 @@ async def test_runner_serializes_unique_sandbox_resume_keys_for_duplicate_agent_
             [get_final_output_message("done")],
         ]
     )
-    second_model.add_multiple_turn_outputs(
+    second_model.extend(
         [
             [get_function_tool_call("approval_tool", json.dumps({}), call_id="call_approval")],
             [get_handoff_tool_call(first, call_id="handoff_to_first")],
@@ -3395,7 +3395,7 @@ def test_duplicate_name_sandbox_identity_map_uses_capability_and_manifest_config
     def _make_agent(readme: bytes, capability_text: str) -> SandboxAgent[None]:
         return SandboxAgent(
             name="sandbox",
-            model=FakeModel(),
+            model=ScriptedModel(),
             instructions="Base instructions.",
             default_manifest=Manifest(entries={"README.md": File(content=readme)}),
             capabilities=[_RecordingCapability(instruction_text=capability_text)],
@@ -3431,8 +3431,8 @@ def test_duplicate_name_sandbox_identity_map_uses_capability_and_manifest_config
 async def test_session_manager_reserves_current_duplicate_resume_key_for_current_agent() -> None:
     manifest = Manifest(entries={"README.md": File(content=b"duplicate resume")})
     client = _FakeClient(_FakeSession(manifest))
-    first = SandboxAgent(name="sandbox", model=FakeModel(), instructions="First.")
-    second = SandboxAgent(name="sandbox", model=FakeModel(), instructions="Second.")
+    first = SandboxAgent(name="sandbox", model=ScriptedModel(), instructions="First.")
+    second = SandboxAgent(name="sandbox", model=ScriptedModel(), instructions="Second.")
     first.handoffs = [second]
     second.handoffs = [first]
     first_session_state = client.serialize_session_state(
@@ -3478,9 +3478,9 @@ async def test_session_manager_reserves_current_duplicate_resume_key_for_current
 
 def test_session_manager_generates_collision_free_resume_keys_for_literal_suffix_names() -> None:
     client = _FakeClient(_FakeSession(Manifest()))
-    first = SandboxAgent(name="sandbox", model=FakeModel(), instructions="First.")
-    literal_suffix = SandboxAgent(name="sandbox#2", model=FakeModel(), instructions="Literal.")
-    second = SandboxAgent(name="sandbox", model=FakeModel(), instructions="Second.")
+    first = SandboxAgent(name="sandbox", model=ScriptedModel(), instructions="First.")
+    literal_suffix = SandboxAgent(name="sandbox#2", model=ScriptedModel(), instructions="Literal.")
+    second = SandboxAgent(name="sandbox", model=ScriptedModel(), instructions="Second.")
     first.handoffs = [literal_suffix, second]
     literal_suffix.handoffs = [first, second]
     second.handoffs = [first, literal_suffix]
@@ -3504,7 +3504,7 @@ def test_session_manager_generates_collision_free_resume_keys_for_literal_suffix
 async def test_session_manager_passes_concurrency_limits_from_run_config(
     source: str,
 ) -> None:
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     live_session = _FakeSession(Manifest())
     client = _FakeClient(live_session)
 
@@ -3558,7 +3558,7 @@ async def test_session_manager_passes_concurrency_limits_from_run_config(
 async def test_session_manager_passes_archive_limits_from_run_config(
     source: str,
 ) -> None:
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     live_session = _FakeSession(Manifest())
     client = _FakeClient(live_session)
     archive_limits = SandboxArchiveLimits(
@@ -3603,7 +3603,7 @@ async def test_session_manager_passes_archive_limits_from_run_config(
 
 @pytest.mark.asyncio
 async def test_session_manager_default_archive_limits_preserves_no_resource_limits() -> None:
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     live_session = _FakeSession(Manifest())
     client = _FakeClient(live_session)
     manager = SandboxRuntimeSessionManager(
@@ -3620,7 +3620,7 @@ async def test_session_manager_default_archive_limits_preserves_no_resource_limi
 
 @pytest.mark.asyncio
 async def test_session_manager_rejects_invalid_archive_limits() -> None:
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     client = _FakeClient(_FakeSession(Manifest()))
     limits = SandboxArchiveLimits(max_input_bytes=1)
     limits.max_input_bytes = 0
@@ -3660,7 +3660,7 @@ async def test_session_manager_rejects_invalid_concurrency_limits(
     limits: SandboxConcurrencyLimits,
     message: str,
 ) -> None:
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     client = _FakeClient(_FakeSession(Manifest()))
     manager = SandboxRuntimeSessionManager(
         starting_agent=agent,
@@ -3684,8 +3684,8 @@ async def test_session_manager_rejects_invalid_concurrency_limits(
 async def test_session_manager_preserves_untouched_run_state_sessions_on_cleanup() -> None:
     manifest = Manifest(entries={"README.md": File(content=b"duplicate resume")})
     client = _FakeClient(_FakeSession(manifest))
-    triage = SandboxAgent(name="triage", model=FakeModel(), instructions="Triage.")
-    worker = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    triage = SandboxAgent(name="triage", model=ScriptedModel(), instructions="Triage.")
+    worker = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     triage.handoffs = [worker]
     worker.handoffs = [triage]
     triage_session_state = client.serialize_session_state(
@@ -3745,7 +3745,7 @@ async def test_session_manager_reapplies_capability_manifest_mutations_on_resume
     capability = _ManifestMutationCapability()
     agent = SandboxAgent(
         name="worker",
-        model=FakeModel(),
+        model=ScriptedModel(),
         instructions="Worker.",
         default_manifest=Manifest(),
     )
@@ -3821,7 +3821,7 @@ async def test_session_manager_rebinds_persisted_path_grants_from_current_manife
     client = _FakeClient(_FakeSession(Manifest()))
     agent = SandboxAgent(
         name="worker",
-        model=FakeModel(),
+        model=ScriptedModel(),
         instructions="Worker.",
         default_manifest=trusted_manifest,
     )
@@ -3885,7 +3885,7 @@ async def test_session_manager_rebinds_redacted_external_mount_authority() -> No
     client.backend_id = "docker"
     agent = SandboxAgent(
         name="worker",
-        model=FakeModel(),
+        model=ScriptedModel(),
         instructions="Worker.",
         default_manifest=trusted_manifest,
     )
@@ -3955,7 +3955,7 @@ async def test_session_manager_rebinds_capability_host_path_grant_once(
     client = _FakeClient(_FakeSession(Manifest()))
     agent = SandboxAgent(
         name="worker",
-        model=FakeModel(),
+        model=ScriptedModel(),
         instructions="Worker.",
         default_manifest=Manifest(),
     )
@@ -4009,7 +4009,7 @@ async def test_session_manager_rejects_unmarked_serialized_host_path(
     tmp_path: Path,
 ) -> None:
     client = _FakeClient(_FakeSession(Manifest()))
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     serialized_state = TestSessionState(
         manifest=Manifest(
             extra_path_grants=(
@@ -4065,7 +4065,7 @@ async def test_session_manager_adds_run_as_user_on_resume() -> None:
     run_as = User(name="sandbox-user")
     agent = SandboxAgent(
         name="worker",
-        model=FakeModel(),
+        model=ScriptedModel(),
         instructions="Worker.",
         run_as=run_as,
     )
@@ -4111,7 +4111,7 @@ async def test_session_manager_applies_capability_manifest_mutations_with_sessio
     source: str,
 ) -> None:
     capability = _ManifestMutationCapability()
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     run_state: RunState[Any, Agent[Any]] | None = None
 
     if source == "live_session":
@@ -4163,7 +4163,7 @@ async def test_session_manager_applies_capability_manifest_mutations_with_sessio
 async def test_session_manager_starts_stopped_injected_session_with_manifest_mutation() -> None:
     live_session = _LiveSessionDeltaRecorder(Manifest())
     capability = _ManifestMutationCapability()
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     manager = SandboxRuntimeSessionManager(
         starting_agent=agent,
         sandbox_config=SandboxRunConfig(session=live_session),
@@ -4207,7 +4207,7 @@ async def test_session_manager_rejects_unsafe_stopped_injected_session_manifest(
         [_CredentialedMountCapability()] if authority_source == "capability" else []
     )
     live_session = _LiveSessionDeltaRecorder(initial_manifest)
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     manager = SandboxRuntimeSessionManager(
         starting_agent=agent,
         sandbox_config=SandboxRunConfig(session=live_session),
@@ -4250,7 +4250,7 @@ async def test_session_manager_redacts_capability_failure_with_external_mount_au
     client = _FakeClient(_FakeSession(Manifest()))
     agent = SandboxAgent(
         name="worker",
-        model=FakeModel(),
+        model=ScriptedModel(),
         instructions="Worker.",
         default_manifest=manifest if manifest_source == "agent_default" else None,
     )
@@ -4286,7 +4286,7 @@ async def test_session_manager_redacts_capability_failure_with_external_mount_au
 async def test_session_manager_redacts_authority_added_before_capability_failure() -> None:
     sentinel = "capability-added-mount-secret"
     client = _FakeClient(_FakeSession(Manifest()))
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     manager = SandboxRuntimeSessionManager(
         starting_agent=agent,
         sandbox_config=SandboxRunConfig(
@@ -4407,7 +4407,7 @@ async def test_session_manager_rejects_stopped_injected_session_host_mount_chang
         Manifest(extra_path_grants=current_grants),
     )
     capability = _ManifestPathGrantsCapability(processed_grants)
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     manager = SandboxRuntimeSessionManager(
         starting_agent=agent,
         sandbox_config=SandboxRunConfig(session=live_session),
@@ -4431,7 +4431,7 @@ async def test_session_manager_materializes_running_injected_session_manifest_mu
     live_session = _LiveSessionDeltaRecorder(Manifest())
     live_session._running = True
     capability = _ManifestMutationCapability()
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     manager = SandboxRuntimeSessionManager(
         starting_agent=agent,
         sandbox_config=SandboxRunConfig(session=live_session),
@@ -4464,7 +4464,7 @@ async def test_session_manager_validates_running_manifest_update_before_material
     inner._running = True
     live_session = SandboxSession(inner)
     capability = _ManifestMutationCapability()
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     manager = SandboxRuntimeSessionManager(
         starting_agent=agent,
         sandbox_config=SandboxRunConfig(session=live_session),
@@ -4488,7 +4488,7 @@ async def test_session_manager_retries_running_injected_session_delta_apply_afte
     live_session = _LiveSessionDeltaRecorder(Manifest(), fail_entry_batch_times=1)
     live_session._running = True
     capability = _ManifestMutationCapability()
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     manager = SandboxRuntimeSessionManager(
         starting_agent=agent,
         sandbox_config=SandboxRunConfig(session=live_session),
@@ -4528,7 +4528,7 @@ async def test_session_manager_retries_running_injected_session_delta_apply_afte
 async def test_session_manager_skips_rematerialization_for_unchanged_running_session() -> None:
     live_session = _LiveSessionDeltaRecorder(Manifest())
     live_session._running = True
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     manager = SandboxRuntimeSessionManager(
         starting_agent=agent,
         sandbox_config=SandboxRunConfig(session=live_session),
@@ -4557,7 +4557,7 @@ async def test_session_manager_skips_rematerialization_for_unchanged_running_ses
 async def test_session_manager_rejects_running_injected_session_account_mutation() -> None:
     live_session = _LiveSessionDeltaRecorder(Manifest())
     live_session._running = True
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     manager = SandboxRuntimeSessionManager(
         starting_agent=agent,
         sandbox_config=SandboxRunConfig(session=live_session),
@@ -4580,7 +4580,7 @@ async def test_session_manager_rejects_running_injected_session_account_mutation
 @pytest.mark.asyncio
 async def test_session_manager_preserves_existing_payload_when_no_sandbox_session_is_used() -> None:
     client = _FakeClient(_FakeSession(Manifest()))
-    agent = SandboxAgent(name="sandbox", model=FakeModel(), instructions="Base instructions.")
+    agent = SandboxAgent(name="sandbox", model=ScriptedModel(), instructions="Base instructions.")
     run_state: RunState[Any, Agent[Any]] = cast(
         RunState[Any, Agent[Any]],
         RunState(
@@ -4616,7 +4616,7 @@ async def test_session_manager_preserves_existing_payload_when_no_sandbox_sessio
 
 @pytest.mark.asyncio
 async def test_session_manager_omits_existing_payload_for_injected_live_session() -> None:
-    agent = SandboxAgent(name="sandbox", model=FakeModel(), instructions="Base instructions.")
+    agent = SandboxAgent(name="sandbox", model=ScriptedModel(), instructions="Base instructions.")
     live_session = _FakeSession(Manifest())
     run_state: RunState[Any, Agent[Any]] = cast(
         RunState[Any, Agent[Any]],
@@ -4657,9 +4657,9 @@ async def test_session_manager_omits_existing_payload_for_injected_live_session(
 async def test_session_manager_uses_run_state_starting_agent_for_duplicate_resume_keys() -> None:
     manifest = Manifest(entries={"README.md": File(content=b"duplicate resume")})
     client = _FakeClient(_FakeSession(manifest))
-    first = SandboxAgent(name="sandbox", model=FakeModel(), instructions="First.")
-    second = SandboxAgent(name="sandbox", model=FakeModel(), instructions="Second.")
-    approver = Agent(name="approver", model=FakeModel(), instructions="Approve.", handoffs=[])
+    first = SandboxAgent(name="sandbox", model=ScriptedModel(), instructions="First.")
+    second = SandboxAgent(name="sandbox", model=ScriptedModel(), instructions="Second.")
+    approver = Agent(name="approver", model=ScriptedModel(), instructions="Approve.", handoffs=[])
     approver.handoffs = [second, first]
     first.handoffs = [second]
     second.handoffs = [approver]
@@ -4712,7 +4712,7 @@ async def test_session_manager_restores_duplicate_name_sessions_when_only_sandbo
     def _make_agent(readme: bytes, capability_text: str) -> SandboxAgent[None]:
         return SandboxAgent(
             name="sandbox",
-            model=FakeModel(),
+            model=ScriptedModel(),
             instructions="Base instructions.",
             default_manifest=Manifest(entries={"README.md": File(content=readme)}),
             capabilities=[_RecordingCapability(instruction_text=capability_text)],
@@ -4793,8 +4793,8 @@ async def test_runner_restores_duplicate_name_sandbox_sessions_after_json_roundt
     def approval_tool() -> str:
         return "approved"
 
-    first_model = FakeModel()
-    second_model = FakeModel()
+    first_model = ScriptedModel()
+    second_model = ScriptedModel()
     first = SandboxAgent(
         name="sandbox",
         model=first_model,
@@ -4809,7 +4809,7 @@ async def test_runner_restores_duplicate_name_sandbox_sessions_after_json_roundt
     )
     first.handoffs = [second]
     second.handoffs = [first]
-    first_model.add_multiple_turn_outputs(
+    first_model.extend(
         [
             [
                 get_function_tool_call(
@@ -4821,7 +4821,7 @@ async def test_runner_restores_duplicate_name_sandbox_sessions_after_json_roundt
             [get_handoff_tool_call(second, call_id="handoff_to_second")],
         ]
     )
-    second_model.add_multiple_turn_outputs(
+    second_model.extend(
         [[get_function_tool_call("approval_tool", json.dumps({}), call_id="call_approval")]]
     )
 
@@ -4834,8 +4834,8 @@ async def test_runner_restores_duplicate_name_sandbox_sessions_after_json_roundt
     state = first_run.to_state()
     state_json = state.to_json()
 
-    resumed_first_model = FakeModel()
-    resumed_second_model = FakeModel()
+    resumed_first_model = ScriptedModel()
+    resumed_second_model = ScriptedModel()
     resumed_first = SandboxAgent(
         name="sandbox",
         model=resumed_first_model,
@@ -4850,10 +4850,10 @@ async def test_runner_restores_duplicate_name_sandbox_sessions_after_json_roundt
     )
     resumed_first.handoffs = [resumed_second]
     resumed_second.handoffs = [resumed_first]
-    resumed_second_model.add_multiple_turn_outputs(
+    resumed_second_model.extend(
         [[get_handoff_tool_call(resumed_first, call_id="handoff_to_first")]]
     )
-    resumed_first_model.add_multiple_turn_outputs(
+    resumed_first_model.extend(
         [
             [
                 get_function_tool_call(
@@ -4891,8 +4891,8 @@ async def test_runner_restores_legacy_current_sandbox_payload_after_json_roundtr
     def approval_tool() -> str:
         return "approved"
 
-    initial_model = FakeModel()
-    initial_model.add_multiple_turn_outputs(
+    initial_model = ScriptedModel()
+    initial_model.extend(
         [
             [
                 get_function_tool_call(
@@ -4925,8 +4925,8 @@ async def test_runner_restores_legacy_current_sandbox_payload_after_json_roundtr
         "sessions_by_agent": {str(id(agent)): session_state},
     }
 
-    resumed_model = FakeModel()
-    resumed_model.add_multiple_turn_outputs(
+    resumed_model = ScriptedModel()
+    resumed_model.extend(
         [
             [
                 get_function_tool_call(
@@ -5365,7 +5365,7 @@ async def test_sandbox_run_persists_only_new_session_input_items() -> None:
             }
         ]
     )
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     agent = SandboxAgent(
         name="sandbox",
         model=model,
@@ -5393,8 +5393,8 @@ async def test_sandbox_run_persists_only_new_session_input_items() -> None:
 
 @pytest.mark.asyncio
 async def test_runner_streamed_emits_public_agent_for_tool_and_reasoning_events() -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [
                 _get_reasoning_item(),
@@ -5449,7 +5449,7 @@ def test_capability_clone_deep_copies_nested_object_state() -> None:
 
 def test_capability_clone_preserves_session_field_identity() -> None:
     capability = Shell()
-    session = _FakeSession(Manifest())
+    session = scripted_sandbox_session()
     capability.bind(session)
 
     cloned = capability.clone()
@@ -5832,7 +5832,7 @@ async def test_prepare_agent_rechecks_session_liveness_before_reusing_cached_age
     client = _FakeClient(session)
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
     )
     runtime = SandboxRuntime(
@@ -5870,7 +5870,7 @@ async def test_prepare_agent_binds_run_as_to_cloned_capabilities() -> None:
     capability = _RecordingCapability()
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         capabilities=[capability],
         run_as="sandbox-user",
     )
@@ -5900,7 +5900,7 @@ async def test_prepare_agent_processes_context_with_bound_cached_capabilities() 
     client = _FakeClient(session)
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         capabilities=[_ProcessContextSessionCapability()],
     )
     runtime = SandboxRuntime(
@@ -5943,7 +5943,7 @@ async def test_prepare_agent_starts_new_live_session_even_when_backend_reports_r
     client = _FakeClient(session)
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
     )
     runtime = SandboxRuntime(
@@ -5968,7 +5968,7 @@ async def test_sandbox_runtime_emits_high_level_sdk_spans() -> None:
     client = _FakeClient(session)
     agent = SandboxAgent(
         name="sandbox",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
     )
     runtime = SandboxRuntime(
@@ -6034,8 +6034,8 @@ async def test_runner_uses_public_agent_for_non_function_tool_outputs() -> None:
         type="local_shell_call",
     )
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [local_shell_call],
             [get_final_output_message("done")],
@@ -6069,13 +6069,13 @@ async def test_runner_uses_public_agent_for_non_function_tool_outputs() -> None:
 
 @pytest.mark.asyncio
 async def test_sandbox_agent_as_tool_uses_runner_sandbox_prep() -> None:
-    child_model = FakeModel(initial_output=[get_final_output_message("child done")])
-    parent_model = FakeModel(
-        initial_output=[
-            get_function_tool_call("delegate_to_child", json.dumps({"input": "check sandbox"}))
+    child_model = ScriptedModel(steps=[[get_final_output_message("child done")]])
+    parent_model = ScriptedModel(
+        steps=[
+            [get_function_tool_call("delegate_to_child", json.dumps({"input": "check sandbox"}))]
         ]
     )
-    parent_model.set_next_output([get_final_output_message("parent done")])
+    parent_model.enqueue([get_final_output_message("parent done")])
 
     capability = _RecordingCapability(instruction_text="Use the sandbox carefully.")
     manifest = Manifest(entries={"README.md": File(content=b"Use repo-safe commands only.")})
@@ -6104,16 +6104,16 @@ async def test_sandbox_agent_as_tool_uses_runner_sandbox_prep() -> None:
 
     assert result.final_output == "parent done"
     assert capability.bound_session is None
-    assert child_model.first_turn_args is not None
-    child_input = child_model.first_turn_args["input"]
+    assert bool(child_model.calls)
+    child_input = child_model.calls[0].input
     assert isinstance(child_input, list)
     assert _extract_user_text(child_input[0]) == "check sandbox"
 
 
 @pytest.mark.asyncio
 async def test_runner_reapplies_sandbox_prep_on_handoff() -> None:
-    triage_model = FakeModel()
-    worker_model = FakeModel(initial_output=[get_final_output_message("done")])
+    triage_model = ScriptedModel()
+    worker_model = ScriptedModel(steps=[[get_final_output_message("done")]])
     manifest = Manifest(entries={"README.md": File(content=b"Shared repo instructions.")})
     session = _FakeSession(manifest)
     client = _FakeClient(session)
@@ -6135,7 +6135,7 @@ async def test_runner_reapplies_sandbox_prep_on_handoff() -> None:
         capabilities=[capability_one],
         handoffs=[worker],
     )
-    triage_model.turn_outputs = [[get_handoff_tool_call(worker)]]
+    triage_model.enqueue([get_handoff_tool_call(worker)])
 
     result = await Runner.run(
         triage,
@@ -6146,8 +6146,8 @@ async def test_runner_reapplies_sandbox_prep_on_handoff() -> None:
     assert result.final_output == "done"
     assert capability_one.bound_session is None
     assert capability_two.bound_session is None
-    assert worker_model.first_turn_args is not None
-    assert worker_model.first_turn_args["system_instructions"] == (
+    assert bool(worker_model.calls)
+    assert worker_model.calls[0].system_instructions == (
         f"{get_default_sandbox_instructions()}\n\n"
         "# Agent instructions\n\n"
         "Worker instructions.\n\n"
@@ -6163,12 +6163,12 @@ async def test_prepare_agent_uses_active_sandbox_agent_memory_capability_for_han
     client = _FakeClient(session)
     triage = SandboxAgent(
         name="triage",
-        model=FakeModel(),
+        model=ScriptedModel(),
         capabilities=[Memory(), Filesystem(), Shell()],
     )
     reviewer = SandboxAgent(
         name="reviewer",
-        model=FakeModel(),
+        model=ScriptedModel(),
         capabilities=[Memory(generate=None), Filesystem(), Shell()],
     )
     runtime = SandboxRuntime(
@@ -6201,11 +6201,11 @@ async def test_prepare_agent_enables_memory_when_handoff_target_adds_capability(
     client = _FakeClient(session)
     triage = SandboxAgent(
         name="triage",
-        model=FakeModel(),
+        model=ScriptedModel(),
     )
     worker = SandboxAgent(
         name="worker",
-        model=FakeModel(),
+        model=ScriptedModel(),
         capabilities=[Memory(), Filesystem(), Shell()],
     )
     runtime = SandboxRuntime(
@@ -6234,7 +6234,7 @@ async def test_prepare_agent_enables_memory_when_handoff_target_adds_capability(
 
 @pytest.mark.asyncio
 async def test_runner_restores_sandbox_from_run_state() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
 
     @function_tool(name_override="approval_tool", needs_approval=True)
     def approval_tool() -> str:
@@ -6250,7 +6250,7 @@ async def test_runner_restores_sandbox_from_run_state() -> None:
         tools=[approval_tool],
         default_manifest=manifest,
     )
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("approval_tool", json.dumps({}), call_id="call_resume")],
             [get_final_output_message("done")],
@@ -6280,7 +6280,7 @@ async def test_runner_restores_sandbox_from_run_state() -> None:
 
 @pytest.mark.asyncio
 async def test_runner_rejects_concurrent_reuse_of_same_sandbox_agent() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     start_gate = asyncio.Event()
     session = _FakeSession(Manifest(), start_gate=start_gate)
     client = _FakeClient(session)
@@ -6322,8 +6322,8 @@ async def test_runner_isolates_shared_capabilities_per_run() -> None:
     )
     client_one = _FakeClient(session_one)
     client_two = _FakeClient(session_two)
-    model_one = FakeModel(initial_output=[get_final_output_message("done one")])
-    model_two = FakeModel(initial_output=[get_final_output_message("done two")])
+    model_one = ScriptedModel(steps=[[get_final_output_message("done one")]])
+    model_two = ScriptedModel(steps=[[get_final_output_message("done two")]])
     agent_one = SandboxAgent(
         name="sandbox-one",
         model=model_one,
@@ -6352,9 +6352,9 @@ async def test_runner_isolates_shared_capabilities_per_run() -> None:
 
     assert first_result.final_output == "done one"
     assert second_result.final_output == "done two"
-    assert model_one.first_turn_args is not None
-    assert model_two.first_turn_args is not None
-    assert model_one.first_turn_args["system_instructions"] == (
+    assert bool(model_one.calls)
+    assert bool(model_two.calls)
+    assert model_one.calls[0].system_instructions == (
         f"{get_default_sandbox_instructions()}\n\n"
         "# Agent instructions\n\n"
         "Base instructions.\n\n"
@@ -6362,7 +6362,7 @@ async def test_runner_isolates_shared_capabilities_per_run() -> None:
         "Session one instructions.\n\n"
         f"{runtime_agent_preparation_module._filesystem_instructions(session_one.state.manifest)}"
     )
-    assert model_two.first_turn_args["system_instructions"] == (
+    assert model_two.calls[0].system_instructions == (
         f"{get_default_sandbox_instructions()}\n\n"
         "# Agent instructions\n\n"
         "Base instructions.\n\n"
@@ -6375,7 +6375,7 @@ async def test_runner_isolates_shared_capabilities_per_run() -> None:
 
 @pytest.mark.asyncio
 async def test_runner_deep_clones_capability_runtime_state() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     session = _FakeSession(Manifest(entries={"README.md": File(content=b"hello")}))
     client = _FakeClient(session)
 
@@ -6406,7 +6406,7 @@ async def test_runner_deep_clones_capability_runtime_state() -> None:
 
 @pytest.mark.asyncio
 async def test_runner_keeps_public_agent_identity_for_hooks_and_streaming() -> None:
-    model = FakeModel(initial_output=[get_final_output_message("done")])
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
     session = _FakeSession(Manifest())
     client = _FakeClient(session)
     run_hooks = _RecordingRunHooks()
@@ -6437,7 +6437,7 @@ async def test_runner_keeps_public_agent_identity_for_hooks_and_streaming() -> N
     assert agent_hooks.llm_ended_agents == [agent]
     assert all(item.agent is agent for item in result.new_items)
 
-    streamed_model = FakeModel(initial_output=[get_final_output_message("streamed done")])
+    streamed_model = ScriptedModel(steps=[[get_final_output_message("streamed done")]])
     streamed_session = _FakeSession(Manifest())
     streamed_client = _FakeClient(streamed_session)
     streamed_run_hooks = _RecordingRunHooks()

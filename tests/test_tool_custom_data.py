@@ -34,9 +34,9 @@ from agents.run_internal.tool_actions import (
     ComputerAction,
     CustomToolAction,
 )
+from agents.testing import ScriptedModel
 from agents.tool_context import ToolContext
 
-from .fake_model import FakeModel
 from .mcp.helpers import FakeMCPServer
 from .test_apply_patch_tool import DummyApplyPatchCall
 from .test_responses import get_function_tool_call, get_text_message
@@ -56,8 +56,8 @@ async def test_function_tool_custom_data_is_attached_but_not_replayed() -> None:
     def get_data() -> str:
         return "tool_result"
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_text_message("call tool"), get_function_tool_call("get_data", "{}")],
             [get_text_message("done")],
@@ -75,8 +75,7 @@ async def test_function_tool_custom_data_is_attached_but_not_replayed() -> None:
     assert "renderer" not in replay_payload
     assert "renderer" not in cast(dict[str, Any], tool_output.raw_item)
     assert all(
-        not (isinstance(item, dict) and "custom_data" in item)
-        for item in model.last_turn_args["input"]
+        not (isinstance(item, dict) and "custom_data" in item) for item in model.calls[-1].input
     )
 
 
@@ -86,10 +85,8 @@ async def test_function_tool_custom_data_rejects_non_json_compatible_data() -> N
     def get_data() -> str:
         return "tool_result"
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
-        [[get_text_message("call tool"), get_function_tool_call("get_data", "{}")]]
-    )
+    model = ScriptedModel()
+    model.extend([[get_text_message("call tool"), get_function_tool_call("get_data", "{}")]])
     agent = Agent(name="test", model=model, tools=[get_data])
 
     with pytest.raises(UserError, match="custom_data_extractor must return JSON-compatible data"):
@@ -105,10 +102,8 @@ async def test_function_tool_custom_data_rejects_non_finite_floats(
     def get_data() -> str:
         return "tool_result"
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
-        [[get_text_message("call tool"), get_function_tool_call("get_data", "{}")]]
-    )
+    model = ScriptedModel()
+    model.extend([[get_text_message("call tool"), get_function_tool_call("get_data", "{}")]])
     agent = Agent(name="test", model=model, tools=[get_data])
 
     with pytest.raises(UserError, match="custom_data_extractor must return JSON-compatible data"):
@@ -124,8 +119,8 @@ async def test_mcp_custom_data_extractor_maps_result_meta_to_tool_output_item() 
     server.add_tool("meta_tool", {})
     server._response_meta = {"chart": {"type": "line"}}
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_text_message("call tool"), get_function_tool_call("meta_tool", "{}")],
             [get_text_message("done")],

@@ -10,7 +10,7 @@ from openai.types.responses import ResponseCompletedEvent
 from agents import Agent, GuardrailFunctionOutput, InputGuardrail, RunContextWrapper, Runner
 from agents.exceptions import InputGuardrailTripwireTriggered
 from agents.items import TResponseInputItem
-from tests.fake_model import FakeModel
+from agents.testing import ScriptedModel
 from tests.test_responses import get_text_message
 from tests.testing_processor import fetch_events, fetch_ordered_spans
 
@@ -49,8 +49,8 @@ async def test_input_guardrail_results_follow_completion_order():
             output_info={"delay": FAST_GUARDRAIL_DELAY}, tripwire_triggered=False
         )
 
-    model = FakeModel()
-    model.set_next_output([get_text_message("Final response")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("Final response")])
 
     agent = Agent(
         name="TimingAgentOrder",
@@ -81,8 +81,8 @@ async def test_run_streamed_input_guardrail_timing_is_consistent(guardrail_delay
     """
 
     # Arrange: Agent with a single text output and a delayed input guardrail
-    model = FakeModel()
-    model.set_next_output([get_text_message("Final response")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("Final response")])
 
     agent = Agent(
         name="TimingAgent",
@@ -122,8 +122,8 @@ async def test_run_streamed_input_guardrail_sequences_match_between_fast_and_slo
     """Run twice with fast vs slow input guardrail and compare event sequences exactly."""
 
     async def run_once(delay: float) -> list[str]:
-        model = FakeModel()
-        model.set_next_output([get_text_message("Final response")])
+        model = ScriptedModel()
+        model.enqueue([get_text_message("Final response")])
         agent = Agent(
             name="TimingAgent",
             model=model,
@@ -148,8 +148,8 @@ async def test_run_streamed_input_guardrail_sequences_match_between_fast_and_slo
 async def test_run_streamed_input_guardrail_tripwire_raises(guardrail_delay: float):
     """Guardrail tripwire must raise from stream_events regardless of timing."""
 
-    model = FakeModel()
-    model.set_next_output([get_text_message("Final response")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("Final response")])
 
     agent = Agent(
         name="TimingAgentTrip",
@@ -173,11 +173,11 @@ async def test_run_streamed_input_guardrail_tripwire_raises(guardrail_delay: flo
     )
 
 
-class SlowCompleteFakeModel(FakeModel):
-    """A FakeModel that delays just before emitting ResponseCompletedEvent in streaming."""
+class SlowCompleteScriptedModel(ScriptedModel):
+    """A ScriptedModel that delays just before emitting ResponseCompletedEvent in streaming."""
 
-    def __init__(self, delay_seconds: float, tracing_enabled: bool = True):
-        super().__init__(tracing_enabled=tracing_enabled)
+    def __init__(self, delay_seconds: float, emit_traces: bool = True):
+        super().__init__(emit_traces=emit_traces)
         self._delay_seconds = delay_seconds
 
     async def stream_response(self, *args, **kwargs):
@@ -206,8 +206,8 @@ def _iso(s: str | None) -> datetime:
 async def test_parent_span_and_trace_finish_after_slow_input_guardrail():
     """Agent span and trace finish after guardrail when guardrail completes last."""
 
-    model = FakeModel(tracing_enabled=True)
-    model.set_next_output([get_text_message("Final response")])
+    model = ScriptedModel(emit_traces=True)
+    model.enqueue([get_text_message("Final response")])
     agent = Agent(
         name="TimingAgentTrace",
         model=model,
@@ -240,8 +240,8 @@ async def test_parent_span_and_trace_finish_after_slow_input_guardrail():
 async def test_parent_span_and_trace_finish_after_slow_model():
     """Agent span and trace finish after model when model completes last."""
 
-    model = SlowCompleteFakeModel(delay_seconds=SLOW_GUARDRAIL_DELAY, tracing_enabled=True)
-    model.set_next_output([get_text_message("Final response")])
+    model = SlowCompleteScriptedModel(delay_seconds=SLOW_GUARDRAIL_DELAY, emit_traces=True)
+    model.enqueue([get_text_message("Final response")])
     agent = Agent(
         name="TimingAgentTrace",
         model=model,

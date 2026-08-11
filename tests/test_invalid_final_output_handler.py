@@ -27,8 +27,8 @@ from agents import (
 )
 from agents.items import TResponseInputItem, TResponseOutputItem
 from agents.stream_events import RunItemStreamEvent
+from agents.testing import ScriptedModel
 
-from .fake_model import FakeModel
 from .test_responses import get_function_tool_call, get_text_message
 from .utils.simple_session import SimpleListSession
 
@@ -62,7 +62,7 @@ def _message_texts(items: list[TResponseInputItem]) -> list[str]:
 
 @pytest.mark.asyncio
 async def test_invalid_final_output_raises_without_handler() -> None:
-    model = FakeModel(initial_output=[get_text_message("not valid json")])
+    model = ScriptedModel(steps=[[get_text_message("not valid json")]])
     agent = Agent(name="test", model=model, output_type=FinalOutput)
 
     with pytest.raises(ModelBehaviorError, match="Invalid JSON"):
@@ -71,7 +71,7 @@ async def test_invalid_final_output_raises_without_handler() -> None:
 
 @pytest.mark.asyncio
 async def test_invalid_final_output_handler_returns_validated_fallback() -> None:
-    model = FakeModel(initial_output=[get_text_message("not valid json")])
+    model = ScriptedModel(steps=[[get_text_message("not valid json")]])
     agent = Agent(name="test", model=model, output_type=FinalOutput)
 
     def handler(data: RunErrorHandlerInput[None]) -> FinalOutput:
@@ -96,7 +96,7 @@ async def test_invalid_final_output_handler_returns_validated_fallback() -> None
 
 @pytest.mark.asyncio
 async def test_invalid_final_output_handler_can_skip_fallback_history() -> None:
-    model = FakeModel(initial_output=[get_text_message("not valid json")])
+    model = ScriptedModel(steps=[[get_text_message("not valid json")]])
     agent = Agent(name="test", model=model, output_type=FinalOutput)
 
     result = await Runner.run(
@@ -119,7 +119,7 @@ async def test_invalid_final_output_handler_rejects_invalid_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
-    model = FakeModel(initial_output=[get_text_message("not valid json")])
+    model = ScriptedModel(steps=[[get_text_message("not valid json")]])
     agent = Agent(name="test", model=model, output_type=FinalOutput)
 
     with pytest.warns(UserWarning, match="Pydantic serializer warnings"):
@@ -133,7 +133,7 @@ async def test_invalid_final_output_handler_rejects_invalid_fallback(
 
 @pytest.mark.asyncio
 async def test_invalid_final_output_handler_can_decline_recovery() -> None:
-    model = FakeModel(initial_output=[get_text_message("not valid json")])
+    model = ScriptedModel(steps=[[get_text_message("not valid json")]])
     agent = Agent(name="test", model=model, output_type=FinalOutput)
 
     with pytest.raises(ModelBehaviorError, match="Invalid JSON"):
@@ -146,7 +146,7 @@ async def test_invalid_final_output_handler_can_decline_recovery() -> None:
 
 @pytest.mark.asyncio
 async def test_invalid_final_output_handler_does_not_catch_other_model_behavior_errors() -> None:
-    model = FakeModel(initial_output=[get_function_tool_call("missing_tool")])
+    model = ScriptedModel(steps=[[get_function_tool_call("missing_tool")]])
     agent = Agent(name="test", model=model, output_type=FinalOutput)
     handler_called = False
 
@@ -170,8 +170,8 @@ async def test_invalid_final_output_handler_does_not_catch_other_model_behavior_
 async def test_empty_structured_output_handler_avoids_another_model_turn(
     invalid_output: list[TResponseOutputItem],
 ) -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs([invalid_output, [get_text_message('{"summary":"unused"}')]])
+    model = ScriptedModel()
+    model.extend([invalid_output, [get_text_message('{"summary":"unused"}')]])
     agent = Agent(name="test", model=model, output_type=FinalOutput)
 
     def handler(data: RunErrorHandlerInput[None]) -> FinalOutput:
@@ -188,7 +188,7 @@ async def test_empty_structured_output_handler_avoids_another_model_turn(
     )
 
     assert result.final_output == FinalOutput(summary="safe fallback")
-    assert len(model.turn_outputs) == 1
+    assert model.remaining_steps == 1
 
 
 @pytest.mark.asyncio
@@ -199,19 +199,19 @@ async def test_empty_structured_output_handler_avoids_another_model_turn(
 async def test_empty_structured_output_without_fallback_keeps_existing_next_turn_behavior(
     error_handlers: RunErrorHandlers[None] | None,
 ) -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs([[], [get_text_message('{"summary":"second turn"}')]])
+    model = ScriptedModel()
+    model.extend([[], [get_text_message('{"summary":"second turn"}')]])
     agent = Agent(name="test", model=model, output_type=FinalOutput)
 
     result = await Runner.run(agent, input="user_message", error_handlers=error_handlers)
 
     assert result.final_output == FinalOutput(summary="second turn")
-    assert not model.turn_outputs
+    assert model.remaining_steps == 0
 
 
 @pytest.mark.asyncio
 async def test_streamed_invalid_final_output_emits_exact_fallback_item() -> None:
-    model = FakeModel(initial_output=[get_text_message("not valid json")])
+    model = ScriptedModel(steps=[[get_text_message("not valid json")]])
     agent = Agent(name="test", model=model, output_type=FinalOutput)
     session = SimpleListSession()
 
@@ -246,8 +246,8 @@ async def test_streamed_invalid_final_output_emits_exact_fallback_item() -> None
 
 @pytest.mark.asyncio
 async def test_streamed_empty_structured_output_handler_avoids_another_model_turn() -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs([[], [get_text_message('{"summary":"unused"}')]])
+    model = ScriptedModel()
+    model.extend([[], [get_text_message('{"summary":"unused"}')]])
     agent = Agent(name="test", model=model, output_type=FinalOutput)
 
     result = Runner.run_streamed(
@@ -258,7 +258,7 @@ async def test_streamed_empty_structured_output_handler_avoids_another_model_tur
     events = [event async for event in result.stream_events()]
 
     assert result.final_output == FinalOutput(summary="safe fallback")
-    assert len(model.turn_outputs) == 1
+    assert model.remaining_steps == 1
     assert any(
         isinstance(event, RunItemStreamEvent)
         and event.name == "message_output_created"
@@ -270,7 +270,7 @@ async def test_streamed_empty_structured_output_handler_avoids_another_model_tur
 
 @pytest.mark.asyncio
 async def test_invalid_final_output_fallback_runs_hooks_and_output_guardrails() -> None:
-    model = FakeModel(initial_output=[get_text_message("not valid json")])
+    model = ScriptedModel(steps=[[get_text_message("not valid json")]])
     hooks = RecordingRunHooks()
     guarded_outputs: list[Any] = []
 
@@ -315,8 +315,8 @@ async def test_invalid_final_output_fallback_does_not_retry_or_replay_tools(
         side_effects.append(value)
         return f"recorded:{value}"
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [
                 get_function_tool_call(
@@ -373,4 +373,4 @@ async def test_invalid_final_output_fallback_does_not_retry_or_replay_tools(
 
     assert final_output == FinalOutput(summary="safe fallback")
     assert side_effects == ["once"]
-    assert len(model.turn_outputs) == 2
+    assert model.remaining_steps == 2

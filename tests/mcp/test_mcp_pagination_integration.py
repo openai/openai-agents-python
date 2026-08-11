@@ -8,8 +8,8 @@ import pytest
 from agents import Agent, Runner
 from agents.mcp import MCPServerStdio
 from agents.mcp._compat import MCP_V2, result_next_cursor
+from agents.testing import ScriptedModel
 
-from ..fake_model import FakeModel
 from ..test_responses import get_function_tool_call, get_text_message
 
 PAGINATED_SERVER_PATH = Path(__file__).parent / "servers" / "paginated.py"
@@ -50,8 +50,8 @@ async def test_stdio_server_auto_paginates_tools_and_prompts():
 
 @pytest.mark.asyncio
 async def test_agent_calls_tool_from_second_stdio_page():
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_function_tool_call("second_page_tool", "{}")],
             [get_text_message("done")],

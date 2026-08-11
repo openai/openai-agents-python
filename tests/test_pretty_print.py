@@ -6,20 +6,20 @@ from pydantic import BaseModel
 
 from agents import Agent, RunContextWrapper, RunErrorDetails, Runner, RunResult
 from agents.agent_output import _WRAPPER_DICT_KEY
+from agents.testing import ScriptedModel
 from agents.util._pretty_print import (
     pretty_print_result,
     pretty_print_run_error_details,
     pretty_print_run_result_streaming,
 )
-from tests.fake_model import FakeModel
 
 from .test_responses import get_final_output_message, get_text_message
 
 
 @pytest.mark.asyncio
 async def test_pretty_result():
-    model = FakeModel()
-    model.set_next_output([get_text_message("Hi there")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("Hi there")])
 
     agent = Agent(name="test_agent", model=model)
     result = await Runner.run(agent, input="Hello")
@@ -92,8 +92,8 @@ RunErrorDetails:
 
 @pytest.mark.asyncio
 async def test_pretty_run_result_streaming():
-    model = FakeModel()
-    model.set_next_output([get_text_message("Hi there")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("Hi there")])
 
     agent = Agent(name="test_agent", model=model)
     result = Runner.run_streamed(agent, input="Hello")
@@ -122,8 +122,8 @@ class Foo(BaseModel):
 
 @pytest.mark.asyncio
 async def test_pretty_run_result_structured_output():
-    model = FakeModel()
-    model.set_next_output(
+    model = ScriptedModel()
+    model.enqueue(
         [
             get_text_message("Test"),
             get_final_output_message(Foo(bar="Hi there").model_dump_json()),
@@ -150,8 +150,8 @@ RunResult:
 
 @pytest.mark.asyncio
 async def test_pretty_run_result_streaming_structured_output():
-    model = FakeModel()
-    model.set_next_output(
+    model = ScriptedModel()
+    model.enqueue(
         [
             get_text_message("Test"),
             get_final_output_message(Foo(bar="Hi there").model_dump_json()),
@@ -184,8 +184,8 @@ RunResultStreaming:
 
 @pytest.mark.asyncio
 async def test_pretty_run_result_list_structured_output():
-    model = FakeModel()
-    model.set_next_output(
+    model = ScriptedModel()
+    model.enqueue(
         [
             get_text_message("Test"),
             get_final_output_message(
@@ -219,8 +219,8 @@ RunResult:
 
 @pytest.mark.asyncio
 async def test_pretty_run_result_streaming_list_structured_output():
-    model = FakeModel()
-    model.set_next_output(
+    model = ScriptedModel()
+    model.enqueue(
         [
             get_text_message("Test"),
             get_final_output_message(

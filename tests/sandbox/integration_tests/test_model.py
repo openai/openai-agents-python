@@ -5,19 +5,19 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from agents.items import TResponseOutputItem
-from tests.fake_model import FakeModel
+from agents.testing import ScriptedModel
 from tests.test_responses import get_final_output_message, get_function_tool_call
 
 __test__ = False
 
 
-class TestModel(FakeModel):
+class TestModel(ScriptedModel):
     """Reusable queued model for sandbox integration tests."""
 
     __test__ = False
 
     def queue_turn(self, *items: TResponseOutputItem) -> None:
-        self.set_next_output(list(items))
+        self.enqueue(list(items))
 
     def queue_function_call(
         self,

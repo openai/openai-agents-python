@@ -19,7 +19,7 @@ pytest.importorskip("aiosqlite")  # Skip tests if aiosqlite is not installed
 from agents import Agent, Runner, TResponseInputItem
 from agents.extensions.memory import AsyncSQLiteSession
 from agents.memory import SessionSettings
-from tests.fake_model import FakeModel
+from agents.testing import ScriptedModel
 from tests.test_responses import get_text_message
 
 pytestmark = pytest.mark.asyncio
@@ -33,8 +33,8 @@ def _assert_cancel_message(exc: asyncio.CancelledError, expected: str) -> None:
 
 @pytest.fixture
 def agent() -> Agent:
-    """Fixture for a basic agent with a fake model."""
-    return Agent(name="test", model=FakeModel())
+    """Fixture for a basic agent with a scripted model."""
+    return Agent(name="test", model=ScriptedModel())
 
 
 def _item_ids(items: Sequence[TResponseInputItem]) -> list[str]:
@@ -267,9 +267,9 @@ async def test_async_sqlite_session_runner_integration(agent: Agent):
         db_path = Path(temp_dir) / "async_runner_integration.db"
         session = AsyncSQLiteSession("runner_integration_test", db_path)
 
-        assert isinstance(agent.model, FakeModel)
+        assert isinstance(agent.model, ScriptedModel)
 
-        agent.model.set_next_output([get_text_message("San Francisco")])
+        agent.model.enqueue([get_text_message("San Francisco")])
         result1 = await Runner.run(
             agent,
             "What city is the Golden Gate Bridge in?",
@@ -277,11 +277,11 @@ async def test_async_sqlite_session_runner_integration(agent: Agent):
         )
         assert result1.final_output == "San Francisco"
 
-        agent.model.set_next_output([get_text_message("California")])
+        agent.model.enqueue([get_text_message("California")])
         result2 = await Runner.run(agent, "What state is it in?", session=session)
         assert result2.final_output == "California"
 
-        last_input = agent.model.last_turn_args["input"]
+        last_input = agent.model.calls[-1].input
         assert isinstance(last_input, list)
         assert len(last_input) > 1
         assert any("Golden Gate Bridge" in str(item.get("content", "")) for item in last_input)
@@ -296,14 +296,14 @@ async def test_async_sqlite_session_session_isolation(agent: Agent):
         session1 = AsyncSQLiteSession("session_1", db_path)
         session2 = AsyncSQLiteSession("session_2", db_path)
 
-        assert isinstance(agent.model, FakeModel)
-        agent.model.set_next_output([get_text_message("I like cats.")])
+        assert isinstance(agent.model, ScriptedModel)
+        agent.model.enqueue([get_text_message("I like cats.")])
         await Runner.run(agent, "I like cats.", session=session1)
 
-        agent.model.set_next_output([get_text_message("I like dogs.")])
+        agent.model.enqueue([get_text_message("I like dogs.")])
         await Runner.run(agent, "I like dogs.", session=session2)
 
-        agent.model.set_next_output([get_text_message("You said you like cats.")])
+        agent.model.enqueue([get_text_message("You said you like cats.")])
         result = await Runner.run(agent, "What animal did I say I like?", session=session1)
         assert "cats" in result.final_output.lower()
         assert "dogs" not in result.final_output.lower()

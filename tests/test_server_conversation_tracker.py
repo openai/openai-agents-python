@@ -28,9 +28,10 @@ from agents.run_internal.run_loop import get_new_response, run_single_turn_strea
 from agents.run_internal.run_steps import NextStepInterruption
 from agents.run_internal.tool_use_tracker import AgentToolUseTracker
 from agents.stream_events import RunItemStreamEvent
+from agents.testing import ScriptedModel
 from agents.usage import Usage
+from tests.model_test_helpers import get_exact_output_stream_step
 
-from .fake_model import FakeModel
 from .test_responses import get_text_message
 
 
@@ -815,8 +816,8 @@ def test_prepare_input_does_not_resend_reasoning_item_after_marking_omitted_id_a
 
 @pytest.mark.asyncio
 async def test_get_new_response_marks_filtered_input_as_sent() -> None:
-    model = FakeModel()
-    model.set_next_output([get_text_message("ok")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("ok")])
     agent = Agent(name="test", model=model)
     tracker = OpenAIServerConversationTracker(conversation_id="conv4", previous_response_id=None)
     context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
@@ -848,15 +849,15 @@ async def test_get_new_response_marks_filtered_input_as_sent() -> None:
         None,
     )
 
-    assert model.last_turn_args["input"] == [item_1]
+    assert model.calls[-1].input == [item_1]
     assert any(item is item_1 for item in tracker.sent_items)
     assert all(item is not item_2 for item in tracker.sent_items)
 
 
 @pytest.mark.asyncio
 async def test_run_single_turn_streamed_marks_filtered_input_as_sent() -> None:
-    model = FakeModel()
-    model.set_next_output([get_text_message("ok")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("ok")])
     agent = Agent(name="test", model=model)
     tracker = OpenAIServerConversationTracker(conversation_id="conv6", previous_response_id=None)
     context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
@@ -903,13 +904,13 @@ async def test_run_single_turn_streamed_marks_filtered_input_as_sent() -> None:
         server_conversation_tracker=tracker,
     )
 
-    assert model.last_turn_args["input"] == [item_1]
+    assert model.calls[-1].input == [item_1]
     assert tracker.remaining_initial_input == [item_2]
 
 
 @pytest.mark.asyncio
 async def test_run_single_turn_streamed_seeds_hosted_mcp_metadata_from_pre_step_items() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     mcp_call = McpCall(
         id="mcp_call_1",
         arguments="{}",
@@ -918,7 +919,7 @@ async def test_run_single_turn_streamed_seeds_hosted_mcp_metadata_from_pre_step_
         type="mcp_call",
         status="completed",
     )
-    model.set_next_output([mcp_call])
+    model.enqueue(get_exact_output_stream_step([mcp_call]))
     agent = Agent(name="test", model=model)
     hosted_tool = HostedMCPTool(
         tool_config=cast(
@@ -977,7 +978,7 @@ async def test_run_single_turn_streamed_seeds_hosted_mcp_metadata_from_pre_step_
         all_tools=[hosted_tool],
     )
 
-    assert model.last_turn_args["input"] == [item_1]
+    assert model.calls[-1].input == [item_1]
 
     tool_call_events: list[ToolCallItem] = []
     while not streamed_result._event_queue.empty():

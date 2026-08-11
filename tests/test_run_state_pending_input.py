@@ -19,10 +19,11 @@ from agents.run_context import RunContextWrapper
 from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
 from agents.run_internal.run_steps import NextStepInterruption, NextStepRunAgain
 from agents.run_state import CURRENT_SCHEMA_VERSION, RunState
+from agents.testing import ScriptedModel
 from agents.tool import Tool
 from agents.usage import Usage
 
-from .fake_model import FakeModel
+from .model_test_helpers import get_exact_output_stream_step
 from .test_computer_tool_lifecycle import FakeComputer
 from .test_responses import get_function_tool_call, get_text_message
 from .utils.simple_session import SimpleListSession
@@ -53,7 +54,7 @@ async def _make_after_turn_state(
     *,
     session: SimpleListSession | None = None,
     auto_previous_response_id: bool = False,
-) -> tuple[FakeModel, Agent[Any], RunState[Any], list[str]]:
+) -> tuple[ScriptedModel, Agent[Any], RunState[Any], list[str]]:
     calls: list[str] = []
 
     @function_tool(name_override="record_destination")
@@ -61,8 +62,8 @@ async def _make_after_turn_state(
         calls.append(destination)
         return f"recorded:{destination}"
 
-    model = FakeModel()
-    model.set_next_output(
+    model = ScriptedModel()
+    model.enqueue(
         [
             get_function_tool_call(
                 "record_destination",
@@ -136,13 +137,13 @@ async def test_after_turn_resume_admits_input_after_tool_output_exactly_once() -
     session = SimpleListSession()
     model, agent, state, calls = await _make_after_turn_state(session=session)
     state.add_input("Change the destination to Tokyo")
-    model.set_next_output([get_text_message("Updated")])
+    model.enqueue([get_text_message("Updated")])
 
     result = await Runner.run(agent, state, session=session)
 
     assert result.final_output == "Updated"
     assert calls == ["Paris"]
-    model_input = cast(list[TResponseInputItem], model.last_turn_args["input"])
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
     assert [_item_type(item) for item in model_input] == [
         "user",
         "function_call",
@@ -171,7 +172,7 @@ async def test_after_turn_resume_admits_input_after_tool_output_exactly_once() -
 async def test_streamed_resume_matches_pending_input_ordering() -> None:
     model, agent, state, calls = await _make_after_turn_state()
     state.add_input("Change the destination to Tokyo")
-    model.set_next_output([get_text_message("Updated")])
+    model.enqueue([get_text_message("Updated")])
 
     result = Runner.run_streamed(agent, state)
     async for _ in result.stream_events():
@@ -179,7 +180,7 @@ async def test_streamed_resume_matches_pending_input_ordering() -> None:
 
     assert result.final_output == "Updated"
     assert calls == ["Paris"]
-    model_input = cast(list[TResponseInputItem], model.last_turn_args["input"])
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
     assert [_item_type(item) for item in model_input] == [
         "user",
         "function_call",
@@ -199,14 +200,14 @@ async def test_streamed_resume_matches_pending_input_ordering() -> None:
 async def test_server_managed_resume_sends_pending_input_as_unsent_delta_once() -> None:
     model, agent, state, calls = await _make_after_turn_state(auto_previous_response_id=True)
     state.add_input("Change the destination to Tokyo")
-    model.set_next_output([get_text_message("Updated")])
+    model.enqueue([get_text_message("Updated")])
 
     result = await Runner.run(agent, state)
 
     assert result.final_output == "Updated"
     assert calls == ["Paris"]
-    assert model.last_turn_args["previous_response_id"] == "resp-789"
-    model_input = cast(list[TResponseInputItem], model.last_turn_args["input"])
+    assert model.calls[-1].previous_response_id == "resp-789"
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
     assert [_item_type(item) for item in model_input] == ["function_call_output", "user"]
     assert [_message_text(item) for item in model_input].count(
         "Change the destination to Tokyo"
@@ -243,7 +244,7 @@ async def test_server_managed_resume_sends_identical_late_input_in_later_occurre
 ) -> None:
     model, agent, state, calls = await _make_after_turn_state(auto_previous_response_id=True)
     state.add_input("Repeat")
-    model.set_next_output(
+    model.enqueue(
         [
             get_function_tool_call(
                 "record_destination",
@@ -261,7 +262,7 @@ async def test_server_managed_resume_sends_identical_late_input_in_later_occurre
     state = await RunState.from_json(agent, first_resume.to_state().to_json())
     admitted_before = next(item for item in state._generated_items if isinstance(item, InputItem))
     state.add_input("Repeat")
-    model.set_next_output([get_text_message("Done")])
+    model.enqueue([get_text_message("Done")])
 
     if streamed_second_resume:
         streamed_result = Runner.run_streamed(agent, state)
@@ -274,7 +275,7 @@ async def test_server_managed_resume_sends_identical_late_input_in_later_occurre
 
     assert final_output == "Done"
     assert calls == ["Paris", "Rome"]
-    model_input = cast(list[TResponseInputItem], model.last_turn_args["input"])
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
     assert [_message_text(item) for item in model_input].count("Repeat") == 1
     admitted_after = [item for item in state._generated_items if isinstance(item, InputItem)]
     assert [item.input_id for item in admitted_after].count(admitted_before.input_id) == 1
@@ -290,8 +291,8 @@ async def test_unresolved_approval_keeps_pending_input_until_tool_finishes() -> 
         calls.append(value)
         return f"approved:{value}"
 
-    model = FakeModel()
-    model.set_next_output(
+    model = ScriptedModel()
+    model.enqueue(
         [get_function_tool_call("protected_tool", '{"value":"one"}', call_id="call-protected")]
     )
     agent = Agent(name="assistant", model=model, tools=[protected_tool])
@@ -305,12 +306,12 @@ async def test_unresolved_approval_keeps_pending_input_until_tool_finishes() -> 
     assert _message_text(state.pending_input[0]) == "Late input"
 
     state.approve(state.get_interruptions()[0])
-    model.set_next_output([get_text_message("Done")])
+    model.enqueue([get_text_message("Done")])
     resumed = await Runner.run(agent, state)
 
     assert resumed.final_output == "Done"
     assert calls == ["one"]
-    model_input = cast(list[TResponseInputItem], model.last_turn_args["input"])
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
     assert [_item_type(item) for item in model_input][-2:] == ["function_call_output", "user"]
     assert _message_text(model_input[-1]) == "Late input"
 
@@ -324,8 +325,8 @@ async def test_streamed_after_turn_cancel_keeps_pending_input_for_next_resume() 
         calls.append(value)
         return f"approved:{value}"
 
-    model = FakeModel()
-    model.set_next_output(
+    model = ScriptedModel()
+    model.enqueue(
         [get_function_tool_call("protected_tool", '{"value":"one"}', call_id="call-protected")]
     )
     agent = Agent(name="assistant", model=model, tools=[protected_tool])
@@ -342,10 +343,10 @@ async def test_streamed_after_turn_cancel_keeps_pending_input_for_next_resume() 
     assert calls == ["one"]
     assert _message_text(state.pending_input[0]) == "Late input"
 
-    model.set_next_output([get_text_message("Done")])
+    model.enqueue([get_text_message("Done")])
     result = await Runner.run(agent, state)
     assert result.final_output == "Done"
-    model_input = cast(list[TResponseInputItem], model.last_turn_args["input"])
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
     assert [_message_text(item) for item in model_input].count("Late input") == 1
 
 
@@ -367,13 +368,15 @@ async def test_interruption_without_guaranteed_next_model_rejects_input(
     def protected_tool(value: str) -> str:
         return value
 
-    model = FakeModel(
-        initial_output=[
-            get_function_tool_call(
-                "protected_tool",
-                '{"value":"one"}',
-                call_id="call-protected-terminal",
-            )
+    model = ScriptedModel(
+        steps=[
+            [
+                get_function_tool_call(
+                    "protected_tool",
+                    '{"value":"one"}',
+                    call_id="call-protected-terminal",
+                )
+            ]
         ]
     )
     agent = Agent(
@@ -412,13 +415,13 @@ async def test_pending_input_guardrail_trip_keeps_input_recoverable() -> None:
 
     agent.input_guardrails = [InputGuardrail(guardrail_function=trip_pending_input)]
     state.add_input("Unsafe late input")
-    model.set_next_output([get_text_message("Must not run")])
-    queued_outputs = len(model.turn_outputs)
+    model.enqueue([get_text_message("Must not run")])
+    queued_outputs = model.remaining_steps
 
     with pytest.raises(InputGuardrailTripwireTriggered):
         await Runner.run(agent, state)
 
-    assert len(model.turn_outputs) == queued_outputs
+    assert model.remaining_steps == queued_outputs
     assert [[_message_text(item) for item in batch] for batch in guarded_inputs] == [
         ["Unsafe late input"]
     ]
@@ -453,7 +456,7 @@ async def test_pending_input_runs_agent_and_run_config_guardrails_on_only_pendin
         input_guardrails=[InputGuardrail(guardrail_function=inspect_config_input)]
     )
     state.add_input("Guard only this")
-    model.set_next_output([get_text_message("Done")])
+    model.enqueue([get_text_message("Done")])
 
     result = await Runner.run(agent, state, run_config=run_config)
 
@@ -494,7 +497,7 @@ async def test_guardrail_retry_persists_successful_turn_with_session(
             await Runner.run(agent, state, session=session)
 
     should_trip = False
-    model.set_next_output([get_text_message("Recovered")])
+    model.enqueue([get_text_message("Recovered")])
     if streamed_retry:
         streamed_result = Runner.run_streamed(agent, state, session=session)
         async for _event in streamed_result.stream_events():
@@ -519,7 +522,7 @@ async def test_guardrail_retry_persists_successful_turn_with_session(
 async def test_failed_model_request_does_not_duplicate_admitted_input_on_resume() -> None:
     model, agent, state, _calls = await _make_after_turn_state()
     state.add_input("Late input")
-    model.set_next_output(RuntimeError("model failed"))
+    model.enqueue(RuntimeError("model failed"))
 
     with pytest.raises(RuntimeError, match="model failed"):
         await Runner.run(agent, state)
@@ -534,10 +537,10 @@ async def test_failed_model_request_does_not_duplicate_admitted_input_on_resume(
         next(item.input_id for item in state._generated_items if isinstance(item, InputItem))
         == admitted_input_id
     )
-    model.set_next_output([get_text_message("Recovered")])
+    model.enqueue([get_text_message("Recovered")])
     result = await Runner.run(agent, state)
     assert result.final_output == "Recovered"
-    model_input = cast(list[TResponseInputItem], model.last_turn_args["input"])
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
     assert [_message_text(item) for item in model_input].count("Late input") == 1
 
 
@@ -546,7 +549,7 @@ async def test_failed_model_request_with_session_persists_admitted_input_once() 
     session = SimpleListSession()
     model, agent, state, _calls = await _make_after_turn_state(session=session)
     state.add_input("Late input")
-    model.set_next_output(RuntimeError("model failed"))
+    model.enqueue(RuntimeError("model failed"))
 
     with pytest.raises(RuntimeError, match="model failed"):
         await Runner.run(agent, state, session=session)
@@ -555,10 +558,10 @@ async def test_failed_model_request_with_session_persists_admitted_input_once() 
     assert [_message_text(item) for item in await session.get_items()].count("Late input") == 1
 
     state = await RunState.from_json(agent, state.to_json())
-    model.set_next_output([get_text_message("Recovered")])
+    model.enqueue([get_text_message("Recovered")])
     result = await Runner.run(agent, state, session=session)
     assert result.final_output == "Recovered"
-    model_input = cast(list[TResponseInputItem], model.last_turn_args["input"])
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
     assert [_message_text(item) for item in model_input].count("Late input") == 1
     assert [_message_text(item) for item in await session.get_items()].count("Late input") == 1
 
@@ -567,17 +570,17 @@ async def test_failed_model_request_with_session_persists_admitted_input_once() 
 async def test_failed_server_managed_request_keeps_pending_input_for_retry() -> None:
     model, agent, state, _calls = await _make_after_turn_state(auto_previous_response_id=True)
     state.add_input("Late input")
-    model.set_next_output(RuntimeError("model failed"))
+    model.enqueue(RuntimeError("model failed"))
 
     with pytest.raises(RuntimeError, match="model failed"):
         await Runner.run(agent, state)
 
     assert _message_text(state.pending_input[0]) == "Late input"
     state = await RunState.from_json(agent, state.to_json())
-    model.set_next_output([get_text_message("Recovered")])
+    model.enqueue([get_text_message("Recovered")])
     result = await Runner.run(agent, state)
     assert result.final_output == "Recovered"
-    model_input = cast(list[TResponseInputItem], model.last_turn_args["input"])
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
     assert [_message_text(item) for item in model_input].count("Late input") == 1
     assert state.pending_input == []
 
@@ -586,7 +589,7 @@ async def test_failed_server_managed_request_keeps_pending_input_for_retry() -> 
 async def test_server_filter_omission_remains_pending_for_later_nonstream_turn() -> None:
     model, agent, state, calls = await _make_after_turn_state(auto_previous_response_id=True)
     state.add_input("Late input")
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 get_function_tool_call(
@@ -616,7 +619,7 @@ async def test_server_filter_omission_remains_pending_for_later_nonstream_turn()
 
     assert result.final_output == "Done"
     assert calls == ["Paris", "Rome"]
-    model_input = cast(list[TResponseInputItem], model.last_turn_args["input"])
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
     assert [_message_text(item) for item in model_input].count("Late input") == 1
     assert state.pending_input == []
 
@@ -625,7 +628,7 @@ async def test_server_filter_omission_remains_pending_for_later_nonstream_turn()
 async def test_server_filter_omission_survives_streamed_state_round_trip() -> None:
     model, agent, state, calls = await _make_after_turn_state(auto_previous_response_id=True)
     state.add_input("Late input")
-    model.set_next_output(
+    model.enqueue(
         [
             get_function_tool_call(
                 "record_destination",
@@ -651,11 +654,11 @@ async def test_server_filter_omission_survives_streamed_state_round_trip() -> No
     assert [_message_text(item) for item in state.pending_input] == ["Late input"]
     assert not any(isinstance(item, InputItem) for item in state._generated_items)
 
-    model.set_next_output([get_text_message("Done")])
+    model.enqueue([get_text_message("Done")])
     result = await Runner.run(agent, state)
     assert result.final_output == "Done"
     assert calls == ["Paris", "Rome"]
-    model_input = cast(list[TResponseInputItem], model.last_turn_args["input"])
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
     assert [_message_text(item) for item in model_input].count("Late input") == 1
 
 
@@ -664,7 +667,7 @@ async def test_server_filter_omission_survives_streamed_state_round_trip() -> No
 async def test_server_filter_reconstructed_pending_rewrite_is_rejected(streamed: bool) -> None:
     model, agent, state, _calls = await _make_after_turn_state(auto_previous_response_id=True)
     state.add_input("Late input")
-    model.set_next_output([get_text_message("Done")])
+    model.enqueue([get_text_message("Done")])
 
     def reconstruct_pending(data: CallModelData[Any]) -> ModelInputData:
         rewritten = [
@@ -678,7 +681,7 @@ async def test_server_filter_reconstructed_pending_rewrite_is_rejected(streamed:
             instructions=data.model_data.instructions,
         )
 
-    queued_outputs = len(model.turn_outputs)
+    queued_outputs = model.remaining_steps
     run_config = RunConfig(call_model_input_filter=reconstruct_pending)
     if streamed:
         failed = Runner.run_streamed(agent, state, run_config=run_config)
@@ -689,7 +692,7 @@ async def test_server_filter_reconstructed_pending_rewrite_is_rejected(streamed:
         with pytest.raises(UserError, match="cannot safely associate"):
             await Runner.run(agent, state, run_config=run_config)
 
-    assert len(model.turn_outputs) == queued_outputs
+    assert model.remaining_steps == queued_outputs
     assert [_message_text(item) for item in state.pending_input] == ["Late input"]
 
 
@@ -697,7 +700,7 @@ async def test_server_filter_reconstructed_pending_rewrite_is_rejected(streamed:
 async def test_server_filter_in_place_pending_rewrite_preserves_occurrence() -> None:
     model, agent, state, _calls = await _make_after_turn_state(auto_previous_response_id=True)
     state.add_input("Late input")
-    model.set_next_output([get_text_message("Done")])
+    model.enqueue([get_text_message("Done")])
 
     def rewrite_pending_in_place(data: CallModelData[Any]) -> ModelInputData:
         for item in data.model_data.input:
@@ -712,7 +715,7 @@ async def test_server_filter_in_place_pending_rewrite_preserves_occurrence() -> 
     )
 
     assert result.final_output == "Done"
-    model_input = cast(list[TResponseInputItem], model.last_turn_args["input"])
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
     assert [_message_text(item) for item in model_input].count("Filtered late input") == 1
     assert state.pending_input == []
 
@@ -747,7 +750,7 @@ async def test_server_response_acceptance_commits_before_hook_failure(
     agent_hooks = CountAgentResponseHook()
     agent.hooks = agent_hooks
     state.add_input("Late input")
-    model.set_next_output([get_text_message("Accepted")])
+    model.enqueue([get_text_message("Accepted")])
 
     if streamed_failure:
         failed = Runner.run_streamed(agent, state, hooks=FailAfterResponse())
@@ -758,7 +761,7 @@ async def test_server_response_acceptance_commits_before_hook_failure(
         with pytest.raises(RuntimeError, match="after response"):
             await Runner.run(agent, state, hooks=FailAfterResponse())
 
-    accepted_model_input = cast(list[TResponseInputItem], model.last_turn_args["input"])
+    accepted_model_input = cast(list[TResponseInputItem], model.calls[-1].input)
     assert [_message_text(item) for item in accepted_model_input].count("Late input") == 1
     assert state.pending_input == []
     assert isinstance(state._current_step, NextStepInterruption)
@@ -766,12 +769,12 @@ async def test_server_response_acceptance_commits_before_hook_failure(
     assert state._current_step.llm_end_hooks_started
     assert agent_hooks.call_count == 1
     state = await RunState.from_json(agent, state.to_json())
-    queued_outputs = len(model.turn_outputs)
+    queued_outputs = model.remaining_steps
 
     recovered = await Runner.run(agent, state)
     assert recovered.final_output == "Accepted"
     assert agent_hooks.call_count == 1
-    assert len(model.turn_outputs) == queued_outputs
+    assert model.remaining_steps == queued_outputs
 
 
 @pytest.mark.asyncio
@@ -781,7 +784,7 @@ async def test_server_acceptance_commits_before_invocation_validation_failure(
 ) -> None:
     model, agent, state, calls = await _make_after_turn_state(auto_previous_response_id=True)
     state.add_input("Late input")
-    model.set_next_output(
+    model.enqueue(
         [
             get_function_tool_call(
                 "record_destination",
@@ -800,7 +803,7 @@ async def test_server_acceptance_commits_before_invocation_validation_failure(
         with pytest.raises(ModelBehaviorError, match="completed tool call ID"):
             await Runner.run(agent, state)
 
-    accepted_model_input = cast(list[TResponseInputItem], model.last_turn_args["input"])
+    accepted_model_input = cast(list[TResponseInputItem], model.calls[-1].input)
     assert [_message_text(item) for item in accepted_model_input].count("Late input") == 1
     assert state.pending_input == []
     assert isinstance(state._current_step, NextStepInterruption)
@@ -809,10 +812,10 @@ async def test_server_acceptance_commits_before_invocation_validation_failure(
     assert calls == ["Paris"]
 
     state = await RunState.from_json(agent, state.to_json())
-    queued_outputs = len(model.turn_outputs)
+    queued_outputs = model.remaining_steps
     with pytest.raises(UserError, match="accepted model response could not be processed"):
         await Runner.run(agent, state)
-    assert len(model.turn_outputs) == queued_outputs
+    assert model.remaining_steps == queued_outputs
     assert calls == ["Paris"]
 
 
@@ -845,18 +848,17 @@ async def test_server_accepted_computer_start_hook_failure_is_not_replayed(
     model, agent, state, _calls = await _make_after_turn_state(auto_previous_response_id=True)
     agent.tools = [ComputerTool(computer=RecordingComputer())]
     state.add_input("Late input")
-    model.set_next_output(
-        [
-            ResponseComputerToolCall(
-                id="computer-item",
-                type="computer_call",
-                action=ActionScreenshot(type="screenshot"),
-                call_id="computer-call",
-                pending_safety_checks=[],
-                status="completed",
-            )
-        ]
-    )
+    output = [
+        ResponseComputerToolCall(
+            id="computer-item",
+            type="computer_call",
+            action=ActionScreenshot(type="screenshot"),
+            call_id="computer-call",
+            pending_safety_checks=[],
+            status="completed",
+        )
+    ]
+    model.enqueue(get_exact_output_stream_step(output) if streamed_failure else output)
     hooks = FailComputerStart()
 
     if streamed_failure:
@@ -909,7 +911,7 @@ async def test_server_accepted_tool_side_effect_failure_is_safe(
 
     model, agent, state, calls = await _make_after_turn_state(auto_previous_response_id=True)
     state.add_input("Late input")
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 get_function_tool_call(
@@ -947,13 +949,13 @@ async def test_server_accepted_tool_side_effect_failure_is_safe(
     recovered = await Runner.run(agent, state)
     assert recovered.final_output == "Recovered"
     assert calls == ["Paris", "Rome"]
-    retry_model_input = cast(list[TResponseInputItem], model.last_turn_args["input"])
+    retry_model_input = cast(list[TResponseInputItem], model.calls[-1].input)
     assert [_message_text(item) for item in retry_model_input].count("Late input") == 0
 
 
 @pytest.mark.asyncio
 async def test_terminal_state_rejects_pending_input_without_mutation() -> None:
-    model = FakeModel(initial_output=[get_text_message("Done")])
+    model = ScriptedModel(steps=[[get_text_message("Done")]])
     agent = Agent(name="assistant", model=model)
     result = await Runner.run(agent, "Initial request")
     state = result.to_state()

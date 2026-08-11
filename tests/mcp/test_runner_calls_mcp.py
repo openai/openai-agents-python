@@ -15,8 +15,8 @@ from agents import (
     handoff,
 )
 from agents.exceptions import AgentsException
+from agents.testing import ScriptedModel
 
-from ..fake_model import FakeModel
 from ..test_responses import get_function_tool_call, get_text_message
 from .helpers import FakeMCPServer
 
@@ -29,14 +29,14 @@ async def test_runner_calls_mcp_tool(streaming: bool):
     server.add_tool("test_tool_1", {})
     server.add_tool("test_tool_2", {})
     server.add_tool("test_tool_3", {})
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         mcp_servers=[server],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [get_text_message("a_message"), get_function_tool_call("test_tool_2", "")],
@@ -63,14 +63,14 @@ async def test_runner_asserts_when_mcp_tool_not_found(streaming: bool):
     server.add_tool("test_tool_1", {})
     server.add_tool("test_tool_2", {})
     server.add_tool("test_tool_3", {})
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         mcp_servers=[server],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [get_text_message("a_message"), get_function_tool_call("test_tool_doesnt_exist", "")],
@@ -99,14 +99,14 @@ async def test_runner_works_with_multiple_mcp_servers(streaming: bool):
     server2.add_tool("test_tool_2", {})
     server2.add_tool("test_tool_3", {})
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         mcp_servers=[server1, server2],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [get_text_message("a_message"), get_function_tool_call("test_tool_2", "")],
@@ -138,14 +138,14 @@ async def test_runner_errors_when_mcp_tools_clash(streaming: bool):
     server2.add_tool("test_tool_2", {})
     server2.add_tool("test_tool_3", {})
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         mcp_servers=[server1, server2],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [get_text_message("a_message"), get_function_tool_call("test_tool_3", "")],
@@ -172,7 +172,7 @@ async def test_runner_can_call_server_prefixed_mcp_tool_names(streaming: bool):
     server2 = FakeMCPServer(server_name="calendar")
     server2.add_tool("search", {})
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
@@ -180,7 +180,7 @@ async def test_runner_can_call_server_prefixed_mcp_tool_names(streaming: bool):
         mcp_config={"include_server_in_tool_names": True},
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_text_message("a_message"), get_function_tool_call("mcp_calendar__search", "")],
             [get_text_message("done")],
@@ -220,7 +220,7 @@ async def test_runner_prefixed_mcp_tool_names_do_not_collide_with_agent_tools(st
         on_invoke_tool=invoke_local_tool,
     )
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
@@ -238,7 +238,7 @@ async def test_runner_prefixed_mcp_tool_names_do_not_collide_with_agent_tools(st
     assert calendar_search_tool_name != "mcp_calendar__search"
     assert calendar_search_tool_name.startswith("mcp_calendar__search_")
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_text_message("a_message"), get_function_tool_call(calendar_search_tool_name, "")],
             [get_text_message("done")],
@@ -263,11 +263,11 @@ async def test_runner_prefixed_mcp_tool_names_do_not_collide_with_handoffs(strea
     server = FakeMCPServer(server_name="calendar")
     server.add_tool("search", {})
 
-    target_model = FakeModel()
+    target_model = ScriptedModel()
     target_agent = Agent(name="calendar_agent", model=target_model)
-    target_model.add_multiple_turn_outputs([[get_text_message("handoff target")]])
+    target_model.extend([[get_text_message("handoff target")]])
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
@@ -282,7 +282,7 @@ async def test_runner_prefixed_mcp_tool_names_do_not_collide_with_handoffs(strea
     assert calendar_search_tool_name != "mcp_calendar__search"
     assert calendar_search_tool_name.startswith("mcp_calendar__search_")
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_text_message("a_message"), get_function_tool_call(calendar_search_tool_name, "")],
             [get_text_message("done")],
@@ -297,7 +297,7 @@ async def test_runner_prefixed_mcp_tool_names_do_not_collide_with_handoffs(strea
         await Runner.run(agent, input="user_message")
 
     assert server.tool_calls == ["search"]
-    assert target_model.first_turn_args is None
+    assert not target_model.calls
 
 
 class Foo(BaseModel):
@@ -314,7 +314,7 @@ async def test_runner_calls_mcp_tool_with_args(streaming: bool):
     server.add_tool("test_tool_1", {})
     server.add_tool("test_tool_2", Foo.model_json_schema())
     server.add_tool("test_tool_3", {})
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
@@ -323,7 +323,7 @@ async def test_runner_calls_mcp_tool_with_args(streaming: bool):
 
     json_args = json.dumps(Foo(bar="baz", baz=1).model_dump())
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [get_text_message("a_message"), get_function_tool_call("test_tool_2", json_args)],
@@ -362,14 +362,14 @@ async def test_runner_emits_mcp_error_tool_call_output_item(streaming: bool):
     server = CrashingFakeMCPServer()
     server.add_tool("crashing_tool", {})
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="test",
         model=model,
         mcp_servers=[server],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_text_message("a_message"), get_function_tool_call("crashing_tool", "{}")],
             [get_text_message("done")],

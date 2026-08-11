@@ -11,8 +11,8 @@ from agents.guardrail import GuardrailFunctionOutput, InputGuardrail
 from agents.memory import OpenAIResponsesCompactionSession
 from agents.memory.session import _session_accepts_wrapper, _session_method_accepts_wrapper
 from agents.run_internal.session_persistence import rewind_session_items
+from agents.testing import ScriptedModel
 from agents.tool import function_tool
-from tests.fake_model import FakeModel
 from tests.test_responses import get_function_tool_call, get_text_message
 
 
@@ -136,7 +136,7 @@ class UninspectableAsyncMethod:
 @pytest.mark.asyncio
 async def test_runner_passes_same_wrapper_to_context_aware_session(streamed: bool) -> None:
     session = ContextAwareSession()
-    model = FakeModel(initial_output=[get_text_message("ok")])
+    model = ScriptedModel(steps=[[get_text_message("ok")]])
     agent = Agent(name="test", model=model)
     context = TenantContext(tenant_id="tenant-a")
 
@@ -161,7 +161,7 @@ async def test_runner_passes_same_wrapper_to_context_aware_session(streamed: boo
 @pytest.mark.asyncio
 async def test_runner_preserves_legacy_session_call_shapes() -> None:
     session = LegacySession()
-    model = FakeModel(initial_output=[get_text_message("ok")])
+    model = ScriptedModel(steps=[[get_text_message("ok")]])
     agent = Agent(name="test", model=model)
 
     result = await Runner.run(
@@ -179,7 +179,7 @@ async def test_runner_preserves_legacy_session_call_shapes() -> None:
 @pytest.mark.asyncio
 async def test_runner_does_not_treat_legacy_kwargs_as_wrapper_opt_in() -> None:
     session = LegacyKwargsSession()
-    model = FakeModel(initial_output=[get_text_message("ok")])
+    model = ScriptedModel(steps=[[get_text_message("ok")]])
 
     result = await Runner.run(
         Agent(name="test", model=model),
@@ -197,7 +197,7 @@ async def test_runner_does_not_treat_legacy_kwargs_as_wrapper_opt_in() -> None:
 async def test_runner_preserves_legacy_calls_when_signature_inspection_fails() -> None:
     session = cast(Any, LegacySession())
     session.get_items = UninspectableAsyncMethod(session.get_items)
-    model = FakeModel(initial_output=[get_text_message("ok")])
+    model = ScriptedModel(steps=[[get_text_message("ok")]])
 
     result = await Runner.run(
         Agent(name="test", model=model),
@@ -245,7 +245,7 @@ async def test_runner_does_not_partially_enable_context_aware_session() -> None:
             pass
 
     session = PartialSession()
-    model = FakeModel(initial_output=[get_text_message("ok")])
+    model = ScriptedModel(steps=[[get_text_message("ok")]])
 
     result = await Runner.run(
         Agent(name="test", model=model),
@@ -338,7 +338,7 @@ async def test_input_guardrail_persists_in_the_context_scope(streamed: bool) -> 
     context = TenantContext(tenant_id="tenant-a")
     agent = Agent(
         name="test",
-        model=FakeModel(initial_output=[get_text_message("not persisted")]),
+        model=ScriptedModel(steps=[[get_text_message("not persisted")]]),
         input_guardrails=[InputGuardrail(guardrail_function=guardrail_function)],
     )
 
@@ -362,8 +362,8 @@ async def test_resumed_run_persists_in_the_context_scope(streamed: bool) -> None
         return "tool result"
 
     tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_function_tool_call("test_tool", "{}", call_id="call-resume")],
             [get_text_message("done")],
@@ -415,7 +415,7 @@ async def test_compaction_session_keeps_context_aware_underlying_on_legacy_scope
     )
 
     result = await Runner.run(
-        Agent(name="test", model=FakeModel(initial_output=[get_text_message("done")])),
+        Agent(name="test", model=ScriptedModel(steps=[[get_text_message("done")]])),
         "hello",
         context=TenantContext(tenant_id="tenant-a"),
         session=session,

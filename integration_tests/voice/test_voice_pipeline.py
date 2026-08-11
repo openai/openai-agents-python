@@ -217,22 +217,11 @@ async def test_voice_pipeline_surfaces_tts_failures_without_hanging(
     from agents.voice import (
         AudioInput,
         SingleAgentVoiceWorkflow,
-        TTSModel,
-        TTSModelSettings,
         VoicePipeline,
         VoiceStreamEventLifecycle,
     )
     from agents.voice.events import VoiceStreamEventError
-
-    class FailingTTSModel(TTSModel):
-        @property
-        def model_name(self) -> str:
-            return "failing-packaged-tts"
-
-        async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
-            del text, settings
-            raise RuntimeError("Packaged TTS synthesis failed.")
-            yield b""  # pragma: no cover
+    from agents.voice.testing import ScriptedTTSModel
 
     agent: Agent[Any] = Agent(
         name="Packaged failing voice workflow agent",
@@ -242,7 +231,10 @@ async def test_voice_pipeline_surfaces_tts_failures_without_hanging(
     )
     pipeline = VoicePipeline(
         workflow=SingleAgentVoiceWorkflow(agent),
-        tts_model=FailingTTSModel(),
+        tts_model=ScriptedTTSModel(
+            [RuntimeError("Packaged TTS synthesis failed.")],
+            model_name="failing-packaged-tts",
+        ),
         config={"tracing_disabled": True},
     )
     audio = np.frombuffer(integration_pcm_audio, dtype=np.int16).copy()

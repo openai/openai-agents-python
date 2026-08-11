@@ -48,8 +48,8 @@ from agents.sandbox.session.manager import Instrumentation
 from agents.sandbox.session.sinks import CallbackSink
 from agents.sandbox.snapshot import NoopSnapshot, SnapshotBase
 from agents.sandbox.types import User
+from agents.testing import ScriptedModel
 from tests._fake_workspace_paths import resolve_fake_workspace_path
-from tests.fake_model import FakeModel
 
 
 class _FakeNetworkPolicyRule(BaseModel):
@@ -1045,7 +1045,7 @@ async def test_vercel_injected_session_accepts_unchanged_s3_manifest(
         manifest=_vercel_s3_manifest(package_module),
         options=vercel_module.VercelSandboxClientOptions(),
     )
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     manager = SandboxRuntimeSessionManager(
         starting_agent=agent,
         sandbox_config=SandboxRunConfig(session=session),
@@ -1074,7 +1074,7 @@ async def test_vercel_injected_session_revalidates_preexisting_s3_topology_mutat
     )
     mount = cast(S3Mount, session.state.manifest.entries["remote"])
     mount.bucket = "tampered-bucket"
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     manager = SandboxRuntimeSessionManager(
         starting_agent=agent,
         sandbox_config=SandboxRunConfig(session=session),
@@ -1105,7 +1105,7 @@ async def test_vercel_injected_session_applies_non_mount_delta_with_fixed_s3_top
         options=vercel_module.VercelSandboxClientOptions(),
     )
     sandbox = cast(_FakeAsyncSandbox, session._inner._sandbox)
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     manager = SandboxRuntimeSessionManager(
         starting_agent=agent,
         sandbox_config=SandboxRunConfig(session=session),
@@ -1147,7 +1147,7 @@ async def test_vercel_live_manifest_update_uses_one_running_snapshot(
         return True
 
     monkeypatch.setattr(session, "running", running_once)
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
 
     update = await SandboxRuntimeSessionManager._process_live_session_manifest(
         agent=agent,
@@ -1176,7 +1176,7 @@ async def test_vercel_stopped_injected_session_rejects_non_mount_delta_before_st
     )
     sandbox = cast(_FakeAsyncSandbox, session._inner._sandbox)
     sandbox.status = "stopped"
-    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
     manager = SandboxRuntimeSessionManager(
         starting_agent=agent,
         sandbox_config=SandboxRunConfig(session=session),

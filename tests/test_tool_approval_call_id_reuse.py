@@ -46,7 +46,7 @@ from agents._tool_invocation import (
 )
 from agents.editor import ApplyPatchOperation, ApplyPatchResult
 from agents.exceptions import ModelBehaviorError, UserError
-from agents.items import ModelResponse, ToolApprovalItem
+from agents.items import ModelResponse, ToolApprovalItem, TResponseOutputItem
 from agents.lifecycle import RunHooks
 from agents.models.interface import Model, ModelProvider
 from agents.run_context import RunContextWrapper
@@ -59,9 +59,10 @@ from agents.run_internal.tool_execution import (
 from agents.run_internal.tool_planning import _collect_runs_by_approval
 from agents.run_state import RunState
 from agents.stream_events import RunItemStreamEvent
+from agents.testing import ScriptedModel
 from agents.tool import Tool
 from agents.tool_context import ToolContext
-from tests.fake_model import FakeModel
+from tests.model_test_helpers import get_exact_output_stream_step
 from tests.test_computer_tool_lifecycle import FakeComputer
 from tests.test_responses import get_function_tool_call, get_handoff_tool_call, get_text_message
 from tests.utils.hitl import make_apply_patch_dict, make_shell_call, make_state_with_interruptions
@@ -205,8 +206,8 @@ async def test_completed_apply_patch_fallback_run_state_round_trip(fallback_type
             call_id="patch_0",
             arguments=json.dumps(operation),
         )
-    model = FakeModel(initial_output=[call])
-    model.set_next_output([get_text_message("done")])
+    model = ScriptedModel(steps=[[call]])
+    model.enqueue([get_text_message("done")])
     agent = Agent(name="agent", model=model, tools=[tool])
 
     result = await Runner.run(agent, "update the file")
@@ -236,10 +237,8 @@ async def test_streamed_function_apply_patch_replay_emits_one_tool_called_event(
         call_id="patch_0",
         arguments=json.dumps(operation),
     )
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
-        [[call], [call.model_copy(deep=True)], [get_text_message("done")]]
-    )
+    model = ScriptedModel()
+    model.extend([[call], [call.model_copy(deep=True)], [get_text_message("done")]])
     agent = Agent(
         name="agent",
         model=model,
@@ -305,8 +304,8 @@ async def test_custom_named_shell_sticky_approval_applies_to_fresh_call_ids() ->
 
     first_call = make_shell_call("call_0", commands=["echo first"])
     second_call = make_shell_call("call_1", commands=["echo second"])
-    model = FakeModel()
-    model.add_multiple_turn_outputs([[first_call], [second_call], [get_text_message("done")]])
+    model = ScriptedModel()
+    model.extend([[first_call], [second_call], [get_text_message("done")]])
     tool = ShellTool(
         executor=execute,
         name="safe_shell",
@@ -337,7 +336,7 @@ async def test_custom_named_shell_replacement_rejects_completed_call_id_replay()
         return "ok"
 
     call = make_shell_call("call_0", commands=["echo safe"])
-    model = FakeModel(initial_output=[call])
+    model = ScriptedModel(steps=[[call]])
     original_tool = ShellTool(
         executor=run_first,
         name="safe_shell",
@@ -348,7 +347,7 @@ async def test_custom_named_shell_replacement_rejects_completed_call_id_replay()
     first = await Runner.run(agent, "run command")
     state = first.to_state()
     state.approve(first.interruptions[0])
-    model.set_next_output([get_text_message("done")])
+    model.enqueue([get_text_message("done")])
     completed = await Runner.run(agent, state)
 
     agent.tools = [
@@ -358,7 +357,7 @@ async def test_custom_named_shell_replacement_rejects_completed_call_id_replay()
             needs_approval=False,
         )
     ]
-    model.set_next_output([cast(Any, dict(cast(dict[str, Any], call)))])
+    model.enqueue([cast(Any, dict(cast(dict[str, Any], call)))])
 
     with pytest.raises(ModelBehaviorError, match="unique call ID"):
         await Runner.run(agent, completed.to_state())
@@ -376,8 +375,8 @@ async def test_schema_1_13_custom_named_shell_skips_exact_completed_replay() -> 
         return "ok"
 
     call = make_shell_call("legacy-shell", commands=["echo safe"])
-    model = FakeModel(initial_output=[call])
-    model.set_next_output([get_text_message("done")])
+    model = ScriptedModel(steps=[[call]])
+    model.enqueue([get_text_message("done")])
     agent = Agent(
         name="agent",
         model=model,
@@ -401,7 +400,7 @@ async def test_schema_1_13_custom_named_shell_skips_exact_completed_replay() -> 
     restored_record = restored._context._tool_invocations["legacy-shell"]
     assert restored_record.approval_scope == expected_identity[2]
     assert restored_record.fingerprint == expected_identity[3]
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [call],
             [get_text_message("done again")],
@@ -499,8 +498,8 @@ def _build_scenario(
         executed.append(value)
         return value
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [
                 get_function_tool_call(
@@ -549,14 +548,16 @@ async def test_empty_custom_tool_call_id_fails_before_approval_or_execution() ->
         needs_approval=True,
         on_approval=approve,
     )
-    model = FakeModel(
-        initial_output=[
-            ResponseCustomToolCall(
-                type="custom_tool_call",
-                name=tool.name,
-                call_id="",
-                input="changed",
-            )
+    model = ScriptedModel(
+        steps=[
+            [
+                ResponseCustomToolCall(
+                    type="custom_tool_call",
+                    name=tool.name,
+                    call_id="",
+                    input="changed",
+                )
+            ]
         ]
     )
     agent = Agent(name="agent", model=model, tools=[tool])
@@ -576,15 +577,17 @@ async def test_empty_unresolved_function_call_id_fails_before_error_formatter() 
         formatter_calls.append(args.tool_name)
         return "error"
 
-    model = FakeModel(
-        initial_output=[
-            ResponseFunctionToolCall(
-                id="item_0",
-                type="function_call",
-                name="missing",
-                arguments="{}",
-                call_id="",
-            )
+    model = ScriptedModel(
+        steps=[
+            [
+                ResponseFunctionToolCall(
+                    id="item_0",
+                    type="function_call",
+                    name="missing",
+                    arguments="{}",
+                    call_id="",
+                )
+            ]
         ]
     )
     agent = Agent(name="agent", model=model)
@@ -627,8 +630,8 @@ async def test_bound_call_id_with_missing_arguments_fails_before_error_formatter
         name="missing",
         call_id="shared",
     )
-    model = FakeModel()
-    model.add_multiple_turn_outputs([[valid_call], [malformed_replacement]])
+    model = ScriptedModel()
+    model.extend([[valid_call], [malformed_replacement]])
     agent = Agent(name="agent", model=model, tools=[record_value])
 
     with pytest.raises(ModelBehaviorError, match="unique call ID"):
@@ -654,15 +657,17 @@ async def test_empty_handoff_call_id_fails_before_handoff_callback() -> None:
         tool_name_override="route",
         on_handoff=lambda _context: handoff_calls.append("route"),
     )
-    model = FakeModel(
-        initial_output=[
-            ResponseFunctionToolCall(
-                id="item_0",
-                type="function_call",
-                name="route",
-                arguments="{}",
-                call_id="",
-            )
+    model = ScriptedModel(
+        steps=[
+            [
+                ResponseFunctionToolCall(
+                    id="item_0",
+                    type="function_call",
+                    name="route",
+                    arguments="{}",
+                    call_id="",
+                )
+            ]
         ]
     )
     agent = Agent(name="agent", model=model, handoffs=[route])
@@ -689,8 +694,8 @@ async def test_failed_handoff_hook_does_not_commit_output_or_repeat_callback() -
             hook_calls.append(to_agent.name)
             raise RuntimeError("handoff hook failed")
 
-    model = FakeModel(initial_output=[call])
-    model.set_next_output([call.model_copy(deep=True)])
+    model = ScriptedModel(steps=[[call]])
+    model.enqueue([call.model_copy(deep=True)])
     agent = Agent(name="source", model=model, handoffs=[target])
     context = RunContextWrapper(context=None)
     hooks = FailingHooks()
@@ -763,8 +768,8 @@ async def test_non_approval_identical_siblings_execute_once(
         '{"value":"safe"}',
         call_id="call_0",
     )
-    model = FakeModel(initial_output=[duplicate, duplicate.model_copy(deep=True)])
-    model.set_next_output([get_text_message("done")])
+    model = ScriptedModel(steps=[[duplicate, duplicate.model_copy(deep=True)]])
+    model.enqueue([get_text_message("done")])
     agent = Agent(name="agent", model=model, tools=[record_value])
 
     result = await _run(
@@ -795,8 +800,8 @@ async def test_non_approval_completed_replay_does_not_execute_again(
         executed.append(value)
         return value
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_function_tool_call("record_value", '{"value":"safe"}', call_id="call_0")],
             [get_function_tool_call("record_value", '{ "value" : "safe" }', call_id="call_0")],
@@ -838,8 +843,8 @@ async def test_non_approval_changed_completed_call_id_fails_before_execution(
         executed.append(value)
         return value
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_function_tool_call("record_value", '{"value":"safe"}', call_id="call_0")],
             [get_function_tool_call("record_value", '{"value":"changed"}', call_id="call_0")],
@@ -877,28 +882,32 @@ async def test_nested_agent_tool_approval_allows_outer_call_id_collision(
         executed.append(value)
         return value
 
-    inner_model = FakeModel(
-        initial_output=[
-            get_function_tool_call(
-                "inner_sensitive_tool",
-                '{"value":"safe"}',
-                call_id="shared",
-            )
+    inner_model = ScriptedModel(
+        steps=[
+            [
+                get_function_tool_call(
+                    "inner_sensitive_tool",
+                    '{"value":"safe"}',
+                    call_id="shared",
+                )
+            ]
         ]
     )
-    inner_model.set_next_output([get_text_message("inner done")])
+    inner_model.enqueue([get_text_message("inner done")])
     inner_agent = Agent(name="inner", model=inner_model, tools=[inner_sensitive_tool])
 
-    outer_model = FakeModel(
-        initial_output=[
-            get_function_tool_call(
-                "nested_agent",
-                '{"input":"hello"}',
-                call_id="shared",
-            )
+    outer_model = ScriptedModel(
+        steps=[
+            [
+                get_function_tool_call(
+                    "nested_agent",
+                    '{"input":"hello"}',
+                    call_id="shared",
+                )
+            ]
         ]
     )
-    outer_model.set_next_output([get_text_message("outer done")])
+    outer_model.enqueue([get_text_message("outer done")])
     outer_agent = Agent(
         name="outer",
         model=outer_model,
@@ -936,8 +945,8 @@ async def test_parent_approval_does_not_authorize_independent_nested_run(
         executed.append(value)
         return value
 
-    inner_model = FakeModel()
-    inner_model.add_multiple_turn_outputs(
+    inner_model = ScriptedModel()
+    inner_model.extend(
         [
             [get_function_tool_call("sensitive", '{"value":"same"}', call_id="shared")],
             [get_text_message("inner done")],
@@ -945,8 +954,8 @@ async def test_parent_approval_does_not_authorize_independent_nested_run(
     )
     inner_agent = Agent(name="inner", model=inner_model, tools=[sensitive])
 
-    outer_model = FakeModel()
-    outer_model.add_multiple_turn_outputs(
+    outer_model = ScriptedModel()
+    outer_model.extend(
         [
             [get_function_tool_call("sensitive", '{"value":"same"}', call_id="shared")],
             [
@@ -1016,13 +1025,15 @@ async def test_streamed_validated_items_precede_llm_end_hook_failure() -> None:
         executed.append(value)
         return value
 
-    model = FakeModel(
-        initial_output=[
-            get_function_tool_call(
-                "record_value",
-                '{"value":"safe"}',
-                call_id="call_0",
-            )
+    model = ScriptedModel(
+        steps=[
+            [
+                get_function_tool_call(
+                    "record_value",
+                    '{"value":"safe"}',
+                    call_id="call_0",
+                )
+            ]
         ]
     )
     agent = Agent(name="agent", model=model, tools=[record_value])
@@ -1048,8 +1059,8 @@ async def test_non_approval_failed_tool_body_does_not_reexecute() -> None:
         raise RuntimeError("failed after side effect")
 
     call = get_function_tool_call("perform_side_effect", "{}", call_id="call_0")
-    model = FakeModel()
-    model.add_multiple_turn_outputs([[call], [call.model_copy(deep=True)]])
+    model = ScriptedModel()
+    model.extend([[call], [call.model_copy(deep=True)]])
     agent = Agent(name="agent", model=model, tools=[perform_side_effect])
     context = RunContextWrapper(context=None)
 
@@ -1082,8 +1093,8 @@ async def test_non_approval_custom_tool_identical_siblings_execute_once() -> Non
         call_id="call_0",
         input="safe",
     )
-    model = FakeModel(initial_output=[duplicate, duplicate.model_copy(deep=True)])
-    model.set_next_output([get_text_message("done")])
+    model = ScriptedModel(steps=[[duplicate, duplicate.model_copy(deep=True)]])
+    model.enqueue([get_text_message("done")])
     agent = Agent(name="agent", model=model, tools=[tool])
 
     result = await Runner.run(agent, "edit text")
@@ -1107,10 +1118,12 @@ async def test_changed_same_id_siblings_fail_before_approval_callback(
     async def record_value(value: str) -> str:
         return value
 
-    model = FakeModel(
-        initial_output=[
-            get_function_tool_call("record_value", '{"value":"one"}', call_id="call_0"),
-            get_function_tool_call("record_value", '{"value":"two"}', call_id="call_0"),
+    model = ScriptedModel(
+        steps=[
+            [
+                get_function_tool_call("record_value", '{"value":"one"}', call_id="call_0"),
+                get_function_tool_call("record_value", '{"value":"two"}', call_id="call_0"),
+            ]
         ]
     )
     agent = Agent(name="agent", model=model, tools=[record_value])
@@ -1140,7 +1153,9 @@ async def test_response_processing_error_still_invokes_llm_end(
             self.llm_end_calls += 1
 
     hooks = CountingHooks()
-    model = FakeModel(initial_output=[make_shell_call("call_0", commands=["echo safe"])])
+    output: list[TResponseOutputItem] = [make_shell_call("call_0", commands=["echo safe"])]
+    step = get_exact_output_stream_step(output) if mode == "streamed" else output
+    model = ScriptedModel(steps=[step])
     agent = Agent(name="agent", model=model)
 
     with pytest.raises(ModelBehaviorError, match="without a shell tool"):
@@ -1171,19 +1186,21 @@ async def test_processing_error_with_changed_call_id_still_suppresses_llm_end(
     async def record_value(value: str) -> str:
         return value
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    outputs: list[list[TResponseOutputItem]] = [
+        [get_function_tool_call("record_value", '{"value":"safe"}', call_id="shared")],
         [
-            [get_function_tool_call("record_value", '{"value":"safe"}', call_id="shared")],
-            [
-                get_function_tool_call(
-                    "record_value",
-                    '{"value":"changed"}',
-                    call_id="shared",
-                ),
-                make_shell_call("shell_0", commands=["echo safe"]),
-            ],
-        ]
+            get_function_tool_call(
+                "record_value",
+                '{"value":"changed"}',
+                call_id="shared",
+            ),
+            make_shell_call("shell_0", commands=["echo safe"]),
+        ],
+    ]
+    model = ScriptedModel(
+        [get_exact_output_stream_step(output) for output in outputs]
+        if mode == "streamed"
+        else outputs
     )
     hooks = CountingHooks()
     agent = Agent(name="agent", model=model, tools=[record_value])
@@ -1223,7 +1240,9 @@ async def test_processing_error_with_repeated_uncanonical_id_suppresses_llm_end(
         call_id="shared",
     )
     hooks = CountingHooks()
-    model = FakeModel(initial_output=[first_call, second_call])
+    output: list[TResponseOutputItem] = [first_call, second_call]
+    step = get_exact_output_stream_step(output) if mode == "streamed" else output
+    model = ScriptedModel(steps=[step])
     agent = Agent(name="agent", model=model)
 
     with pytest.raises(ModelBehaviorError, match="one response"):
@@ -1244,10 +1263,12 @@ async def test_changed_same_id_siblings_fail_before_non_approval_execution(
         executed.append(value)
         return value
 
-    model = FakeModel(
-        initial_output=[
-            get_function_tool_call("record_value", '{"value":"one"}', call_id="call_0"),
-            get_function_tool_call("record_value", '{"value":"two"}', call_id="call_0"),
+    model = ScriptedModel(
+        steps=[
+            [
+                get_function_tool_call("record_value", '{"value":"one"}', call_id="call_0"),
+                get_function_tool_call("record_value", '{"value":"two"}', call_id="call_0"),
+            ]
         ]
     )
     agent = Agent(name="agent", model=model, tools=[record_value])
@@ -1295,9 +1316,11 @@ async def test_changed_computer_safety_checks_fail_before_same_response_effects(
             ],
         }
     )
+    output: list[TResponseOutputItem] = [first_call, changed_call]
+    step = get_exact_output_stream_step(output) if mode == "streamed" else output
     agent = Agent(
         name="computer-agent",
-        model=FakeModel(initial_output=[first_call, changed_call]),
+        model=ScriptedModel(steps=[step]),
         tools=[tool],
     )
 
@@ -1345,8 +1368,12 @@ async def test_changed_computer_safety_checks_fail_before_completed_replay_effec
             ],
         }
     )
-    model = FakeModel()
-    model.add_multiple_turn_outputs([[first_call], [changed_call]])
+    outputs: list[list[TResponseOutputItem]] = [[first_call], [changed_call]]
+    model = ScriptedModel(
+        [get_exact_output_stream_step(output) for output in outputs]
+        if mode == "streamed"
+        else outputs
+    )
     agent = Agent(name="computer-agent", model=model, tools=[tool])
 
     with pytest.raises(ModelBehaviorError, match="completed tool call ID"):
@@ -1389,8 +1416,8 @@ async def test_computer_hook_failure_does_not_repeat_side_effect() -> None:
         pending_safety_checks=[],
         status="completed",
     )
-    model = FakeModel()
-    model.add_multiple_turn_outputs([[call], [call.model_copy(deep=True)]])
+    model = ScriptedModel()
+    model.extend([[call], [call.model_copy(deep=True)]])
     agent = Agent(name="computer-agent", model=model, tools=[tool])
     context = RunContextWrapper(context=None)
     hooks = FailOnceHooks()
@@ -1413,8 +1440,8 @@ async def test_exact_replay_drops_tied_reasoning_item() -> None:
         executed.append(value)
         return value
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_function_tool_call("record_value", '{"value":"safe"}', call_id="call_0")],
             [
@@ -1437,7 +1464,7 @@ async def test_exact_replay_drops_tied_reasoning_item() -> None:
 
     assert resumed.final_output == "done"
     assert executed == ["safe"]
-    model_input = model.last_turn_args["input"]
+    model_input = model.calls[-1].input
     assert isinstance(model_input, list)
     assert not any(item.get("id") == "rs_replay" for item in model_input)
     assert (
@@ -1458,8 +1485,8 @@ async def test_streamed_exact_replay_does_not_emit_tied_reasoning_item() -> None
         executed.append(value)
         return value
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_function_tool_call("record_value", '{"value":"safe"}', call_id="call_0")],
             [
@@ -1539,9 +1566,7 @@ async def test_failed_output_guardrail_does_not_reexecute_approved_call() -> Non
         executed.append("ran")
         return "sensitive"
 
-    model = FakeModel(
-        initial_output=[get_function_tool_call("record_value", "{}", call_id="call_0")]
-    )
+    model = ScriptedModel(steps=[[get_function_tool_call("record_value", "{}", call_id="call_0")]])
     agent = Agent(name="agent", model=model, tools=[record_value])
     first = await Runner.run(agent, "record a value")
     state = first.to_state()
@@ -1566,8 +1591,8 @@ async def test_failed_approved_tool_body_does_not_reexecute() -> None:
         attempts.append("ran")
         raise RuntimeError("failed after side effect")
 
-    model = FakeModel(
-        initial_output=[get_function_tool_call("perform_side_effect", "{}", call_id="call_0")]
+    model = ScriptedModel(
+        steps=[[get_function_tool_call("perform_side_effect", "{}", call_id="call_0")]]
     )
     agent = Agent(name="agent", model=model, tools=[perform_side_effect])
     first = await Runner.run(agent, "run it")
@@ -1596,8 +1621,8 @@ async def test_cancelled_approved_tool_body_does_not_reexecute() -> None:
         await keep_running.wait()
         return "done"
 
-    model = FakeModel(
-        initial_output=[get_function_tool_call("perform_side_effect", "{}", call_id="call_0")]
+    model = ScriptedModel(
+        steps=[[get_function_tool_call("perform_side_effect", "{}", call_id="call_0")]]
     )
     agent = Agent(name="agent", model=model, tools=[perform_side_effect])
     first = await Runner.run(agent, "run it")
@@ -1621,7 +1646,7 @@ async def test_failed_approved_agent_tool_start_does_not_reexecute() -> None:
     hook_calls: list[str] = []
     inner_agent = Agent(
         name="inner",
-        model=FakeModel(initial_output=[get_text_message("inner done")]),
+        model=ScriptedModel(steps=[[get_text_message("inner done")]]),
     )
     agent_tool = inner_agent.as_tool(
         tool_name="delegate",
@@ -1640,8 +1665,8 @@ async def test_failed_approved_agent_tool_start_does_not_reexecute() -> None:
                 hook_calls.append("ran")
                 raise RuntimeError("failed after side effect")
 
-    outer_model = FakeModel(
-        initial_output=[get_function_tool_call("delegate", '{"input":"hi"}', call_id="call_0")]
+    outer_model = ScriptedModel(
+        steps=[[get_function_tool_call("delegate", '{"input":"hi"}', call_id="call_0")]]
     )
     outer_agent = Agent(name="outer", model=outer_model, tools=[agent_tool])
     first = await Runner.run(outer_agent, "delegate")
@@ -1690,13 +1715,15 @@ async def test_failed_parallel_tool_end_hook_checkpoints_outputs_in_model_order(
                 self.failed = True
                 raise RuntimeError("second end hook failed")
 
-    model = FakeModel(
-        initial_output=[
-            get_function_tool_call("first_tool", "{}", call_id="call_first"),
-            get_function_tool_call("second_tool", "{}", call_id="call_second"),
+    model = ScriptedModel(
+        steps=[
+            [
+                get_function_tool_call("first_tool", "{}", call_id="call_first"),
+                get_function_tool_call("second_tool", "{}", call_id="call_second"),
+            ]
         ]
     )
-    model.set_next_output([get_text_message("done")])
+    model.enqueue([get_text_message("done")])
     agent = Agent(name="agent", model=model, tools=[first_tool, second_tool])
     hooks = FailSecondHookOnce()
 
@@ -1712,7 +1739,7 @@ async def test_failed_parallel_tool_end_hook_checkpoints_outputs_in_model_order(
 
     assert resumed.final_output == "done"
     assert sorted(executed) == ["first", "second"]
-    model_input = model.last_turn_args["input"]
+    model_input = model.calls[-1].input
     assert isinstance(model_input, list)
     output_call_ids = [
         item["call_id"]
@@ -1739,8 +1766,8 @@ async def test_identical_approval_bound_siblings_execute_once(
         json.dumps({"value": "safe"}),
         call_id="call-duplicate",
     )
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [[duplicated_call, duplicated_call.model_copy(deep=True)], [get_text_message("done")]]
     )
     run_config = RunConfig(model_provider=_ScriptedProvider(model))
@@ -1829,13 +1856,15 @@ async def test_serialized_sticky_identical_siblings_execute_once() -> None:
         '{"value":1}',
         call_id="call_0",
     )
-    model = FakeModel(
-        initial_output=[
-            duplicate,
-            duplicate.model_copy(deep=True),
+    model = ScriptedModel(
+        steps=[
+            [
+                duplicate,
+                duplicate.model_copy(deep=True),
+            ]
         ]
     )
-    model.set_next_output([get_text_message("done")])
+    model.enqueue([get_text_message("done")])
     agent = Agent(name="agent", model=model, tools=[record_value])
 
     first = await Runner.run(agent, "record a value")
@@ -2061,8 +2090,8 @@ async def test_changed_tool_under_approved_call_id_fails_before_second_tool_star
         executed.append(f"second:{value}")
         return value
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [
                 get_function_tool_call(
@@ -2116,8 +2145,8 @@ async def test_approved_call_id_reused_for_another_invocation_type_fails_before_
         on_invoke_tool=invoke_custom,
         format={"type": "text"},
     )
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [
                 get_function_tool_call(
@@ -2172,8 +2201,8 @@ async def test_changed_missing_tool_under_approved_call_id_fails_before_sibling_
         executed.append("sibling")
         return "sibling"
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [
                 get_function_tool_call(
@@ -2224,8 +2253,8 @@ def _build_serialized_replay_scenario(
         executed.append(f"gate:{value}")
         return value
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [
                 get_function_tool_call(
@@ -2316,8 +2345,8 @@ async def test_serialized_completed_approval_skips_exact_replay(
     provider = run_config.model_provider
     assert isinstance(provider, _ScriptedProvider)
     model = provider.model
-    assert isinstance(model, FakeModel)
-    model_input = model.last_turn_args["input"]
+    assert isinstance(model, ScriptedModel)
+    model_input = model.calls[-1].input
     assert isinstance(model_input, list)
     for call_id in ("call_0", "call_1"):
         calls = [
@@ -2368,16 +2397,18 @@ async def test_legacy_schema_historical_sticky_call_id_is_not_reexecuted(
             call_id="call_0",
         ),
     )
-    model = FakeModel(
-        initial_output=[
-            get_function_tool_call(
-                "record_value",
-                json.dumps({"value": replay_value}),
-                call_id="call_0",
-            )
+    model = ScriptedModel(
+        steps=[
+            [
+                get_function_tool_call(
+                    "record_value",
+                    json.dumps({"value": replay_value}),
+                    call_id="call_0",
+                )
+            ]
         ]
     )
-    model.set_next_output([get_text_message("done")])
+    model.enqueue([get_text_message("done")])
     agent = Agent(name="agent", model=model, tools=[record_value])
     context: RunContextWrapper[Any] = RunContextWrapper(context=None)
     context.approve_tool(
@@ -2738,7 +2769,7 @@ async def test_unbindable_mcp_callback_request_requires_manual_reapproval() -> N
     )
     agent = Agent(
         name="mcp-approval-agent",
-        model=FakeModel(initial_output=[request]),
+        model=ScriptedModel(steps=[[request]]),
         tools=[mcp_tool],
     )
 
@@ -2746,7 +2777,8 @@ async def test_unbindable_mcp_callback_request_requires_manual_reapproval() -> N
 
     assert callback_calls == 0
     assert len(result.interruptions) == 1
-    assert result.interruptions[0].raw_item is request
+    assert result.interruptions[0].raw_item == request
+    assert result.interruptions[0].raw_item is not request
 
 
 @pytest.mark.parametrize("always_approve", [False, True], ids=["per-call", "sticky"])
@@ -2828,10 +2860,8 @@ async def test_runner_omits_completed_mcp_approval_request_replay(
         server_label="test_server",
         arguments='{"limit":1,"query":"safe"}',
     )
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
-        [[first_request], [replayed_request], [get_text_message("done")]]
-    )
+    model = ScriptedModel()
+    model.extend([[first_request], [replayed_request], [get_text_message("done")]])
     agent = Agent(name="mcp-approval-agent", model=model, tools=[mcp_tool])
 
     first = await Runner.run(agent, "lookup")
@@ -2845,7 +2875,7 @@ async def test_runner_omits_completed_mcp_approval_request_replay(
 
     assert result.final_output == "done"
     assert callback_calls == int(with_callback)
-    model_input = model.last_turn_args["input"]
+    model_input = model.calls[-1].input
     assert isinstance(model_input, list)
     replay_items = [
         item

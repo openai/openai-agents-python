@@ -10,8 +10,8 @@ import pytest
 from agents import Agent, Runner, SQLiteSession
 from agents.agent_output import AgentOutputSchema
 from agents.stream_events import StreamEvent
+from agents.testing import ScriptedModel
 
-from .fake_model import FakeModel
 from .test_responses import (
     get_function_tool,
     get_function_tool_call,
@@ -23,7 +23,7 @@ from .test_responses import (
 @pytest.mark.asyncio
 async def test_soft_cancel_completes_turn():
     """Verify soft cancel waits for turn to complete."""
-    model = FakeModel()
+    model = ScriptedModel([[]])
     agent = Agent(name="Assistant", model=model)
 
     result = Runner.run_streamed(agent, input="Hello")
@@ -44,7 +44,7 @@ async def test_soft_cancel_completes_turn():
 async def test_soft_cancel_vs_immediate():
     """Compare soft cancel vs immediate cancel behavior."""
     # Immediate cancel
-    model1 = FakeModel()
+    model1 = ScriptedModel([[]])
     agent1 = Agent(name="A1", model=model1)
     result1 = Runner.run_streamed(agent1, input="Hello")
     immediate_events = []
@@ -54,7 +54,7 @@ async def test_soft_cancel_vs_immediate():
             result1.cancel(mode="immediate")
 
     # Soft cancel
-    model2 = FakeModel()
+    model2 = ScriptedModel([[]])
     agent2 = Agent(name="A2", model=model2)
     result2 = Runner.run_streamed(agent2, input="Hello")
     soft_events = []
@@ -72,14 +72,14 @@ async def test_soft_cancel_vs_immediate():
 @pytest.mark.asyncio
 async def test_soft_cancel_with_tool_calls():
     """Verify tool calls execute before soft cancel stops."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="Assistant",
         model=model,
         tools=[get_function_tool("calc", "42")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 get_text_message("Let me calculate"),
@@ -109,7 +109,7 @@ async def test_soft_cancel_with_tool_calls():
 @pytest.mark.asyncio
 async def test_soft_cancel_saves_session():
     """Verify session is saved properly with soft cancel."""
-    model = FakeModel()
+    model = ScriptedModel([[], []])
     agent = Agent(name="Assistant", model=model)
 
     session = SQLiteSession("test_soft_cancel_session")
@@ -136,7 +136,7 @@ async def test_soft_cancel_saves_session():
 @pytest.mark.asyncio
 async def test_soft_cancel_tracks_usage():
     """Verify usage is tracked for completed turn."""
-    model = FakeModel()
+    model = ScriptedModel([[]])
     agent = Agent(name="Assistant", model=model)
 
     result = Runner.run_streamed(agent, input="Hello")
@@ -145,7 +145,7 @@ async def test_soft_cancel_tracks_usage():
         if event.type == "raw_response_event":
             result.cancel(mode="after_turn")
 
-    # Usage should be tracked (FakeModel tracks requests even if tokens are 0)
+    # Usage should be tracked (ScriptedModel tracks requests even if tokens are 0)
     assert result.context_wrapper.usage.requests > 0
 
 
@@ -153,7 +153,7 @@ async def test_soft_cancel_tracks_usage():
 @pytest.mark.parametrize("consumer_suspensions", [0, 1, 3])
 async def test_soft_cancel_stops_next_turn(consumer_suspensions: int):
     """Verify soft cancel prevents next turn from starting."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="Assistant",
         model=model,
@@ -161,7 +161,7 @@ async def test_soft_cancel_stops_next_turn(consumer_suspensions: int):
     )
 
     # Set up multi-turn scenario
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("tool1", "{}")],
             [get_text_message("Turn 2")],
@@ -188,13 +188,13 @@ async def test_soft_cancel_stops_next_turn(consumer_suspensions: int):
 @pytest.mark.asyncio
 async def test_soft_cancel_stops_next_turn_with_short_lived_anext_tasks():
     """Per-event tasks must not acknowledge a turn before the caller handles its event."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="Assistant",
         model=model,
         tools=[get_function_tool("tool1", "result1")],
     )
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("tool1", "{}")],
             [get_text_message("Turn 2")],
@@ -218,8 +218,8 @@ async def test_soft_cancel_stops_next_turn_with_short_lived_anext_tasks():
 @pytest.mark.asyncio
 async def test_streamed_run_completes_without_an_event_consumer():
     """Turn acknowledgement must not block a run whose events are not consumed."""
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_function_tool_call("tool1", "{}")],
             [get_text_message("Turn 2")],
@@ -242,8 +242,8 @@ async def test_streamed_run_completes_without_an_event_consumer():
 @pytest.mark.asyncio
 async def test_closing_stream_consumer_releases_turn_acknowledgement():
     """Closing an iterator must not deadlock while a turn awaits its consumer."""
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_function_tool_call("tool1", "{}")],
             [get_text_message("Turn 2")],
@@ -271,8 +271,8 @@ async def test_closing_stream_consumer_releases_turn_acknowledgement():
 @pytest.mark.asyncio
 async def test_cancelled_stream_consumer_releases_turn_acknowledgement():
     """Cancelling a consumer suspended after yield must release the completed turn."""
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_function_tool_call("tool1", "{}")],
             [get_text_message("Turn 2")],
@@ -315,8 +315,8 @@ async def test_cancelled_stream_consumer_releases_turn_acknowledgement():
 @pytest.mark.asyncio
 async def test_immediate_cancel_releases_turn_acknowledgement():
     """Immediate cancellation must cancel a run waiting for streamed event acknowledgement."""
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_function_tool_call("tool1", "{}")],
             [get_text_message("Turn 2")],
@@ -342,7 +342,7 @@ async def test_immediate_cancel_releases_turn_acknowledgement():
 @pytest.mark.asyncio
 async def test_cancel_mode_backward_compatibility():
     """Verify default behavior unchanged."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="Assistant", model=model)
 
     result = Runner.run_streamed(agent, input="Hello")
@@ -363,7 +363,7 @@ async def test_cancel_mode_backward_compatibility():
 @pytest.mark.asyncio
 async def test_soft_cancel_idempotent():
     """Verify calling cancel multiple times is safe."""
-    model = FakeModel()
+    model = ScriptedModel([[]])
     agent = Agent(name="Assistant", model=model)
 
     result = Runner.run_streamed(agent, input="Hello")
@@ -382,7 +382,7 @@ async def test_soft_cancel_idempotent():
 @pytest.mark.asyncio
 async def test_soft_cancel_before_streaming():
     """Verify soft cancel before streaming starts."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="Assistant", model=model)
 
     result = Runner.run_streamed(agent, input="Hello")
@@ -398,7 +398,7 @@ async def test_soft_cancel_before_streaming():
 @pytest.mark.asyncio
 async def test_soft_cancel_mixed_modes():
     """Verify changing cancel mode behaves correctly."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="Assistant", model=model)
 
     result = Runner.run_streamed(agent, input="Hello")
@@ -418,7 +418,7 @@ async def test_soft_cancel_mixed_modes():
 @pytest.mark.asyncio
 async def test_soft_cancel_explicit_immediate_mode():
     """Test explicit immediate mode behaves same as default."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="Assistant", model=model)
 
     result = Runner.run_streamed(agent, input="Hello")
@@ -439,7 +439,7 @@ async def test_soft_cancel_explicit_immediate_mode():
 @pytest.mark.asyncio
 async def test_soft_cancel_with_multiple_tool_calls():
     """Verify soft cancel works with multiple tool calls in one turn."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="Assistant",
         model=model,
@@ -450,7 +450,7 @@ async def test_soft_cancel_with_multiple_tool_calls():
     )
 
     # Turn with multiple tool calls
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 get_function_tool_call("tool1", "{}", call_id="tool_1"),
@@ -479,14 +479,14 @@ async def test_soft_cancel_with_multiple_tool_calls():
 @pytest.mark.asyncio
 async def test_soft_cancel_preserves_state():
     """Verify soft cancel preserves all result state correctly."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="Assistant",
         model=model,
         tools=[get_function_tool("tool1", "result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("tool1", "{}")],
             [get_text_message("Done")],
@@ -509,7 +509,7 @@ async def test_soft_cancel_preserves_state():
 @pytest.mark.asyncio
 async def test_immediate_cancel_clears_queues():
     """Verify immediate cancel clears queues as expected."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="Assistant", model=model)
 
     result = Runner.run_streamed(agent, input="Hello")
@@ -528,7 +528,7 @@ async def test_immediate_cancel_clears_queues():
 @pytest.mark.asyncio
 async def test_soft_cancel_does_not_clear_queues_immediately():
     """Verify soft cancel does NOT clear queues immediately."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="Assistant", model=model)
 
     result = Runner.run_streamed(agent, input="Hello")
@@ -551,7 +551,7 @@ async def test_soft_cancel_with_handoff():
     """Verify soft cancel after handoff saves the handoff turn."""
     from agents import Handoff
 
-    model = FakeModel()
+    model = ScriptedModel()
 
     # Create two agents with handoff
     agent2 = Agent(name="Agent2", model=model)
@@ -574,7 +574,7 @@ async def test_soft_cancel_with_handoff():
     )
 
     # Setup: Agent1 does handoff, Agent2 responds
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # Agent1's turn - triggers handoff
             [get_function_tool_call(Handoff.default_tool_name(agent2), "{}")],
@@ -610,7 +610,7 @@ async def test_soft_cancel_waits_for_handoff_event_consumption_before_next_turn(
     """A suspended handoff consumer can stop the run before the delegate model starts."""
     second_request_started = asyncio.Event()
 
-    class HandoffModel(FakeModel):
+    class HandoffModel(ScriptedModel):
         def __init__(self) -> None:
             super().__init__()
             self.request_count = 0
@@ -625,7 +625,7 @@ async def test_soft_cancel_waits_for_handoff_event_consumption_before_next_turn(
     model = HandoffModel()
     delegate = Agent(name="Delegate", model=model, output_type=int)
     triage = Agent(name="Triage", model=model, handoffs=[delegate])
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_handoff_tool_call(delegate)],
             [get_text_message("Delegate response")],
@@ -666,7 +666,7 @@ async def test_soft_cancel_waits_for_handoff_event_consumption_before_next_turn(
 @pytest.mark.asyncio
 async def test_soft_cancel_with_session_and_multiple_turns():
     """Verify soft cancel with session across multiple turns."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="Assistant",
         model=model,
@@ -677,7 +677,7 @@ async def test_soft_cancel_with_session_and_multiple_turns():
     await session.clear_session()
 
     # Setup 3 turns
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("tool1", "{}", call_id="tool_1")],
             [get_function_tool_call("tool1", "{}", call_id="tool_2")],

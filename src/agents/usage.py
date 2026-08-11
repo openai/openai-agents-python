@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Mapping
 from dataclasses import field
@@ -11,6 +12,7 @@ from pydantic import BeforeValidator, JsonValue, TypeAdapter, ValidationError
 from pydantic.dataclasses import dataclass
 
 _RAW_USAGE_ATTRIBUTE = "_agents_sdk_raw_usage"
+_NORMALIZED_USAGE_ATTRIBUTE = "_agents_sdk_normalized_usage"
 _RAW_USAGE_ADAPTER = TypeAdapter(dict[str, JsonValue])
 _RAW_USAGE_MISSING = object()
 
@@ -333,6 +335,10 @@ def _requests_for_response_without_usage(response: Any) -> int:
 
 def _response_usage_to_usage(response_usage: Any) -> Usage:
     """Convert Responses API usage, including adapter-supplied per-request details."""
+    normalized_usage = getattr(response_usage, _NORMALIZED_USAGE_ATTRIBUTE, None)
+    if isinstance(normalized_usage, Usage):
+        return copy.deepcopy(normalized_usage)
+
     request_usages = getattr(response_usage, "_agents_sdk_request_usages", None)
     request_count = getattr(response_usage, "_agents_sdk_request_count", 1)
 
@@ -360,6 +366,11 @@ def _response_usage_to_usage(response_usage: Any) -> Usage:
         input_tokens_details=response_usage.input_tokens_details,
         output_tokens_details=response_usage.output_tokens_details,
     )
+
+
+def _attach_normalized_usage(target: Any, usage: Usage) -> None:
+    """Attach a detached normalized usage snapshot for lossless internal conversion."""
+    object.__setattr__(target, _NORMALIZED_USAGE_ATTRIBUTE, copy.deepcopy(usage))
 
 
 def _serialize_usage_details(details: Any, default: dict[str, int]) -> dict[str, Any]:

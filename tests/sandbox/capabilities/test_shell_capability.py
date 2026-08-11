@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import io
 import uuid
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -17,243 +15,60 @@ from agents.sandbox.capabilities.tools import (
 )
 from agents.sandbox.capabilities.tools.shell_tool import _resolve_shell
 from agents.sandbox.errors import ExecTimeoutError, ExecTransportError, PtySessionNotFoundError
-from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.session.pty_types import PtyExecUpdate
-from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, User
+from agents.testing import scripted_sandbox_session
 from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
-from tests.utils.factories import TestSessionState
 
 
-class _ShellSession(BaseSandboxSession):
-    def __init__(self, manifest: Manifest) -> None:
-        self.state = TestSessionState(
-            manifest=manifest,
-            snapshot=NoopSnapshot(id=str(uuid.uuid4())),
-        )
-        self.exec_calls: list[tuple[str, float | None, bool | list[str]]] = []
-        self.exec_users: list[str | None] = []
-
-    async def start(self) -> None:
-        return None
-
-    async def stop(self) -> None:
-        return None
-
-    async def shutdown(self) -> None:
-        return None
-
-    async def running(self) -> bool:
-        return True
-
-    async def read(self, path: Path, *, user: object = None) -> io.BytesIO:
-        _ = (path, user)
-        raise AssertionError("read() should not be called")
-
-    async def write(self, path: Path, data: io.IOBase, *, user: object = None) -> None:
-        _ = (path, data, user)
-        raise AssertionError("write() should not be called")
-
-    async def _exec_internal(
-        self,
-        *command: str | Path,
-        timeout: float | None = None,
-    ) -> ExecResult:
-        _ = command
-        _ = timeout
-        raise AssertionError("_exec_internal() should not be called directly")
-
-    async def exec(
-        self,
-        *command: str | Path,
-        timeout: float | None = None,
-        user: str | User | None = None,
-        shell: bool | list[str] = False,
-    ) -> ExecResult:
-        self.exec_users.append(user.name if isinstance(user, User) else user)
-        rendered_command = " ".join(str(part) for part in command)
-        self.exec_calls.append((rendered_command, timeout, shell))
-        return ExecResult(
-            stdout=f"stdout: {rendered_command}".encode(),
-            stderr=f"stderr: {rendered_command}".encode(),
-            exit_code=7,
-        )
-
-    async def persist_workspace(self) -> io.IOBase:
-        return io.BytesIO()
-
-    async def hydrate_workspace(self, data: io.IOBase) -> None:
-        _ = data
+def _default_exec_result(call: Any) -> ExecResult:
+    rendered_command = " ".join(str(part) for part in call.args)
+    return ExecResult(
+        stdout=f"stdout: {rendered_command}".encode(),
+        stderr=f"stderr: {rendered_command}".encode(),
+        exit_code=7,
+    )
 
 
-class _TimeoutShellSession(_ShellSession):
-    async def exec(
-        self,
-        *command: str | Path,
-        timeout: float | None = None,
-        user: str | User | None = None,
-        shell: bool | list[str] = False,
-    ) -> ExecResult:
-        _ = (command, user, shell)
-        raise ExecTimeoutError(command=("sleep 30",), timeout_s=timeout)
+def _shell_session(
+    *,
+    manifest: Manifest | None = None,
+    result: ExecResult | None = None,
+    error: Exception | None = None,
+) -> Any:
+    outcome: dict[str, object]
+    if error is not None:
+        outcome = {"error": error}
+    elif result is not None:
+        outcome = {"result": result}
+    else:
+        outcome = {"responder": _default_exec_result}
+    step: dict[str, object] = {"method": "exec"}
+    step.update(outcome)
+    return scripted_sandbox_session(
+        cast(Any, [step]),
+        manifest=manifest or Manifest(root="/workspace"),
+    )
 
 
-class _OutputShellSession(_ShellSession):
-    def __init__(
-        self,
-        manifest: Manifest,
-        *,
-        stdout: bytes,
-        stderr: bytes,
-        exit_code: int = 7,
-    ) -> None:
-        super().__init__(manifest)
-        self.stdout = stdout
-        self.stderr = stderr
-        self.exit_code = exit_code
-
-    async def exec(
-        self,
-        *command: str | Path,
-        timeout: float | None = None,
-        user: str | User | None = None,
-        shell: bool | list[str] = False,
-    ) -> ExecResult:
-        self.exec_users.append(user.name if isinstance(user, User) else user)
-        rendered_command = " ".join(str(part) for part in command)
-        self.exec_calls.append((rendered_command, timeout, shell))
-        return ExecResult(stdout=self.stdout, stderr=self.stderr, exit_code=self.exit_code)
+def _pty_session(
+    steps: list[dict[str, object]],
+    *,
+    manifest: Manifest | None = None,
+) -> Any:
+    return scripted_sandbox_session(
+        cast(Any, steps),
+        manifest=manifest or Manifest(root="/workspace"),
+    )
 
 
-class _PtyShellSession(_ShellSession):
-    def __init__(self, manifest: Manifest) -> None:
-        super().__init__(manifest)
-        self._next_session_id = 1337
-        self._live_sessions: set[int] = set()
-        self.last_exec_yield_time_s: float | None = None
-        self.last_exec_user: str | None = None
-        self.last_write_yield_time_s: float | None = None
-
-    def supports_pty(self) -> bool:
-        return True
-
-    async def pty_exec_start(
-        self,
-        *command: str | Path,
-        timeout: float | None = None,
-        shell: bool | list[str] = True,
-        user: str | User | None = None,
-        tty: bool = False,
-        yield_time_s: float | None = None,
-        max_output_tokens: int | None = None,
-    ) -> PtyExecUpdate:
-        _ = (command, timeout, shell, tty, max_output_tokens)
-        self.last_exec_user = user.name if isinstance(user, User) else user
-        self.last_exec_yield_time_s = yield_time_s
-        session_id = self._next_session_id
-        self._next_session_id += 1
-        self._live_sessions.add(session_id)
-        return PtyExecUpdate(
-            process_id=session_id,
-            output=b"",
-            exit_code=None,
-            original_token_count=None,
-        )
-
-    async def pty_write_stdin(
-        self,
-        *,
-        session_id: int,
-        chars: str,
-        yield_time_s: float | None = None,
-        max_output_tokens: int | None = None,
-    ) -> PtyExecUpdate:
-        _ = max_output_tokens
-        self.last_write_yield_time_s = yield_time_s
-        if session_id not in self._live_sessions:
-            raise PtySessionNotFoundError(session_id=session_id)
-
-        self._live_sessions.discard(session_id)
-        return PtyExecUpdate(
-            process_id=None,
-            output=chars.encode("utf-8", errors="replace"),
-            exit_code=0,
-            original_token_count=None,
-        )
-
-
-class _PtyNoStdinShellSession(_PtyShellSession):
-    async def pty_write_stdin(
-        self,
-        *,
-        session_id: int,
-        chars: str,
-        yield_time_s: float | None = None,
-        max_output_tokens: int | None = None,
-    ) -> PtyExecUpdate:
-        _ = (chars, yield_time_s, max_output_tokens)
-        if session_id not in self._live_sessions:
-            raise PtySessionNotFoundError(session_id=session_id)
-        raise RuntimeError("stdin is not available for this process")
-
-
-class _PtyUnexpectedStdinErrorShellSession(_PtyShellSession):
-    async def pty_write_stdin(
-        self,
-        *,
-        session_id: int,
-        chars: str,
-        yield_time_s: float | None = None,
-        max_output_tokens: int | None = None,
-    ) -> PtyExecUpdate:
-        _ = (session_id, chars, yield_time_s, max_output_tokens)
-        raise RuntimeError("unexpected stdin failure")
-
-
-class _PtyTransportFailingShellSession(_OutputShellSession):
-    def __init__(
-        self,
-        manifest: Manifest,
-        *,
-        stdout: bytes = b"",
-        stderr: bytes = b"",
-        exit_code: int = 0,
-        transport_context: dict[str, object] | None = None,
-    ) -> None:
-        super().__init__(manifest, stdout=stdout, stderr=stderr, exit_code=exit_code)
-        self.transport_context = transport_context or {}
-        self.exec_call_count = 0
-
-    def supports_pty(self) -> bool:
-        return True
-
-    async def exec(
-        self,
-        *command: str | Path,
-        timeout: float | None = None,
-        user: str | User | None = None,
-        shell: bool | list[str] = False,
-    ) -> ExecResult:
-        self.exec_call_count += 1
-        return await super().exec(*command, timeout=timeout, user=user, shell=shell)
-
-    async def pty_exec_start(
-        self,
-        *command: str | Path,
-        timeout: float | None = None,
-        shell: bool | list[str] = True,
-        user: str | User | None = None,
-        tty: bool = False,
-        yield_time_s: float | None = None,
-        max_output_tokens: int | None = None,
-    ) -> PtyExecUpdate:
-        _ = (timeout, shell, user, tty, yield_time_s, max_output_tokens)
-        raise ExecTransportError(
-            command=command,
-            context=self.transport_context,
-            cause=RuntimeError("connection closed while reading HTTP status line"),
-        )
+def _transport_error(context: dict[str, object]) -> ExecTransportError:
+    return ExecTransportError(
+        command=("pwd",),
+        context=context,
+        cause=RuntimeError("connection closed while reading HTTP status line"),
+    )
 
 
 def _patch_shell_tool_clock(
@@ -286,7 +101,7 @@ class TestShellCapability:
 
     def test_tools_exposes_exec_command_function_tool_after_bind(self) -> None:
         capability = Shell()
-        capability.bind(_ShellSession(Manifest(root="/workspace")))
+        capability.bind(_shell_session())
 
         tools = capability.tools()
 
@@ -297,7 +112,7 @@ class TestShellCapability:
 
     def test_tools_exposes_write_stdin_for_pty_sessions(self) -> None:
         capability = Shell()
-        capability.bind(_PtyShellSession(Manifest(root="/workspace")))
+        capability.bind(_pty_session([{"method": "pty_write_stdin", "result": None}]))
 
         tools = capability.tools()
 
@@ -306,6 +121,17 @@ class TestShellCapability:
         assert isinstance(tools[1], WriteStdinTool)
         assert tools[0].name == "exec_command"
         assert tools[1].name == "write_stdin"
+
+    def test_tools_keep_both_pty_session_methods_callable(self) -> None:
+        capability = Shell()
+        session = _pty_session([{"method": "pty_exec_start", "result": None}])
+        capability.bind(session)
+
+        tools = capability.tools()
+
+        assert len(tools) == 2
+        assert hasattr(session, "pty_exec_start")
+        assert hasattr(session, "pty_write_stdin")
 
     def test_configure_tools_can_customize_shell_approvals_after_clone(self) -> None:
         async def exec_command_needs_approval(
@@ -324,7 +150,7 @@ class TestShellCapability:
             toolset.write_stdin.needs_approval = write_stdin_needs_approval
 
         capability = Shell(configure_tools=configure_tools).clone()
-        capability.bind(_PtyShellSession(Manifest(root="/workspace")))
+        capability.bind(_pty_session([{"method": "pty_write_stdin", "result": None}]))
 
         tools = capability.tools()
         exec_command_tool = cast(ExecCommandTool, tools[0])
@@ -341,7 +167,7 @@ class TestShellCapability:
             saw_missing_write_stdin = toolset.write_stdin is None
 
         capability = Shell(configure_tools=configure_tools)
-        capability.bind(_ShellSession(Manifest(root="/workspace")))
+        capability.bind(_shell_session())
 
         tools = capability.tools()
 
@@ -361,7 +187,7 @@ class TestShellCapability:
             toolset.exec_command = replacement_exec_command
 
         capability = Shell(configure_tools=configure_tools)
-        capability.bind(_ShellSession(Manifest(root="/workspace")))
+        capability.bind(_shell_session())
 
         tools = capability.tools()
         exec_command_tool = cast(ExecCommandTool, tools[0])
@@ -392,7 +218,7 @@ class TestShellCapability:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         capability = Shell()
-        session = _ShellSession(Manifest(root="/workspace"))
+        session = _shell_session()
         capability.bind(session)
         tool = cast(FunctionTool, capability.tools()[0])
 
@@ -412,7 +238,9 @@ class TestShellCapability:
             ExecCommandArgs(cmd="pwd", yield_time_ms=1500).model_dump_json(),
         )
 
-        assert session.exec_calls == [("pwd", 1.5, True)]
+        assert session.calls[0].args == ("pwd",)
+        assert session.calls[0].kwargs["timeout"] == 1.5
+        assert session.calls[0].kwargs["shell"] is True
         assert (
             output == "Chunk ID: 123456\n"
             "Wall time: 0.2500 seconds\n"
@@ -425,7 +253,14 @@ class TestShellCapability:
     @pytest.mark.asyncio
     async def test_exec_command_tool_runs_as_bound_user(self) -> None:
         capability = Shell()
-        session = _ShellSession(Manifest(root="/workspace"))
+        session = scripted_sandbox_session(
+            [
+                {
+                    "method": "exec",
+                    "result": ExecResult(stdout=b"", stderr=b"", exit_code=0),
+                }
+            ]
+        )
         capability.bind(session)
         capability.bind_run_as(User(name="sandbox-user"))
         tool = cast(FunctionTool, capability.tools()[0])
@@ -435,7 +270,8 @@ class TestShellCapability:
             ExecCommandArgs(cmd="pwd").model_dump_json(),
         )
 
-        assert session.exec_users == ["sandbox-user"]
+        assert session.calls[0].kwargs["user"] == User(name="sandbox-user")
+        session.assert_complete()
 
     @pytest.mark.asyncio
     async def test_exec_command_tool_includes_original_token_count_when_truncating(
@@ -443,7 +279,7 @@ class TestShellCapability:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         capability = Shell()
-        session = _ShellSession(Manifest(root="/workspace"))
+        session = _shell_session()
         capability.bind(session)
         tool = cast(FunctionTool, capability.tools()[0])
 
@@ -478,7 +314,7 @@ class TestShellCapability:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         capability = Shell()
-        session = _ShellSession(Manifest(root="/workspace"))
+        session = _shell_session()
         capability.bind(session)
         tool = cast(FunctionTool, capability.tools()[0])
         _patch_shell_tool_clock(
@@ -498,9 +334,9 @@ class TestShellCapability:
             ).model_dump_json(),
         )
 
-        assert session.exec_calls == [
-            ("cd /workspace/src/project && pwd", 10.0, ["/bin/bash", "-c"])
-        ]
+        assert session.calls[0].args == ("cd /workspace/src/project && pwd",)
+        assert session.calls[0].kwargs["timeout"] == 10.0
+        assert session.calls[0].kwargs["shell"] == ["/bin/bash", "-c"]
         assert (
             output == "Chunk ID: 876543\n"
             "Wall time: 0.1250 seconds\n"
@@ -516,8 +352,8 @@ class TestShellCapability:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         capability = Shell()
-        session = _ShellSession(
-            Manifest(
+        session = _shell_session(
+            manifest=Manifest(
                 root="/workspace",
                 extra_path_grants=(
                     SandboxPathGrant(
@@ -547,7 +383,9 @@ class TestShellCapability:
             ).model_dump_json(),
         )
 
-        assert session.exec_calls == [("cd /mnt/shared-data && pwd", 10.0, ["/bin/bash", "-c"])]
+        assert session.calls[0].args == ("cd /mnt/shared-data && pwd",)
+        assert session.calls[0].kwargs["timeout"] == 10.0
+        assert session.calls[0].kwargs["shell"] == ["/bin/bash", "-c"]
         assert (
             output == "Chunk ID: 111111\n"
             "Wall time: 0.2500 seconds\n"
@@ -563,7 +401,19 @@ class TestShellCapability:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         capability = Shell()
-        session = _PtyShellSession(Manifest(root="/workspace"))
+        session = _pty_session(
+            [
+                {
+                    "method": "pty_exec_start",
+                    "result": PtyExecUpdate(
+                        process_id=1337,
+                        output=b"",
+                        exit_code=None,
+                        original_token_count=None,
+                    ),
+                }
+            ]
+        )
         capability.bind(session)
         tool = cast(FunctionTool, capability.tools()[0])
         _patch_shell_tool_clock(
@@ -578,7 +428,7 @@ class TestShellCapability:
             ExecCommandArgs(cmd="pwd", yield_time_ms=0, tty=True).model_dump_json(),
         )
 
-        assert session.last_exec_yield_time_s == 0.0
+        assert session.calls[0].kwargs["yield_time_s"] == 0.0
         assert (
             output == "Chunk ID: abcdef\n"
             "Wall time: 0.0500 seconds\n"
@@ -590,7 +440,19 @@ class TestShellCapability:
     @pytest.mark.asyncio
     async def test_exec_command_tool_starts_pty_as_bound_user(self) -> None:
         capability = Shell()
-        session = _PtyShellSession(Manifest(root="/workspace"))
+        session = _pty_session(
+            [
+                {
+                    "method": "pty_exec_start",
+                    "result": PtyExecUpdate(
+                        process_id=1337,
+                        output=b"",
+                        exit_code=None,
+                        original_token_count=None,
+                    ),
+                }
+            ]
+        )
         capability.bind(session)
         capability.bind_run_as(User(name="sandbox-user"))
         tool = cast(FunctionTool, capability.tools()[0])
@@ -600,7 +462,7 @@ class TestShellCapability:
             ExecCommandArgs(cmd="pwd", yield_time_ms=0, tty=True).model_dump_json(),
         )
 
-        assert session.last_exec_user == "sandbox-user"
+        assert session.calls[0].kwargs["user"] == User(name="sandbox-user")
 
     @pytest.mark.asyncio
     async def test_exec_command_tool_formats_timeout_without_exit_code(
@@ -608,7 +470,7 @@ class TestShellCapability:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         capability = Shell()
-        session = _TimeoutShellSession(Manifest(root="/workspace"))
+        session = _shell_session(error=ExecTimeoutError(command=("sleep 30",), timeout_s=0.005))
         capability.bind(session)
         tool = cast(FunctionTool, capability.tools()[0])
         _patch_shell_tool_clock(
@@ -635,13 +497,19 @@ class TestShellCapability:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        tool = ExecCommandTool(
-            session=_PtyTransportFailingShellSession(
-                Manifest(root="/workspace"),
-                stdout=b"fallback ok",
-                transport_context={"stage": "open_pipe", "retry_safe": True},
-            )
+        session = _pty_session(
+            [
+                {
+                    "method": "pty_exec_start",
+                    "error": _transport_error({"stage": "open_pipe", "retry_safe": True}),
+                },
+                {
+                    "method": "exec",
+                    "result": ExecResult(stdout=b"fallback ok", stderr=b"", exit_code=0),
+                },
+            ]
         )
+        tool = ExecCommandTool(session=session)
         _patch_shell_tool_clock(
             monkeypatch,
             chunk_id="44444444444444444444444444444444",
@@ -661,12 +529,17 @@ class TestShellCapability:
 
     @pytest.mark.asyncio
     async def test_exec_command_tool_does_not_fall_back_for_tty_sessions(self) -> None:
-        tool = ExecCommandTool(
-            session=_PtyTransportFailingShellSession(
-                Manifest(root="/workspace"),
-                transport_context={"stage": "open_pipe", "retry_safe": True, "tty": True},
-            )
+        session = _pty_session(
+            [
+                {
+                    "method": "pty_exec_start",
+                    "error": _transport_error(
+                        {"stage": "open_pipe", "retry_safe": True, "tty": True}
+                    ),
+                }
+            ]
         )
+        tool = ExecCommandTool(session=session)
 
         with pytest.raises(ExecTransportError):
             await tool.on_invoke_tool(
@@ -678,12 +551,15 @@ class TestShellCapability:
     async def test_exec_command_tool_does_not_fall_back_for_non_retry_safe_transport_errors(
         self,
     ) -> None:
-        tool = ExecCommandTool(
-            session=_PtyTransportFailingShellSession(
-                Manifest(root="/workspace"),
-                transport_context={"stage": "open_pipe"},
-            )
+        session = _pty_session(
+            [
+                {
+                    "method": "pty_exec_start",
+                    "error": _transport_error({"stage": "open_pipe"}),
+                }
+            ]
         )
+        tool = ExecCommandTool(session=session)
 
         with pytest.raises(ExecTransportError):
             await tool.on_invoke_tool(
@@ -697,10 +573,8 @@ class TestShellCapability:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         tool = ExecCommandTool(
-            session=_OutputShellSession(
-                Manifest(root="/workspace"),
-                stdout=b"stdout only\n",
-                stderr=b"",
+            session=_shell_session(
+                result=ExecResult(stdout=b"stdout only\n", stderr=b"", exit_code=7)
             )
         )
         _patch_shell_tool_clock(
@@ -729,10 +603,8 @@ class TestShellCapability:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         tool = ExecCommandTool(
-            session=_OutputShellSession(
-                Manifest(root="/workspace"),
-                stdout=b"",
-                stderr=b"stderr only\n",
+            session=_shell_session(
+                result=ExecResult(stdout=b"", stderr=b"stderr only\n", exit_code=7)
             )
         )
         _patch_shell_tool_clock(
@@ -761,10 +633,12 @@ class TestShellCapability:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         tool = ExecCommandTool(
-            session=_OutputShellSession(
-                Manifest(root="/workspace"),
-                stdout=b"stdout line\n",
-                stderr=b"stderr line\n",
+            session=_shell_session(
+                result=ExecResult(
+                    stdout=b"stdout line\n",
+                    stderr=b"stderr line\n",
+                    exit_code=7,
+                )
             )
         )
         _patch_shell_tool_clock(
@@ -793,8 +667,19 @@ class TestShellCapability:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        session = _PtyShellSession(Manifest(root="/workspace"))
-        session._live_sessions.add(1337)
+        session = _pty_session(
+            [
+                {
+                    "method": "pty_write_stdin",
+                    "result": PtyExecUpdate(
+                        process_id=None,
+                        output=b"hello",
+                        exit_code=0,
+                        original_token_count=None,
+                    ),
+                }
+            ]
+        )
         tool = WriteStdinTool(session=session)
         _patch_shell_tool_clock(
             monkeypatch,
@@ -818,7 +703,7 @@ class TestShellCapability:
 
     @pytest.mark.asyncio
     async def test_write_stdin_tool_rejects_non_pty_sessions(self) -> None:
-        tool = WriteStdinTool(session=_ShellSession(Manifest(root="/workspace")))
+        tool = WriteStdinTool(session=_shell_session())
 
         with pytest.raises(
             RuntimeError, match="write_stdin is not available for non-PTY sandboxes"
@@ -833,7 +718,15 @@ class TestShellCapability:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        tool = WriteStdinTool(session=_PtyShellSession(Manifest(root="/workspace")))
+        session = _pty_session(
+            [
+                {
+                    "method": "pty_write_stdin",
+                    "error": PtySessionNotFoundError(session_id=9999),
+                }
+            ]
+        )
+        tool = WriteStdinTool(session=session)
         _patch_shell_tool_clock(
             monkeypatch,
             chunk_id="66666666666666666666666666666666",
@@ -859,8 +752,14 @@ class TestShellCapability:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        session = _PtyNoStdinShellSession(Manifest(root="/workspace"))
-        session._live_sessions.add(1337)
+        session = _pty_session(
+            [
+                {
+                    "method": "pty_write_stdin",
+                    "error": RuntimeError("stdin is not available for this process"),
+                }
+            ]
+        )
         tool = WriteStdinTool(session=session)
         _patch_shell_tool_clock(
             monkeypatch,
@@ -885,9 +784,15 @@ class TestShellCapability:
 
     @pytest.mark.asyncio
     async def test_write_stdin_tool_reraises_unexpected_runtime_error(self) -> None:
-        tool = WriteStdinTool(
-            session=_PtyUnexpectedStdinErrorShellSession(Manifest(root="/workspace"))
+        session = _pty_session(
+            [
+                {
+                    "method": "pty_write_stdin",
+                    "error": RuntimeError("unexpected stdin failure"),
+                }
+            ]
         )
+        tool = WriteStdinTool(session=session)
 
         with pytest.raises(RuntimeError, match="unexpected stdin failure"):
             await tool.on_invoke_tool(

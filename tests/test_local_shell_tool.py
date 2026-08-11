@@ -28,8 +28,9 @@ from agents import (
 from agents.items import ToolCallOutputItem
 from agents.run_internal.run_loop import LocalShellAction, ToolRunLocalShellCall
 from agents.run_state import RunState
+from agents.testing import ScriptedModel
+from tests.model_test_helpers import get_response_obj
 
-from .fake_model import FakeModel, get_response_obj
 from .test_responses import get_text_message
 
 
@@ -47,7 +48,7 @@ class RecordingLocalShellExecutor:
 
 async def _create_serialized_local_shell_state() -> tuple[LocalShellTool, dict[str, Any]]:
     tool = LocalShellTool(executor=RecordingLocalShellExecutor(output="shell result"))
-    initial_model = FakeModel()
+    initial_model = ScriptedModel()
     initial_agent = Agent(name="shell-agent", model=initial_model, tools=[tool])
     local_shell_call = LocalShellCall(
         id="lsh_test",
@@ -62,7 +63,7 @@ async def _create_serialized_local_shell_state() -> tuple[LocalShellTool, dict[s
         status="completed",
         type="local_shell_call",
     )
-    initial_model.add_multiple_turn_outputs(
+    initial_model.extend(
         [
             [get_text_message("running shell"), local_shell_call],
             [get_text_message("shell complete")],
@@ -158,7 +159,7 @@ async def test_runner_executes_local_shell_calls() -> None:
     executor = RecordingLocalShellExecutor(output="shell result")
     tool = LocalShellTool(executor=executor)
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="shell-agent", model=model, tools=[tool])
 
     action = LocalShellCallAction(
@@ -176,7 +177,7 @@ async def test_runner_executes_local_shell_calls() -> None:
         type="local_shell_call",
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_text_message("running shell"), local_shell_call],
             [get_text_message("shell complete")],
@@ -188,7 +189,8 @@ async def test_runner_executes_local_shell_calls() -> None:
     assert len(executor.calls) == 1
     request = executor.calls[0]
     assert isinstance(request, LocalShellCommandRequest)
-    assert request.data is local_shell_call
+    assert request.data == local_shell_call
+    assert request.data is not local_shell_call
 
     items = result.new_items
     assert len(items) == 4
@@ -201,7 +203,8 @@ async def test_runner_executes_local_shell_calls() -> None:
 
     tool_call_item = items[1]
     assert tool_call_item.type == "tool_call_item"
-    assert tool_call_item.raw_item is local_shell_call
+    assert tool_call_item.raw_item == local_shell_call
+    assert tool_call_item.raw_item is not local_shell_call
 
     local_shell_output = items[2]
     assert isinstance(local_shell_output, ToolCallOutputItem)
@@ -334,8 +337,8 @@ async def test_run_state_preserves_official_local_shell_original_input(
         "id": "lsh_output_123",
         "output": "shell result",
     }
-    model = FakeModel()
-    model.add_multiple_turn_outputs([[get_text_message("complete")]])
+    model = ScriptedModel()
+    model.extend([[get_text_message("complete")]])
     agent = Agent(name="shell-agent", model=model)
     result = await Runner.run(agent, input=[original_input])
     serialized = json.loads(json.dumps(result.to_state().to_json()))

@@ -7,15 +7,14 @@ import pytest
 from agents.agent import Agent
 from agents.items import ItemHelpers, ModelResponse, TResponseInputItem
 from agents.lifecycle import AgentHooks, RunHooks
-from agents.models.interface import Model
 from agents.run import Runner
 from agents.run_context import AgentHookContext, RunContextWrapper, TContext
 from agents.run_internal.run_loop import validate_run_hooks
+from agents.testing import ModelStep, ScriptedModel
 from agents.tool import Tool, function_tool
 from agents.tool_context import ToolContext
 from tests.test_agent_llm_hooks import AgentHooksForTests
 
-from .fake_model import FakeModel
 from .test_responses import (
     get_function_tool,
     get_function_tool_call,
@@ -89,11 +88,11 @@ class RunHooksForTests(RunHooks):
 @pytest.mark.asyncio
 async def test_async_run_hooks_with_llm():
     hooks = RunHooksForTests()
-    model = FakeModel()
+    model = ScriptedModel()
 
     agent = Agent(name="A", model=model, tools=[get_function_tool("f", "res")], handoffs=[])
     # Simulate a single LLM call producing an output:
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
     await Runner.run(agent, input="hello", hooks=hooks)
     # Expect one on_agent_start, one on_llm_start, one on_llm_end, and one on_agent_end
     assert hooks.events == {
@@ -107,10 +106,10 @@ async def test_async_run_hooks_with_llm():
 # test_sync_run_hook_with_llm()
 def test_sync_run_hook_with_llm():
     hooks = RunHooksForTests()
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="A", model=model, tools=[get_function_tool("f", "res")], handoffs=[])
     # Simulate a single LLM call producing an output:
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
     Runner.run_sync(agent, input="hello", hooks=hooks)
     # Expect one on_agent_start, one on_llm_start, one on_llm_end, and one on_agent_end
     assert hooks.events == {
@@ -125,10 +124,10 @@ def test_sync_run_hook_with_llm():
 @pytest.mark.asyncio
 async def test_streamed_run_hooks_with_llm():
     hooks = RunHooksForTests()
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="A", model=model, tools=[get_function_tool("f", "res")], handoffs=[])
     # Simulate a single LLM call producing an output:
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
     stream = Runner.run_streamed(agent, input="hello", hooks=hooks)
 
     async for event in stream.stream_events():
@@ -160,13 +159,13 @@ async def test_streamed_run_hooks_with_llm():
 async def test_async_run_hooks_with_agent_hooks_with_llm():
     hooks = RunHooksForTests()
     agent_hooks = AgentHooksForTests()
-    model = FakeModel()
+    model = ScriptedModel()
 
     agent = Agent(
         name="A", model=model, tools=[get_function_tool("f", "res")], handoffs=[], hooks=agent_hooks
     )
     # Simulate a single LLM call producing an output:
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
     await Runner.run(agent, input="hello", hooks=hooks)
     # Expect one on_agent_start, one on_llm_start, one on_llm_end, and one on_agent_end
     assert hooks.events == {
@@ -182,13 +181,13 @@ async def test_async_run_hooks_with_agent_hooks_with_llm():
 @pytest.mark.asyncio
 async def test_run_hooks_llm_error_non_streaming(monkeypatch):
     hooks = RunHooksForTests()
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="A", model=model, tools=[get_function_tool("f", "res")], handoffs=[])
 
     async def boom(*args, **kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(FakeModel, "get_response", boom, raising=True)
+    monkeypatch.setattr(ScriptedModel, "get_response", boom, raising=True)
 
     with pytest.raises(RuntimeError, match="boom"):
         await Runner.run(agent, input="hello", hooks=hooks)
@@ -206,7 +205,7 @@ class DummyAgentHooks(AgentHooks):
 
 @pytest.mark.asyncio
 async def test_runner_run_rejects_agent_hooks():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="A", model=model)
     hooks = cast(RunHooks, DummyAgentHooks())
 
@@ -215,7 +214,7 @@ async def test_runner_run_rejects_agent_hooks():
 
 
 def test_runner_run_streamed_rejects_agent_hooks():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="A", model=model)
     hooks = cast(RunHooks, DummyAgentHooks())
 
@@ -228,13 +227,9 @@ def test_validate_run_hooks_rejects_non_hook_objects() -> None:
         validate_run_hooks(object())
 
 
-class BoomModel(Model):
-    async def get_response(self, *a, **k):
-        raise AssertionError("get_response should not be called in streaming test")
-
-    async def stream_response(self, *a, **k):
-        yield {"foo": "bar"}
-        raise RuntimeError("stream blew up")
+async def _failing_stream(_call):
+    yield {"foo": "bar"}
+    raise RuntimeError("stream blew up")
 
 
 @pytest.mark.asyncio
@@ -244,7 +239,8 @@ async def test_streamed_run_hooks_llm_error(monkeypatch):
     but do NOT emit on_llm_end (current behavior), and the exception propagates.
     """
     hooks = RunHooksForTests()
-    agent = Agent(name="A", model=BoomModel(), tools=[get_function_tool("f", "res")], handoffs=[])
+    model = ScriptedModel([ModelStep.stream(_failing_stream)])
+    agent = Agent(name="A", model=model, tools=[get_function_tool("f", "res")], handoffs=[])
 
     stream = Runner.run_streamed(agent, input="hello", hooks=hooks)
 
@@ -276,10 +272,10 @@ class RunHooksWithTurnInput(RunHooks):
 async def test_run_hooks_receives_turn_input_string():
     """Test that on_agent_start receives turn_input when input is a string."""
     hooks = RunHooksWithTurnInput()
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
 
-    model.set_next_output([get_text_message("response")])
+    model.enqueue([get_text_message("response")])
     await Runner.run(agent, input="hello world", hooks=hooks)
 
     assert len(hooks.captured_turn_inputs) == 1
@@ -293,7 +289,7 @@ async def test_run_hooks_receives_turn_input_string():
 async def test_run_hooks_receives_turn_input_list():
     """Test that on_agent_start receives turn_input when input is a list."""
     hooks = RunHooksWithTurnInput()
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
 
     input_items: list[Any] = [
@@ -301,7 +297,7 @@ async def test_run_hooks_receives_turn_input_list():
         {"role": "user", "content": "second message"},
     ]
 
-    model.set_next_output([get_text_message("response")])
+    model.enqueue([get_text_message("response")])
     await Runner.run(agent, input=input_items, hooks=hooks)
 
     assert len(hooks.captured_turn_inputs) == 1
@@ -315,10 +311,10 @@ async def test_run_hooks_receives_turn_input_list():
 async def test_run_hooks_receives_turn_input_streamed():
     """Test that on_agent_start receives turn_input in streamed mode."""
     hooks = RunHooksWithTurnInput()
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
 
-    model.set_next_output([get_text_message("response")])
+    model.enqueue([get_text_message("response")])
     result = Runner.run_streamed(agent, input="streamed input", hooks=hooks)
     async for _ in result.stream_events():
         pass
@@ -332,7 +328,7 @@ async def test_run_hooks_receives_turn_input_streamed():
 @pytest.mark.asyncio
 async def test_run_hooks_count_tool_and_handoff_invocations():
     hooks = RunHooksForTests()
-    model = FakeModel()
+    model = ScriptedModel()
 
     agent_1 = Agent(name="test_1", model=model)
     agent_2 = Agent(
@@ -342,7 +338,7 @@ async def test_run_hooks_count_tool_and_handoff_invocations():
         tools=[get_function_tool("some_function", "result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("some_function", json.dumps({"a": "b"}))],
             [get_text_message("a_message"), get_handoff_tool_call(agent_1)],
@@ -362,7 +358,7 @@ async def test_run_hooks_count_tool_and_handoff_invocations():
 @pytest.mark.asyncio
 async def test_streamed_run_hooks_count_tool_and_handoff_invocations():
     hooks = RunHooksForTests()
-    model = FakeModel()
+    model = ScriptedModel()
 
     agent_1 = Agent(name="test_1", model=model)
     agent_2 = Agent(
@@ -372,7 +368,7 @@ async def test_streamed_run_hooks_count_tool_and_handoff_invocations():
         tools=[get_function_tool("some_function", "result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 get_function_tool_call("some_function", json.dumps({"a": "b"}), call_id="call_1"),
@@ -433,10 +429,10 @@ async def test_tool_end_hooks_receive_raw_function_tool_result():
 
     run_hooks = RecordingRunHooks()
     agent_hooks = RecordingAgentHooks()
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model, tools=[get_metadata], hooks=agent_hooks)
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("get_metadata", "{}")],
             [get_text_message("done")],

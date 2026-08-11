@@ -41,7 +41,7 @@ from agents.models.openai_responses import (
 )
 from agents.retry import ModelRetryAdviceRequest
 from agents.usage import Usage
-from tests.fake_model import get_response_obj
+from tests.model_test_helpers import get_response_obj
 from tests.testing_processor import fetch_ordered_spans
 
 

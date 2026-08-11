@@ -19,8 +19,8 @@ from agents.run import __all__ as run_exports
 from agents.run_config import SandboxConcurrencyLimits, SandboxRunConfig
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.snapshot import NoopSnapshotSpec
+from agents.testing import ScriptedModel
 
-from .fake_model import FakeModel
 from .test_responses import get_text_message
 
 
@@ -30,7 +30,7 @@ class DummyProvider(ModelProvider):
 
     def __init__(self, model_to_return: Model | None = None) -> None:
         self.last_requested: str | None = None
-        self.model_to_return: Model = model_to_return or FakeModel()
+        self.model_to_return: Model = model_to_return or ScriptedModel()
 
     def get_model(self, model_name: str | None) -> Model:
         # record the requested model name and return our test model
@@ -119,7 +119,7 @@ def test_run_config_rejects_unknown_first_party_dictionary_fields(
 
 @pytest.mark.asyncio
 async def test_runner_accepts_dictionary_run_configuration() -> None:
-    model = FakeModel(initial_output=[get_text_message("done")])
+    model = ScriptedModel(steps=[[get_text_message("done")]])
     agent = Agent(name="test", model=model)
 
     result = await Runner.run(
@@ -138,8 +138,8 @@ async def test_model_provider_on_run_config_is_used_for_agent_model_name() -> No
     provided in the ``RunConfig``, the ``Runner`` should resolve the model using the
     ``model_provider`` on the ``RunConfig``.
     """
-    fake_model = FakeModel(initial_output=[get_text_message("from-provider")])
-    provider = DummyProvider(model_to_return=fake_model)
+    scripted_model = ScriptedModel(steps=[[get_text_message("from-provider")]])
+    provider = DummyProvider(model_to_return=scripted_model)
     agent = Agent(name="test", model="test-model")
     run_config = RunConfig(model_provider=provider)
     result = await Runner.run(agent, input="any", run_config=run_config)
@@ -154,8 +154,8 @@ async def test_run_config_model_name_override_takes_precedence() -> None:
     When a model name string is set on the RunConfig, then that name should be looked up
     using the RunConfig's model_provider, and should override any model on the agent.
     """
-    fake_model = FakeModel(initial_output=[get_text_message("override-name")])
-    provider = DummyProvider(model_to_return=fake_model)
+    scripted_model = ScriptedModel(steps=[[get_text_message("override-name")]])
+    provider = DummyProvider(model_to_return=scripted_model)
     agent = Agent(name="test", model="agent-model")
     run_config = RunConfig(model="override-name", model_provider=provider)
     result = await Runner.run(agent, input="any", run_config=run_config)
@@ -179,14 +179,15 @@ async def test_run_config_model_name_override_uses_model_specific_default_settin
     than the default fallback model.
     """
     monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.4-mini")
-    fake_model = FakeModel(initial_output=[get_text_message("override-name")])
-    provider = DummyProvider(model_to_return=fake_model)
+    scripted_model = ScriptedModel(steps=[[get_text_message("override-name")]])
+    provider = DummyProvider(model_to_return=scripted_model)
     agent = Agent(name="test")
     run_config = RunConfig(model=model_name, model_provider=provider)
     result = await Runner.run(agent, input="any", run_config=run_config)
     assert result.final_output == "override-name"
-    assert fake_model.first_turn_args is not None
-    model_settings = fake_model.first_turn_args["model_settings"]
+    assert bool(scripted_model.calls)
+    model_settings = scripted_model.calls[0].model_settings
+    assert model_settings.reasoning is not None
     assert model_settings.reasoning.effort == reasoning_effort
     assert model_settings.verbosity == "low"
 
@@ -199,8 +200,8 @@ async def test_run_config_model_settings_override_implicit_model_specific_defaul
     RunConfig model settings should overlay the implicit defaults for the resolved model name.
     """
     monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.4-mini")
-    fake_model = FakeModel(initial_output=[get_text_message("override-name")])
-    provider = DummyProvider(model_to_return=fake_model)
+    scripted_model = ScriptedModel(steps=[[get_text_message("override-name")]])
+    provider = DummyProvider(model_to_return=scripted_model)
     agent = Agent(name="test")
     run_config = RunConfig(
         model="gpt-5",
@@ -209,8 +210,9 @@ async def test_run_config_model_settings_override_implicit_model_specific_defaul
     )
     result = await Runner.run(agent, input="any", run_config=run_config)
     assert result.final_output == "override-name"
-    assert fake_model.first_turn_args is not None
-    model_settings = fake_model.first_turn_args["model_settings"]
+    assert bool(scripted_model.calls)
+    model_settings = scripted_model.calls[0].model_settings
+    assert model_settings.reasoning is not None
     assert model_settings.reasoning.effort == "low"
     assert model_settings.verbosity == "low"
     assert model_settings.temperature == 0.3
@@ -222,11 +224,11 @@ async def test_run_config_model_override_object_takes_precedence() -> None:
     When a concrete Model instance is set on the RunConfig, then that instance should be
     returned by AgentRunner._get_model regardless of the agent's model.
     """
-    fake_model = FakeModel(initial_output=[get_text_message("override-object")])
+    scripted_model = ScriptedModel(steps=[[get_text_message("override-object")]])
     agent = Agent(name="test", model="agent-model")
-    run_config = RunConfig(model=fake_model)
+    run_config = RunConfig(model=scripted_model)
     result = await Runner.run(agent, input="any", run_config=run_config)
-    # Our FakeModel on the RunConfig should have been used.
+    # The ScriptedModel on the RunConfig should have been used.
     assert result.final_output == "override-object"
 
 
@@ -237,13 +239,13 @@ async def test_agent_model_object_is_used_when_present() -> None:
     not specify a model override, then that object should be used directly without
     consulting the RunConfig's model_provider.
     """
-    fake_model = FakeModel(initial_output=[get_text_message("from-agent-object")])
+    scripted_model = ScriptedModel(steps=[[get_text_message("from-agent-object")]])
     provider = DummyProvider()
-    agent = Agent(name="test", model=fake_model)
+    agent = Agent(name="test", model=scripted_model)
     run_config = RunConfig(model_provider=provider)
     result = await Runner.run(agent, input="any", run_config=run_config)
     # The dummy provider should never have been called, and the output should come from
-    # the FakeModel on the agent.
+    # the ScriptedModel on the agent.
     assert provider.last_requested is None
     assert result.final_output == "from-agent-object"
 
@@ -352,7 +354,7 @@ def test_tool_name_collision_policy_rejects_invalid_value() -> None:
 
 @pytest.mark.asyncio
 async def test_runner_dictionary_rejects_invalid_tool_name_collision_policy() -> None:
-    model = FakeModel(initial_output=[get_text_message("done")])
+    model = ScriptedModel(steps=[[get_text_message("done")]])
     agent = Agent(name="test", model=model)
 
     with pytest.raises(
@@ -365,4 +367,4 @@ async def test_runner_dictionary_rejects_invalid_tool_name_collision_policy() ->
             run_config={"tool_name_collision_policy": cast(Any, "erorr")},
         )
 
-    assert model.first_turn_args is None
+    assert not model.calls

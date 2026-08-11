@@ -45,7 +45,7 @@ from agents.extensions.memory import (
     DAPR_CONSISTENCY_STRONG,
     DaprSession,
 )
-from tests.fake_model import FakeModel
+from agents.testing import ScriptedModel
 from tests.test_responses import get_text_message
 
 # Docker-backed integration tests should stay on the exclusive serial test path.
@@ -234,8 +234,8 @@ spec:
 
 @pytest.fixture
 def agent() -> Agent:
-    """Fixture for a basic agent with a fake model."""
-    return Agent(name="test", model=FakeModel())
+    """Fixture for a basic agent with a scripted model."""
+    return Agent(name="test", model=ScriptedModel())
 
 
 async def test_dapr_redis_integration(dapr_container, monkeypatch):
@@ -321,8 +321,8 @@ async def test_dapr_runner_integration(agent: Agent, dapr_container, monkeypatch
         await session.clear_session()
 
         # First turn
-        assert isinstance(agent.model, FakeModel)
-        agent.model.set_next_output([get_text_message("San Francisco")])
+        assert isinstance(agent.model, ScriptedModel)
+        agent.model.enqueue([get_text_message("San Francisco")])
         result1 = await Runner.run(
             agent,
             "What city is the Golden Gate Bridge in?",
@@ -331,12 +331,12 @@ async def test_dapr_runner_integration(agent: Agent, dapr_container, monkeypatch
         assert result1.final_output == "San Francisco"
 
         # Second turn - should remember context
-        agent.model.set_next_output([get_text_message("California")])
+        agent.model.enqueue([get_text_message("California")])
         result2 = await Runner.run(agent, "What state is it in?", session=session)
         assert result2.final_output == "California"
 
         # Verify history
-        last_input = agent.model.last_turn_args["input"]
+        last_input = agent.model.calls[-1].input
         assert len(last_input) > 1
         assert any("Golden Gate Bridge" in str(item.get("content", "")) for item in last_input)
 

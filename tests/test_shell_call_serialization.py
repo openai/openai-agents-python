@@ -6,8 +6,8 @@ from agents.agent import Agent
 from agents.exceptions import ModelBehaviorError
 from agents.items import ToolCallOutputItem
 from agents.run_internal import run_loop
+from agents.testing import ScriptedModel
 from agents.tool import ShellCallOutcome, ShellCommandOutput
-from tests.fake_model import FakeModel
 
 
 def test_coerce_shell_call_reads_max_output_length() -> None:
@@ -122,7 +122,7 @@ def test_serialize_shell_output_emits_canonical_outcome() -> None:
 
 
 def test_shell_rejection_payload_preserves_missing_exit_code() -> None:
-    agent = Agent(name="tester", model=FakeModel())
+    agent = Agent(name="tester", model=ScriptedModel())
     raw_item = {
         "type": "shell_call_output",
         "call_id": "call-1",
@@ -148,7 +148,7 @@ def test_shell_rejection_payload_preserves_missing_exit_code() -> None:
 
 
 def test_shell_output_preserves_zero_exit_code() -> None:
-    agent = Agent(name="tester", model=FakeModel())
+    agent = Agent(name="tester", model=ScriptedModel())
     raw_item = {
         "type": "shell_call_output",
         "call_id": "call-2",

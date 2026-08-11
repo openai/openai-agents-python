@@ -51,10 +51,11 @@ from agents.items import (
     ToolSearchOutputItem,
 )
 from agents.run_internal.streaming import stream_step_items_to_queue, stream_step_result_to_queue
+from agents.testing import ScriptedModel
 
-from .fake_model import FakeModel
 from .mcp.helpers import FakeMCPServer
 from .mcp.model_compat import Tool as MCPTool
+from .model_test_helpers import get_exact_output_stream_step
 from .test_responses import get_function_tool_call, get_handoff_tool_call, get_text_message
 
 
@@ -88,14 +89,14 @@ async def foo() -> str:
 
 @pytest.mark.asyncio
 async def test_stream_events_main():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="Joker",
         model=model,
         tools=[foo],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [
@@ -127,7 +128,7 @@ async def test_stream_events_main():
 
 @pytest.mark.asyncio
 async def test_stream_events_tool_called_includes_local_mcp_title() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     server = FakeMCPServer(
         tools=[
             MCPTool(
@@ -140,7 +141,7 @@ async def test_stream_events_tool_called_includes_local_mcp_title() -> None:
     )
     agent = Agent(name="MCPAgent", model=model, mcp_servers=[server])
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("search_docs", "{}")],
             [get_text_message("done")],
@@ -287,11 +288,11 @@ async def test_stream_events_main_with_handoff():
     english_agent = Agent(
         name="EnglishAgent",
         instructions="You only speak English.",
-        model=FakeModel(),
+        model=ScriptedModel([[]]),
     )
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [
                 get_text_message("Hello"),
@@ -341,14 +342,14 @@ async def test_complete_streaming_events():
     - Function call with arguments delta/done events
     - Message output with content_part and text delta/done events
     """
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="TestAgent",
         model=model,
         tools=[foo],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 get_reasoning_item(),
@@ -481,8 +482,8 @@ async def test_complete_streaming_events():
 
 @pytest.mark.asyncio
 async def test_tool_call_event_preserves_order_before_later_reasoning_item() -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [
                 get_function_tool_call("foo", '{"arg": "value"}'),
@@ -511,12 +512,14 @@ async def test_tool_call_event_preserves_order_before_later_reasoning_item() -> 
 async def test_handoff_event_preserves_order_before_later_reasoning_item() -> None:
     english_agent = Agent(
         name="EnglishAgent",
-        model=FakeModel(initial_output=[get_text_message("Done")]),
+        model=ScriptedModel(steps=[[get_text_message("Done")]]),
     )
-    model = FakeModel(
-        initial_output=[
-            get_handoff_tool_call(english_agent),
-            get_reasoning_item(),
+    model = ScriptedModel(
+        steps=[
+            [
+                get_handoff_tool_call(english_agent),
+                get_reasoning_item(),
+            ]
         ]
     )
     triage_agent = Agent(name="TriageAgent", model=model, handoffs=[english_agent])
@@ -542,12 +545,14 @@ async def test_handoff_filter_copy_does_not_duplicate_streamed_model_items() -> 
 
     english_agent = Agent(
         name="EnglishAgent",
-        model=FakeModel(initial_output=[get_text_message("Done")]),
+        model=ScriptedModel(steps=[[get_text_message("Done")]]),
     )
-    model = FakeModel(
-        initial_output=[
-            get_text_message("Transferring"),
-            get_handoff_tool_call(english_agent),
+    model = ScriptedModel(
+        steps=[
+            [
+                get_text_message("Transferring"),
+                get_handoff_tool_call(english_agent),
+            ]
         ]
     )
     triage_agent = Agent(
@@ -572,7 +577,7 @@ async def test_handoff_filter_copy_does_not_duplicate_streamed_model_items() -> 
 
 @pytest.mark.asyncio
 async def test_stream_events_emit_tool_search_items() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="ToolSearchAgent", model=model)
     tool_search_call = cast(
         ResponseOutputItem,
@@ -616,8 +621,12 @@ async def test_stream_events_emit_tool_search_items() -> None:
             },
         ),
     )
-    model.add_multiple_turn_outputs(
-        [[tool_search_call, tool_search_output, get_text_message("Done")]]
+    model.extend(
+        [
+            get_exact_output_stream_step(
+                [tool_search_call, tool_search_output, get_text_message("Done")]
+            )
+        ]
     )
 
     result = Runner.run_streamed(agent, input="Search for CRM order tools")
@@ -641,10 +650,10 @@ async def test_stream_events_emit_tool_search_items() -> None:
 @pytest.mark.asyncio
 async def test_streamed_handoff_call_is_not_emitted_as_tool_called():
     """A handoff call streams only as `handoff_requested`, never also as `tool_called`."""
-    english_agent = Agent(name="EnglishAgent", model=FakeModel())
+    english_agent = Agent(name="EnglishAgent", model=ScriptedModel([[]]))
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_handoff_tool_call(english_agent)],
             [get_text_message("Done")],
@@ -673,10 +682,10 @@ async def test_streamed_handoff_call_is_not_emitted_as_tool_called():
 @pytest.mark.asyncio
 async def test_streamed_tool_call_alongside_handoff_still_emits_tool_called():
     """A real tool call in the same turn as a handoff keeps its `tool_called` event."""
-    english_agent = Agent(name="EnglishAgent", model=FakeModel())
+    english_agent = Agent(name="EnglishAgent", model=ScriptedModel([[]]))
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [
                 get_function_tool_call("foo", '{"a": "b"}', call_id="tool_call"),
@@ -712,10 +721,10 @@ async def test_streamed_tool_call_alongside_handoff_still_emits_tool_called():
 @pytest.mark.asyncio
 async def test_streamed_handoff_item_events_match_new_items():
     """Streamed run item events stay in sync with the items recorded on the result."""
-    english_agent = Agent(name="EnglishAgent", model=FakeModel())
+    english_agent = Agent(name="EnglishAgent", model=ScriptedModel([[]]))
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_text_message("Transferring"), get_handoff_tool_call(english_agent)],
             [get_text_message("Done")],

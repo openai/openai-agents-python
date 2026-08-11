@@ -11,7 +11,7 @@ import pytest
 
 from agents import Agent, RunConfig, Runner, SessionSettings, SQLiteSession, TResponseInputItem
 from agents.memory.sqlite_session import _await_mutation
-from tests.fake_model import FakeModel
+from agents.testing import ScriptedModel
 from tests.test_responses import get_text_message
 
 
@@ -95,11 +95,11 @@ async def test_session_memory_basic_functionality_parametrized(runner_method):
         session_id = "test_session_123"
         session = SQLiteSession(session_id, db_path)
 
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="test", model=model)
 
         # First turn
-        model.set_next_output([get_text_message("San Francisco")])
+        model.enqueue([get_text_message("San Francisco")])
         result1 = await run_agent_async(
             runner_method,
             agent,
@@ -109,7 +109,7 @@ async def test_session_memory_basic_functionality_parametrized(runner_method):
         assert result1.final_output == "San Francisco"
 
         # Second turn - should have conversation history
-        model.set_next_output([get_text_message("California")])
+        model.enqueue([get_text_message("California")])
         result2 = await run_agent_async(
             runner_method,
             agent,
@@ -120,7 +120,7 @@ async def test_session_memory_basic_functionality_parametrized(runner_method):
 
         # Verify that the input to the second turn includes the previous conversation
         # The model should have received the full conversation history
-        last_input = model.last_turn_args["input"]
+        last_input = model.calls[-1].input
         assert len(last_input) > 1  # Should have more than just the current message
 
         session.close()
@@ -135,16 +135,16 @@ async def test_session_memory_with_explicit_instance_parametrized(runner_method)
         session_id = "test_session_456"
         session = SQLiteSession(session_id, db_path)
 
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="test", model=model)
 
         # First turn
-        model.set_next_output([get_text_message("Hello")])
+        model.enqueue([get_text_message("Hello")])
         result1 = await run_agent_async(runner_method, agent, "Hi there", session=session)
         assert result1.final_output == "Hello"
 
         # Second turn
-        model.set_next_output([get_text_message("I remember you said hi")])
+        model.enqueue([get_text_message("I remember you said hi")])
         result2 = await run_agent_async(
             runner_method,
             agent,
@@ -160,21 +160,21 @@ async def test_session_memory_with_explicit_instance_parametrized(runner_method)
 @pytest.mark.asyncio
 async def test_session_memory_disabled_parametrized(runner_method):
     """Test that session memory is disabled when session=None across all runner methods."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
 
     # First turn (no session parameters = disabled)
-    model.set_next_output([get_text_message("Hello")])
+    model.enqueue([get_text_message("Hello")])
     result1 = await run_agent_async(runner_method, agent, "Hi there")
     assert result1.final_output == "Hello"
 
     # Second turn - should NOT have conversation history
-    model.set_next_output([get_text_message("I don't remember")])
+    model.enqueue([get_text_message("I don't remember")])
     result2 = await run_agent_async(runner_method, agent, "Do you remember what I said?")
     assert result2.final_output == "I don't remember"
 
     # Verify that the input to the second turn is just the current message
-    last_input = model.last_turn_args["input"]
+    last_input = model.calls[-1].input
     assert len(last_input) == 1  # Should only have the current message
 
 
@@ -186,14 +186,14 @@ async def test_session_memory_different_sessions_parametrized(runner_method):
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_memory.db"
 
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="test", model=model)
 
         # Session 1
         session_id_1 = "session_1"
         session_1 = SQLiteSession(session_id_1, db_path)
 
-        model.set_next_output([get_text_message("I like cats")])
+        model.enqueue([get_text_message("I like cats")])
         result1 = await run_agent_async(runner_method, agent, "I like cats", session=session_1)
         assert result1.final_output == "I like cats"
 
@@ -201,12 +201,12 @@ async def test_session_memory_different_sessions_parametrized(runner_method):
         session_id_2 = "session_2"
         session_2 = SQLiteSession(session_id_2, db_path)
 
-        model.set_next_output([get_text_message("I like dogs")])
+        model.enqueue([get_text_message("I like dogs")])
         result2 = await run_agent_async(runner_method, agent, "I like dogs", session=session_2)
         assert result2.final_output == "I like dogs"
 
         # Back to Session 1 - should remember cats, not dogs
-        model.set_next_output([get_text_message("Yes, you mentioned cats")])
+        model.enqueue([get_text_message("Yes, you mentioned cats")])
         result3 = await run_agent_async(
             runner_method,
             agent,
@@ -548,7 +548,7 @@ async def test_session_memory_appends_list_input_by_default(runner_method):
         session_id = "test_validation_parametrized"
         session = SQLiteSession(session_id, db_path)
 
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="test", model=model)
 
         initial_history: list[TResponseInputItem] = [
@@ -559,10 +559,10 @@ async def test_session_memory_appends_list_input_by_default(runner_method):
 
         list_input = [{"role": "user", "content": "Test message"}]
 
-        model.set_next_output([get_text_message("This should run")])
+        model.enqueue([get_text_message("This should run")])
         await run_agent_async(runner_method, agent, list_input, session=session)
 
-        assert model.last_turn_args["input"] == initial_history + list_input
+        assert model.calls[-1].input == initial_history + list_input
 
         session.close()
 
@@ -574,7 +574,7 @@ async def test_session_callback_prepared_input(runner_method):
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_memory.db"
 
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="test", model=model)
 
         # Session
@@ -594,7 +594,7 @@ async def test_session_callback_prepared_input(runner_method):
                 return [item for item in history if item["role"] == "user"] + new_input
 
             new_turn_input = [{"role": "user", "content": "What your name?"}]
-            model.set_next_output([get_text_message("I'm gpt-4o")])
+            model.enqueue([get_text_message("I'm gpt-4o")])
 
             # Run the agent with the callable
             await run_agent_async(
@@ -610,8 +610,8 @@ async def test_session_callback_prepared_input(runner_method):
                 new_turn_input[0],  # New input
             ]
 
-            assert len(model.last_turn_args["input"]) == 2
-            assert model.last_turn_args["input"] == expected_model_input
+            assert len(model.calls[-1].input) == 2
+            assert model.calls[-1].input == expected_model_input
         finally:
             session.close()
 
@@ -621,7 +621,7 @@ async def test_session_callback_prepared_input(runner_method):
 async def test_session_callback_repeating_history_does_not_grow_session(runner_method):
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_memory.db"
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="test", model=model)
         session = SQLiteSession("session_repeat", db_path)
 
@@ -632,7 +632,7 @@ async def test_session_callback_repeating_history_does_not_grow_session(runner_m
 
         try:
             for turn in range(3):
-                model.set_next_output([get_text_message(f"assistant {turn}")])
+                model.enqueue([get_text_message(f"assistant {turn}")])
                 await run_agent_async(
                     runner_method,
                     agent,
@@ -825,9 +825,9 @@ async def test_session_add_items_exception_propagates_in_streamed():
 
     session.add_items = _failing_add_items  # type: ignore[method-assign]
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
-    model.set_next_output([get_text_message("This should not be reached")])
+    model.enqueue([get_text_message("This should not be reached")])
 
     result = Runner.run_streamed(agent, "Hello", session=session)
 
@@ -981,9 +981,9 @@ async def test_runner_with_session_settings_override():
         ]
         await session.add_items(items)
 
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="test", model=model)
-        model.set_next_output([get_text_message("Got it")])
+        model.enqueue([get_text_message("Got it")])
 
         await Runner.run(
             agent,
@@ -995,7 +995,7 @@ async def test_runner_with_session_settings_override():
         )
 
         # Verify the agent received only the last 2 history items + new question
-        last_input = model.last_turn_args["input"]
+        last_input = model.calls[-1].input
         # Filter out the new "New question" input
         history_items = [item for item in last_input if item.get("content") != "New question"]
         # Should have 2 history items (last two from the 10 we added)

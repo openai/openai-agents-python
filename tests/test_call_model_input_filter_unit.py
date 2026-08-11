@@ -9,15 +9,15 @@ from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from agents.agent import Agent
 from agents.exceptions import UserError
 from agents.run import CallModelData, ModelInputData, RunConfig, Runner
-from tests.fake_model import FakeModel
+from agents.testing import ScriptedModel
 
 
 @pytest.mark.asyncio
 async def test_call_model_input_filter_sync_non_streamed_unit() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
 
-    model.set_next_output(
+    model.enqueue(
         [
             ResponseOutputMessage(
                 id="1",
@@ -44,18 +44,18 @@ async def test_call_model_input_filter_sync_non_streamed_unit() -> None:
         run_config=RunConfig(call_model_input_filter=filter_fn),
     )
 
-    assert model.last_turn_args["system_instructions"] == "filtered-sync"
-    assert isinstance(model.last_turn_args["input"], list)
-    assert len(model.last_turn_args["input"]) == 2
-    assert model.last_turn_args["input"][-1]["content"] == "added-sync"
+    assert model.calls[-1].system_instructions == "filtered-sync"
+    assert isinstance(model.calls[-1].input, list)
+    assert len(model.calls[-1].input) == 2
+    assert model.calls[-1].input[-1]["content"] == "added-sync"
 
 
 @pytest.mark.asyncio
 async def test_call_model_input_filter_async_streamed_unit() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
 
-    model.set_next_output(
+    model.enqueue(
         [
             ResponseOutputMessage(
                 id="1",
@@ -84,15 +84,15 @@ async def test_call_model_input_filter_async_streamed_unit() -> None:
     async for _ in result.stream_events():
         pass
 
-    assert model.last_turn_args["system_instructions"] == "filtered-async"
-    assert isinstance(model.last_turn_args["input"], list)
-    assert len(model.last_turn_args["input"]) == 2
-    assert model.last_turn_args["input"][-1]["content"] == "added-async"
+    assert model.calls[-1].system_instructions == "filtered-async"
+    assert isinstance(model.calls[-1].input, list)
+    assert len(model.calls[-1].input) == 2
+    assert model.calls[-1].input[-1]["content"] == "added-async"
 
 
 @pytest.mark.asyncio
 async def test_call_model_input_filter_invalid_return_type_raises_unit() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model)
 
     def invalid_filter(_data: CallModelData[Any]):

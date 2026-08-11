@@ -70,9 +70,10 @@ from agents.memory import SQLiteSession
 from agents.models.chatcmpl_converter import Converter as ChatCompletionsConverter
 from agents.models.openai_responses import Converter as ResponsesConverter
 from agents.run_internal.turn_resolution import process_model_response
+from agents.testing import ScriptedModel
 from agents.tool_context import ToolContext
 
-from .fake_model import FakeModel
+from .model_test_helpers import get_exact_output_stream_step
 from .test_responses import get_handoff_tool_call, get_text_message
 
 PROGRAM_CALL_ID = "call_program"
@@ -493,7 +494,7 @@ async def test_schema_backed_direct_tool_preserves_argument_error_formatter() ->
 
 @pytest.mark.asyncio
 async def test_runner_preserves_direct_error_for_schema_backed_tool() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     direct_call = ResponseFunctionToolCall(
         id="function_item",
         call_id=FUNCTION_CALL_ID,
@@ -501,7 +502,7 @@ async def test_runner_preserves_direct_error_for_schema_backed_tool() -> None:
         arguments='{"sku":"A-1"}',
         type="function_call",
     )
-    model.add_multiple_turn_outputs([[direct_call], [get_text_message("inventory lookup failed")]])
+    model.extend([[direct_call], [get_text_message("inventory lookup failed")]])
 
     @function_tool(allowed_callers=["direct", "programmatic"])
     def lookup_inventory(sku: str) -> InventoryOutput:
@@ -526,7 +527,7 @@ async def test_runner_preserves_direct_error_for_schema_backed_tool() -> None:
 
 @pytest.mark.asyncio
 async def test_runner_preserves_direct_default_timeout_for_schema_backed_tool() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     direct_call = ResponseFunctionToolCall(
         id="function_item",
         call_id=FUNCTION_CALL_ID,
@@ -534,7 +535,7 @@ async def test_runner_preserves_direct_default_timeout_for_schema_backed_tool() 
         arguments='{"sku":"A-1"}',
         type="function_call",
     )
-    model.add_multiple_turn_outputs([[direct_call], [get_text_message("timed out")]])
+    model.extend([[direct_call], [get_text_message("timed out")]])
 
     @function_tool(allowed_callers=["direct", "programmatic"], timeout=0.01)
     async def lookup_inventory(sku: str) -> InventoryOutput:
@@ -588,8 +589,8 @@ async def test_schema_backed_function_tool_accepts_conforming_custom_error_outpu
 
 @pytest.mark.asyncio
 async def test_schema_backed_programmatic_tool_accepts_conforming_custom_timeout_output() -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [_program(), _function_call()],
             [_program_output(), get_text_message("timeout handled")],
@@ -1190,8 +1191,8 @@ def test_process_model_response_rejects_program_items_without_programmatic_tool(
 
 @pytest.mark.asyncio
 async def test_runner_rejects_program_item_without_programmatic_tool() -> None:
-    model = FakeModel()
-    model.set_next_output([_program()])
+    model = ScriptedModel()
+    model.enqueue([_program()])
     agent = Agent(name="inventory", model=model)
 
     with pytest.raises(ModelBehaviorError, match="programmatic_tool_calling tool"):
@@ -1252,8 +1253,8 @@ def test_process_model_response_rejects_program_owned_calls_without_programmatic
 
 @pytest.mark.asyncio
 async def test_runner_does_not_execute_program_owned_call_without_programmatic_tool() -> None:
-    model = FakeModel()
-    model.set_next_output([_function_call()])
+    model = ScriptedModel()
+    model.enqueue([_function_call()])
     executed = False
 
     @function_tool(allowed_callers=["programmatic"])
@@ -1500,8 +1501,8 @@ def test_process_model_response_accepts_server_owned_parent_after_incomplete_out
 
 @pytest.mark.asyncio
 async def test_runner_does_not_execute_program_owned_call_without_parent_program() -> None:
-    model = FakeModel()
-    model.set_next_output([_function_call()])
+    model = ScriptedModel()
+    model.enqueue([_function_call()])
     executed = False
 
     @function_tool(allowed_callers=["programmatic"])
@@ -1891,12 +1892,12 @@ def test_process_model_response_accepts_allowed_program_owned_shell_output(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
 async def test_runner_executes_and_replays_programmatic_function_calls(streamed: bool) -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
-        [
-            [_program(), _function_call()],
-            [_program_output(), get_text_message("42 units are available")],
-        ]
+    outputs = [
+        [_program(), _function_call()],
+        [_program_output(), get_text_message("42 units are available")],
+    ]
+    model = ScriptedModel(
+        [get_exact_output_stream_step(output) for output in outputs] if streamed else outputs
     )
 
     @function_tool(allowed_callers=["programmatic"])
@@ -1923,9 +1924,9 @@ async def test_runner_executes_and_replays_programmatic_function_calls(streamed:
         result = await Runner.run(agent, "Check inventory")
 
     assert result.final_output == "42 units are available"
-    assert model.first_turn_args is not None
-    assert model.first_turn_args["model_settings"].tool_choice == "programmatic_tool_calling"
-    assert model.last_turn_args["model_settings"].tool_choice is None
+    assert bool(model.calls)
+    assert model.calls[0].model_settings.tool_choice == "programmatic_tool_calling"
+    assert model.calls[-1].model_settings.tool_choice is None
 
     function_outputs = [
         item
@@ -1941,18 +1942,21 @@ async def test_runner_executes_and_replays_programmatic_function_calls(streamed:
     }
     assert _caller_dict(raw_output["caller"]) == PROGRAM_CALLER
 
-    replayed_output = next(
-        item
-        for item in model.last_turn_args["input"]
-        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    replayed_output = cast(
+        dict[str, Any],
+        next(
+            item
+            for item in model.calls[-1].input
+            if isinstance(item, dict) and item.get("type") == "function_call_output"
+        ),
     )
     assert _caller_dict(replayed_output["caller"]) == PROGRAM_CALLER
 
 
 @pytest.mark.asyncio
 async def test_typed_programmatic_tool_preserves_input_guardrail_rejection() -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [_program(), _function_call()],
             [_program_output(), get_text_message("request rejected")],
@@ -1991,8 +1995,8 @@ async def test_typed_programmatic_tool_preserves_input_guardrail_rejection() -> 
 
 @pytest.mark.asyncio
 async def test_typed_programmatic_tool_preserves_default_timeout_result() -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [_program(), _function_call()],
             [_program_output(), get_text_message("request timed out")],
@@ -2023,8 +2027,8 @@ async def test_typed_programmatic_tool_preserves_default_timeout_result() -> Non
 
 @pytest.mark.asyncio
 async def test_typed_programmatic_tool_preserves_output_guardrail_rejection() -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [_program(), _function_call()],
             [_program_output(), get_text_message("request rejected")],
@@ -2070,12 +2074,12 @@ async def test_typed_programmatic_tool_preserves_approval_rejection(
     serialize_state: bool,
     rejection_message: str | None,
 ) -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
-        [
-            [_program(), _function_call()],
-            [_program_output(), get_text_message("request rejected")],
-        ]
+    outputs = [
+        [_program(), _function_call()],
+        [_program_output(), get_text_message("request rejected")],
+    ]
+    model = ScriptedModel(
+        [get_exact_output_stream_step(output) for output in outputs] if streaming else outputs
     )
 
     @function_tool(allowed_callers=["programmatic"], needs_approval=True)
@@ -2114,19 +2118,22 @@ async def test_typed_programmatic_tool_preserves_approval_rejection(
     expected_message = rejection_message or "Tool execution was not approved."
     assert json.loads(function_outputs[0]["output"]) == {"error": expected_message}
     assert _caller_dict(function_outputs[0]["caller"]) == PROGRAM_CALLER
-    assert model.last_turn_args is not None
-    replayed_output = next(
-        item
-        for item in model.last_turn_args["input"]
-        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    assert bool(model.calls)
+    replayed_output = cast(
+        dict[str, Any],
+        next(
+            item
+            for item in model.calls[-1].input
+            if isinstance(item, dict) and item.get("type") == "function_call_output"
+        ),
     )
     assert json.loads(replayed_output["output"]) == {"error": expected_message}
 
 
 @pytest.mark.asyncio
 async def test_rebuilt_mapping_programmatic_approval_preserves_caller() -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [_program(), _function_call()],
             [_program_output(), get_text_message("done")],
@@ -2164,8 +2171,8 @@ async def test_rebuilt_mapping_programmatic_approval_preserves_caller() -> None:
 
 @pytest.mark.asyncio
 async def test_rebuilt_mapping_programmatic_approval_rechecks_caller_permissions() -> None:
-    model = FakeModel()
-    model.set_next_output([_program(), _function_call()])
+    model = ScriptedModel()
+    model.enqueue([_program(), _function_call()])
     executed = False
 
     @function_tool(allowed_callers=["programmatic"], needs_approval=True)
@@ -2197,8 +2204,8 @@ async def test_rebuilt_mapping_programmatic_approval_rechecks_caller_permissions
 @pytest.mark.asyncio
 @pytest.mark.parametrize("parent_state", ["missing", "completed"])
 async def test_rebuilt_programmatic_approval_requires_active_parent(parent_state: str) -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [_program(), _function_call()],
             [_program_output(), get_text_message("done")],
@@ -2250,8 +2257,8 @@ async def test_rebuilt_programmatic_approval_requires_active_parent(parent_state
 
 @pytest.mark.asyncio
 async def test_typed_programmatic_tool_preserves_pre_approval_guardrail_rejection() -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [_program(), _function_call()],
             [_program_output(), get_text_message("request rejected")],
@@ -2290,7 +2297,7 @@ async def test_typed_programmatic_tool_preserves_pre_approval_guardrail_rejectio
 
 @pytest.mark.asyncio
 async def test_runner_handles_multiple_pauses_from_one_program() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     second_call = ResponseFunctionToolCall(
         id="function_item_2",
         call_id="call_lookup_2",
@@ -2299,7 +2306,7 @@ async def test_runner_handles_multiple_pauses_from_one_program() -> None:
         caller=CallerProgram(type="program", caller_id=PROGRAM_CALL_ID),
         type="function_call",
     )
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [_program(), _function_call()],
             [_program_output("incomplete"), second_call],
@@ -2334,13 +2341,13 @@ async def test_runner_handles_multiple_pauses_from_one_program() -> None:
 
     assert result.final_output == "84 units are available"
     assert calls == ["A-1", "B-2"]
-    assert model.last_turn_args["model_settings"].tool_choice is None
+    assert model.calls[-1].model_settings.tool_choice is None
     assert len([item for item in result.new_items if isinstance(item, ToolCallOutputItem)]) == 4
 
 
 @pytest.mark.asyncio
 async def test_runner_executes_programmatic_batch_calls_concurrently() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     batch_calls = [
         ResponseFunctionToolCall(
             id=f"function_item_{index}",
@@ -2352,7 +2359,7 @@ async def test_runner_executes_programmatic_batch_calls_concurrently() -> None:
         )
         for index in range(9)
     ]
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [_program(), *batch_calls],
             [_program_output(), get_text_message("batch complete")],
@@ -2398,8 +2405,8 @@ async def test_runner_executes_programmatic_batch_calls_concurrently() -> None:
 
 @pytest.mark.asyncio
 async def test_previous_response_id_continuation_sends_only_program_function_output() -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [_program(), _function_call()],
             [_program_output(), get_text_message("done")],
@@ -2419,8 +2426,8 @@ async def test_previous_response_id_continuation_sends_only_program_function_out
     result = await Runner.run(agent, "Check inventory", auto_previous_response_id=True)
 
     assert result.final_output == "done"
-    assert model.last_turn_args["previous_response_id"] == "resp-789"
-    last_input = model.last_turn_args["input"]
+    assert model.calls[-1].previous_response_id == "resp-789"
+    last_input = model.calls[-1].input
     assert isinstance(last_input, list)
     assert len(last_input) == 1
     function_output = cast(dict[str, Any], last_input[0])
@@ -2433,8 +2440,8 @@ async def test_previous_response_id_continuation_sends_only_program_function_out
 async def test_previous_response_id_continuation_accepts_server_owned_program_output(
     streamed: bool,
 ) -> None:
-    model = FakeModel()
-    model.set_next_output([_program_output(), get_text_message("done")])
+    output = [_program_output(), get_text_message("done")]
+    model = ScriptedModel([get_exact_output_stream_step(output) if streamed else output])
 
     @function_tool(allowed_callers=["programmatic"])
     def lookup_inventory(sku: str) -> InventoryOutput:
@@ -2470,13 +2477,13 @@ async def test_previous_response_id_continuation_accepts_server_owned_program_ou
         )
 
     assert result.final_output == "done"
-    assert model.last_turn_args["previous_response_id"] == "response_with_program_parent"
+    assert model.calls[-1].previous_response_id == "response_with_program_parent"
 
 
 @pytest.mark.asyncio
 async def test_previous_response_id_continuation_accepts_repeated_program_pause() -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [_function_call()],
             [_program_output(), get_text_message("done")],
@@ -2520,8 +2527,8 @@ async def test_previous_response_id_continuation_accepts_repeated_program_pause(
 async def test_run_state_round_trip_preserves_server_owned_program_parent(
     parent_source: str,
 ) -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [_function_call()],
             [_program_output(), get_text_message("done")],
@@ -2566,13 +2573,13 @@ async def test_run_state_round_trip_preserves_server_owned_program_parent(
 
     assert executed is True
     assert result.final_output == "done"
-    assert model.last_turn_args["previous_response_id"] == "resp-789"
+    assert model.calls[-1].previous_response_id == "resp-789"
 
 
 @pytest.mark.asyncio
 async def test_sqlite_session_round_trip_preserves_program_history_and_caller() -> None:
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [_program(), _function_call()],
             [_program_output(), get_text_message("done")],
@@ -2614,9 +2621,9 @@ async def test_sqlite_session_round_trip_preserves_program_history_and_caller() 
 
 @pytest.mark.asyncio
 async def test_nested_handoff_summarizes_complete_programmatic_transcript() -> None:
-    model = FakeModel()
+    model = ScriptedModel()
     delegate = Agent(name="delegate", model=model)
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [_program(), _function_call()],
             [_program_output(), get_handoff_tool_call(delegate)],
@@ -2692,8 +2699,8 @@ async def test_non_function_programmatic_outputs_preserve_caller() -> None:
     caller = cast(Any, PROGRAM_CALLER)
 
     async def run_tool(tool: Any, tool_call: Any) -> dict[str, Any]:
-        model = FakeModel()
-        model.add_multiple_turn_outputs([[_program(), tool_call], [get_text_message("done")]])
+        model = ScriptedModel()
+        model.extend([[_program(), tool_call], [get_text_message("done")]])
         agent = Agent(
             name="tool agent",
             model=model,
@@ -2752,13 +2759,13 @@ async def test_non_function_programmatic_outputs_preserve_caller() -> None:
 
     apply_patch_output = await run_tool(
         ApplyPatchTool(editor=Editor(), allowed_callers=["programmatic"]),
-        ResponseApplyPatchToolCall(
-            id="apply_patch_item",
-            call_id="call_apply_patch",
-            operation=OperationCreateFile(type="create_file", path="example.txt", diff="hello"),
-            status="completed",
-            type="apply_patch_call",
-            caller=caller,
-        ),
+        {
+            "id": "apply_patch_item",
+            "call_id": "call_apply_patch",
+            "operation": {"type": "create_file", "path": "example.txt", "diff": "hello"},
+            "status": "completed",
+            "type": "apply_patch_call",
+            "caller": caller,
+        },
     )
     assert _caller_dict(apply_patch_output["caller"]) == PROGRAM_CALLER

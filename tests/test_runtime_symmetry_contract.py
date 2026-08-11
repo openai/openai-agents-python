@@ -8,9 +8,9 @@ from openai.types.responses.response_usage import InputTokensDetails, OutputToke
 from agents import Agent, Runner, Tool, Usage
 from agents.items import ToolApprovalItem
 from agents.result import RunResult, RunResultStreaming
+from agents.testing import ScriptedModel
 from agents.usage import serialize_usage
 
-from .fake_model import FakeModel
 from .test_responses import get_function_tool, get_function_tool_call, get_text_message
 from .testing_processor import SPAN_PROCESSOR_TESTING, fetch_normalized_spans
 from .utils.simple_session import SimpleListSession
@@ -97,12 +97,12 @@ async def _run(
 
 
 @pytest.mark.parametrize("streamed", [False, True])
-async def test_fake_model_records_every_model_visible_request_field(streamed: bool) -> None:
-    model = FakeModel()
-    model.set_next_output([get_text_message("READY")])
+async def test_scripted_model_records_every_model_visible_request_field(streamed: bool) -> None:
+    model = ScriptedModel()
+    model.enqueue([get_text_message("READY")])
     await _run(Agent(name="request-contract-agent", model=model), streamed=streamed)
 
-    assert set(model.last_turn_args) == {
+    assert set(model.calls[-1].__dataclass_fields__) == {
         "system_instructions",
         "input",
         "model_settings",
@@ -113,6 +113,7 @@ async def test_fake_model_records_every_model_visible_request_field(streamed: bo
         "previous_response_id",
         "conversation_id",
         "prompt",
+        "streamed",
     }
 
 
@@ -121,11 +122,11 @@ async def test_streamed_and_nonstreamed_runs_have_matching_semantics(scenario: s
     projections: list[dict[str, Any]] = []
     for streamed in (False, True):
         SPAN_PROCESSOR_TESTING.clear()
-        model = FakeModel(tracing_enabled=True)
-        model.set_hardcoded_usage(_detailed_usage())
+        model = ScriptedModel(emit_traces=True)
+        model.set_default_usage(_detailed_usage())
         tools: list[Tool] = []
         if scenario == "function-tool":
-            model.add_multiple_turn_outputs(
+            model.extend(
                 [
                     [get_function_tool_call("release_check", "{}", call_id="call-release")],
                     [get_text_message("READY")],
@@ -133,7 +134,7 @@ async def test_streamed_and_nonstreamed_runs_have_matching_semantics(scenario: s
             )
             tools = [get_function_tool("release_check", "checked")]
         else:
-            model.set_next_output([get_text_message("READY")])
+            model.enqueue([get_text_message("READY")])
         agent = Agent(name="symmetry-agent", model=model, tools=tools)
         session = SimpleListSession(session_id=f"{scenario}-{streamed}")
         result = await _run(agent, streamed=streamed, session=session)
@@ -155,8 +156,8 @@ async def test_streamed_and_nonstreamed_runs_have_matching_semantics(scenario: s
 async def test_streamed_and_nonstreamed_runs_raise_the_same_exception_class() -> None:
     exception_classes: list[type[BaseException]] = []
     for streamed in (False, True):
-        model = FakeModel()
-        model.set_next_output(RuntimeError("release contract failure"))
+        model = ScriptedModel()
+        model.enqueue(RuntimeError("release contract failure"))
         agent = Agent(name="symmetry-agent", model=model)
 
         with pytest.raises(RuntimeError) as exc_info:
@@ -170,9 +171,9 @@ async def test_approval_resume_cross_modes_have_matching_semantics() -> None:
     projections: list[dict[str, Any]] = []
     for start_streamed, resume_streamed in ((True, False), (False, True)):
         SPAN_PROCESSOR_TESTING.clear()
-        model = FakeModel(tracing_enabled=True)
-        model.set_hardcoded_usage(_detailed_usage())
-        model.add_multiple_turn_outputs(
+        model = ScriptedModel(emit_traces=True)
+        model.set_default_usage(_detailed_usage())
+        model.extend(
             [
                 [get_function_tool_call("release_check", "{}", call_id="call-release")],
                 [get_text_message("READY")],

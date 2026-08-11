@@ -28,8 +28,8 @@ from agents.sandbox.session import (
     SandboxSessionEvent,
 )
 from agents.sandbox.snapshot import NoopSnapshotSpec
+from agents.testing import ModelStep, ScriptedModel, UnexpectedModelCall
 from integration_tests._contract_support import _redaction_observables
-from integration_tests._fake_model import QueuedFakeModel
 from integration_tests.conftest import skip_or_fail
 
 pytestmark = pytest.mark.security
@@ -204,7 +204,9 @@ async def test_runner_owned_local_sandbox_cannot_inspect_trusted_client_credenti
         turns: list[list[TResponseOutputItem]] = [[tool_call]]
         if not fail_after_inspection:
             turns.append([final_message])
-        model = QueuedFakeModel(turns)
+        model = ScriptedModel(
+            [ModelStep(output=turn, response_id="queued-fake-response") for turn in turns]
+        )
         client = _CredentialOwningDockerClient(trusted_credential=sentinel)
         nested_mount_source = tmp_path / "nested-mount-probe"
         nested_mount_source.mkdir()
@@ -234,8 +236,8 @@ async def test_runner_owned_local_sandbox_cannot_inspect_trusted_client_credenti
         with caplog.at_level(logging.DEBUG):
             if fail_after_inspection:
                 with pytest.raises(
-                    AssertionError,
-                    match="QueuedFakeModel received an unexpected model request",
+                    UnexpectedModelCall,
+                    match="no scripted steps remain",
                 ) as exc_info:
                     await Runner.run(
                         agent,
@@ -277,24 +279,12 @@ async def test_runner_owned_local_sandbox_cannot_inspect_trusted_client_credenti
                 pass
         docker_client.close()
 
-    expected_model_request_fields = {
-        "system_instructions",
-        "input",
-        "model_settings",
-        "tools",
-        "output_schema",
-        "handoffs",
-        "tracing",
-        "previous_response_id",
-        "conversation_id",
-        "prompt",
-    }
-    assert model.requests
-    assert all(set(request) == expected_model_request_fields for request in model.requests)
-    model_requests = repr(model.requests)
+    assert model.calls
+    assert all(call.streamed is False for call in model.calls)
+    model_requests = repr(model.calls)
     model_visible_tool_outputs: list[object] = []
-    for request in model.requests:
-        model_input = request["input"]
+    for call in model.calls:
+        model_input = call.input
         if not isinstance(model_input, list):
             continue
         model_visible_tool_outputs.extend(

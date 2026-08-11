@@ -25,8 +25,8 @@ from agents import Agent, Runner, TResponseInputItem, function_tool
 from agents.extensions.memory import AdvancedSQLiteSession
 from agents.result import RunResult
 from agents.run_context import RunContextWrapper
+from agents.testing import ScriptedModel
 from agents.usage import Usage
-from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 
 # Mark all tests in this file as asyncio
@@ -52,8 +52,8 @@ async def test_tool(query: str) -> str:
 
 @pytest.fixture
 def agent() -> Agent:
-    """Fixture for a basic agent with a fake model."""
-    return Agent(name="test", model=FakeModel(), tools=[test_tool])
+    """Fixture for a basic agent with a scripted model."""
+    return Agent(name="test", model=ScriptedModel(), tools=[test_tool])
 
 
 @pytest.fixture
@@ -74,7 +74,7 @@ def usage_data() -> Usage:
 def create_mock_run_result(usage: Usage | None = None, agent: Agent | None = None) -> RunResult:
     """Helper function to create a mock RunResult for testing."""
     if agent is None:
-        agent = Agent(name="test", model=FakeModel())
+        agent = Agent(name="test", model=ScriptedModel())
 
     if usage is None:
         usage = Usage(
@@ -2057,10 +2057,10 @@ async def test_runner_integration_with_usage_tracking(agent: Agent):
             # Ignore errors in test helper
             pass
 
-    # Set up fake model responses
-    assert isinstance(agent.model, FakeModel)
-    fake_model = agent.model
-    fake_model.set_next_output([get_text_message("San Francisco")])
+    # Set up scripted model responses.
+    assert isinstance(agent.model, ScriptedModel)
+    scripted_model = agent.model
+    scripted_model.enqueue([get_text_message("San Francisco")])
 
     # First turn
     result1 = await Runner.run(
@@ -2072,7 +2072,7 @@ async def test_runner_integration_with_usage_tracking(agent: Agent):
     await store_session_usage(result1, session)
 
     # Second turn
-    fake_model.set_next_output([get_text_message("California")])
+    scripted_model.enqueue([get_text_message("California")])
     result2 = await Runner.run(agent, "What state is it in?", session=session)
     assert result2.final_output == "California"
     await store_session_usage(result2, session)
@@ -2085,7 +2085,7 @@ async def test_runner_integration_with_usage_tracking(agent: Agent):
     session_usage = await session.get_session_usage()
     assert session_usage is not None
     assert session_usage["total_turns"] == 2
-    # FakeModel doesn't generate realistic usage data, so we just check structure exists
+    # ScriptedModel doesn't generate realistic usage data, so we just check structure exists
     assert "requests" in session_usage
     assert "total_tokens" in session_usage
 
@@ -2480,9 +2480,9 @@ async def test_tool_execution_integration(agent: Agent):
     session_id = "tool_integration_test"
     session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
 
-    # Set up the fake model to trigger a tool call
-    fake_model = cast(FakeModel, agent.model)
-    fake_model.set_next_output(
+    # Set up the scripted model to trigger a tool call.
+    scripted_model = cast(ScriptedModel, agent.model)
+    scripted_model.enqueue(
         [
             {  # type: ignore
                 "type": "function_call",
@@ -2494,7 +2494,7 @@ async def test_tool_execution_integration(agent: Agent):
     )
 
     # Then set the final response
-    fake_model.set_next_output([get_text_message("Tool executed successfully")])
+    scripted_model.enqueue([get_text_message("Tool executed successfully")])
 
     # Run the agent
     result = await Runner.run(
@@ -2687,8 +2687,8 @@ async def test_runner_with_session_settings_override(agent: Agent):
     await session.add_items(items)
 
     # Use RunConfig to override limit to 2
-    assert isinstance(agent.model, FakeModel)
-    agent.model.set_next_output([get_text_message("Got it")])
+    assert isinstance(agent.model, ScriptedModel)
+    agent.model.enqueue([get_text_message("Got it")])
 
     await Runner.run(
         agent,
@@ -2700,7 +2700,7 @@ async def test_runner_with_session_settings_override(agent: Agent):
     )
 
     # Verify the agent received only the last 2 history items + new question
-    last_input = agent.model.last_turn_args["input"]
+    last_input = agent.model.calls[-1].input
     # Filter out the new "New question" input
     history_items = [item for item in last_input if item.get("content") != "New question"]
     # Should have 2 history items (last two from the 10 we added)

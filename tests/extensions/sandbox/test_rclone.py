@@ -12,20 +12,11 @@ from agents.extensions.sandbox._rclone import (
 )
 from agents.sandbox.errors import MountConfigError
 from agents.sandbox.types import ExecResult
+from agents.testing import scripted_sandbox_session
 
 
 def _result(*, exit_code: int = 0, stdout: bytes = b"") -> ExecResult:
     return ExecResult(stdout=stdout, stderr=b"", exit_code=exit_code)
-
-
-class _FakeSession:
-    def __init__(self, results: list[ExecResult]) -> None:
-        self.results = results
-        self.calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
-
-    async def exec(self, *command: str, **kwargs: object) -> ExecResult:
-        self.calls.append((command, kwargs))
-        return self.results.pop(0)
 
 
 @pytest.mark.parametrize(
@@ -73,25 +64,25 @@ def test_rclone_install_command_pins_and_verifies_archive() -> None:
 
 @pytest.mark.asyncio
 async def test_ensure_rclone_preserves_preinstalled_binary() -> None:
-    session = _FakeSession([_result()])
+    session = scripted_sandbox_session([{"method": "exec", "result": _result()}])
 
-    await ensure_rclone(session)  # type: ignore[arg-type]
+    await ensure_rclone(session)
 
     assert len(session.calls) == 1
 
 
 @pytest.mark.asyncio
 async def test_ensure_rclone_rejects_unsupported_architecture_before_install() -> None:
-    session = _FakeSession(
+    session = scripted_sandbox_session(
         [
-            _result(exit_code=1),
-            _result(),
-            _result(stdout=b"mips64\n"),
+            {"method": "exec", "result": _result(exit_code=1)},
+            {"method": "exec", "result": _result()},
+            {"method": "exec", "result": _result(stdout=b"mips64\n")},
         ]
     )
 
     with pytest.raises(MountConfigError, match="architecture is unsupported") as exc_info:
-        await ensure_rclone(session)  # type: ignore[arg-type]
+        await ensure_rclone(session)
 
     assert exc_info.value.context["architecture"] == "mips64"
     assert len(session.calls) == 3
@@ -99,19 +90,22 @@ async def test_ensure_rclone_rejects_unsupported_architecture_before_install() -
 
 @pytest.mark.asyncio
 async def test_ensure_rclone_reports_checksum_mismatch() -> None:
-    session = _FakeSession(
+    session = scripted_sandbox_session(
         [
-            _result(exit_code=1),
-            _result(),
-            _result(stdout=b"x86_64\n"),
-            _result(),
-            _result(),
-            _result(exit_code=_RCLONE_CHECKSUM_MISMATCH_EXIT),
+            {"method": "exec", "result": _result(exit_code=1)},
+            {"method": "exec", "result": _result()},
+            {"method": "exec", "result": _result(stdout=b"x86_64\n")},
+            {"method": "exec", "result": _result()},
+            {"method": "exec", "result": _result()},
+            {
+                "method": "exec",
+                "result": _result(exit_code=_RCLONE_CHECKSUM_MISMATCH_EXIT),
+            },
         ]
     )
 
     with pytest.raises(MountConfigError, match="checksum verification failed") as exc_info:
-        await ensure_rclone(session)  # type: ignore[arg-type]
+        await ensure_rclone(session)
 
     assert exc_info.value.context == {
         "package": "rclone",

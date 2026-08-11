@@ -12,6 +12,7 @@ from openai.types.responses.response_usage import InputTokensDetails, OutputToke
 
 from agents import Agent, Runner
 from agents.run_internal.agent_runner_helpers import snapshot_usage, usage_delta
+from agents.testing import ScriptedModel
 from agents.usage import (
     RequestUsage,
     Usage,
@@ -20,7 +21,6 @@ from agents.usage import (
     model_usage_to_span_usage,
     serialize_usage,
 )
-from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 
 
@@ -90,8 +90,8 @@ async def test_runner_run_carries_request_usage_entries() -> None:
             )
         ],
     )
-    model = FakeModel(initial_output=[get_text_message("done")])
-    model.set_hardcoded_usage(usage)
+    model = ScriptedModel(steps=[[get_text_message("done")]])
+    model.set_default_usage(usage)
     agent = Agent(name="usage-agent", model=model)
 
     result = await Runner.run(agent, input="hi")

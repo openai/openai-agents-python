@@ -3,16 +3,16 @@ import json
 import pytest
 
 from agents import Agent, MaxTurnsExceeded, RunErrorDetails, Runner
+from agents.testing import ScriptedModel
 
-from .fake_model import FakeModel
 from .test_responses import get_function_tool, get_function_tool_call, get_text_message
 
 
 @pytest.mark.asyncio
 async def test_run_error_includes_data():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model, tools=[get_function_tool("foo", "res")])
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_text_message("1"), get_function_tool_call("foo", json.dumps({"a": "b"}))],
             [get_text_message("done")],
@@ -29,9 +29,9 @@ async def test_run_error_includes_data():
 
 @pytest.mark.asyncio
 async def test_streamed_run_error_includes_data():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="test", model=model, tools=[get_function_tool("foo", "res")])
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_text_message("1"), get_function_tool_call("foo", json.dumps({"a": "b"}))],
             [get_text_message("done")],

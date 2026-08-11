@@ -8,13 +8,13 @@ from openai.types.responses import ResponseCompletedEvent
 from agents import Agent, Runner
 from agents.guardrail import input_guardrail
 from agents.stream_events import RawResponsesStreamEvent
+from agents.testing import ScriptedModel
 
-from .fake_model import FakeModel
 from .test_responses import get_function_tool, get_function_tool_call, get_text_message
 
 
-class SlowCompleteFakeModel(FakeModel):
-    """A FakeModel that delays before emitting the completed event in streaming."""
+class SlowCompleteScriptedModel(ScriptedModel):
+    """A ScriptedModel that delays before emitting the completed event in streaming."""
 
     def __init__(self, delay_seconds: float):
         super().__init__()
@@ -29,7 +29,7 @@ class SlowCompleteFakeModel(FakeModel):
 
 @pytest.mark.asyncio
 async def test_simple_streaming_with_cancel():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="Joker", model=model)
 
     result = Runner.run_streamed(agent, input="Please tell me 5 jokes.")
@@ -46,14 +46,14 @@ async def test_simple_streaming_with_cancel():
 
 @pytest.mark.asyncio
 async def test_multiple_events_streaming_with_cancel():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="Joker",
         model=model,
         tools=[get_function_tool("foo", "tool_result")],
     )
 
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             # First turn: a message and tool call
             [
@@ -79,7 +79,7 @@ async def test_multiple_events_streaming_with_cancel():
 
 @pytest.mark.asyncio
 async def test_cancel_prevents_further_events():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="Joker", model=model)
     result = Runner.run_streamed(agent, input="Please tell me 5 jokes.")
     events = []
@@ -95,7 +95,7 @@ async def test_cancel_prevents_further_events():
 
 @pytest.mark.asyncio
 async def test_cancel_is_idempotent():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="Joker", model=model)
     result = Runner.run_streamed(agent, input="Please tell me 5 jokes.")
     events = []
@@ -110,7 +110,7 @@ async def test_cancel_is_idempotent():
 
 @pytest.mark.asyncio
 async def test_cancel_before_streaming():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="Joker", model=model)
     result = Runner.run_streamed(agent, input="Please tell me 5 jokes.")
     result.cancel()  # Cancel before streaming
@@ -120,7 +120,7 @@ async def test_cancel_before_streaming():
 
 @pytest.mark.asyncio
 async def test_cancel_cleans_up_resources():
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="Joker", model=model)
     result = Runner.run_streamed(agent, input="Please tell me 5 jokes.")
     # Start streaming, then cancel
@@ -138,7 +138,7 @@ async def test_cancel_cleans_up_resources():
 @pytest.mark.asyncio
 async def test_cancel_immediate_mode_explicit():
     """Test explicit immediate mode behaves same as default."""
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="Joker", model=model)
 
     result = Runner.run_streamed(agent, input="Please tell me 5 jokes.")
@@ -154,8 +154,8 @@ async def test_cancel_immediate_mode_explicit():
 
 @pytest.mark.asyncio
 async def test_stream_events_respects_asyncio_timeout_cancellation():
-    model = SlowCompleteFakeModel(delay_seconds=0.5)
-    model.set_next_output([get_text_message("Final response")])
+    model = SlowCompleteScriptedModel(delay_seconds=0.5)
+    model.enqueue([get_text_message("Final response")])
     agent = Agent(name="TimeoutTester", model=model)
 
     result = Runner.run_streamed(agent, input="Please tell me 5 jokes.")
@@ -183,7 +183,7 @@ async def test_stream_events_respects_asyncio_timeout_cancellation():
 async def test_cancel_immediate_unblocks_waiting_stream_consumer():
     block_event = asyncio.Event()
 
-    class BlockingFakeModel(FakeModel):
+    class BlockingScriptedModel(ScriptedModel):
         async def stream_response(
             self,
             system_instructions,
@@ -213,7 +213,7 @@ async def test_cancel_immediate_unblocks_waiting_stream_consumer():
             ):
                 yield event
 
-    model = BlockingFakeModel()
+    model = BlockingScriptedModel()
     agent = Agent(name="Joker", model=model)
 
     result = Runner.run_streamed(agent, input="Please tell me 5 jokes.")
@@ -236,8 +236,8 @@ async def test_cancel_immediate_unblocks_waiting_stream_consumer():
 @pytest.mark.asyncio
 async def test_run_loop_exception_property_is_none_on_success():
     """run_loop_exception is None when the stream completes without error."""
-    model = FakeModel()
-    model.set_next_output([get_text_message("hello")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("hello")])
     agent = Agent(name="A", model=model)
 
     result = Runner.run_streamed(agent, input="hi")
@@ -251,7 +251,7 @@ async def test_run_loop_exception_property_is_none_on_success():
 async def test_run_loop_exception_surfaced_after_stream():
     """run_loop_exception is set when the run loop raises before yielding events."""
 
-    class BoomModel(FakeModel):
+    class BoomModel(ScriptedModel):
         async def get_response(self, *args, **kwargs):
             raise RuntimeError("run loop boom")
 
@@ -278,7 +278,7 @@ async def test_falsy_run_loop_exception_is_surfaced_after_stream() -> None:
         def __bool__(self) -> bool:
             return False
 
-    class BoomModel(FakeModel):
+    class BoomModel(ScriptedModel):
         async def stream_response(self, *args, **kwargs):
             raise FalsyRuntimeError("falsy run loop boom")
             yield
@@ -300,8 +300,8 @@ async def test_falsy_input_guardrail_exception_is_surfaced_after_stream() -> Non
     async def raising_guardrail(context, agent, input):
         raise FalsyRuntimeError("falsy guardrail boom")
 
-    model = FakeModel()
-    model.set_next_output([get_text_message("done")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("done")])
     result = Runner.run_streamed(
         Agent(name="A", model=model, input_guardrails=[raising_guardrail]),
         input="hi",

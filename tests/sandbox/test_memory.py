@@ -75,7 +75,7 @@ from agents.sandbox.memory.storage import (
 )
 from agents.sandbox.runtime import _stream_memory_input_override
 from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
-from tests.fake_model import FakeModel
+from agents.testing import ScriptedModel
 from tests.test_responses import get_final_output_message, get_text_message
 from tests.utils.hitl import make_shell_call
 
@@ -148,8 +148,8 @@ def _memory_config(
     extra_prompt: str | None = None,
     layout: MemoryLayoutConfig | None = None,
     read: MemoryReadConfig | None = None,
-    phase_one_model: FakeModel | None = None,
-    phase_two_model: FakeModel | None = None,
+    phase_one_model: ScriptedModel | None = None,
+    phase_two_model: ScriptedModel | None = None,
 ) -> Memory:
     return Memory(
         layout=layout or MemoryLayoutConfig(),
@@ -157,14 +157,16 @@ def _memory_config(
         generate=MemoryGenerateConfig(
             max_raw_memories_for_consolidation=max_raw_memories_for_consolidation,
             extra_prompt=extra_prompt,
-            phase_one_model=phase_one_model or FakeModel(initial_output=[_phase_one_message()]),
+            phase_one_model=phase_one_model or ScriptedModel(steps=[[_phase_one_message()]]),
             phase_two_model=phase_two_model
-            or FakeModel(
-                initial_output=[
-                    _patch_update_call("memory-md", "memories/MEMORY.md", "memory entry"),
-                    _patch_update_call(
-                        "memory-summary", "memories/memory_summary.md", "summary entry"
-                    ),
+            or ScriptedModel(
+                steps=[
+                    [
+                        _patch_update_call("memory-md", "memories/MEMORY.md", "memory entry"),
+                        _patch_update_call(
+                            "memory-summary", "memories/memory_summary.md", "summary entry"
+                        ),
+                    ]
                 ]
             ),
         ),
@@ -175,13 +177,12 @@ def _run_config_for_session(session: Any) -> RunConfig:
     return RunConfig(sandbox=SandboxRunConfig(session=session))
 
 
-def _extract_user_text(fake_model: FakeModel) -> str:
-    assert fake_model.first_turn_args is not None
-    return _extract_user_text_from_turn_args(fake_model.first_turn_args)
+def _extract_user_text(scripted_model: ScriptedModel) -> str:
+    assert bool(scripted_model.calls)
+    return _extract_user_text_from_model_input(scripted_model.calls[0].input)
 
 
-def _extract_user_text_from_turn_args(turn_args: dict[str, Any]) -> str:
-    input_items = turn_args["input"]
+def _extract_user_text_from_model_input(input_items: str | list[Any]) -> str:
     assert isinstance(input_items, list)
     first_item = cast(dict[str, Any], input_items[0])
     content = first_item["content"]
@@ -649,23 +650,25 @@ async def test_runner_memory_generation_sanitizes_and_truncates_phase_one_prompt
     monkeypatch.setattr(phase_one_module, "_PHASE_ONE_ROLLOUT_TOKEN_LIMIT", 1000)
     client = UnixLocalSandboxClient()
     session = await client.create(manifest=Manifest())
-    phase_one_model = FakeModel(initial_output=[_phase_one_message()])
+    phase_one_model = ScriptedModel(steps=[[_phase_one_message()]])
     memory = _memory_config(phase_one_model=phase_one_model)
     agent = SandboxAgent(
         name="worker",
-        model=FakeModel(
-            initial_output=[
-                ResponseReasoningItem(id="rs_1", summary=[], type="reasoning"),
-                cast(
-                    TResponseOutputItem,
-                    {
-                        "id": "compaction_1",
-                        "type": "compaction",
-                        "summary": "compacted-so-far",
-                        "encrypted_content": "encrypted",
-                    },
-                ),
-                get_text_message("done"),
+        model=ScriptedModel(
+            steps=[
+                [
+                    ResponseReasoningItem(id="rs_1", summary=[], type="reasoning"),
+                    cast(
+                        TResponseOutputItem,
+                        {
+                            "id": "compaction_1",
+                            "type": "compaction",
+                            "summary": "compacted-so-far",
+                            "encrypted_content": "encrypted",
+                        },
+                    ),
+                    get_text_message("done"),
+                ]
             ]
         ),
         instructions="Worker.",
@@ -694,7 +697,7 @@ async def test_runner_memory_generation_sanitizes_and_truncates_phase_one_prompt
         )
 
         assert result.final_output == "done"
-        assert phase_one_model.first_turn_args is None
+        assert not phase_one_model.calls
 
         await session.aclose()
         closed = True
@@ -721,7 +724,7 @@ async def test_sandbox_agent_without_memory_capability_skips_memory_generation()
     session = await client.create(manifest=Manifest())
     agent = SandboxAgent(
         name="worker",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Worker.",
     )
 
@@ -990,14 +993,16 @@ async def test_memory_capability_live_update_instructions() -> None:
 async def test_sandbox_memory_writes_rollouts_and_memory_files() -> None:
     client = UnixLocalSandboxClient()
     session = await client.create(manifest=Manifest())
-    phase_one_model = FakeModel(initial_output=[_phase_one_message()])
-    phase_two_model = FakeModel(
-        initial_output=[
-            _patch_update_call("memory-md", "memories/MEMORY.md", "memory entry"),
-            _patch_update_call("memory-summary", "memories/memory_summary.md", "summary entry"),
+    phase_one_model = ScriptedModel(steps=[[_phase_one_message()]])
+    phase_two_model = ScriptedModel(
+        steps=[
+            [
+                _patch_update_call("memory-md", "memories/MEMORY.md", "memory entry"),
+                _patch_update_call("memory-summary", "memories/memory_summary.md", "summary entry"),
+            ]
         ]
     )
-    phase_two_model.set_next_output([get_final_output_message("consolidated")])
+    phase_two_model.enqueue([get_final_output_message("consolidated")])
     memory = _memory_config(
         extra_prompt="Track durable user preferences.",
         phase_one_model=phase_one_model,
@@ -1005,7 +1010,7 @@ async def test_sandbox_memory_writes_rollouts_and_memory_files() -> None:
     )
     agent = SandboxAgent(
         name="worker",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Worker.",
         capabilities=[memory],
     )
@@ -1023,7 +1028,7 @@ async def test_sandbox_memory_writes_rollouts_and_memory_files() -> None:
 
         assert result.final_output == "done"
         assert len(rollouts) == 1
-        assert phase_one_model.first_turn_args is None
+        assert not phase_one_model.calls
 
         await session.aclose()
         closed = True
@@ -1048,16 +1053,12 @@ async def test_sandbox_memory_writes_rollouts_and_memory_files() -> None:
         assert "rollout_path: sessions/" in rollout_summaries[0].read_text()
         assert "terminal_state: completed" in rollout_summaries[0].read_text()
         assert '"terminal_state":"completed"' in _extract_user_text(phase_one_model)
-        assert phase_one_model.first_turn_args is not None
-        assert (
-            "DEVELOPER-SPECIFIC EXTRA GUIDANCE"
-            in phase_one_model.first_turn_args["system_instructions"]
-        )
-        assert (
-            "Track durable user preferences."
-            in phase_one_model.first_turn_args["system_instructions"]
-        )
-        assert phase_two_model.first_turn_args is not None
+        assert bool(phase_one_model.calls)
+        system_instructions = phase_one_model.calls[0].system_instructions
+        assert system_instructions is not None
+        assert "DEVELOPER-SPECIFIC EXTRA GUIDANCE" in system_instructions
+        assert "Track durable user preferences." in system_instructions
+        assert bool(phase_two_model.calls)
         assert "DEVELOPER-SPECIFIC EXTRA GUIDANCE" in _extract_user_text(phase_two_model)
         assert "Track durable user preferences." in _extract_user_text(phase_two_model)
     finally:
@@ -1068,24 +1069,28 @@ async def test_sandbox_memory_writes_rollouts_and_memory_files() -> None:
 async def test_sandbox_memory_uses_custom_layout() -> None:
     client = UnixLocalSandboxClient()
     session = await client.create(manifest=Manifest())
-    phase_two_model = FakeModel(
-        initial_output=[
-            _patch_update_call("memory-md", "agent_memory/MEMORY.md", "memory entry"),
-            _patch_update_call("memory-summary", "agent_memory/memory_summary.md", "summary entry"),
+    phase_two_model = ScriptedModel(
+        steps=[
+            [
+                _patch_update_call("memory-md", "agent_memory/MEMORY.md", "memory entry"),
+                _patch_update_call(
+                    "memory-summary", "agent_memory/memory_summary.md", "summary entry"
+                ),
+            ]
         ]
     )
-    phase_two_model.set_next_output([get_final_output_message("consolidated")])
+    phase_two_model.enqueue([get_final_output_message("consolidated")])
     memory = Memory(
         layout=MemoryLayoutConfig(memories_dir="agent_memory", sessions_dir="agent_sessions"),
         read=None,
         generate=MemoryGenerateConfig(
-            phase_one_model=FakeModel(initial_output=[_phase_one_message()]),
+            phase_one_model=ScriptedModel(steps=[[_phase_one_message()]]),
             phase_two_model=phase_two_model,
         ),
     )
     agent = SandboxAgent(
         name="worker",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Worker.",
         capabilities=[memory],
     )
@@ -1114,47 +1119,51 @@ async def test_sandbox_memory_uses_custom_layout() -> None:
 async def test_sandbox_memory_supports_multiple_generating_layouts_in_one_session() -> None:
     client = UnixLocalSandboxClient()
     session = await client.create(manifest=Manifest())
-    phase_two_model_a = FakeModel(
-        initial_output=[
-            _patch_update_call("a-memory", "agent_a_memory/MEMORY.md", "agent a entry"),
-            _patch_update_call(
-                "a-summary",
-                "agent_a_memory/memory_summary.md",
-                "agent a summary",
-            ),
+    phase_two_model_a = ScriptedModel(
+        steps=[
+            [
+                _patch_update_call("a-memory", "agent_a_memory/MEMORY.md", "agent a entry"),
+                _patch_update_call(
+                    "a-summary",
+                    "agent_a_memory/memory_summary.md",
+                    "agent a summary",
+                ),
+            ]
         ]
     )
-    phase_two_model_a.set_next_output([get_final_output_message("agent a consolidated")])
-    phase_two_model_b = FakeModel(
-        initial_output=[
-            _patch_update_call("b-memory", "agent_b_memory/MEMORY.md", "agent b entry"),
-            _patch_update_call(
-                "b-summary",
-                "agent_b_memory/memory_summary.md",
-                "agent b summary",
-            ),
+    phase_two_model_a.enqueue([get_final_output_message("agent a consolidated")])
+    phase_two_model_b = ScriptedModel(
+        steps=[
+            [
+                _patch_update_call("b-memory", "agent_b_memory/MEMORY.md", "agent b entry"),
+                _patch_update_call(
+                    "b-summary",
+                    "agent_b_memory/memory_summary.md",
+                    "agent b summary",
+                ),
+            ]
         ]
     )
-    phase_two_model_b.set_next_output([get_final_output_message("agent b consolidated")])
+    phase_two_model_b.enqueue([get_final_output_message("agent b consolidated")])
     memory_a = _memory_config(
         layout=MemoryLayoutConfig(memories_dir="agent_a_memory", sessions_dir="agent_a_sessions"),
-        phase_one_model=FakeModel(initial_output=[_phase_one_message(raw_memory="agent a raw\n")]),
+        phase_one_model=ScriptedModel(steps=[[_phase_one_message(raw_memory="agent a raw\n")]]),
         phase_two_model=phase_two_model_a,
     )
     memory_b = _memory_config(
         layout=MemoryLayoutConfig(memories_dir="agent_b_memory", sessions_dir="agent_b_sessions"),
-        phase_one_model=FakeModel(initial_output=[_phase_one_message(raw_memory="agent b raw\n")]),
+        phase_one_model=ScriptedModel(steps=[[_phase_one_message(raw_memory="agent b raw\n")]]),
         phase_two_model=phase_two_model_b,
     )
     agent_a = SandboxAgent(
         name="agent-a",
-        model=FakeModel(initial_output=[get_final_output_message("a done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("a done")]]),
         instructions="Agent A.",
         capabilities=[memory_a],
     )
     agent_b = SandboxAgent(
         name="agent-b",
-        model=FakeModel(initial_output=[get_final_output_message("b done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("b done")]]),
         instructions="Agent B.",
         capabilities=[memory_b],
     )
@@ -1183,7 +1192,7 @@ async def test_sandbox_memory_rejects_different_generate_configs_for_same_layout
     session = await client.create(manifest=Manifest())
     memory = _memory_config()
     different_memory = _memory_config(
-        phase_one_model=FakeModel(initial_output=[_phase_one_message(raw_memory="different\n")])
+        phase_one_model=ScriptedModel(steps=[[_phase_one_message(raw_memory="different\n")]])
     )
 
     try:
@@ -1266,27 +1275,31 @@ async def test_sandbox_memory_rejects_shared_sessions_dir_for_different_memories
 async def test_sandbox_memory_groups_segments_by_sdk_session_until_close() -> None:
     client = UnixLocalSandboxClient()
     session = await client.create(manifest=Manifest())
-    phase_one_model = FakeModel(initial_output=[_phase_one_message(raw_memory="joined raw\n")])
-    phase_two_model = FakeModel(
-        initial_output=[
-            _patch_update_call("memory-md", "memories/MEMORY.md", "joined entry"),
-            _patch_update_call("memory-summary", "memories/memory_summary.md", "joined summary"),
+    phase_one_model = ScriptedModel(steps=[[_phase_one_message(raw_memory="joined raw\n")]])
+    phase_two_model = ScriptedModel(
+        steps=[
+            [
+                _patch_update_call("memory-md", "memories/MEMORY.md", "joined entry"),
+                _patch_update_call(
+                    "memory-summary", "memories/memory_summary.md", "joined summary"
+                ),
+            ]
         ]
     )
-    phase_two_model.set_next_output([get_final_output_message("joined")])
+    phase_two_model.enqueue([get_final_output_message("joined")])
     memory = _memory_config(
         phase_one_model=phase_one_model,
         phase_two_model=phase_two_model,
     )
     first_agent = SandboxAgent(
         name="first-worker",
-        model=FakeModel(initial_output=[get_final_output_message("first done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("first done")]]),
         instructions="Worker.",
         capabilities=[memory],
     )
     second_agent = SandboxAgent(
         name="second-worker",
-        model=FakeModel(initial_output=[get_final_output_message("second done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("second done")]]),
         instructions="Worker.",
         capabilities=[memory],
     )
@@ -1324,7 +1337,7 @@ async def test_sandbox_memory_groups_segments_by_sdk_session_until_close() -> No
         ]
         assert segments[0]["input"] == [{"content": "first", "role": "user"}]
         assert segments[1]["input"] == [{"content": "second", "role": "user"}]
-        assert phase_one_model.first_turn_args is None
+        assert not phase_one_model.calls
 
         await session.aclose()
         closed = True
@@ -1345,8 +1358,8 @@ async def test_sandbox_memory_groups_segments_by_sdk_session_until_close() -> No
 async def test_sandbox_memory_fallback_does_not_mutate_run_config() -> None:
     client = UnixLocalSandboxClient()
     session = await client.create(manifest=Manifest())
-    agent_model = FakeModel()
-    agent_model.add_multiple_turn_outputs(
+    agent_model = ScriptedModel()
+    agent_model.extend(
         [
             [get_final_output_message("first done")],
             [get_final_output_message("second done")],
@@ -1387,7 +1400,7 @@ async def test_sandbox_memory_uses_conversation_id_when_sdk_session_is_absent() 
     session = await client.create(manifest=Manifest())
     agent = SandboxAgent(
         name="worker",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Worker.",
         capabilities=[_memory_config()],
     )
@@ -1413,8 +1426,8 @@ async def test_sandbox_memory_uses_conversation_id_when_sdk_session_is_absent() 
 async def test_sandbox_memory_uses_group_id_when_sdk_session_is_absent() -> None:
     client = UnixLocalSandboxClient()
     session = await client.create(manifest=Manifest())
-    agent_model = FakeModel()
-    agent_model.add_multiple_turn_outputs(
+    agent_model = ScriptedModel()
+    agent_model.extend(
         [
             [get_final_output_message("first done")],
             [get_final_output_message("second done")],
@@ -1450,8 +1463,8 @@ async def test_sandbox_memory_uses_group_id_when_sdk_session_is_absent() -> None
 async def test_sandbox_memory_uses_per_run_conversation_when_no_conversation_id() -> None:
     client = UnixLocalSandboxClient()
     session = await client.create(manifest=Manifest())
-    agent_model = FakeModel()
-    agent_model.add_multiple_turn_outputs(
+    agent_model = ScriptedModel()
+    agent_model.extend(
         [
             [get_final_output_message("first done")],
             [get_final_output_message("second done")],
@@ -1483,27 +1496,29 @@ async def test_sandbox_memory_uses_per_run_conversation_when_no_conversation_id(
 async def test_sandbox_memory_caps_phase_two_selection_and_surfaces_removed_rollouts() -> None:
     client = UnixLocalSandboxClient()
     session = await client.create(manifest=Manifest())
-    phase_one_model = FakeModel()
-    phase_one_model.add_multiple_turn_outputs(
+    phase_one_model = ScriptedModel()
+    phase_one_model.extend(
         [
             [_phase_one_message(slug="first", raw_memory="first raw\n")],
             [_phase_one_message(slug="second", raw_memory="second raw\n")],
         ]
     )
-    phase_two_model = FakeModel(
-        initial_output=[
-            _patch_update_call("memory-md", "memories/MEMORY.md", "first entry"),
-            _patch_update_call("memory-summary", "memories/memory_summary.md", "first summary"),
+    phase_two_model = ScriptedModel(
+        steps=[
+            [
+                _patch_update_call("memory-md", "memories/MEMORY.md", "first entry"),
+                _patch_update_call("memory-summary", "memories/memory_summary.md", "first summary"),
+            ]
         ]
     )
-    phase_two_model.set_next_output([get_final_output_message("consolidated")])
+    phase_two_model.enqueue([get_final_output_message("consolidated")])
     memory = _memory_config(
         max_raw_memories_for_consolidation=1,
         phase_one_model=phase_one_model,
         phase_two_model=phase_two_model,
     )
-    agent_model = FakeModel()
-    agent_model.add_multiple_turn_outputs(
+    agent_model = ScriptedModel()
+    agent_model.extend(
         [
             [get_final_output_message("first done")],
             [get_final_output_message("second done")],
@@ -1551,8 +1566,8 @@ async def test_sandbox_memory_caps_phase_two_selection_and_surfaces_removed_roll
         assert "second raw" in merged_raw_memories
         assert "first raw" not in merged_raw_memories
 
-        assert phase_two_model.first_turn_args is not None
-        prompt = _extract_user_text_from_turn_args(phase_two_model.first_turn_args)
+        assert bool(phase_two_model.calls)
+        prompt = _extract_user_text_from_model_input(phase_two_model.calls[0].input)
         assert "newly added since the last successful Phase 2 run: 1" in prompt
         assert f"rollout_id={selected_rollout_ids[0]}" in prompt
     finally:
@@ -1563,21 +1578,25 @@ async def test_sandbox_memory_caps_phase_two_selection_and_surfaces_removed_roll
 async def test_sandbox_memory_runs_phase_one_and_phase_two_on_session_close() -> None:
     client = UnixLocalSandboxClient()
     session = await client.create(manifest=Manifest())
-    phase_one_model = FakeModel(initial_output=[_phase_one_message()])
-    phase_two_model = FakeModel(
-        initial_output=[
-            _patch_update_call("memory-md", "memories/MEMORY.md", "shutdown entry"),
-            _patch_update_call("memory-summary", "memories/memory_summary.md", "shutdown summary"),
+    phase_one_model = ScriptedModel(steps=[[_phase_one_message()]])
+    phase_two_model = ScriptedModel(
+        steps=[
+            [
+                _patch_update_call("memory-md", "memories/MEMORY.md", "shutdown entry"),
+                _patch_update_call(
+                    "memory-summary", "memories/memory_summary.md", "shutdown summary"
+                ),
+            ]
         ]
     )
-    phase_two_model.set_next_output([get_final_output_message("shutdown")])
+    phase_two_model.enqueue([get_final_output_message("shutdown")])
     memory = _memory_config(
         phase_one_model=phase_one_model,
         phase_two_model=phase_two_model,
     )
     agent = SandboxAgent(
         name="worker",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Worker.",
         capabilities=[memory],
     )
@@ -1752,7 +1771,7 @@ async def test_sandbox_memory_enqueue_failure_follows_both_data_policies(
     client = _DeleteTrackingUnixLocalSandboxClient()
     agent = SandboxAgent(
         name="worker",
-        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Worker.",
         capabilities=[_memory_config()],
     )
@@ -1796,23 +1815,25 @@ async def test_sandbox_memory_enqueue_failure_follows_both_data_policies(
 async def test_sandbox_memory_marks_interrupted_runs_in_phase_one_prompt() -> None:
     client = UnixLocalSandboxClient()
     session = await client.create(manifest=Manifest())
-    phase_one_model = FakeModel(initial_output=[_phase_one_message()])
-    phase_two_model = FakeModel(
-        initial_output=[
-            _patch_update_call("memory-md", "memories/MEMORY.md", "interrupted entry"),
-            _patch_update_call(
-                "memory-summary", "memories/memory_summary.md", "interrupted summary"
-            ),
+    phase_one_model = ScriptedModel(steps=[[_phase_one_message()]])
+    phase_two_model = ScriptedModel(
+        steps=[
+            [
+                _patch_update_call("memory-md", "memories/MEMORY.md", "interrupted entry"),
+                _patch_update_call(
+                    "memory-summary", "memories/memory_summary.md", "interrupted summary"
+                ),
+            ]
         ]
     )
-    phase_two_model.set_next_output([get_final_output_message("done")])
+    phase_two_model.enqueue([get_final_output_message("done")])
     memory = _memory_config(
         phase_one_model=phase_one_model,
         phase_two_model=phase_two_model,
     )
     agent = SandboxAgent(
         name="worker",
-        model=FakeModel(initial_output=[make_shell_call("approval-call")]),
+        model=ScriptedModel(steps=[[make_shell_call("approval-call")]]),
         instructions="Worker.",
         tools=[ShellTool(executor=lambda _request: "ok", needs_approval=True)],
         capabilities=[memory],

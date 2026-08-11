@@ -6,7 +6,7 @@ from openai.types.responses.response_usage import InputTokensDetails, OutputToke
 
 from agents import ModelBehaviorError, ModelSettings, ModelTracing, OpenAIResponsesModel, trace
 from agents.tracing.span_data import ResponseSpanData
-from tests import fake_model
+from tests import model_test_helpers
 
 from .testing_processor import assert_no_spans, fetch_normalized_spans, fetch_ordered_spans
 
@@ -49,7 +49,7 @@ class DummyResponse:
     def __aiter__(self):
         yield ResponseCompletedEvent(
             type="response.completed",
-            response=fake_model.get_response_obj(self.output),
+            response=model_test_helpers.get_response_obj(self.output),
             sequence_number=0,
         )
 
@@ -249,7 +249,7 @@ async def test_stream_response_creates_trace(monkeypatch):
                 async def __aiter__(self):
                     yield ResponseCompletedEvent(
                         type="response.completed",
-                        response=fake_model.get_response_obj([], "dummy-id-123"),
+                        response=model_test_helpers.get_response_obj([], "dummy-id-123"),
                         sequence_number=0,
                     )
 
@@ -322,7 +322,7 @@ async def test_stream_response_failed_or_incomplete_terminal_event_creates_trace
             class DummyTerminalEvent:
                 def __init__(self):
                     self.type = terminal_event_type
-                    self.response = fake_model.get_response_obj([], "dummy-id-terminal")
+                    self.response = model_test_helpers.get_response_obj([], "dummy-id-terminal")
                     self.sequence_number = 0
 
             class DummyStream:
@@ -391,7 +391,7 @@ async def test_stream_non_data_tracing_doesnt_set_response_id(monkeypatch):
                 async def __aiter__(self):
                     yield ResponseCompletedEvent(
                         type="response.completed",
-                        response=fake_model.get_response_obj([], "dummy-id-123"),
+                        response=model_test_helpers.get_response_obj([], "dummy-id-123"),
                         sequence_number=0,
                     )
 
@@ -467,7 +467,7 @@ async def test_stream_disabled_tracing_doesnt_create_span(monkeypatch):
                 async def __aiter__(self):
                     yield ResponseCompletedEvent(
                         type="response.completed",
-                        response=fake_model.get_response_obj([], "dummy-id-123"),
+                        response=model_test_helpers.get_response_obj([], "dummy-id-123"),
                         sequence_number=0,
                     )
 

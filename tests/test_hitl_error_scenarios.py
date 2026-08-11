@@ -73,6 +73,7 @@ from agents.run_internal.tool_planning import (
     execute_mcp_approval_requests,
 )
 from agents.run_state import RunState as RunStateClass
+from agents.testing import ScriptedModel
 from agents.tool import FunctionTool, HostedMCPTool
 from agents.tool_guardrails import (
     ToolGuardrailFunctionOutput,
@@ -83,7 +84,6 @@ from agents.tool_guardrails import (
 )
 from agents.usage import Usage
 
-from .fake_model import FakeModel
 from .mcp.helpers import FakeMCPServer
 from .test_responses import get_text_message
 from .utils.hitl import (
@@ -321,12 +321,12 @@ async def test_nested_agent_tool_resumes_after_rejection() -> None:
     async def inner_hitl_tool() -> str:
         return "ok"
 
-    inner_model = FakeModel()
+    inner_model = ScriptedModel()
     inner_agent = Agent(name="Inner", model=inner_model, tools=[inner_hitl_tool])
     inner_call_first = make_function_tool_call(inner_hitl_tool.name, call_id="inner-1")
     inner_call_retry = make_function_tool_call(inner_hitl_tool.name, call_id="inner-2")
     inner_final = get_text_message("done")
-    inner_model.add_multiple_turn_outputs(
+    inner_model.extend(
         [
             [inner_call_first],
             [inner_call_retry],
@@ -340,12 +340,12 @@ async def test_nested_agent_tool_resumes_after_rejection() -> None:
         needs_approval=True,
     )
 
-    outer_model = FakeModel()
+    outer_model = ScriptedModel()
     outer_agent = Agent(name="Outer", model=outer_model, tools=[agent_tool])
     outer_call = make_function_tool_call(
         agent_tool.name, call_id="outer-1", arguments='{"input":"hi"}'
     )
-    outer_model.add_multiple_turn_outputs([[outer_call]])
+    outer_model.extend([[outer_call]])
 
     first = await Runner.run(outer_agent, "start")
     assert first.interruptions, "agent tool should request approval first"
@@ -391,23 +391,23 @@ async def test_changed_nested_parent_fails_before_tool_inventory_callbacks() -> 
     async def observer() -> str:
         return "unused"
 
-    inner_model = FakeModel()
-    inner_model.add_multiple_turn_outputs(
-        [[make_function_tool_call(inner_hitl_tool.name, call_id="inner-1")]]
-    )
+    inner_model = ScriptedModel()
+    inner_model.extend([[make_function_tool_call(inner_hitl_tool.name, call_id="inner-1")]])
     inner_agent = Agent(name="Inner", model=inner_model, tools=[inner_hitl_tool])
     agent_tool = inner_agent.as_tool(
         tool_name="inner_agent_tool",
         tool_description="Inner agent tool with HITL",
         needs_approval=True,
     )
-    outer_model = FakeModel(
-        initial_output=[
-            make_function_tool_call(
-                agent_tool.name,
-                call_id="outer-1",
-                arguments='{"input":"safe"}',
-            )
+    outer_model = ScriptedModel(
+        steps=[
+            [
+                make_function_tool_call(
+                    agent_tool.name,
+                    call_id="outer-1",
+                    arguments='{"input":"safe"}',
+                )
+            ]
         ]
     )
     outer_agent = Agent(name="Outer", model=outer_model, tools=[agent_tool, observer])
@@ -438,9 +438,9 @@ async def test_nested_agent_tool_interruptions_remain_distinct_across_outer_call
     async def inner_hitl_tool() -> str:
         return "ok"
 
-    inner_model = FakeModel()
+    inner_model = ScriptedModel()
     inner_agent = Agent(name="Inner", model=inner_model, tools=[inner_hitl_tool])
-    inner_model.add_multiple_turn_outputs(
+    inner_model.extend(
         [
             [make_function_tool_call(inner_hitl_tool.name, call_id="inner-1")],
             [make_function_tool_call(inner_hitl_tool.name, call_id="inner-2")],
@@ -453,9 +453,9 @@ async def test_nested_agent_tool_interruptions_remain_distinct_across_outer_call
         needs_approval=False,
     )
 
-    outer_model = FakeModel()
+    outer_model = ScriptedModel()
     outer_agent = Agent(name="Outer", model=outer_model, tools=[agent_tool])
-    outer_model.add_multiple_turn_outputs(
+    outer_model.extend(
         [
             [
                 make_function_tool_call(
@@ -488,11 +488,9 @@ async def test_nested_agent_tool_does_not_inherit_parent_approvals() -> None:
     async def inner_shared_tool() -> str:
         return "inner"
 
-    inner_model = FakeModel()
+    inner_model = ScriptedModel()
     inner_agent = Agent(name="Inner", model=inner_model, tools=[inner_shared_tool])
-    inner_model.add_multiple_turn_outputs(
-        [[make_function_tool_call(inner_shared_tool.name, call_id="dup")]]
-    )
+    inner_model.extend([[make_function_tool_call(inner_shared_tool.name, call_id="dup")]])
 
     agent_tool = inner_agent.as_tool(
         tool_name="inner_agent_tool",
@@ -500,9 +498,9 @@ async def test_nested_agent_tool_does_not_inherit_parent_approvals() -> None:
         needs_approval=False,
     )
 
-    outer_model = FakeModel()
+    outer_model = ScriptedModel()
     outer_agent = Agent(name="Outer", model=outer_model, tools=[outer_shared_tool, agent_tool])
-    outer_model.add_multiple_turn_outputs(
+    outer_model.extend(
         [
             [make_function_tool_call(outer_shared_tool.name, call_id="dup")],
             [
@@ -568,7 +566,7 @@ async def test_resume_does_not_duplicate_pending_shell_approvals() -> None:
     call_id = extract_tool_call_id(raw_call)
     assert call_id, "shell call must have a call_id"
 
-    model.set_next_output([raw_call])
+    model.enqueue([raw_call])
     first = await Runner.run(agent, "run shell")
     assert first.interruptions, "shell tool should require approval"
 
@@ -626,7 +624,8 @@ async def test_route_local_shell_calls_to_remote_shell_tool():
         action={"type": "exec", "command": ["echo", "test"], "env": {}},  # type: ignore[arg-type]
         status="in_progress",
     )
-    model.set_next_output([local_shell_call])
+    model.enqueue([local_shell_call])
+    model.enqueue([])
 
     await Runner.run(agent, "run local shell")
 
@@ -654,7 +653,7 @@ async def test_preserve_max_turns_when_resuming_from_runresult_state():
     tool = function_tool(test_tool, needs_approval=require_approval)
     model, agent = make_model_and_agent(tools=[tool])
 
-    model.add_multiple_turn_outputs([[make_function_tool_call("test_tool", call_id="call-1")]])
+    model.extend([[make_function_tool_call("test_tool", call_id="call-1")]])
 
     result1 = await Runner.run(agent, "call test_tool", max_turns=20)
     assert result1.interruptions, "should have an interruption"
@@ -662,7 +661,7 @@ async def test_preserve_max_turns_when_resuming_from_runresult_state():
     state = approve_first_interruption(result1, always_approve=True)
 
     # Provide 10 more turns (turns 2-11) to ensure we exceed the default 10 but not 20.
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [
                 get_text_message(f"turn {i + 2}"),  # Text message first (doesn't finish)
@@ -671,6 +670,7 @@ async def test_preserve_max_turns_when_resuming_from_runresult_state():
             for i in range(10)
         ]
     )
+    model.enqueue([])
 
     result2 = await Runner.run(agent, state)
     assert result2 is not None, "Run should complete successfully with max_turns=20 from state"
@@ -687,7 +687,7 @@ async def test_current_turn_not_preserved_in_to_state():
     model, agent = make_model_and_agent(tools=[tool])
 
     # Model emits a tool call requiring approval
-    model.set_next_output([make_function_tool_call("test_tool", call_id="call-1")])
+    model.enqueue([make_function_tool_call("test_tool", call_id="call-1")])
 
     # First turn with interruption
     result1 = await Runner.run(agent, "call test_tool")
@@ -859,7 +859,7 @@ async def test_preserve_persisted_item_counter_when_resuming_streamed_runs():
     ]
 
     # Set up model to return final output immediately (so the run completes)
-    model.set_next_output([get_text_message("done")])
+    model.enqueue([get_text_message("done")])
 
     result = Runner.run_streamed(agent, state)
 
@@ -910,7 +910,7 @@ async def test_function_needs_approval_invalid_type_raises() -> None:
         return "ok"
 
     model, agent = make_model_and_agent(tools=[bad_tool])
-    model.set_next_output([make_function_tool_call("bad_tool")])
+    model.enqueue([make_function_tool_call("bad_tool")])
 
     with pytest.raises(UserError, match="needs_approval"):
         await Runner.run(agent, "run invalid")
@@ -951,9 +951,7 @@ async def test_callable_function_approval_fails_closed_for_invalid_arguments(
         needs_approval=needs_approval,
     )
     model, agent = make_model_and_agent(tools=[tool])
-    model.set_next_output(
-        [make_function_tool_call(tool.name, arguments=arguments, call_id="call-invalid")]
-    )
+    model.enqueue([make_function_tool_call(tool.name, arguments=arguments, call_id="call-invalid")])
 
     result = await Runner.run(agent, "send an email")
 
@@ -986,7 +984,7 @@ async def test_callable_function_approval_receives_valid_object_arguments() -> N
     )
     arguments = '{"subject": "status update"}'
     model, agent = make_model_and_agent(tools=[tool])
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [make_function_tool_call(tool.name, arguments=arguments, call_id="call-valid")],
             [get_text_message("done")],
@@ -1058,7 +1056,7 @@ async def test_agent_as_tool_with_nested_approvals_propagates() -> None:
     spanish_agent.tools = [get_current_timestamp]
 
     # Spanish agent will first request timestamp, then return text.
-    nested_model.add_multiple_turn_outputs(
+    nested_model.extend(
         [
             [make_function_tool_call("get_current_timestamp")],
             [get_text_message("hola")],
@@ -1066,7 +1064,7 @@ async def test_agent_as_tool_with_nested_approvals_propagates() -> None:
     )
 
     # Orchestrator model will call the spanish agent tool.
-    orchestrator_model = FakeModel()
+    orchestrator_model = ScriptedModel()
     orchestrator = Agent(
         name="orchestrator",
         tools=[
@@ -1079,7 +1077,7 @@ async def test_agent_as_tool_with_nested_approvals_propagates() -> None:
         model=orchestrator_model,
     )
 
-    orchestrator_model.add_multiple_turn_outputs(
+    orchestrator_model.extend(
         [
             [
                 make_function_tool_call(
@@ -1132,7 +1130,7 @@ async def test_nested_agent_tool_continuation_runs_outer_callbacks_once(streamed
         return "inner output"
 
     nested_agent.tools = [inner_tool]
-    nested_model.add_multiple_turn_outputs(
+    nested_model.extend(
         [
             [
                 make_function_tool_call(
@@ -1171,8 +1169,8 @@ async def test_nested_agent_tool_continuation_runs_outer_callbacks_once(streamed
     outer_tool.tool_output_guardrails = [track_output]
     outer_tool.custom_data_extractor = extract_custom_data
 
-    outer_model = FakeModel()
-    outer_model.add_multiple_turn_outputs(
+    outer_model = ScriptedModel()
+    outer_model.extend(
         [
             [
                 make_function_tool_call(
@@ -1789,9 +1787,9 @@ async def test_execute_path_skips_needs_approval_checker_when_status_resolved() 
     async def sensitive(value: str) -> str:
         return f"ran:{value}"
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="agent", model=model, tools=[sensitive])
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [make_function_tool_call(sensitive.name, call_id="call-1", arguments='{"value":"x"}')],
             [get_text_message("done")],
@@ -1827,14 +1825,14 @@ async def test_resume_checkpoints_tool_output_before_tool_use_behavior_failure()
     def failing_behavior(_ctx: Any, _results: Any) -> Any:
         raise RuntimeError("tool use behavior failed")
 
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="agent",
         model=model,
         tools=[sensitive],
         tool_use_behavior=failing_behavior,
     )
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [make_function_tool_call(sensitive.name, call_id="call-1", arguments='{"value":"x"}')],
             [get_text_message("done")],

@@ -41,8 +41,8 @@ from agents.items import (
 )
 from agents.mcp.util import MCPUtil
 from agents.run_internal import run_loop
+from agents.testing import ScriptedModel
 from agents.usage import Usage
-from tests.fake_model import FakeModel
 from tests.mcp.helpers import FakeMCPServer
 from tests.mcp.model_compat import Tool as MCPTool
 from tests.test_responses import get_function_tool_call
@@ -76,7 +76,7 @@ def _make_hosted_mcp_list_tools(server_label: str, tool_name: str) -> McpListToo
 
 
 def test_process_model_response_shell_call_without_tool_raises() -> None:
-    agent = Agent(name="no-shell", model=FakeModel())
+    agent = Agent(name="no-shell", model=ScriptedModel())
     shell_call = make_shell_call("shell-1")
 
     with pytest.raises(ModelBehaviorError, match="shell tool"):
@@ -111,7 +111,7 @@ def test_process_model_response_dispatches_falsy_shell_tool() -> None:
 
 
 def test_process_model_response_sets_title_for_local_mcp_function_tool() -> None:
-    agent = Agent(name="local-mcp", model=FakeModel())
+    agent = Agent(name="local-mcp", model=ScriptedModel())
     mcp_tool = MCPTool(name="search_docs", inputSchema={}, description=None, title="Search Docs")
     function_tool = MCPUtil.to_function_tool(
         mcp_tool,
@@ -142,7 +142,7 @@ def test_process_model_response_sets_title_for_local_mcp_function_tool() -> None
 
 
 def test_process_model_response_uses_mcp_list_tools_metadata_for_hosted_mcp_calls() -> None:
-    agent = Agent(name="hosted-mcp", model=FakeModel())
+    agent = Agent(name="hosted-mcp", model=ScriptedModel())
     hosted_tool = HostedMCPTool(
         tool_config=cast(
             Any,
@@ -186,7 +186,7 @@ def test_process_model_response_uses_mcp_list_tools_metadata_for_hosted_mcp_call
 
 def test_process_model_response_skips_local_shell_execution_for_hosted_environment() -> None:
     shell_tool = ShellTool(environment={"type": "container_auto"})
-    agent = Agent(name="hosted-shell", model=FakeModel(), tools=[shell_tool])
+    agent = Agent(name="hosted-shell", model=ScriptedModel(), tools=[shell_tool])
     shell_call = make_shell_call("shell-hosted-1")
 
     processed = run_loop.process_model_response(
@@ -213,7 +213,7 @@ def test_process_model_response_sanitizes_shell_call_model_object() -> None:
         action=cast(Any, {"commands": ["echo hi"], "timeout_ms": 1000}),
     )
     shell_tool = ShellTool(environment={"type": "container_auto"})
-    agent = Agent(name="hosted-shell-model", model=FakeModel(), tools=[shell_tool])
+    agent = Agent(name="hosted-shell-model", model=ScriptedModel(), tools=[shell_tool])
 
     processed = run_loop.process_model_response(
         agent=agent,
@@ -252,7 +252,7 @@ def test_process_model_response_preserves_shell_call_output() -> None:
             }
         ],
     }
-    agent = Agent(name="shell-output", model=FakeModel())
+    agent = Agent(name="shell-output", model=ScriptedModel())
 
     processed = run_loop.process_model_response(
         agent=agent,
@@ -288,7 +288,7 @@ def test_process_model_response_sanitizes_shell_call_output_model_object() -> No
             ],
         ),
     )
-    agent = Agent(name="shell-output-model", model=FakeModel())
+    agent = Agent(name="shell-output-model", model=ScriptedModel())
 
     processed = run_loop.process_model_response(
         agent=agent,
@@ -322,7 +322,7 @@ def test_process_model_response_sanitizes_shell_call_output_model_object() -> No
 
 
 def test_process_model_response_apply_patch_call_without_tool_raises() -> None:
-    agent = Agent(name="no-apply", model=FakeModel())
+    agent = Agent(name="no-apply", model=ScriptedModel())
     apply_patch_call = make_apply_patch_dict("apply-1", diff="-old\n+new\n")
 
     with pytest.raises(ModelBehaviorError, match="apply_patch tool"):
@@ -338,7 +338,7 @@ def test_process_model_response_apply_patch_call_without_tool_raises() -> None:
 def test_process_model_response_sanitizes_apply_patch_call_model_object() -> None:
     editor = RecordingEditor()
     apply_patch_tool = ApplyPatchTool(editor=editor)
-    agent = Agent(name="apply-agent-model", model=FakeModel(), tools=[apply_patch_tool])
+    agent = Agent(name="apply-agent-model", model=ScriptedModel(), tools=[apply_patch_tool])
     apply_patch_call = ResponseApplyPatchToolCall(
         type="apply_patch_call",
         id="ap_call_1",
@@ -380,7 +380,7 @@ def test_process_model_response_sanitizes_apply_patch_call_model_object() -> Non
 def test_process_model_response_queues_apply_patch_call() -> None:
     editor = RecordingEditor()
     apply_patch_tool = ApplyPatchTool(editor=editor)
-    agent = Agent(name="apply-agent", model=FakeModel(), tools=[apply_patch_tool])
+    agent = Agent(name="apply-agent", model=ScriptedModel(), tools=[apply_patch_tool])
     apply_patch_call = make_apply_patch_dict("apply-1")
 
     processed = run_loop.process_model_response(
@@ -420,7 +420,7 @@ def test_process_model_response_dispatches_falsy_apply_patch_tool() -> None:
 def test_process_model_response_queues_hosted_apply_patch_from_custom_tool_call() -> None:
     editor = RecordingEditor()
     apply_patch_tool = ApplyPatchTool(editor=editor)
-    agent = Agent(name="apply-agent-custom", model=FakeModel(), tools=[apply_patch_tool])
+    agent = Agent(name="apply-agent-custom", model=ScriptedModel(), tools=[apply_patch_tool])
     custom_call = ResponseCustomToolCall(
         type="custom_tool_call",
         name="apply_patch",
@@ -456,7 +456,7 @@ def test_process_model_response_queues_custom_tool_call_for_custom_tool() -> Non
         on_invoke_tool=lambda _ctx, raw_input: raw_input,
         format={"type": "text"},
     )
-    agent = Agent(name="custom-agent", model=FakeModel(), tools=[custom_tool])
+    agent = Agent(name="custom-agent", model=ScriptedModel(), tools=[custom_tool])
     custom_call = ResponseCustomToolCall(
         type="custom_tool_call",
         name="raw_editor",
@@ -487,7 +487,7 @@ def test_process_model_response_prefers_namespaced_function_over_apply_patch_fal
         tools=[function_tool(lambda payload: payload, name_override="apply_patch_lookup")],
     )[0]
     all_tools: list[Tool] = [namespaced_tool]
-    agent = Agent(name="billing-agent", model=FakeModel(), tools=all_tools)
+    agent = Agent(name="billing-agent", model=ScriptedModel(), tools=all_tools)
 
     processed = run_loop.process_model_response(
         agent=agent,
@@ -511,7 +511,7 @@ def test_process_model_response_prefers_namespaced_function_over_apply_patch_fal
 
 
 def test_process_model_response_handles_compaction_item() -> None:
-    agent = Agent(name="compaction-agent", model=FakeModel())
+    agent = Agent(name="compaction-agent", model=ScriptedModel())
     compaction_item = ResponseCompactionItem(
         id="comp-1",
         encrypted_content="enc",
@@ -537,7 +537,7 @@ def test_process_model_response_handles_compaction_item() -> None:
 
 
 def test_process_model_response_classifies_tool_search_items() -> None:
-    agent = Agent(name="tool-search-agent", model=FakeModel())
+    agent = Agent(name="tool-search-agent", model=ScriptedModel())
     tool_search_call = construct_type(
         type_=ResponseOutputItem,
         value={
@@ -604,7 +604,7 @@ def test_process_model_response_uses_namespace_for_duplicate_function_names() ->
         tools=[billing_tool],
     )
     all_tools: list[Tool] = [*crm_namespace, *billing_namespace]
-    agent = Agent(name="billing-agent", model=FakeModel(), tools=all_tools)
+    agent = Agent(name="billing-agent", model=ScriptedModel(), tools=all_tools)
 
     processed = run_loop.process_model_response(
         agent=agent,
@@ -633,7 +633,7 @@ def test_process_model_response_collapses_synthetic_deferred_namespace_in_tools_
         name_override="get_weather",
         defer_loading=True,
     )
-    agent = Agent(name="weather-agent", model=FakeModel(), tools=[deferred_tool])
+    agent = Agent(name="weather-agent", model=ScriptedModel(), tools=[deferred_tool])
 
     processed = run_loop.process_model_response(
         agent=agent,
@@ -670,7 +670,7 @@ def test_process_model_response_rejects_bare_name_for_duplicate_namespaced_funct
         tools=[billing_tool],
     )
     all_tools: list[Tool] = [*crm_namespace, *billing_namespace]
-    agent = Agent(name="billing-agent", model=FakeModel(), tools=all_tools)
+    agent = Agent(name="billing-agent", model=ScriptedModel(), tools=all_tools)
 
     with pytest.raises(ModelBehaviorError, match="Tool lookup_account not found"):
         run_loop.process_model_response(
@@ -688,7 +688,7 @@ def test_process_model_response_uses_last_duplicate_top_level_function() -> None
     first_tool = function_tool(lambda customer_id: f"first:{customer_id}", name_override="lookup")
     second_tool = function_tool(lambda customer_id: f"second:{customer_id}", name_override="lookup")
     all_tools: list[Tool] = [first_tool, second_tool]
-    agent = Agent(name="lookup-agent", model=FakeModel(), tools=all_tools)
+    agent = Agent(name="lookup-agent", model=ScriptedModel(), tools=all_tools)
 
     processed = run_loop.process_model_response(
         agent=agent,
@@ -707,7 +707,7 @@ def test_process_model_response_rejects_reserved_same_name_namespace_shape() -> 
     invalid_tool._tool_namespace = "lookup_account"
     invalid_tool._tool_namespace_description = "Same-name namespace"
     all_tools: list[Tool] = [invalid_tool]
-    agent = Agent(name="lookup-agent", model=FakeModel(), tools=all_tools)
+    agent = Agent(name="lookup-agent", model=ScriptedModel(), tools=all_tools)
 
     with pytest.raises(UserError, match="synthetic namespace `lookup_account.lookup_account`"):
         run_loop.process_model_response(
@@ -740,7 +740,7 @@ def test_process_model_response_rejects_qualified_name_collision_with_dotted_top
         tools=[function_tool(lambda customer_id: customer_id, name_override="lookup_account")],
     )[0]
     all_tools: list[Tool] = [dotted_top_level_tool, namespaced_tool]
-    agent = Agent(name="lookup-agent", model=FakeModel(), tools=all_tools)
+    agent = Agent(name="lookup-agent", model=ScriptedModel(), tools=all_tools)
 
     with pytest.raises(UserError, match="qualified name `crm.lookup_account`"):
         run_loop.process_model_response(
@@ -771,7 +771,7 @@ def test_process_model_response_prefers_visible_top_level_function_over_deferred
         defer_loading=True,
     )
     all_tools: list[Tool] = [visible_tool, deferred_tool]
-    agent = Agent(name="lookup-agent", model=FakeModel(), tools=all_tools)
+    agent = Agent(name="lookup-agent", model=ScriptedModel(), tools=all_tools)
 
     processed = run_loop.process_model_response(
         agent=agent,
@@ -801,7 +801,7 @@ def test_process_model_response_uses_internal_lookup_key_for_deferred_top_level_
         defer_loading=True,
     )
     all_tools: list[Tool] = [visible_tool, deferred_tool]
-    agent = Agent(name="lookup-agent", model=FakeModel(), tools=all_tools)
+    agent = Agent(name="lookup-agent", model=ScriptedModel(), tools=all_tools)
 
     processed = run_loop.process_model_response(
         agent=agent,
@@ -832,7 +832,7 @@ def test_process_model_response_preserves_synthetic_namespace_for_deferred_top_l
         defer_loading=True,
     )
     all_tools: list[Tool] = [deferred_tool]
-    agent = Agent(name="weather-agent", model=FakeModel(), tools=all_tools)
+    agent = Agent(name="weather-agent", model=ScriptedModel(), tools=all_tools)
 
     processed = run_loop.process_model_response(
         agent=agent,
@@ -858,10 +858,10 @@ def test_process_model_response_prefers_namespaced_function_over_handoff_name_co
         description="Billing tools",
         tools=[billing_tool],
     )
-    handoff_target = Agent(name="lookup-agent", model=FakeModel())
+    handoff_target = Agent(name="lookup-agent", model=ScriptedModel())
     lookup_handoff: Handoff = handoff(handoff_target, tool_name_override="lookup_account")
     all_tools: list[Tool] = [*billing_namespace]
-    agent = Agent(name="billing-agent", model=FakeModel(), tools=all_tools)
+    agent = Agent(name="billing-agent", model=ScriptedModel(), tools=all_tools)
 
     processed = run_loop.process_model_response(
         agent=agent,
@@ -890,7 +890,7 @@ def test_process_model_response_prefers_namespaced_function_over_handoff_name_co
 def test_process_model_response_rejects_mismatched_function_namespace() -> None:
     bare_tool = function_tool(lambda customer_id: customer_id, name_override="lookup_account")
     all_tools: list[Tool] = [bare_tool]
-    agent = Agent(name="bare-agent", model=FakeModel(), tools=all_tools)
+    agent = Agent(name="bare-agent", model=ScriptedModel(), tools=all_tools)
 
     with pytest.raises(ModelBehaviorError, match="crm.lookup_account"):
         run_loop.process_model_response(
@@ -911,7 +911,7 @@ def test_process_model_response_rejects_mismatched_function_namespace() -> None:
 
 
 def test_process_model_response_collects_missing_function_tool_when_opted_in() -> None:
-    agent = Agent(name="test", model=FakeModel(), tools=[function_tool(lambda: "ok")])
+    agent = Agent(name="test", model=ScriptedModel(), tools=[function_tool(lambda: "ok")])
     missing_call = get_function_tool_call("missing_tool", "{}", call_id="call_missing")
 
     processed = run_loop.process_model_response(

@@ -15,6 +15,7 @@ from agents.run_internal.run_steps import (
     SingleStepResult,
 )
 from agents.run_state import RunState
+from agents.testing import ScriptedModel
 from agents.tool_guardrails import (
     AllowBehavior,
     ToolGuardrailFunctionOutput,
@@ -24,12 +25,11 @@ from agents.tool_guardrails import (
     ToolOutputGuardrailResult,
 )
 from agents.usage import Usage
-from tests.fake_model import FakeModel
 
 
 @pytest.mark.asyncio
 async def test_runner_resume_preserves_guardrail_results(monkeypatch: pytest.MonkeyPatch) -> None:
-    agent = Agent(name="agent", model=FakeModel())
+    agent = Agent(name="agent", model=ScriptedModel())
     context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
 
     input_guardrail: InputGuardrail[Any] = InputGuardrail(
@@ -163,7 +163,7 @@ async def test_runner_resume_preserves_guardrail_results_on_reinterruption(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A resumed run that interrupts again must keep the tool guardrail results it carried in."""
-    agent = Agent(name="agent", model=FakeModel())
+    agent = Agent(name="agent", model=ScriptedModel())
     context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
 
     tool_input_guardrail: ToolInputGuardrail[Any] = ToolInputGuardrail(

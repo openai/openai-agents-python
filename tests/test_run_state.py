@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import gc
 import importlib
-import io
 import json
 import logging
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
@@ -39,7 +38,7 @@ from openai.types.responses.response_usage import InputTokensDetails
 from openai.types.responses.tool_param import Mcp
 from pydantic import BaseModel, ValidationError
 
-from agents import Agent, Model, ModelSettings, RunConfig, RunHooks, Runner, handoff, trace
+from agents import Agent, ModelSettings, RunConfig, RunHooks, Runner, handoff, trace
 from agents._tool_invocation import tool_invocation_identity_and_scope
 from agents.computer import Computer
 from agents.exceptions import ModelBehaviorError, UserError
@@ -66,7 +65,6 @@ from agents.items import (
     ToolSearchOutputItem,
     TResponseInputItem,
     TResponseOutputItem,
-    TResponseStreamEvent,
 )
 from agents.run_context import RunContextWrapper
 from agents.run_error_handlers import RunErrorHandlerResult, RunErrorHandlers
@@ -110,9 +108,8 @@ from agents.sandbox import Manifest
 from agents.sandbox.capabilities.capability import Capability
 from agents.sandbox.entries import BaseEntry, Mount, MountStrategyBase
 from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient, UnixLocalSandboxSessionState
-from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
-from agents.sandbox.snapshot import LocalSnapshot, NoopSnapshot
-from agents.sandbox.types import ExecResult
+from agents.sandbox.snapshot import LocalSnapshot
+from agents.testing import ModelCall, ModelStep, ScriptedModel, scripted_sandbox_session
 from agents.tool import (
     ApplyPatchTool,
     ComputerTool,
@@ -135,9 +132,7 @@ from agents.tool_guardrails import (
 )
 from agents.tracing.traces import TraceState
 from agents.usage import Usage
-from tests.utils.factories import TestSessionState
 
-from .fake_model import FakeModel
 from .test_responses import (
     get_final_output_message,
     get_function_tool_call,
@@ -164,49 +159,6 @@ _CURRENT_SCHEMA_MAJOR, _CURRENT_SCHEMA_MINOR = CURRENT_SCHEMA_VERSION.split(".")
 _NEXT_UNSUPPORTED_SCHEMA_VERSION = f"{_CURRENT_SCHEMA_MAJOR}.{int(_CURRENT_SCHEMA_MINOR) + 1}"
 
 TContext = TypeVar("TContext")
-
-
-class _IdentitySandboxSession(BaseSandboxSession):
-    def __init__(self, root: str) -> None:
-        self.state = TestSessionState(
-            manifest=Manifest(root=root),
-            snapshot=NoopSnapshot(id=f"snapshot:{root}"),
-        )
-
-    async def start(self) -> None:
-        return None
-
-    async def stop(self) -> None:
-        return None
-
-    async def shutdown(self) -> None:
-        return None
-
-    async def running(self) -> bool:
-        return True
-
-    async def read(self, path: Path, *, user: object = None) -> Any:
-        _ = (path, user)
-        raise AssertionError("read() should not be called")
-
-    async def write(self, path: Path, data: io.IOBase, *, user: object = None) -> None:
-        _ = (path, data, user)
-        raise AssertionError("write() should not be called")
-
-    async def _exec_internal(
-        self,
-        *command: Any,
-        timeout: float | None = None,
-    ) -> ExecResult:
-        _ = (command, timeout)
-        raise AssertionError("_exec_internal() should not be called")
-
-    async def persist_workspace(self) -> Any:
-        raise AssertionError("persist_workspace() should not be called")
-
-    async def hydrate_workspace(self, data: Any) -> None:
-        _ = data
-        raise AssertionError("hydrate_workspace() should not be called")
 
 
 class _IdentityCapability(Capability):
@@ -315,8 +267,8 @@ class TestRunState:
 
         trace_state = FalsyTraceState(trace_id="trace_falsy")
 
-        model = FakeModel()
-        model.set_next_output([get_final_output_message("done")])
+        model = ScriptedModel()
+        model.enqueue([get_final_output_message("done")])
         result = await Runner.run(Agent(name="test", model=model), "input")
         result._trace_state = trace_state
 
@@ -324,8 +276,8 @@ class TestRunState:
         assert isinstance(restored, FalsyTraceState)
         assert restored.trace_id == "trace_falsy"
 
-        streaming_model = FakeModel()
-        streaming_model.set_next_output([get_final_output_message("done")])
+        streaming_model = ScriptedModel()
+        streaming_model.enqueue([get_final_output_message("done")])
         streaming_result = Runner.run_streamed(
             Agent(name="streaming-test", model=streaming_model),
             "input",
@@ -625,13 +577,21 @@ class TestRunState:
 
         first_alpha_capability = _IdentityCapability(setting="alpha")
         first_beta_capability = _IdentityCapability(setting="beta")
-        first_alpha_capability.bind(_IdentitySandboxSession("/workspace/first-alpha"))
-        first_beta_capability.bind(_IdentitySandboxSession("/workspace/first-beta"))
+        first_alpha_capability.bind(
+            scripted_sandbox_session(manifest=Manifest(root="/workspace/first-alpha"))
+        )
+        first_beta_capability.bind(
+            scripted_sandbox_session(manifest=Manifest(root="/workspace/first-beta"))
+        )
 
         second_alpha_capability = _IdentityCapability(setting="alpha")
         second_beta_capability = _IdentityCapability(setting="beta")
-        second_alpha_capability.bind(_IdentitySandboxSession("/workspace/second-alpha"))
-        second_beta_capability.bind(_IdentitySandboxSession("/workspace/second-beta"))
+        second_alpha_capability.bind(
+            scripted_sandbox_session(manifest=Manifest(root="/workspace/second-alpha"))
+        )
+        second_beta_capability.bind(
+            scripted_sandbox_session(manifest=Manifest(root="/workspace/second-beta"))
+        )
 
         first_alpha_signature = _capability_identity_signature(first_alpha_capability)
         first_beta_signature = _capability_identity_signature(first_beta_capability)
@@ -707,8 +667,8 @@ class TestRunState:
         def approval_tool() -> str:
             return "approved"
 
-        first_model = FakeModel()
-        second_model = FakeModel()
+        first_model = ScriptedModel()
+        second_model = ScriptedModel()
         first = Agent(name="duplicate", model=first_model)
         second = Agent(
             name="duplicate",
@@ -719,8 +679,8 @@ class TestRunState:
         first.handoffs = [second]
         second.handoffs = [first]
 
-        first_model.add_multiple_turn_outputs([[get_handoff_tool_call(second)]])
-        second_model.add_multiple_turn_outputs(
+        first_model.extend([[get_handoff_tool_call(second)]])
+        second_model.extend(
             [[get_function_tool_call("approval_tool", json.dumps({}), call_id="call_approval")]]
         )
 
@@ -1930,7 +1890,7 @@ class TestRunState:
 
         probe_agent = Agent(
             name="ApprovalProbeAgent",
-            model=FakeModel(initial_output=[get_text_message("done")]),
+            model=ScriptedModel(steps=[[get_text_message("done")]]),
         )
         await Runner.run(
             probe_agent,
@@ -4452,109 +4412,52 @@ class TestDeserializeHelpers:
                     return True
             return False
 
-        class ResumeAwareToolModel(Model):
-            def __init__(
-                self,
-                *,
-                tool_name: str,
-                tool_arguments: str,
-                final_text: str,
-                call_prefix: str,
-                preceding_tool_name: str | None = None,
-            ) -> None:
-                self.tool_name = tool_name
-                self.tool_arguments = tool_arguments
-                self.final_text = final_text
-                self.call_prefix = call_prefix
-                self.preceding_tool_name = preceding_tool_name
-                self.call_count = 0
+        def _make_resume_aware_tool_model(
+            *,
+            tool_name: str,
+            tool_arguments: str,
+            final_text: str,
+            call_prefix: str,
+            preceding_tool_name: str | None = None,
+        ) -> ScriptedModel:
+            tool_call_count = 0
 
-            async def get_response(
-                self,
-                system_instructions: str | None,
-                input: str | list[TResponseInputItem],
-                model_settings: ModelSettings,
-                tools: list[Any],
-                output_schema: Any,
-                handoffs: list[Any],
-                tracing: Any,
-                *,
-                previous_response_id: str | None,
-                conversation_id: str | None,
-                prompt: Any | None,
-            ) -> ModelResponse:
-                del (
-                    system_instructions,
-                    model_settings,
-                    tools,
-                    output_schema,
-                    handoffs,
-                    tracing,
-                    previous_response_id,
-                    conversation_id,
-                    prompt,
-                )
-                if _has_function_call_output(input):
+            def _respond(call: ModelCall) -> ModelResponse:
+                nonlocal tool_call_count
+                if _has_function_call_output(call.input):
                     return ModelResponse(
-                        output=[get_text_message(self.final_text)],
+                        output=[get_text_message(final_text)],
                         usage=Usage(),
-                        response_id=f"{self.call_prefix}-done",
+                        response_id=f"{call_prefix}-done",
                     )
 
-                self.call_count += 1
+                tool_call_count += 1
                 output: list[TResponseOutputItem] = []
-                if self.preceding_tool_name is not None:
+                if preceding_tool_name is not None:
                     output.append(
                         ResponseFunctionToolCall(
                             type="function_call",
-                            name=self.preceding_tool_name,
-                            call_id=f"{self.call_prefix}-preceding-{self.call_count}",
+                            name=preceding_tool_name,
+                            call_id=f"{call_prefix}-preceding-{tool_call_count}",
                             arguments="{}",
                         )
                     )
                 output.append(
                     ResponseFunctionToolCall(
                         type="function_call",
-                        name=self.tool_name,
-                        call_id=f"{self.call_prefix}-{id(self)}-{self.call_count}",
-                        arguments=self.tool_arguments,
+                        name=tool_name,
+                        call_id=f"{call_prefix}-{id(model)}-{tool_call_count}",
+                        arguments=tool_arguments,
                     )
                 )
                 return ModelResponse(
                     output=output,
                     usage=Usage(),
-                    response_id=f"{self.call_prefix}-call-{self.call_count}",
+                    response_id=f"{call_prefix}-call-{tool_call_count}",
                 )
 
-            async def stream_response(
-                self,
-                system_instructions: str | None,
-                input: str | list[TResponseInputItem],
-                model_settings: ModelSettings,
-                tools: list[Any],
-                output_schema: Any,
-                handoffs: list[Any],
-                tracing: Any,
-                *,
-                previous_response_id: str | None,
-                conversation_id: str | None,
-                prompt: Any | None,
-            ) -> AsyncIterator[TResponseStreamEvent]:
-                del (
-                    system_instructions,
-                    input,
-                    model_settings,
-                    tools,
-                    output_schema,
-                    handoffs,
-                    tracing,
-                    previous_response_id,
-                    conversation_id,
-                    prompt,
-                )
-                if False:
-                    yield cast(TResponseStreamEvent, {})
-                raise RuntimeError("Streaming is not supported in this test.")
+            model = ScriptedModel(ModelStep.respond(_respond) for _ in range(3))
+            return model
 
         tool_calls: list[str] = []
 
@@ -4563,7 +4466,7 @@ class TestDeserializeHelpers:
             tool_calls.append(text)
             return f"approved:{text}"
 
-        inner_model = ResumeAwareToolModel(
+        inner_model = _make_resume_aware_tool_model(
             tool_name="inner_sensitive_tool",
             tool_arguments=json.dumps({"text": "hello"}),
             final_text="inner-complete",
@@ -4575,7 +4478,7 @@ class TestDeserializeHelpers:
             tool_name="inner_agent_tool",
             tool_description="Inner agent tool",
         )
-        outer_model = ResumeAwareToolModel(
+        outer_model = _make_resume_aware_tool_model(
             tool_name="inner_agent_tool",
             tool_arguments=json.dumps({"input": "hello"}),
             final_text="outer-complete",
@@ -4628,6 +4531,8 @@ class TestDeserializeHelpers:
         assert resumed_result_two.final_output == "outer-complete"
         assert resumed_result_two.interruptions == []
         assert tool_calls == (["hello", "hello"] if approve_nested_tool else [])
+        inner_model.assert_complete()
+        outer_model.assert_complete()
 
     async def test_json_decode_error_handling(self):
         """Test that invalid JSON raises appropriate error."""
@@ -4667,18 +4572,18 @@ class TestRunStateResumption:
     @pytest.mark.asyncio
     async def test_resume_from_run_state(self):
         """Test resuming a run from a RunState."""
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="TestAgent", model=model)
 
         # First run - create a state
-        model.set_next_output([get_text_message("First response")])
+        model.enqueue([get_text_message("First response")])
         result1 = await Runner.run(agent, "First input")
 
         # Create RunState from result
         state = result1.to_state()
 
         # Resume from state
-        model.set_next_output([get_text_message("Second response")])
+        model.enqueue([get_text_message("Second response")])
         result2 = await Runner.run(agent, state)
 
         assert result2.final_output == "Second response"
@@ -4686,16 +4591,16 @@ class TestRunStateResumption:
     @pytest.mark.asyncio
     async def test_resume_from_run_state_does_not_mutate_source_result(self):
         """Resuming from a state must not append to the raw_responses already returned."""
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="TestAgent", model=model)
 
-        model.set_next_output([get_text_message("First response")])
+        model.enqueue([get_text_message("First response")])
         result1 = await Runner.run(agent, "First input")
         assert len(result1.raw_responses) == 1
 
         state = result1.to_state()
 
-        model.set_next_output([get_text_message("Second response")])
+        model.enqueue([get_text_message("Second response")])
         result2 = await Runner.run(agent, state)
 
         # The second run accumulates on top of the first, but the RunResult that was
@@ -4707,15 +4612,15 @@ class TestRunStateResumption:
     @pytest.mark.asyncio
     async def test_resume_does_not_append_to_the_state_it_resumed_from(self):
         """A resumed run must not accumulate its responses into the caller's checkpoint."""
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="TestAgent", model=model)
 
-        model.set_next_output([get_text_message("First response")])
+        model.enqueue([get_text_message("First response")])
         result1 = await Runner.run(agent, "First input")
         state = result1.to_state()
         serialized_before = state.to_json()["model_responses"]
 
-        model.set_next_output([get_text_message("Second response")])
+        model.enqueue([get_text_message("Second response")])
         result2 = await Runner.run(agent, state)
         assert len(result2.raw_responses) == 2
 
@@ -4725,22 +4630,22 @@ class TestRunStateResumption:
         assert state.to_json()["model_responses"] == serialized_before
 
         # Re-running the same checkpoint therefore replays only its own history.
-        model.set_next_output([get_text_message("Third response")])
+        model.enqueue([get_text_message("Third response")])
         result3 = await Runner.run(agent, state)
         assert len(result3.raw_responses) == 2
 
     @pytest.mark.asyncio
     async def test_streamed_resume_does_not_append_to_the_state_it_resumed_from(self):
         """A streamed resume must not accumulate its items into the caller's checkpoint."""
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="TestAgent", model=model)
 
-        model.set_next_output([get_text_message("First response")])
+        model.enqueue([get_text_message("First response")])
         result1 = await Runner.run(agent, "First input")
         state = result1.to_state()
         serialized_before = state.to_json()["session_items"]
 
-        model.set_next_output([get_text_message("Second response")])
+        model.enqueue([get_text_message("Second response")])
         result2 = Runner.run_streamed(agent, state)
         async for _ in result2.stream_events():
             pass
@@ -4750,7 +4655,7 @@ class TestRunStateResumption:
         assert state.to_json()["session_items"] == serialized_before
 
         # Without this, the abandoned attempt's message leaks into the replayed history.
-        model.set_next_output([get_text_message("Third response")])
+        model.enqueue([get_text_message("Third response")])
         result3 = Runner.run_streamed(agent, state)
         async for _ in result3.stream_events():
             pass
@@ -4760,10 +4665,10 @@ class TestRunStateResumption:
     @pytest.mark.asyncio
     async def test_resumed_max_turns_handler_does_not_append_to_state_items(self):
         """A resumed run that trips max turns must not append to the state's items."""
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="TestAgent", model=model)
 
-        model.set_next_output([get_text_message("First response")])
+        model.enqueue([get_text_message("First response")])
         result1 = await Runner.run(agent, "First input", max_turns=1)
         state = result1.to_state()
         serialized_before = state.to_json()["generated_items"]
@@ -4780,15 +4685,15 @@ class TestRunStateResumption:
     @pytest.mark.asyncio
     async def test_fresh_runs_still_report_their_own_history(self):
         """Boundary: a run that starts without a state is unaffected by the copies."""
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="TestAgent", model=model)
 
-        model.set_next_output([get_text_message("First response")])
+        model.enqueue([get_text_message("First response")])
         result1 = await Runner.run(agent, "First input")
         assert len(result1.raw_responses) == 1
         assert len(result1.new_items) == 1
 
-        model.set_next_output([get_text_message("Streamed response")])
+        model.enqueue([get_text_message("Streamed response")])
         result2 = Runner.run_streamed(agent, "Second input")
         async for _ in result2.stream_events():
             pass
@@ -4798,12 +4703,12 @@ class TestRunStateResumption:
     @pytest.mark.asyncio
     async def test_resume_from_run_state_with_context(self):
         """Test resuming a run from a RunState with context override."""
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="TestAgent", model=model)
 
         # First run with context
         context1 = {"key": "value1"}
-        model.set_next_output([get_text_message("First response")])
+        model.enqueue([get_text_message("First response")])
         result1 = await Runner.run(agent, "First input", context=context1)
 
         # Create RunState from result
@@ -4811,7 +4716,7 @@ class TestRunStateResumption:
 
         # Resume from state with different context (should use new context)
         context2 = {"key": "value2"}
-        model.set_next_output([get_text_message("Second response")])
+        model.enqueue([get_text_message("Second response")])
         result2 = await Runner.run(agent, state, context=context2)
 
         # New context should be used.
@@ -4823,18 +4728,18 @@ class TestRunStateResumption:
     @pytest.mark.asyncio
     async def test_resume_from_run_state_with_conversation_id(self):
         """Test resuming a run from a RunState with conversation_id."""
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="TestAgent", model=model)
 
         # First run
-        model.set_next_output([get_text_message("First response")])
+        model.enqueue([get_text_message("First response")])
         result1 = await Runner.run(agent, "First input", conversation_id="conv123")
 
         # Create RunState from result
         state = result1.to_state()
 
         # Resume from state with conversation_id
-        model.set_next_output([get_text_message("Second response")])
+        model.enqueue([get_text_message("Second response")])
         result2 = await Runner.run(agent, state, conversation_id="conv123")
 
         assert result2.final_output == "Second response"
@@ -4842,18 +4747,18 @@ class TestRunStateResumption:
     @pytest.mark.asyncio
     async def test_resume_from_run_state_with_previous_response_id(self):
         """Test resuming a run from a RunState with previous_response_id."""
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="TestAgent", model=model)
 
         # First run
-        model.set_next_output([get_text_message("First response")])
+        model.enqueue([get_text_message("First response")])
         result1 = await Runner.run(agent, "First input", previous_response_id="resp123")
 
         # Create RunState from result
         state = result1.to_state()
 
         # Resume from state with previous_response_id
-        model.set_next_output([get_text_message("Second response")])
+        model.enqueue([get_text_message("Second response")])
         result2 = await Runner.run(agent, state, previous_response_id="resp123")
 
         assert result2.final_output == "Second response"
@@ -4861,7 +4766,7 @@ class TestRunStateResumption:
     @pytest.mark.asyncio
     async def test_resume_from_run_state_with_interruption(self):
         """Test resuming a run from a RunState with an interruption."""
-        model = FakeModel()
+        model = ScriptedModel()
 
         async def tool_func() -> str:
             return "tool_result"
@@ -4875,7 +4780,8 @@ class TestRunStateResumption:
         )
 
         # First run - create an interruption
-        model.set_next_output([get_function_tool_call("test_tool", "{}")])
+        model.enqueue([get_function_tool_call("test_tool", "{}")])
+        model.enqueue([])
         result1 = await Runner.run(agent, "First input")
 
         # Create RunState from result
@@ -4886,7 +4792,7 @@ class TestRunStateResumption:
             state.approve(state.get_interruptions()[0])
 
         # Resume from state - should execute approved tools
-        model.set_next_output([get_text_message("Second response")])
+        model.enqueue([get_text_message("Second response")])
         result2 = await Runner.run(agent, state)
 
         assert result2.final_output == "Second response"
@@ -4894,18 +4800,18 @@ class TestRunStateResumption:
     @pytest.mark.asyncio
     async def test_resume_from_run_state_streamed(self):
         """Test resuming a run from a RunState using run_streamed."""
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="TestAgent", model=model)
 
         # First run
-        model.set_next_output([get_text_message("First response")])
+        model.enqueue([get_text_message("First response")])
         result1 = await Runner.run(agent, "First input")
 
         # Create RunState from result
         state = result1.to_state()
 
         # Resume from state using run_streamed
-        model.set_next_output([get_text_message("Second response")])
+        model.enqueue([get_text_message("Second response")])
         result2 = Runner.run_streamed(agent, state)
 
         events = []
@@ -4920,8 +4826,8 @@ class TestRunStateResumption:
     async def test_resume_from_run_state_streamed_uses_context_from_state(self):
         """Test that streaming with RunState uses context from state."""
 
-        model = FakeModel()
-        model.set_next_output([get_text_message("done")])
+        model = ScriptedModel()
+        model.enqueue([get_text_message("done")])
         agent = Agent(name="TestAgent", model=model)
 
         # Create a RunState with context
@@ -4940,8 +4846,8 @@ class TestRunStateResumption:
     async def test_resume_from_run_state_streamed_with_context_override(self):
         """Test that streaming uses provided context override when resuming."""
 
-        model = FakeModel()
-        model.set_next_output([get_text_message("done")])
+        model = ScriptedModel()
+        model.enqueue([get_text_message("done")])
         agent = Agent(name="TestAgent", model=model)
 
         # Create a RunState with context
@@ -4959,7 +4865,7 @@ class TestRunStateResumption:
     @pytest.mark.asyncio
     async def test_run_result_streaming_to_state_with_interruptions(self):
         """Test RunResultStreaming.to_state() sets _current_step with interruptions."""
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="TestAgent", model=model)
 
         async def test_tool() -> str:
@@ -4969,7 +4875,7 @@ class TestRunStateResumption:
         agent.tools = [tool]
 
         # Create a run that will have interruptions
-        model.add_multiple_turn_outputs(
+        model.extend(
             [
                 [get_function_tool_call("test_tool", json.dumps({}))],
                 [get_text_message("done")],
@@ -9549,7 +9455,7 @@ async def _interrupted_approval_state_with_tool_input(
         return text
 
     model, agent = make_model_and_agent(tools=[needs_ok], name="agent")
-    model.add_multiple_turn_outputs(
+    model.extend(
         [
             [get_function_tool_call("needs_ok", json.dumps({"text": "one"}), call_id="1")],
             [get_final_output_message("done")],
@@ -9647,17 +9553,17 @@ async def test_resume_nested_agent_as_tool_with_context_override() -> None:
         output_tokens=3,
         total_tokens=20,
     )
-    nested_model = FakeModel()
-    nested_model.set_hardcoded_usage(nested_turn_usage)
+    nested_model = ScriptedModel()
+    nested_model.set_default_usage(nested_turn_usage)
     nested_agent = Agent(name="nested", tools=[needs_ok], model=nested_model)
-    nested_model.add_multiple_turn_outputs(
+    nested_model.extend(
         [
             [get_function_tool_call("needs_ok", json.dumps({"text": "one"}), call_id="inner-1")],
             [get_final_output_message("nested-done")],
         ]
     )
 
-    outer_model = FakeModel()
+    outer_model = ScriptedModel()
     outer = Agent(
         name="outer",
         tools=[
@@ -9669,7 +9575,7 @@ async def test_resume_nested_agent_as_tool_with_context_override() -> None:
         ],
         model=outer_model,
     )
-    outer_model.add_multiple_turn_outputs(
+    outer_model.extend(
         [
             [
                 get_function_tool_call(

@@ -30,8 +30,8 @@ from agents.run_internal.run_loop import (
     SingleStepResult,
 )
 from agents.run_state import RunState
+from agents.testing import ScriptedModel
 from agents.usage import Usage
-from tests.fake_model import FakeModel
 from tests.test_responses import get_function_tool_call, get_text_message
 from tests.utils.hitl import (
     make_agent,
@@ -44,7 +44,7 @@ from tests.utils.simple_session import SimpleListSession
 
 @pytest.mark.asyncio
 async def test_resolve_interrupted_turn_final_output_short_circuit(monkeypatch) -> None:
-    agent: Agent[dict[str, str]] = make_agent(model=FakeModel())
+    agent: Agent[dict[str, str]] = make_agent(model=ScriptedModel())
     context_wrapper = make_context_wrapper()
 
     async def fake_execute_tool_plan(*_: object, **__: object):

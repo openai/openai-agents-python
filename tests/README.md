@@ -4,6 +4,8 @@ Before running any tests, make sure you have `uv` installed (and ideally run `ma
 
 ## Running tests
 
+For provider-neutral agent workflow tests, prefer `ScriptedModel` from `agents.testing` instead of adding a new mock or fake `Model`. Use `ScriptedRealtimeModel` from `agents.realtime.testing` for Realtime session tests, the scripted utilities from `agents.voice.testing` for Voice pipeline tests, and `scripted_sandbox_session()` from `agents.testing` for deterministic Sandbox session calls. Keep a specialized test double only when the test specifically requires provider-wire conversion, malformed streams, controlled suspension or concurrency, or an exact cancellation or lifecycle boundary that the scripted utilities cannot preserve; document that boundary in the test.
+
 ```
 make tests
 ```

@@ -20,7 +20,7 @@ from agents.memory.openai_conversations_session import (
     OpenAIConversationsSession,
     start_openai_conversations_session,
 )
-from tests.fake_model import FakeModel
+from agents.testing import ScriptedModel
 from tests.test_responses import get_text_message
 
 
@@ -46,8 +46,8 @@ def mock_openai_client():
 
 @pytest.fixture
 def agent() -> Agent:
-    """Fixture for a basic agent with a fake model."""
-    return Agent(name="test", model=FakeModel())
+    """Fixture for a basic agent with a scripted model."""
+    return Agent(name="test", model=ScriptedModel())
 
 
 class TestStartOpenAIConversationsSession:
@@ -451,8 +451,8 @@ class TestOpenAIConversationsSessionRunnerIntegration:
         with patch.object(session, "get_items", return_value=[]):
             with patch.object(session, "add_items") as mock_add_items:
                 # Run the agent
-                assert isinstance(agent.model, FakeModel)
-                agent.model.set_next_output([get_text_message("San Francisco")])
+                assert isinstance(agent.model, ScriptedModel)
+                agent.model.enqueue([get_text_message("San Francisco")])
 
                 result = await Runner.run(
                     agent, "What city is the Golden Gate Bridge in?", session=session
@@ -477,15 +477,15 @@ class TestOpenAIConversationsSessionRunnerIntegration:
         with patch.object(session, "get_items", return_value=conversation_history):
             with patch.object(session, "add_items"):
                 # Second turn - should have access to previous conversation
-                assert isinstance(agent.model, FakeModel)
-                agent.model.set_next_output([get_text_message("California")])
+                assert isinstance(agent.model, ScriptedModel)
+                agent.model.enqueue([get_text_message("California")])
 
                 result = await Runner.run(agent, "What state is it in?", session=session)
 
                 assert result.final_output == "California"
 
                 # Verify that the model received the conversation history
-                last_input = agent.model.last_turn_args["input"]
+                last_input = agent.model.calls[-1].input
                 assert len(last_input) > 1  # Should include previous messages
 
                 # Check that previous conversation is included
@@ -495,8 +495,8 @@ class TestOpenAIConversationsSessionRunnerIntegration:
     @pytest.mark.asyncio
     async def test_runner_persists_program_item_ids(self, mock_openai_client):
         """Program items keep the id the Conversations create-item schema requires."""
-        model = FakeModel()
-        model.add_multiple_turn_outputs(
+        model = ScriptedModel()
+        model.extend(
             [
                 [
                     Program(

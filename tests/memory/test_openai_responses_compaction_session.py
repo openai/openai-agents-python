@@ -29,7 +29,7 @@ from agents.run_internal.items import (
     TOOL_CALL_SESSION_DESCRIPTION_KEY,
     TOOL_CALL_SESSION_TITLE_KEY,
 )
-from tests.fake_model import FakeModel
+from agents.testing import ScriptedModel
 from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
 from tests.utils.simple_session import SimpleListSession
 
@@ -1463,7 +1463,7 @@ class TestOpenAIResponsesCompactionSession:
             should_trigger_compaction=lambda ctx: True,
         )
 
-        model = FakeModel(initial_output=[get_text_message("ok")])
+        model = ScriptedModel(steps=[[get_text_message("ok")]])
         agent = Agent(name="assistant", model=model)
 
         await Runner.run(agent, "hello", session=session)
@@ -1486,7 +1486,7 @@ class TestOpenAIResponsesCompactionSession:
         )
 
         tool = get_function_tool(name="do_thing", return_value="done")
-        model = FakeModel(initial_output=[get_function_tool_call("do_thing")])
+        model = ScriptedModel(steps=[[get_function_tool_call("do_thing")]])
         agent = Agent(
             name="assistant",
             model=model,
@@ -1518,7 +1518,7 @@ class TestOpenAIResponsesCompactionSession:
         )
 
         tool = get_function_tool(name="do_thing", return_value="done")
-        model = FakeModel(initial_output=[get_function_tool_call("do_thing")])
+        model = ScriptedModel(steps=[[get_function_tool_call("do_thing")]])
         agent = Agent(
             name="assistant",
             model=model,
@@ -1554,8 +1554,8 @@ class TestOpenAIResponsesCompactionSession:
         )
 
         tool = get_function_tool(name="do_thing", return_value="done")
-        model = FakeModel()
-        model.add_multiple_turn_outputs(
+        model = ScriptedModel()
+        model.extend(
             [
                 [get_function_tool_call("do_thing")],
                 [get_text_message("ok")],
@@ -1596,8 +1596,8 @@ class TestOpenAIResponsesCompactionSession:
         )
 
         tool = get_function_tool(name="do_thing", return_value="done")
-        model = FakeModel()
-        model.add_multiple_turn_outputs(
+        model = ScriptedModel()
+        model.extend(
             [
                 [get_function_tool_call("do_thing")],
                 [get_function_tool_call("do_thing")],

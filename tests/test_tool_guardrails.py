@@ -19,10 +19,10 @@ from agents import (
     UserError,
     function_tool,
 )
+from agents.testing import ScriptedModel
 from agents.tool_context import ToolContext
 from agents.tool_guardrails import tool_input_guardrail, tool_output_guardrail
 
-from .fake_model import FakeModel
 from .test_responses import get_function_tool_call
 
 
@@ -538,8 +538,8 @@ def _agent_with_repeated_guarded_tool_calls(
     guarded.tool_input_guardrails = input_guardrails or []
     guarded.tool_output_guardrails = output_guardrails or []
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [get_function_tool_call("guarded", '{"query": "secret"}', call_id="guarded_1")],
             [get_function_tool_call("guarded", '{"query": "secret"}', call_id="guarded_2")],

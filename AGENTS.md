@@ -188,6 +188,8 @@ The OpenAI Agents Python repository provides the Python Agents SDK, examples, an
 
 Before submitting changes, ensure relevant checks pass and extend tests when you touch code.
 
+For provider-neutral agent workflow tests, prefer `ScriptedModel` from `agents.testing` over adding a new mock or fake `Model`. Prefer `ScriptedRealtimeModel` from `agents.realtime.testing` for Realtime session tests, the scripted utilities from `agents.voice.testing` for Voice pipeline tests, and `scripted_sandbox_session()` from `agents.testing` for deterministic Sandbox session calls. Keep a specialized test double only when the test specifically requires provider-wire conversion, malformed streams, controlled suspension or concurrency, or an exact cancellation or lifecycle boundary that the scripted utilities cannot preserve; document that boundary in the test.
+
 Before adding or changing async, retry, timeout, subprocess, PTY, warning, or xdist-sensitive tests, read [Performance and determinism](tests/README.md#performance-and-determinism) and preserve the applicable behavioral and lifecycle coverage while optimizing execution.
 
 When `$code-change-verification` applies, run it to execute the required verification stack from the repository root. Rerun the full stack after applying fixes.

@@ -7,7 +7,7 @@ were emitted with empty arguments during streaming (Issue #1629).
 
 import json
 from collections.abc import AsyncIterator
-from typing import Any, cast
+from typing import cast
 
 import pytest
 from openai.types.responses import (
@@ -18,116 +18,54 @@ from openai.types.responses import (
 )
 
 from agents import Agent, Runner, function_tool
-from agents.agent_output import AgentOutputSchemaBase
-from agents.handoffs import Handoff
-from agents.items import TResponseInputItem, TResponseOutputItem, TResponseStreamEvent
-from agents.model_settings import ModelSettings
-from agents.models.interface import Model, ModelTracing
+from agents.items import TResponseOutputItem, TResponseStreamEvent
 from agents.stream_events import RunItemStreamEvent
-from agents.tool import Tool
-from agents.tracing import generation_span
+from agents.testing import ModelStep, ScriptedModel
+from tests.model_test_helpers import get_response_obj
 
-from .fake_model import get_response_obj
 from .test_responses import get_function_tool_call
 
 
-class StreamingFakeModel(Model):
-    """A fake model that actually emits streaming events to test our streaming fix."""
+def _split_argument_step(output: list[TResponseOutputItem]) -> ModelStep:
+    async def events(_call) -> AsyncIterator[TResponseStreamEvent]:
+        sequence_number = 0
 
-    def __init__(self):
-        self.turn_outputs: list[list[TResponseOutputItem]] = []
-        self.last_turn_args: dict[str, Any] = {}
+        # Emit each output item with proper streaming events.
+        for item in output:
+            if isinstance(item, ResponseFunctionToolCall):
+                # First emit an added event with empty arguments, as the API does before deltas.
+                empty_args_item = ResponseFunctionToolCall(
+                    id=item.id,
+                    call_id=item.call_id,
+                    type=item.type,
+                    name=item.name,
+                    arguments="",
+                )
 
-    def set_next_output(self, output: list[TResponseOutputItem]):
-        self.turn_outputs.append(output)
+                yield ResponseOutputItemAddedEvent(
+                    item=empty_args_item,
+                    output_index=0,
+                    type="response.output_item.added",
+                    sequence_number=sequence_number,
+                )
+                sequence_number += 1
 
-    def get_next_output(self) -> list[TResponseOutputItem]:
-        if not self.turn_outputs:
-            return []
-        return self.turn_outputs.pop(0)
+                # Then emit the completed item with its final arguments.
+                yield ResponseOutputItemDoneEvent(
+                    item=item,
+                    output_index=0,
+                    type="response.output_item.done",
+                    sequence_number=sequence_number,
+                )
+                sequence_number += 1
 
-    async def get_response(
-        self,
-        system_instructions: str | None,
-        input: str | list[TResponseInputItem],
-        model_settings: ModelSettings,
-        tools: list[Tool],
-        output_schema: AgentOutputSchemaBase | None,
-        handoffs: list[Handoff],
-        tracing: ModelTracing,
-        *,
-        previous_response_id: str | None,
-        conversation_id: str | None,
-        prompt: Any | None,
-    ):
-        raise NotImplementedError("Use stream_response instead")
+        yield ResponseCompletedEvent(
+            type="response.completed",
+            response=get_response_obj(output),
+            sequence_number=sequence_number,
+        )
 
-    async def stream_response(
-        self,
-        system_instructions: str | None,
-        input: str | list[TResponseInputItem],
-        model_settings: ModelSettings,
-        tools: list[Tool],
-        output_schema: AgentOutputSchemaBase | None,
-        handoffs: list[Handoff],
-        tracing: ModelTracing,
-        *,
-        previous_response_id: str | None = None,
-        conversation_id: str | None = None,
-        prompt: Any | None = None,
-    ) -> AsyncIterator[TResponseStreamEvent]:
-        """Stream events that simulate real OpenAI streaming behavior for tool calls."""
-        self.last_turn_args = {
-            "system_instructions": system_instructions,
-            "input": input,
-            "model_settings": model_settings,
-            "tools": tools,
-            "output_schema": output_schema,
-            "previous_response_id": previous_response_id,
-            "conversation_id": conversation_id,
-        }
-
-        with generation_span(disabled=True) as _:
-            output = self.get_next_output()
-
-            sequence_number = 0
-
-            # Emit each output item with proper streaming events
-            for item in output:
-                if isinstance(item, ResponseFunctionToolCall):
-                    # First: emit ResponseOutputItemAddedEvent with EMPTY arguments
-                    # (this simulates the real streaming behavior that was causing the bug)
-                    empty_args_item = ResponseFunctionToolCall(
-                        id=item.id,
-                        call_id=item.call_id,
-                        type=item.type,
-                        name=item.name,
-                        arguments="",  # EMPTY - this is the bug condition!
-                    )
-
-                    yield ResponseOutputItemAddedEvent(
-                        item=empty_args_item,
-                        output_index=0,
-                        type="response.output_item.added",
-                        sequence_number=sequence_number,
-                    )
-                    sequence_number += 1
-
-                    # Then: emit ResponseOutputItemDoneEvent with COMPLETE arguments
-                    yield ResponseOutputItemDoneEvent(
-                        item=item,  # This has the complete arguments
-                        output_index=0,
-                        type="response.output_item.done",
-                        sequence_number=sequence_number,
-                    )
-                    sequence_number += 1
-
-            # Finally: emit completion
-            yield ResponseCompletedEvent(
-                type="response.completed",
-                response=get_response_obj(output),
-                sequence_number=sequence_number,
-            )
+    return ModelStep.stream(events)
 
 
 @function_tool
@@ -146,7 +84,7 @@ def format_message(name: str, message: str, urgent: bool = False) -> str:
 @pytest.mark.asyncio
 async def test_streaming_tool_call_arguments_not_empty():
     """Test that tool_called events contain non-empty arguments during streaming."""
-    model = StreamingFakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="TestAgent",
         model=model,
@@ -155,12 +93,14 @@ async def test_streaming_tool_call_arguments_not_empty():
 
     # Set up a tool call with arguments
     expected_arguments = '{"a": 5, "b": 3}'
-    model.set_next_output(
-        [
-            get_function_tool_call("calculate_sum", expected_arguments, "call_123"),
-        ]
+    model.enqueue(
+        _split_argument_step(
+            [
+                get_function_tool_call("calculate_sum", expected_arguments, "call_123"),
+            ]
+        )
     )
-
+    model.enqueue([])
     result = Runner.run_streamed(agent, input="Add 5 and 3")
 
     tool_called_events = []
@@ -212,7 +152,7 @@ async def test_streaming_tool_call_arguments_not_empty():
 @pytest.mark.asyncio
 async def test_streaming_tool_call_arguments_complex():
     """Test streaming tool calls with complex arguments including strings and booleans."""
-    model = StreamingFakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="TestAgent",
         model=model,
@@ -223,12 +163,14 @@ async def test_streaming_tool_call_arguments_complex():
     expected_arguments = (
         '{"name": "Alice", "message": "Your meeting is starting soon", "urgent": true}'
     )
-    model.set_next_output(
-        [
-            get_function_tool_call("format_message", expected_arguments, "call_456"),
-        ]
+    model.enqueue(
+        _split_argument_step(
+            [
+                get_function_tool_call("format_message", expected_arguments, "call_456"),
+            ]
+        )
     )
-
+    model.enqueue([])
     result = Runner.run_streamed(agent, input="Format a message for Alice")
 
     tool_called_events = []
@@ -265,7 +207,7 @@ async def test_streaming_tool_call_arguments_complex():
 @pytest.mark.asyncio
 async def test_streaming_multiple_tool_calls_arguments():
     """Test that multiple tool calls in streaming all have proper arguments."""
-    model = StreamingFakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="TestAgent",
         model=model,
@@ -273,15 +215,17 @@ async def test_streaming_multiple_tool_calls_arguments():
     )
 
     # Set up multiple tool calls
-    model.set_next_output(
-        [
-            get_function_tool_call("calculate_sum", '{"a": 10, "b": 20}', "call_1"),
-            get_function_tool_call(
-                "format_message", '{"name": "Bob", "message": "Test"}', "call_2"
-            ),
-        ]
+    model.enqueue(
+        _split_argument_step(
+            [
+                get_function_tool_call("calculate_sum", '{"a": 10, "b": 20}', "call_1"),
+                get_function_tool_call(
+                    "format_message", '{"name": "Bob", "message": "Test"}', "call_2"
+                ),
+            ]
+        )
     )
-
+    model.enqueue([])
     result = Runner.run_streamed(agent, input="Do some calculations")
 
     tool_called_events = []
@@ -324,7 +268,7 @@ async def test_streaming_multiple_tool_calls_arguments():
 @pytest.mark.asyncio
 async def test_streaming_tool_call_with_empty_arguments():
     """Test that tool calls with legitimately empty arguments still work correctly."""
-    model = StreamingFakeModel()
+    model = ScriptedModel()
 
     @function_tool
     def get_current_time() -> str:
@@ -338,12 +282,14 @@ async def test_streaming_tool_call_with_empty_arguments():
     )
 
     # Tool call with empty arguments (legitimate case)
-    model.set_next_output(
-        [
-            get_function_tool_call("get_current_time", "{}", "call_time"),
-        ]
+    model.enqueue(
+        _split_argument_step(
+            [
+                get_function_tool_call("get_current_time", "{}", "call_time"),
+            ]
+        )
     )
-
+    model.enqueue([])
     result = Runner.run_streamed(agent, input="What time is it?")
 
     tool_called_events = []

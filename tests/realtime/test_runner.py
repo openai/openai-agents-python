@@ -4,42 +4,20 @@ import pytest
 
 from agents.realtime.agent import RealtimeAgent
 from agents.realtime.config import RealtimeRunConfig, RealtimeSessionModelSettings
-from agents.realtime.model import RealtimeModel, RealtimeModelConfig
+from agents.realtime.model import RealtimeModelConfig
 from agents.realtime.runner import RealtimeRunner
 from agents.realtime.session import RealtimeSession
+from agents.realtime.testing import RealtimeConnectCall, ScriptedRealtimeModel
 from agents.tool import function_tool
 
 
-class MockRealtimeModel(RealtimeModel):
-    def __init__(self):
-        self.connect_args = None
+class RunnerRealtimeModel(ScriptedRealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(strict=False)
 
-    async def connect(self, options=None):
-        self.connect_args = options
-
-    def add_listener(self, listener):
-        pass
-
-    def remove_listener(self, listener):
-        pass
-
-    async def send_event(self, event):
-        pass
-
-    async def send_message(self, message, other_event_data=None):
-        pass
-
-    async def send_audio(self, audio, commit=False):
-        pass
-
-    async def send_tool_output(self, tool_call, output, start_response=True):
-        pass
-
-    async def interrupt(self):
-        pass
-
-    async def close(self):
-        pass
+    @property
+    def connect_args(self) -> RealtimeConnectCall | None:
+        return self.connect_calls[-1] if self.connect_calls else None
 
 
 @pytest.fixture
@@ -52,12 +30,12 @@ def mock_agent():
 
 @pytest.fixture
 def mock_model():
-    return MockRealtimeModel()
+    return RunnerRealtimeModel()
 
 
 @pytest.mark.asyncio
 async def test_run_preserves_falsey_custom_model(mock_agent: Mock):
-    class FalseyRealtimeModel(MockRealtimeModel):
+    class FalseyRealtimeModel(RunnerRealtimeModel):
         def __bool__(self) -> bool:
             return False
 
@@ -70,7 +48,7 @@ async def test_run_preserves_falsey_custom_model(mock_agent: Mock):
 
 @pytest.mark.asyncio
 async def test_run_creates_session_with_no_settings(
-    mock_agent: Mock, mock_model: MockRealtimeModel
+    mock_agent: Mock, mock_model: RunnerRealtimeModel
 ):
     """Test that run() creates a session correctly if no settings are provided"""
     runner = RealtimeRunner(mock_agent, model=mock_model)
@@ -98,7 +76,7 @@ async def test_run_creates_session_with_no_settings(
 
 @pytest.mark.asyncio
 async def test_run_creates_session_with_settings_only_in_init(
-    mock_agent: Mock, mock_model: MockRealtimeModel
+    mock_agent: Mock, mock_model: RunnerRealtimeModel
 ):
     """Test that it creates a session with the right settings if they are provided only in init"""
     config = RealtimeRunConfig(
@@ -122,7 +100,7 @@ async def test_run_creates_session_with_settings_only_in_init(
 
 @pytest.mark.asyncio
 async def test_run_creates_session_with_settings_in_both_init_and_run_overrides(
-    mock_agent: Mock, mock_model: MockRealtimeModel
+    mock_agent: Mock, mock_model: RunnerRealtimeModel
 ):
     """Test settings provided in run() parameter are passed through"""
     init_config = RealtimeRunConfig(
@@ -152,7 +130,7 @@ async def test_run_creates_session_with_settings_in_both_init_and_run_overrides(
 
 @pytest.mark.asyncio
 async def test_run_creates_session_with_settings_only_in_run(
-    mock_agent: Mock, mock_model: MockRealtimeModel
+    mock_agent: Mock, mock_model: RunnerRealtimeModel
 ):
     """Test settings provided only in run()"""
     runner = RealtimeRunner(mock_agent, model=mock_model)
@@ -178,7 +156,7 @@ async def test_run_creates_session_with_settings_only_in_run(
 
 
 @pytest.mark.asyncio
-async def test_run_with_context_parameter(mock_agent: Mock, mock_model: MockRealtimeModel):
+async def test_run_with_context_parameter(mock_agent: Mock, mock_model: RunnerRealtimeModel):
     """Test that context parameter is passed through to session"""
     runner = RealtimeRunner(mock_agent, model=mock_model)
     test_context = {"user_id": "test123"}
@@ -194,7 +172,7 @@ async def test_run_with_context_parameter(mock_agent: Mock, mock_model: MockReal
 
 
 @pytest.mark.asyncio
-async def test_run_with_none_values_from_agent_does_not_crash(mock_model: MockRealtimeModel):
+async def test_run_with_none_values_from_agent_does_not_crash(mock_model: RunnerRealtimeModel):
     """Test that runner handles agents with None values without crashing"""
     agent = Mock(spec=RealtimeAgent)
     agent.get_system_prompt = AsyncMock(return_value=None)
@@ -216,7 +194,7 @@ async def test_run_with_none_values_from_agent_does_not_crash(mock_model: MockRe
 
 
 @pytest.mark.asyncio
-async def test_tool_and_handoffs_are_correct(mock_model: MockRealtimeModel):
+async def test_tool_and_handoffs_are_correct(mock_model: RunnerRealtimeModel):
     @function_tool
     def tool_one():
         return "result_one"

@@ -76,6 +76,7 @@ from agents.realtime.session import (
     _PendingToolOutputSendError,
     _serialize_tool_output,
 )
+from agents.realtime.testing import RealtimeConnectCall, ScriptedRealtimeModel
 from agents.run_context import RunContextWrapper
 from agents.tool import FunctionTool, function_tool, tool_namespace
 from agents.tool_context import ToolContext
@@ -87,39 +88,23 @@ from agents.tool_guardrails import (
 from agents.usage import Usage
 
 
-class _DummyModel(RealtimeModel):
+class _DummyModel(ScriptedRealtimeModel):
     def __init__(self) -> None:
-        super().__init__()
-        self.events: list[Any] = []
-        self.listeners: list[Any] = []
-        self.connect_options: Any | None = None
+        super().__init__(strict=False)
 
-    async def connect(self, options=None):
-        self.connect_options = options
+    @property
+    def events(self) -> tuple[Any, ...]:
+        return self.sent_events
 
-    async def close(self):  # pragma: no cover - not used here
-        pass
-
-    async def send_event(self, event):
-        self.events.append(event)
-
-    def add_listener(self, listener):
-        self.listeners.append(listener)
-
-    def remove_listener(self, listener):
-        if listener in self.listeners:
-            self.listeners.remove(listener)
+    @property
+    def connect_options(self) -> RealtimeConnectCall | None:
+        return self.connect_calls[-1] if self.connect_calls else None
 
 
 class _FailingConnectModel(_DummyModel):
     def __init__(self, exc: BaseException) -> None:
         super().__init__()
-        self.exc = exc
-        self.connect_options: Any | None = None
-
-    async def connect(self, options=None):
-        self.connect_options = options
-        raise self.exc
+        self._connect_error = exc
 
 
 def _agent_with_ambiguous_realtime_tools(name: str = "invalid_agent") -> RealtimeAgent:
@@ -208,8 +193,11 @@ async def test_property_and_send_helpers_and_enter_alias():
     # property
     assert session.model is model
 
-    # enter alias calls __aenter__
-    async with await session.enter():
+    # The enter alias calls __aenter__, so callers close it manually.
+    entered = await session.enter()
+    try:
+        assert entered is session
+
         # send helpers
         await session.send_message("hi")
         await session.send_audio(b"abc", commit=True)
@@ -219,6 +207,8 @@ async def test_property_and_send_helpers_and_enter_alias():
         assert any(isinstance(e, RealtimeModelSendUserInput) for e in model.events)
         assert any(isinstance(e, RealtimeModelSendAudio) and e.commit for e in model.events)
         assert any(isinstance(e, RealtimeModelSendInterrupt) for e in model.events)
+    finally:
+        await session.close()
 
 
 @pytest.mark.asyncio
@@ -1278,7 +1268,7 @@ async def test_aenter_validates_initial_model_settings_before_listener_registrat
     with pytest.raises(UserError, match="Duplicate Realtime tool"):
         await session.__aenter__()
 
-    assert model.listeners == []
+    assert model.listeners == ()
 
 
 @pytest.mark.parametrize(
@@ -1296,32 +1286,18 @@ async def test_aenter_removes_listener_when_connect_fails(exc: BaseException):
         await session.__aenter__()
 
     assert model.connect_options is not None
-    assert model.listeners == []
+    assert model.listeners == ()
 
 
-class MockRealtimeModel(RealtimeModel):
+class RecordingRealtimeModel(ScriptedRealtimeModel):
     def __init__(self):
-        super().__init__()
-        self.listeners = []
-        self.connect_called = False
-        self.close_called = False
-        self.sent_events = []
+        super().__init__(strict=False)
         # Legacy tracking for tests that haven't been updated yet
         self.sent_messages = []
         self.sent_audio = []
         self.sent_tool_outputs = []
         self.interrupts_called = 0
         self.retired_audio_response_ids = []
-
-    async def connect(self, options=None):
-        self.connect_called = True
-
-    def add_listener(self, listener):
-        self.listeners.append(listener)
-
-    def remove_listener(self, listener):
-        if listener in self.listeners:
-            self.listeners.remove(listener)
 
     async def send_event(self, event):
         from agents.realtime.model_inputs import (
@@ -1331,7 +1307,7 @@ class MockRealtimeModel(RealtimeModel):
             RealtimeModelSendUserInput,
         )
 
-        self.sent_events.append(event)
+        self._sent_events.append(self._snapshot_send_event(event))
 
         # Update legacy tracking for compatibility
         if isinstance(event, RealtimeModelSendUserInput):
@@ -1349,9 +1325,6 @@ class MockRealtimeModel(RealtimeModel):
         await self.send_event(event)
         return True
 
-    async def close(self):
-        self.close_called = True
-
     def _retire_response_audio(self, response_id: str) -> None:
         self.retired_audio_response_ids.append(response_id)
 
@@ -1368,7 +1341,7 @@ def mock_agent():
 
 @pytest.fixture
 def mock_model():
-    return MockRealtimeModel()
+    return RecordingRealtimeModel()
 
 
 def _set_default_timeout_fields(tool: Mock) -> Mock:
@@ -1392,7 +1365,7 @@ def _named_function_tool(
     return tool
 
 
-def _sent_tool_output_strings(model: MockRealtimeModel) -> list[str]:
+def _sent_tool_output_strings(model: RecordingRealtimeModel) -> list[str]:
     return [output for _call, output, _start_response in model.sent_tool_outputs]
 
 
@@ -2598,7 +2571,7 @@ class TestToolCallExecution:
     ):
         """An approved call should retry cached output only for the same invocation."""
 
-        class FailingToolOutputModel(MockRealtimeModel):
+        class FailingToolOutputModel(RecordingRealtimeModel):
             def __init__(self):
                 super().__init__()
                 self.fail_next_tool_output = True
@@ -2696,7 +2669,7 @@ class TestToolCallExecution:
     ):
         """The async approval path should bind retries to the original invocation."""
 
-        class FailingToolOutputModel(MockRealtimeModel):
+        class FailingToolOutputModel(RecordingRealtimeModel):
             def __init__(self):
                 super().__init__()
                 self.fail_next_tool_output = True
@@ -3012,7 +2985,7 @@ class TestToolCallExecution:
             )
 
         assert session._current_agent is first_agent
-        assert mock_model.sent_events == []
+        assert mock_model.sent_events == ()
         assert mock_model.sent_tool_outputs == []
         assert "call_invalid" not in session._active_tool_invocations
         assert not session._context_wrapper._tool_invocations["call_invalid"].completed
@@ -3807,7 +3780,7 @@ class TestToolCallExecution:
     ):
         """A duplicate event during rejection output sending should not emit a second output."""
 
-        class BlockingToolOutputModel(MockRealtimeModel):
+        class BlockingToolOutputModel(RecordingRealtimeModel):
             def __init__(self):
                 super().__init__()
                 self.started = asyncio.Event()
@@ -4171,7 +4144,7 @@ class TestToolCallExecution:
 
     @pytest.mark.asyncio
     async def test_pending_function_output_rejects_handoff_role_reuse(self):
-        class FailingToolOutputModel(MockRealtimeModel):
+        class FailingToolOutputModel(RecordingRealtimeModel):
             async def send_event(self, event):
                 if isinstance(event, RealtimeModelSendToolOutput):
                     raise RuntimeError("send failed")
@@ -4627,14 +4600,14 @@ class TestToolCallExecution:
         assert sent_output == json.dumps({"name": "demo", "score": 7})
 
     def test_serialize_tool_output_ignores_non_pydantic_model_dump_objects(self) -> None:
-        class FakeModelDump:
+        class ModelDumpObject:
             def model_dump(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
                 raise AssertionError("non-pydantic objects should not use model_dump")
 
             def __str__(self) -> str:
                 return "fake-model-dump-object"
 
-        assert _serialize_tool_output(FakeModelDump()) == "fake-model-dump-object"
+        assert _serialize_tool_output(ModelDumpObject()) == "fake-model-dump-object"
 
     def test_serialize_tool_output_falls_back_when_pydantic_json_dump_fails(self) -> None:
         class FallbackModel(BaseModel):
@@ -5044,7 +5017,7 @@ class TestGuardrailFunctionality:
         release_guardrail = asyncio.Event()
         operations: list[str] = []
 
-        class TrackingModel(MockRealtimeModel):
+        class TrackingModel(RecordingRealtimeModel):
             async def send_event(self, event):
                 await super().send_event(event)
                 if isinstance(event, RealtimeModelSendInterrupt):
@@ -5158,7 +5131,7 @@ class TestGuardrailFunctionality:
 
     @pytest.mark.asyncio
     async def test_response_audio_cleanup_error_releases_session_suppression(self, mock_agent):
-        class FailingRetirementModel(MockRealtimeModel):
+        class FailingRetirementModel(RecordingRealtimeModel):
             def _retire_response_audio(self, response_id: str) -> None:
                 raise RuntimeError(f"failed to retire {response_id}")
 
@@ -5251,7 +5224,7 @@ class TestGuardrailFunctionality:
         feedback_send_started = asyncio.Event()
         release_feedback_send = asyncio.Event()
 
-        class BoundaryCheckingModel(MockRealtimeModel):
+        class BoundaryCheckingModel(RecordingRealtimeModel):
             async def send_event_if(self, event, send_if):
                 feedback_send_started.set()
                 await release_feedback_send.wait()
@@ -5288,7 +5261,7 @@ class TestGuardrailFunctionality:
     async def test_output_text_guardrail_skips_feedback_without_atomic_model_send(
         self, mock_agent, triggered_guardrail
     ):
-        class CustomModelWithoutAtomicSend(MockRealtimeModel):
+        class CustomModelWithoutAtomicSend(RecordingRealtimeModel):
             def __init__(self):
                 super().__init__()
                 self.feedback_send_started = False
@@ -6128,7 +6101,7 @@ class TestUpdateAgentFunctionality:
             await session.update_agent(invalid_agent)
 
         assert session._current_agent is first_agent
-        assert mock_model.sent_events == []
+        assert mock_model.sent_events == ()
 
 
 class TestTranscriptPreservation:

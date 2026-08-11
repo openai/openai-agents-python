@@ -34,7 +34,7 @@ try:
         _audio_buffer_to_base64,
     )
 
-    from .fake_models import FakeStreamedAudioInput
+    from .pipeline_test_models import StreamedAudioInputFactory
 except ImportError:
     pass
 
@@ -367,7 +367,7 @@ async def test_non_json_messages_should_crash():
     mock_ws = create_mock_websocket(["not a json message"])
     with patch("websockets.connect", return_value=mock_ws):
         # Instantiate the session
-        input_audio = await FakeStreamedAudioInput.get(count=2)
+        input_audio = await StreamedAudioInputFactory.get(count=2)
         stt_settings = STTModelSettings()
 
         session = OpenAISTTTranscriptionSession(
@@ -407,7 +407,7 @@ async def test_session_connects_and_configures_successfully():
     )
     with patch("websockets.connect", return_value=mock_ws) as mock_connect:
         # Instantiate the session
-        input_audio = await FakeStreamedAudioInput.get(count=2)
+        input_audio = await StreamedAudioInputFactory.get(count=2)
         stt_settings = STTModelSettings()
 
         session = OpenAISTTTranscriptionSession(
@@ -543,7 +543,7 @@ async def test_transcription_event_puts_output_in_queue(created, updated, comple
 
     with patch("websockets.connect", return_value=mock_ws):
         # Prepare
-        audio_input = await FakeStreamedAudioInput.get(count=2)
+        audio_input = await StreamedAudioInputFactory.get(count=2)
         stt_settings = STTModelSettings()
 
         session = OpenAISTTTranscriptionSession(
@@ -589,7 +589,7 @@ async def test_timeout_waiting_for_created_event(monkeypatch):
     )  # add a fake event to the mock websocket to make sure it doesn't raise a different exception
 
     with patch("websockets.connect", return_value=mock_ws):
-        audio_input = await FakeStreamedAudioInput.get(count=2)
+        audio_input = await StreamedAudioInputFactory.get(count=2)
         stt_settings = STTModelSettings()
 
         session = OpenAISTTTranscriptionSession(
@@ -638,7 +638,7 @@ async def test_session_error_event(monkeypatch: pytest.MonkeyPatch):
     )
 
     with patch("websockets.connect", return_value=mock_ws):
-        audio_input = await FakeStreamedAudioInput.get(count=2)
+        audio_input = await StreamedAudioInputFactory.get(count=2)
         stt_settings = STTModelSettings()
 
         session = OpenAISTTTranscriptionSession(
@@ -676,7 +676,7 @@ async def test_session_error_event_before_session_created():
     )
 
     with patch("websockets.connect", return_value=mock_ws):
-        audio_input = await FakeStreamedAudioInput.get(count=2)
+        audio_input = await StreamedAudioInputFactory.get(count=2)
         session = OpenAISTTTranscriptionSession(
             input=audio_input,
             client=AsyncMock(api_key="FAKE_KEY"),
@@ -719,7 +719,7 @@ async def test_listener_timeout_drains_buffered_transcript_before_setup():
     mock_ws.__aiter__.side_effect = messages_then_timeout
 
     with patch("websockets.connect", return_value=mock_ws):
-        audio_input = await FakeStreamedAudioInput.get(count=2)
+        audio_input = await StreamedAudioInputFactory.get(count=2)
         session = OpenAISTTTranscriptionSession(
             input=audio_input,
             client=AsyncMock(api_key="FAKE_KEY"),
@@ -773,7 +773,7 @@ async def test_inactivity_timeout():
             ],
         ),
     ):
-        audio_input = await FakeStreamedAudioInput.get(count=2)
+        audio_input = await StreamedAudioInputFactory.get(count=2)
         stt_settings = STTModelSettings()
 
         session = OpenAISTTTranscriptionSession(

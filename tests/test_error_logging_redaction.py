@@ -65,13 +65,13 @@ from agents.run_internal.tool_execution import (
     resolve_approval_rejection_message,
 )
 from agents.run_state import _deserialize_items
+from agents.testing import ScriptedModel
 from agents.tool_context import ToolContext
 from agents.tracing.processor_interface import TracingProcessor
 from agents.tracing.provider import SynchronousMultiTracingProcessor
 from agents.tracing.spans import Span
 from agents.tracing.traces import Trace
 
-from .fake_model import FakeModel
 from .test_responses import get_function_tool_call, get_text_message
 from .utils.simple_session import SimpleListSession
 
@@ -1215,9 +1215,9 @@ async def test_run_surfaces_redacted_output_validation_error(
 ) -> None:
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="A", model=model, output_type=_RequiredOutput)
-    model.set_next_output([get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    model.enqueue([get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
     session = SimpleListSession(
         session_id="redacted-run",
         history=[{"role": "user", "content": _MODEL_OUTPUT_SECRET}],
@@ -1243,9 +1243,9 @@ def test_run_sync_surfaces_redacted_output_validation_error_without_runner_data(
 ) -> None:
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="A", model=model, output_type=_RequiredOutput)
-    model.set_next_output([get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    model.enqueue([get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
     session = SimpleListSession(
         session_id="redacted-run-sync",
         history=[{"role": "user", "content": _MODEL_OUTPUT_SECRET}],
@@ -1273,7 +1273,7 @@ async def test_run_preserves_diagnostic_wrapper_traceback_locals(
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
     diagnostic_input = "DIAGNOSTIC_RUNNER_INPUT_SECRET"
-    model = FakeModel(initial_output=[get_text_message('{"answer": "missing count"}')])
+    model = ScriptedModel(steps=[[get_text_message('{"answer": "missing count"}')]])
     agent = Agent(name="A", model=model, output_type=_RequiredOutput)
     session = SimpleListSession(session_id="diagnostic-runner")
 
@@ -1292,7 +1292,7 @@ def test_run_sync_preserves_diagnostic_wrapper_traceback_locals(
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
     diagnostic_input = "DIAGNOSTIC_RUNNER_SYNC_INPUT_SECRET"
-    model = FakeModel(initial_output=[get_text_message('{"answer": "missing count"}')])
+    model = ScriptedModel(steps=[[get_text_message('{"answer": "missing count"}')]])
     agent = Agent(name="A", model=model, output_type=_RequiredOutput)
     session = SimpleListSession(session_id="diagnostic-runner-sync")
 
@@ -1311,9 +1311,9 @@ async def test_streamed_run_surfaces_redacted_output_validation_error(
 ) -> None:
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(name="A", model=model, output_type=_RequiredOutput)
-    model.set_next_output([get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    model.enqueue([get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
     result = Runner.run_streamed(agent, "go")
 
     with pytest.raises(ModelBehaviorError) as exc_info:
@@ -1334,7 +1334,7 @@ async def test_streamed_run_loop_exception_follows_model_data_policy(
     redacted: bool,
 ) -> None:
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
-    model = FakeModel(initial_output=[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    model = ScriptedModel(steps=[[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')]])
     agent = Agent(name="A", model=model, output_type=_RequiredOutput)
     result = Runner.run_streamed(agent, "go")
 
@@ -1378,7 +1378,7 @@ async def test_streamed_output_guardrail_omits_run_data_from_redacted_error(
         AgentOutputSchema(_RequiredOutput).validate_json(payload)
         raise AssertionError("validation should fail")  # pragma: no cover
 
-    model = FakeModel(initial_output=[get_text_message(_MODEL_OUTPUT_SECRET)])
+    model = ScriptedModel(steps=[[get_text_message(_MODEL_OUTPUT_SECRET)]])
     agent = Agent(
         name="A",
         model=model,
@@ -1434,7 +1434,7 @@ async def test_streamed_session_error_after_output_guardrail_respects_redaction(
         raise AssertionError("validation should fail")  # pragma: no cover
 
     caplog.set_level(logging.ERROR, logger="openai.agents")
-    model = FakeModel(initial_output=[get_text_message(_MODEL_OUTPUT_SECRET)])
+    model = ScriptedModel(steps=[[get_text_message(_MODEL_OUTPUT_SECRET)]])
     agent = Agent(
         name="A",
         model=model,
@@ -1536,7 +1536,7 @@ async def test_streamed_session_hostile_error_after_redacted_output_guardrail_is
 
     agent = Agent(
         name="A",
-        model=FakeModel(initial_output=[get_text_message(_MODEL_OUTPUT_SECRET)]),
+        model=ScriptedModel(steps=[[get_text_message(_MODEL_OUTPUT_SECRET)]]),
         output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
     )
     result = Runner.run_streamed(agent, "go", session=FailingFinalTurnSession())
@@ -1569,7 +1569,7 @@ async def test_streamed_input_guardrail_omits_run_data_from_redacted_error(
         AgentOutputSchema(_RequiredOutput).validate_json(payload)
         raise AssertionError("validation should fail")  # pragma: no cover
 
-    model = FakeModel(initial_output=[get_text_message("unused")])
+    model = ScriptedModel(steps=[[get_text_message("unused")]])
     agent = Agent(
         name="A",
         model=model,
@@ -1596,7 +1596,7 @@ async def test_invalid_final_output_handler_receives_detached_redacted_error(
     streamed: bool,
 ) -> None:
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
-    model = FakeModel(initial_output=[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    model = ScriptedModel(steps=[[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')]])
     agent = Agent(name="A", model=model, output_type=_RequiredOutput)
     retained_errors: list[ModelBehaviorError] = []
 
@@ -1636,7 +1636,7 @@ async def test_invalid_final_output_handler_invalid_fallback_preserves_redaction
 ) -> None:
     fallback_secret = "INVALID_HANDLER_FALLBACK_SECRET"
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
-    model = FakeModel(initial_output=[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    model = ScriptedModel(steps=[[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')]])
     agent = Agent(name="A", model=model, output_type=_RequiredOutput)
 
     def invalid_fallback(_data: RunErrorHandlerInput[None]) -> dict[str, str]:
@@ -1681,10 +1681,8 @@ async def test_invalid_final_output_handler_fallback_serialization_follows_redac
 ) -> None:
     fallback_secret = "PERMISSIVE_HANDLER_FALLBACK_SECRET"
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
-    model = FakeModel(
-        initial_output=[
-            get_text_message(f'{{"payload": "{_MODEL_OUTPUT_SECRET}", "count": "invalid"}}')
-        ]
+    model = ScriptedModel(
+        steps=[[get_text_message(f'{{"payload": "{_MODEL_OUTPUT_SECRET}", "count": "invalid"}}')]]
     )
     agent = Agent(name="A", model=model, output_type=_PermissiveFallbackOutput)
 
@@ -1743,7 +1741,7 @@ async def test_empty_final_output_handler_fallback_serialization_follows_redacti
 ) -> None:
     fallback_secret = "EMPTY_HANDLER_FALLBACK_SECRET"
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
-    model = FakeModel(initial_output=[])
+    model = ScriptedModel(steps=[[]])
     agent = Agent(name="A", model=model, output_type=_PermissiveFallbackOutput)
 
     def permissive_fallback(_data: RunErrorHandlerInput[None]) -> RunErrorHandlerResult:
@@ -1792,7 +1790,7 @@ async def test_invalid_final_output_handler_failure_preserves_redaction(
     streamed: bool,
 ) -> None:
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
-    model = FakeModel(initial_output=[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    model = ScriptedModel(steps=[[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')]])
     agent = Agent(name="A", model=model, output_type=_RequiredOutput)
 
     def fail(data: RunErrorHandlerInput[None]) -> None:
@@ -1831,7 +1829,7 @@ async def test_invalid_final_output_handler_hostile_failure_preserves_redaction(
 ) -> None:
     handler_secret = "HOSTILE_HANDLER_FAILURE_SECRET"
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
-    model = FakeModel(initial_output=[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    model = ScriptedModel(steps=[[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')]])
     agent = Agent(name="A", model=model, output_type=_RequiredOutput)
 
     def fail(_data: RunErrorHandlerInput[None]) -> None:
@@ -1870,7 +1868,7 @@ async def test_invalid_final_output_handler_failure_preserves_diagnostic_context
     streamed: bool,
 ) -> None:
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
-    model = FakeModel(initial_output=[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')])
+    model = ScriptedModel(steps=[[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')]])
     agent = Agent(name="A", model=model, output_type=_RequiredOutput)
 
     def fail(_data: RunErrorHandlerInput[None]) -> None:
@@ -1914,8 +1912,8 @@ async def test_multiturn_output_validation_error_run_data_follows_redaction_poli
     def record_value(value: str) -> str:
         return "recorded"
 
-    model = FakeModel()
-    model.add_multiple_turn_outputs(
+    model = ScriptedModel()
+    model.extend(
         [
             [
                 get_function_tool_call(

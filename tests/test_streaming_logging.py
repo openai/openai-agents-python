@@ -10,7 +10,7 @@ from agents.items import ToolCallOutputItem
 from agents.run import AgentRunner
 from agents.run_context import RunContextWrapper
 from agents.run_state import RunState
-from tests.fake_model import FakeModel
+from agents.testing import ScriptedModel
 from tests.test_responses import get_text_message
 
 
@@ -20,8 +20,8 @@ async def test_run_streamed_resume_omits_tool_output_in_log_when_dont_log(
 ) -> None:
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
 
-    model = FakeModel()
-    model.set_next_output([get_text_message("ok")])
+    model = ScriptedModel()
+    model.enqueue([get_text_message("ok")])
     agent = Agent(name="log-agent", model=model)
     context_wrapper: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
     state = RunState(

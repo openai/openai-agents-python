@@ -10,13 +10,14 @@ from agents import Agent, Prompt, RunConfig, RunContextWrapper, Runner
 from agents.models.interface import Model, ModelProvider
 from agents.models.openai_responses import OpenAIResponsesModel
 from agents.prompts import GenerateDynamicPromptData
+from agents.testing import ScriptedModel
+from tests.model_test_helpers import get_response_obj
 
-from .fake_model import FakeModel, get_response_obj
 from .test_responses import get_text_message
 
 
-class PromptCaptureFakeModel(FakeModel):
-    """Subclass of FakeModel that records the prompt passed to the model."""
+class PromptCaptureScriptedModel(ScriptedModel):
+    """Subclass of ScriptedModel that records the prompt passed to the model."""
 
     def __init__(self):
         super().__init__()
@@ -91,11 +92,11 @@ async def test_dynamic_prompt_is_resolved_correctly():
 async def test_prompt_is_passed_to_model():
     static_prompt: Prompt = {"id": "model_prompt"}
 
-    model = PromptCaptureFakeModel()
+    model = PromptCaptureScriptedModel()
     agent = Agent(name="test", model=model, prompt=static_prompt)
 
     # Ensure the model returns a simple message so the run completes in one turn.
-    model.set_next_output([get_text_message("done")])
+    model.enqueue([get_text_message("done")])
 
     await Runner.run(agent, input="hello")
 
@@ -171,7 +172,7 @@ async def test_run_cancels_sibling_instructions_when_prompt_resolution_fails() -
 
     agent = Agent(
         name="prompt-agent",
-        model=FakeModel(),
+        model=ScriptedModel(),
         instructions=slow_instructions,
         prompt=failing_prompt,
     )
@@ -206,7 +207,7 @@ async def test_run_streamed_cancels_sibling_instructions_when_prompt_resolution_
 
     agent = Agent(
         name="prompt-agent",
-        model=FakeModel(),
+        model=ScriptedModel(),
         instructions=slow_instructions,
         prompt=failing_prompt,
     )

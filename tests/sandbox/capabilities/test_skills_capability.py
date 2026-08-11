@@ -21,6 +21,7 @@ from agents.sandbox.session.sandbox_session import SandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, FileMode, Group, Permissions, User
 from agents.sandbox.workspace_paths import coerce_posix_path, sandbox_path_str
+from agents.testing import scripted_sandbox_session
 from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
 from agents.tracing import trace
@@ -644,7 +645,11 @@ class TestSkillsLazyLoading:
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
         capability = Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)))
-        capability.bind(_SkillsSession(_source_granted_manifest(workspace_root, source=src_root)))
+        capability.bind(
+            scripted_sandbox_session(
+                manifest=_source_granted_manifest(workspace_root, source=src_root)
+            )
+        )
 
         tools = capability.tools()
 
@@ -785,8 +790,10 @@ class TestSkillsLazyLoading:
             lazy_from=LocalDirLazySkillSource(source=LocalDir(src=tmp_path / "missing-skills"))
         )
         capability.bind(
-            _SkillsSession(
-                _source_granted_manifest(workspace_root, source=tmp_path / "missing-skills")
+            scripted_sandbox_session(
+                manifest=_source_granted_manifest(
+                    workspace_root, source=tmp_path / "missing-skills"
+                )
             )
         )
 
@@ -811,7 +818,11 @@ class TestSkillsLazyLoading:
             encoding="utf-8",
         )
         capability = Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)))
-        capability.bind(_SkillsSession(_source_granted_manifest(workspace_root, source=src_root)))
+        capability.bind(
+            scripted_sandbox_session(
+                manifest=_source_granted_manifest(workspace_root, source=src_root)
+            )
+        )
 
         with pytest.raises(SkillsConfigError):
             await capability.load_skill("shared-skill")
@@ -840,7 +851,11 @@ class TestSkillsLazyLoading:
         second_instructions = await capability.instructions(
             _source_granted_manifest(workspace_root, source=src_root)
         )
-        capability.bind(_SkillsSession(_source_granted_manifest(workspace_root, source=src_root)))
+        capability.bind(
+            scripted_sandbox_session(
+                manifest=_source_granted_manifest(workspace_root, source=src_root)
+            )
+        )
         third_instructions = await capability.instructions(
             _source_granted_manifest(workspace_root, source=src_root)
         )

@@ -22,7 +22,7 @@ import pytest
 
 from agents import Agent, Runner, TResponseInputItem
 from agents.memory.session_settings import SessionSettings
-from tests.fake_model import FakeModel
+from agents.testing import ScriptedModel
 from tests.test_responses import get_text_message
 
 pytestmark = pytest.mark.asyncio
@@ -338,7 +338,7 @@ def session() -> MongoDBSession:
 
 @pytest.fixture
 def agent() -> Agent:
-    return Agent(name="test", model=FakeModel())
+    return Agent(name="test", model=ScriptedModel())
 
 
 # ---------------------------------------------------------------------------
@@ -1048,16 +1048,16 @@ async def test_runner_integration(agent: Agent) -> None:
     """MongoDBSession must supply conversation history to the Runner."""
     session = _make_session("runner-test")
 
-    assert isinstance(agent.model, FakeModel)
-    agent.model.set_next_output([get_text_message("San Francisco")])
+    assert isinstance(agent.model, ScriptedModel)
+    agent.model.enqueue([get_text_message("San Francisco")])
     result1 = await Runner.run(agent, "Where is the Golden Gate Bridge?", session=session)
     assert result1.final_output == "San Francisco"
 
-    agent.model.set_next_output([get_text_message("California")])
+    agent.model.enqueue([get_text_message("California")])
     result2 = await Runner.run(agent, "What state is it in?", session=session)
     assert result2.final_output == "California"
 
-    last_input = agent.model.last_turn_args["input"]
+    last_input = agent.model.calls[-1].input
     assert len(last_input) > 1
     assert any("Golden Gate Bridge" in str(item.get("content", "")) for item in last_input)
 
@@ -1069,14 +1069,14 @@ async def test_runner_session_isolation(agent: Agent) -> None:
     s1 = MongoDBSession("user-a", client=client, database="agents_test")  # type: ignore[arg-type]
     s2 = MongoDBSession("user-b", client=client, database="agents_test")  # type: ignore[arg-type]
 
-    assert isinstance(agent.model, FakeModel)
-    agent.model.set_next_output([get_text_message("I like cats.")])
+    assert isinstance(agent.model, ScriptedModel)
+    agent.model.enqueue([get_text_message("I like cats.")])
     await Runner.run(agent, "I like cats.", session=s1)
 
-    agent.model.set_next_output([get_text_message("I like dogs.")])
+    agent.model.enqueue([get_text_message("I like dogs.")])
     await Runner.run(agent, "I like dogs.", session=s2)
 
-    agent.model.set_next_output([get_text_message("You said you like cats.")])
+    agent.model.enqueue([get_text_message("You said you like cats.")])
     result = await Runner.run(agent, "What animal did I mention?", session=s1)
     assert "cats" in result.final_output.lower()
     assert "dogs" not in result.final_output.lower()
@@ -1099,8 +1099,8 @@ async def test_runner_with_session_settings_limit(agent: Agent) -> None:
     ]
     await session.add_items(history)
 
-    assert isinstance(agent.model, FakeModel)
-    agent.model.set_next_output([get_text_message("Got it")])
+    assert isinstance(agent.model, ScriptedModel)
+    agent.model.enqueue([get_text_message("Got it")])
     await Runner.run(
         agent,
         "New question",
@@ -1108,7 +1108,7 @@ async def test_runner_with_session_settings_limit(agent: Agent) -> None:
         run_config=RunConfig(session_settings=SessionSettings(limit=2)),
     )
 
-    last_input = agent.model.last_turn_args["input"]
+    last_input = agent.model.calls[-1].input
     history_items = [i for i in last_input if i.get("content") != "New question"]
     assert len(history_items) == 2
 

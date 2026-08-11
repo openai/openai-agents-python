@@ -158,9 +158,9 @@ def test_unknown_prefix_can_be_preserved_for_openai_compatible_model_ids(monkeyp
 
         def get_model(self, model_name):
             captured_model["value"] = model_name
-            fake_model = object()
-            captured_result["value"] = fake_model
-            return fake_model
+            mapped_model = object()
+            captured_result["value"] = mapped_model
+            return mapped_model
 
     monkeypatch.setattr("agents.models.multi_provider.OpenAIProvider", FakeOpenAIProvider)
 

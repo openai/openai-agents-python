@@ -1,34 +1,28 @@
 from __future__ import annotations
 
 import shlex
-from types import SimpleNamespace
-from typing import Any
 
 from agents.extensions.sandbox.blaxel.mounts import (
     BlaxelCloudBucketMountConfig,
     _mount_gcs,
     _mount_s3,
 )
+from agents.sandbox import ExecResult
+from agents.testing import scripted_sandbox_session
 
 _INJECTION = "x; touch /tmp/pwned"
 
 
-class _RecordingSession:
-    """Minimal sandbox session that records the `sh -c` commands it is asked to run."""
-
-    def __init__(self) -> None:
-        self.commands: list[str] = []
-
-    async def exec(self, *args: Any, **kwargs: Any) -> Any:
-        if len(args) >= 3 and args[0] == "sh" and args[1] == "-c":
-            self.commands.append(args[2])
-        return SimpleNamespace(exit_code=0, stdout=b"", stderr=b"")
+def _successful_exec(_call: object) -> ExecResult:
+    return ExecResult(exit_code=0, stdout=b"", stderr=b"")
 
 
 async def test_s3_mount_options_are_shell_quoted() -> None:
-    session = _RecordingSession()
+    session = scripted_sandbox_session(
+        [{"method": "exec", "responder": _successful_exec} for _ in range(3)]
+    )
     await _mount_s3(
-        session,  # type: ignore[arg-type]
+        session,
         BlaxelCloudBucketMountConfig(
             provider="s3",
             bucket="bucket",
@@ -36,15 +30,19 @@ async def test_s3_mount_options_are_shell_quoted() -> None:
             endpoint_url=f"http://{_INJECTION}",
         ),
     )
-    cmd = next(c for c in session.commands if c.startswith("s3fs"))
+    commands = [call.args[2] for call in session.calls if call.args[:2] == ("sh", "-c")]
+    cmd = next(command for command in commands if command.startswith("s3fs"))
     # The injected `; touch` must stay inside the -o option token, not become its own command.
     assert "touch" not in shlex.split(cmd)
+    session.assert_complete()
 
 
 async def test_gcs_mount_prefix_is_shell_quoted() -> None:
-    session = _RecordingSession()
+    session = scripted_sandbox_session(
+        [{"method": "exec", "responder": _successful_exec} for _ in range(3)]
+    )
     await _mount_gcs(
-        session,  # type: ignore[arg-type]
+        session,
         BlaxelCloudBucketMountConfig(
             provider="gcs",
             bucket="bucket",
@@ -52,5 +50,7 @@ async def test_gcs_mount_prefix_is_shell_quoted() -> None:
             prefix=_INJECTION,
         ),
     )
-    cmd = next(c for c in session.commands if c.startswith("gcsfuse"))
+    commands = [call.args[2] for call in session.calls if call.args[:2] == ("sh", "-c")]
+    cmd = next(command for command in commands if command.startswith("gcsfuse"))
     assert "touch" not in shlex.split(cmd)
+    session.assert_complete()

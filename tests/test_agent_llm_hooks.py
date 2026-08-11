@@ -8,9 +8,9 @@ from agents.items import ItemHelpers, ModelResponse, TResponseInputItem
 from agents.lifecycle import AgentHooks
 from agents.run import Runner
 from agents.run_context import AgentHookContext, RunContextWrapper, TContext
+from agents.testing import ScriptedModel
 from agents.tool import Tool
 
-from .fake_model import FakeModel
 from .test_responses import (
     get_function_tool,
     get_text_message,
@@ -74,12 +74,12 @@ class AgentHooksForTests(AgentHooks):
 @pytest.mark.asyncio
 async def test_async_agent_hooks_with_llm():
     hooks = AgentHooksForTests()
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="A", model=model, tools=[get_function_tool("f", "res")], handoffs=[], hooks=hooks
     )
     # Simulate a single LLM call producing an output:
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
     await Runner.run(agent, input="hello")
     # Expect one on_start, one on_llm_start, one on_llm_end, and one on_end
     assert hooks.events == {"on_start": 1, "on_llm_start": 1, "on_llm_end": 1, "on_end": 1}
@@ -88,12 +88,12 @@ async def test_async_agent_hooks_with_llm():
 # test_sync_agent_hook_with_llm()
 def test_sync_agent_hook_with_llm():
     hooks = AgentHooksForTests()
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="A", model=model, tools=[get_function_tool("f", "res")], handoffs=[], hooks=hooks
     )
     # Simulate a single LLM call producing an output:
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
     Runner.run_sync(agent, input="hello")
     # Expect one on_start, one on_llm_start, one on_llm_end, and one on_end
     assert hooks.events == {"on_start": 1, "on_llm_start": 1, "on_llm_end": 1, "on_end": 1}
@@ -103,12 +103,12 @@ def test_sync_agent_hook_with_llm():
 @pytest.mark.asyncio
 async def test_streamed_agent_hooks_with_llm():
     hooks = AgentHooksForTests()
-    model = FakeModel()
+    model = ScriptedModel()
     agent = Agent(
         name="A", model=model, tools=[get_function_tool("f", "res")], handoffs=[], hooks=hooks
     )
     # Simulate a single LLM call producing an output:
-    model.set_next_output([get_text_message("hello")])
+    model.enqueue([get_text_message("hello")])
     stream = Runner.run_streamed(agent, input="hello")
 
     async for event in stream.stream_events():

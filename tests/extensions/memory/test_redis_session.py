@@ -13,7 +13,7 @@ pytest.importorskip("redis")  # Skip tests if Redis is not installed
 
 from agents import Agent, Runner, TResponseInputItem
 from agents.extensions.memory.redis_session import RedisSession
-from tests.fake_model import FakeModel
+from agents.testing import ScriptedModel
 from tests.test_responses import get_text_message
 
 # Keep the fallback-to-real-Redis path isolated from xdist workers.
@@ -61,8 +61,8 @@ async def _safe_rpush(client: Redis, key: str, value: str) -> None:
 
 @pytest.fixture
 def agent() -> Agent:
-    """Fixture for a basic agent with a fake model."""
-    return Agent(name="test", model=FakeModel())
+    """Fixture for a basic agent with a scripted model."""
+    return Agent(name="test", model=ScriptedModel())
 
 
 async def _create_redis_session(
@@ -205,8 +205,8 @@ async def test_runner_integration(agent: Agent):
 
     try:
         # First turn
-        assert isinstance(agent.model, FakeModel)
-        agent.model.set_next_output([get_text_message("San Francisco")])
+        assert isinstance(agent.model, ScriptedModel)
+        agent.model.enqueue([get_text_message("San Francisco")])
         result1 = await Runner.run(
             agent,
             "What city is the Golden Gate Bridge in?",
@@ -215,12 +215,12 @@ async def test_runner_integration(agent: Agent):
         assert result1.final_output == "San Francisco"
 
         # Second turn
-        agent.model.set_next_output([get_text_message("California")])
+        agent.model.enqueue([get_text_message("California")])
         result2 = await Runner.run(agent, "What state is it in?", session=session)
         assert result2.final_output == "California"
 
         # Verify history was passed to the model on the second turn
-        last_input = agent.model.last_turn_args["input"]
+        last_input = agent.model.calls[-1].input
         assert len(last_input) > 1
         assert any("Golden Gate Bridge" in str(item.get("content", "")) for item in last_input)
 
@@ -234,23 +234,23 @@ async def test_session_isolation():
     session2 = await _create_redis_session("session_2")
 
     try:
-        agent = Agent(name="test", model=FakeModel())
+        agent = Agent(name="test", model=ScriptedModel())
 
         # Clean up any existing data
         await session1.clear_session()
         await session2.clear_session()
 
         # Interact with session 1
-        assert isinstance(agent.model, FakeModel)
-        agent.model.set_next_output([get_text_message("I like cats.")])
+        assert isinstance(agent.model, ScriptedModel)
+        agent.model.enqueue([get_text_message("I like cats.")])
         await Runner.run(agent, "I like cats.", session=session1)
 
         # Interact with session 2
-        agent.model.set_next_output([get_text_message("I like dogs.")])
+        agent.model.enqueue([get_text_message("I like dogs.")])
         await Runner.run(agent, "I like dogs.", session=session2)
 
         # Go back to session 1 and check its memory
-        agent.model.set_next_output([get_text_message("You said you like cats.")])
+        agent.model.enqueue([get_text_message("You said you like cats.")])
         result = await Runner.run(agent, "What animal did I say I like?", session=session1)
         assert "cats" in result.final_output.lower()
         assert "dogs" not in result.final_output.lower()
@@ -1094,7 +1094,7 @@ async def test_runner_with_session_settings_override():
     """Test that RunConfig can override session's default settings."""
     from agents import Agent, RunConfig, Runner
     from agents.memory import SessionSettings
-    from tests.fake_model import FakeModel
+    from agents.testing import ScriptedModel
     from tests.test_responses import get_text_message
 
     if USE_FAKE_REDIS:
@@ -1118,9 +1118,9 @@ async def test_runner_with_session_settings_override():
         ]
         await session.add_items(items)
 
-        model = FakeModel()
+        model = ScriptedModel()
         agent = Agent(name="test", model=model)
-        model.set_next_output([get_text_message("Got it")])
+        model.enqueue([get_text_message("Got it")])
 
         await Runner.run(
             agent,
@@ -1132,7 +1132,7 @@ async def test_runner_with_session_settings_override():
         )
 
         # Verify the agent received only the last 2 history items + new question
-        last_input = model.last_turn_args["input"]
+        last_input = model.calls[-1].input
         # Filter out the new "New question" input
         history_items = [item for item in last_input if item.get("content") != "New question"]
         # Should have 2 history items (last two from the 10 we added)

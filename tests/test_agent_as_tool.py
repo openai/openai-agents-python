@@ -47,8 +47,8 @@ from agents.agent_tool_state import (
 from agents.run_context import _ApprovalRecord
 from agents.run_state import _build_agent_map
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
+from agents.testing import ScriptedModel
 from agents.tool_context import ToolContext
-from tests.fake_model import FakeModel
 from tests.mcp.helpers import FakeMCPServer
 from tests.mcp.model_compat import create_mcp_error
 from tests.test_responses import get_function_tool_call, get_text_message
@@ -1790,14 +1790,14 @@ async def test_agent_as_tool_resume_survives_cancellation_after_nested_output_co
     nested_model_waiting = asyncio.Event()
     keep_nested_model_waiting = asyncio.Event()
 
-    class BlockingSecondModel(FakeModel):
+    class BlockingSecondModel(ScriptedModel):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
-            self.calls = 0
+            self.response_calls = 0
 
         async def get_response(self, *args: Any, **kwargs: Any) -> ModelResponse:
-            self.calls += 1
-            if self.calls == 2:
+            self.response_calls += 1
+            if self.response_calls == 2:
                 nested_model_waiting.set()
                 await keep_nested_model_waiting.wait()
             return await super().get_response(*args, **kwargs)
@@ -1808,24 +1808,26 @@ async def test_agent_as_tool_resume_survives_cancellation_after_nested_output_co
         return "inner value"
 
     inner_model = BlockingSecondModel(
-        initial_output=[get_function_tool_call("sensitive", "{}", call_id="inner_call")]
+        steps=[[get_function_tool_call("sensitive", "{}", call_id="inner_call")]]
     )
-    inner_model.set_next_output([get_text_message("inner done")])
+    inner_model.enqueue([get_text_message("inner done")])
     inner_agent = Agent(name="inner", model=inner_model, tools=[sensitive])
     nested_tool = inner_agent.as_tool(
         tool_name="delegate",
         tool_description="Delegate",
     )
-    outer_model = FakeModel(
-        initial_output=[
-            get_function_tool_call(
-                "delegate",
-                '{"input":"hi"}',
-                call_id="outer_call",
-            )
+    outer_model = ScriptedModel(
+        steps=[
+            [
+                get_function_tool_call(
+                    "delegate",
+                    '{"input":"hi"}',
+                    call_id="outer_call",
+                )
+            ]
         ]
     )
-    outer_model.set_next_output([get_text_message("outer done")])
+    outer_model.enqueue([get_text_message("outer done")])
     outer_agent = Agent(name="outer", model=outer_model, tools=[nested_tool])
 
     async def run_outer(input_value: Any) -> RunResult | RunResultStreaming:
@@ -1843,7 +1845,7 @@ async def test_agent_as_tool_resume_survives_cancellation_after_nested_output_co
     resume_task = asyncio.create_task(run_outer(state))
     await nested_model_waiting.wait()
     assert tool_attempts == ["ran"]
-    assert inner_model.calls == 2
+    assert inner_model.response_calls == 2
 
     resume_task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -1853,7 +1855,7 @@ async def test_agent_as_tool_resume_survives_cancellation_after_nested_output_co
 
     assert result.final_output == "outer done"
     assert tool_attempts == ["ran"]
-    assert inner_model.calls == 3
+    assert inner_model.response_calls == 3
 
 
 @pytest.mark.parametrize(
@@ -2515,28 +2517,30 @@ async def test_agent_as_tool_streaming_works_with_custom_extractor(
 async def test_agent_as_tool_streaming_settles_multi_segment_text_output() -> None:
     agent = Agent(
         name="streamer",
-        model=FakeModel(
-            initial_output=[
-                ResponseOutputMessage(
-                    id="msg_multi_segment",
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                    content=[
-                        ResponseOutputText(
-                            annotations=[],
-                            text="first ",
-                            type="output_text",
-                            logprobs=[],
-                        ),
-                        ResponseOutputText(
-                            annotations=[],
-                            text="second",
-                            type="output_text",
-                            logprobs=[],
-                        ),
-                    ],
-                )
+        model=ScriptedModel(
+            steps=[
+                [
+                    ResponseOutputMessage(
+                        id="msg_multi_segment",
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                        content=[
+                            ResponseOutputText(
+                                annotations=[],
+                                text="first ",
+                                type="output_text",
+                                logprobs=[],
+                            ),
+                            ResponseOutputText(
+                                annotations=[],
+                                text="second",
+                                type="output_text",
+                                logprobs=[],
+                            ),
+                        ],
+                    )
+                ]
             ]
         ),
     )
@@ -2578,28 +2582,30 @@ async def test_agent_as_tool_streaming_settles_multi_segment_structured_output()
 
     agent = Agent(
         name="streamer",
-        model=FakeModel(
-            initial_output=[
-                ResponseOutputMessage(
-                    id="msg_multi_segment_structured",
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                    content=[
-                        ResponseOutputText(
-                            annotations=[],
-                            text='{"answer":"str',
-                            type="output_text",
-                            logprobs=[],
-                        ),
-                        ResponseOutputText(
-                            annotations=[],
-                            text='uctured"}',
-                            type="output_text",
-                            logprobs=[],
-                        ),
-                    ],
-                )
+        model=ScriptedModel(
+            steps=[
+                [
+                    ResponseOutputMessage(
+                        id="msg_multi_segment_structured",
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                        content=[
+                            ResponseOutputText(
+                                annotations=[],
+                                text='{"answer":"str',
+                                type="output_text",
+                                logprobs=[],
+                            ),
+                            ResponseOutputText(
+                                annotations=[],
+                                text='uctured"}',
+                                type="output_text",
+                                logprobs=[],
+                            ),
+                        ],
+                    )
+                ]
             ]
         ),
         output_type=StructuredOutput,
@@ -2686,10 +2692,10 @@ async def test_agent_as_tool_streaming_settles_final_text_after_nested_mcp_failu
 
     agent = Agent(
         name="streamer",
-        model=FakeModel(),
+        model=ScriptedModel(),
         mcp_servers=[nested_server],
     )
-    cast(FakeModel, agent.model).add_multiple_turn_outputs(
+    cast(ScriptedModel, agent.model).extend(
         [
             [get_function_tool_call(tool_name, "{}")],
             [
