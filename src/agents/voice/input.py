@@ -21,6 +21,8 @@ def _buffer_to_audio_file(
 ) -> tuple[str, io.BytesIO, str]:
     if sample_width not in {1, 2, 3, 4}:
         raise UserError("Sample width must be between 1 and 4 bytes")
+    if channels > 0 and buffer.size % channels != 0:
+        raise UserError("Buffer must contain complete channel frames")
 
     if buffer.dtype == np.float32:
         clipped_buffer = np.clip(buffer, -1.0, 1.0)
