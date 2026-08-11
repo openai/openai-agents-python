@@ -46,6 +46,7 @@ from agents import (
     OpenAIProvider,
     Runner,
     __version__,
+    function_tool,
     generation_span,
     trace,
 )
@@ -53,6 +54,7 @@ from agents.exceptions import UserError
 from agents.models._retry_runtime import provider_managed_retries_disabled
 from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE, ChatCmplHelpers
 from agents.models.fake_id import FAKE_RESPONSES_ID
+from agents.tool import Tool
 from tests.testing_processor import fetch_ordered_spans
 
 
@@ -74,6 +76,7 @@ def _minimal_chat_completion(content: str = "ok") -> ChatCompletion:
 
 async def _run_chat_completions_model_with_custom_base_url(
     model_settings: ModelSettings | dict[str, Any] | None = None,
+    tools: list[Tool] | None = None,
 ) -> dict[str, Any]:
     class DummyCompletions:
         def __init__(self) -> None:
@@ -105,7 +108,12 @@ async def _run_chat_completions_model_with_custom_base_url(
         model="gpt-4",
         openai_client=DummyClient(completions),  # type: ignore[arg-type]
     )
-    agent = Agent(name="test", model=model, model_settings=model_settings or ModelSettings())
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=model_settings or ModelSettings(),
+        tools=tools or [],
+    )
 
     await Runner.run(agent, "hi")
 
@@ -1076,7 +1084,10 @@ async def test_chat_completions_requests_normalize_dictionary_agent_settings(
         },
     }
     kwargs = await _run_chat_completions_model_with_custom_base_url(
-        model_settings=settings if use_dictionary else ModelSettings(**settings)
+        model_settings=settings if use_dictionary else ModelSettings(**settings),
+        # parallel_tool_calls is only forwarded alongside tools, so this parity check
+        # needs a tool for that setting to reach the request.
+        tools=[function_tool(lambda: "ok", name_override="test_tool")],
     )
 
     assert kwargs["reasoning_effort"] == "high"

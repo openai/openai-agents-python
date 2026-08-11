@@ -210,7 +210,9 @@ async def test_stream_response_forwards_dictionary_agent_model_settings(
             system_instructions=None,
             input="hi",
             model_settings=agent.model_settings,
-            tools=[],
+            # parallel_tool_calls is only forwarded alongside tools, so this parity check
+            # needs a tool for that setting to reach the request.
+            tools=[function_tool(lambda: "ok", name_override="test_tool")],
             output_schema=None,
             handoffs=[],
             tracing=ModelTracing.DISABLED,

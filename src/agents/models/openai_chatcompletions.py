@@ -631,12 +631,6 @@ class OpenAIChatCompletionsModel(Model):
         if tracing.include_data():
             span.span_data.input = converted_messages
 
-        if model_settings.parallel_tool_calls and tools:
-            parallel_tool_calls: bool | Omit = True
-        elif model_settings.parallel_tool_calls is False:
-            parallel_tool_calls = False
-        else:
-            parallel_tool_calls = omit
         tool_choice = Converter.convert_tool_choice(model_settings.tool_choice)
         response_format = Converter.convert_response_format(output_schema)
 
@@ -647,6 +641,11 @@ class OpenAIChatCompletionsModel(Model):
 
         converted_tools = _to_dump_compatible(converted_tools)
         tools_param = converted_tools if converted_tools else omit
+        # Chat Completions rejects parallel_tool_calls unless tools are present, so derive it
+        # from the converted list, which also covers handoff-only turns.
+        parallel_tool_calls: bool | Omit = (
+            self._non_null_or_omit(model_settings.parallel_tool_calls) if converted_tools else omit
+        )
 
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")

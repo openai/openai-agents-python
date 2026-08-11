@@ -6,7 +6,7 @@ import pytest
 from httpx import Headers, Response
 from litellm.exceptions import RateLimitError
 from litellm.types.utils import Choices, Message, ModelResponse, Usage
-from openai import APIConnectionError
+from openai import APIConnectionError, omit
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.completion_usage import CompletionUsage
@@ -108,6 +108,65 @@ async def test_litellm_only_forwards_parallel_tool_calls_with_converted_tools(
     expected_parallel_tool_calls = parallel_tool_calls if tool_source != "none" else None
     assert captured["parallel_tool_calls"] is expected_parallel_tool_calls
     assert (captured["tools"] is not None) is (tool_source != "none")
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parallel_tool_calls", [True, False])
+@pytest.mark.parametrize("tool_source", ["none", "function", "handoff"])
+async def test_openai_only_forwards_parallel_tool_calls_with_converted_tools(
+    parallel_tool_calls: bool, tool_source: str
+):
+    captured: dict[str, object] = {}
+
+    class MockChatCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            msg = ChatCompletionMessage(role="assistant", content="test response")
+            return ChatCompletion(
+                id="test-id",
+                created=0,
+                model="gpt-4",
+                object="chat.completion",
+                choices=[Choice(index=0, message=msg, finish_reason="stop")],
+                usage=CompletionUsage(completion_tokens=5, prompt_tokens=10, total_tokens=15),
+            )
+
+    class MockChat:
+        def __init__(self):
+            self.completions = MockChatCompletions()
+
+    class MockClient:
+        def __init__(self):
+            self.chat = MockChat()
+            self.base_url = "https://api.openai.com/v1"
+
+    tools: list[Tool] = (
+        [function_tool(lambda: "ok", name_override="test_tool")]
+        if tool_source == "function"
+        else []
+    )
+    handoffs = [handoff(Agent(name="handoff"))] if tool_source == "handoff" else []
+
+    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=MockClient())  # type: ignore
+    await model.get_response(
+        system_instructions=None,
+        input="test input",
+        model_settings=ModelSettings(parallel_tool_calls=parallel_tool_calls),
+        tools=tools,
+        output_schema=None,
+        handoffs=handoffs,
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+    )
+
+    if tool_source == "none":
+        assert captured["parallel_tool_calls"] is omit
+        assert captured["tools"] is omit
+    else:
+        assert captured["parallel_tool_calls"] is parallel_tool_calls
+        assert captured["tools"] is not omit
 
 
 @pytest.mark.allow_call_model_methods
