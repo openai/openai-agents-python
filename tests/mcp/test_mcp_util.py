@@ -60,6 +60,16 @@ def _convertible_schema() -> dict[str, Any]:
     return schema
 
 
+def _nested_object_schema(depth: int) -> dict[str, Any]:
+    root: dict[str, Any] = {"type": "object", "properties": {}}
+    current = root
+    for _ in range(depth):
+        child: dict[str, Any] = {"type": "object", "properties": {}}
+        current["properties"]["child"] = child
+        current = child
+    return root
+
+
 @pytest.mark.asyncio
 async def test_get_all_function_tools():
     """Test that the get_all_function_tools function returns all function tools from a list of MCP
@@ -1873,6 +1883,20 @@ def test_to_function_tool_does_not_mutate_mcp_input_schema():
     }
     assert schema == {"type": "object", "description": "Test tool"}
     assert tool_input_schema(tool) == {"type": "object", "description": "Test tool"}
+
+
+@pytest.mark.parametrize("convert_schemas_to_strict", [False, True])
+def test_to_function_tool_rejects_deep_schema_before_copying(
+    convert_schemas_to_strict: bool,
+):
+    tool = MCPTool(name="deep_tool", inputSchema=_nested_object_schema(1_000))
+
+    with pytest.raises(UserError, match="too deeply nested"):
+        MCPUtil.to_function_tool(
+            tool,
+            FakeMCPServer(),
+            convert_schemas_to_strict=convert_schemas_to_strict,
+        )
 
 
 def test_to_function_tool_failed_strict_conversion_keeps_original_schema():

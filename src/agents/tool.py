@@ -66,7 +66,7 @@ from .exceptions import ModelBehaviorError, ToolTimeoutError, UserError
 from .function_schema import DocstringStyle, function_schema, generate_func_documentation
 from .logger import log_tool_action_warning, logger
 from .run_context import RunContextWrapper
-from .strict_schema import ensure_strict_json_schema
+from .strict_schema import _copy_json_schema, ensure_strict_json_schema
 from .tool_context import ToolContext
 from .tool_guardrails import ToolInputGuardrail, ToolOutputGuardrail
 from .tracing import SpanError
@@ -594,7 +594,7 @@ class FunctionTool:
             self.on_invoke_tool = bind_to_function_tool(self)
         if self.strict_json_schema:
             self.params_json_schema = ensure_strict_json_schema(
-                copy.deepcopy(self.params_json_schema)
+                _copy_json_schema(self.params_json_schema)
             )
         _validate_function_tool_timeout_config(self)
 
@@ -2199,7 +2199,7 @@ def _build_function_tool_output_type(
         output_json_schema = output_type_adapter.json_schema(mode="serialization")
         if not _json_schema_is_object(output_json_schema):
             raise UserError("the generated JSON Schema is not an object schema")
-        output_json_schema = ensure_strict_json_schema(copy.deepcopy(output_json_schema))
+        output_json_schema = ensure_strict_json_schema(_copy_json_schema(output_json_schema))
     except Exception as error:
         raise UserError(
             "Function tool output_type must define a strict JSON object schema. "
@@ -2234,7 +2234,7 @@ def _resolve_function_tool_output(
         return _build_function_tool_output_type(output_type)
 
     if output_json_schema is not None:
-        return copy.deepcopy(output_json_schema), None
+        return _copy_json_schema(output_json_schema), None
 
     if allowed_callers is None or "programmatic" not in allowed_callers:
         return None, None
@@ -2737,8 +2737,9 @@ def _normalize_function_tool_output_json_schema(
     """Copy and normalize a declared function output schema as a strict object schema."""
     if not isinstance(output_json_schema, dict) or not _json_schema_is_object(output_json_schema):
         raise UserError("Function tool output_json_schema must define a JSON object schema.")
+    copied_schema = _copy_json_schema(output_json_schema)
     try:
-        return ensure_strict_json_schema(copy.deepcopy(output_json_schema))
+        return ensure_strict_json_schema(copied_schema)
     except Exception as error:
         raise UserError(
             "Function tool output_json_schema must define a strict JSON object schema."

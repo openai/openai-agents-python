@@ -19,7 +19,7 @@ from .._mcp_tool_metadata import resolve_mcp_tool_description_for_model, resolve
 from ..exceptions import AgentsException, MCPToolCancellationError, ModelBehaviorError, UserError
 from ..logger import log_tool_action_error, logger
 from ..run_context import RunContextWrapper
-from ..strict_schema import ensure_strict_json_schema
+from ..strict_schema import _copy_json_schema, ensure_strict_json_schema
 from ..tool import (
     FunctionTool,
     Tool,
@@ -535,7 +535,7 @@ class MCPUtil:
         effective_failure_error_function = server._get_failure_error_function(
             failure_error_function
         )
-        schema, is_strict = copy.deepcopy(tool_input_schema(tool)), False
+        schema, is_strict = _copy_json_schema(tool_input_schema(tool)), False
         input_schema_is_empty = schema == {}
 
         # MCP spec doesn't require the inputSchema to have `properties`, but OpenAI spec does.
@@ -550,7 +550,7 @@ class MCPUtil:
             # the original schema intact.
             try:
                 schema = ensure_strict_json_schema(
-                    copy.deepcopy(schema),
+                    _copy_json_schema(schema),
                     _reject_open_objects=not input_schema_is_empty,
                 )
                 is_strict = True

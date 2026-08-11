@@ -6,6 +6,28 @@ from agents.exceptions import UserError
 from agents.strict_schema import ensure_strict_json_schema
 
 
+def _nested_object_schema(depth: int) -> dict[str, object]:
+    root: dict[str, object] = {"type": "object", "properties": {}}
+    current = root
+    for _ in range(depth):
+        child: dict[str, object] = {"type": "object", "properties": {}}
+        properties = current["properties"]
+        assert isinstance(properties, dict)
+        properties["child"] = child
+        current = child
+    return root
+
+
+def _chained_ref_schema(depth: int) -> dict[str, object]:
+    definitions: dict[str, object] = {f"L{i}": {"$ref": f"#/$defs/L{i + 1}"} for i in range(depth)}
+    definitions[f"L{depth}"] = {"type": "string"}
+    return {
+        "$defs": definitions,
+        "type": "object",
+        "properties": {"value": {"$ref": "#/$defs/L0", "description": "value"}},
+    }
+
+
 def test_empty_schema_has_additional_properties_false():
     strict_schema = ensure_strict_json_schema({})
     assert strict_schema["additionalProperties"] is False
@@ -33,6 +55,24 @@ def test_empty_schema_returns_fresh_copy():
 def test_non_dict_schema_errors():
     with pytest.raises(TypeError):
         ensure_strict_json_schema([])  # type: ignore
+
+
+def test_deeply_nested_schema_is_rejected_before_recursive_conversion():
+    with pytest.raises(UserError, match="too deeply nested"):
+        ensure_strict_json_schema(_nested_object_schema(1_000))
+
+
+def test_reasonably_nested_schema_remains_supported():
+    schema = _nested_object_schema(10)
+
+    result = ensure_strict_json_schema(schema)
+
+    assert result["additionalProperties"] is False
+
+
+def test_deeply_chained_refs_are_rejected_before_recursive_conversion():
+    with pytest.raises(UserError, match="too deeply nested"):
+        ensure_strict_json_schema(_chained_ref_schema(1_000))
 
 
 def test_object_without_additional_properties():

@@ -40,6 +40,26 @@ def argless_function() -> str:
     return "ok"
 
 
+def _nested_object_schema(depth: int) -> dict[str, Any]:
+    root: dict[str, Any] = {"type": "object", "properties": {}}
+    current = root
+    for _ in range(depth):
+        child: dict[str, Any] = {"type": "object", "properties": {}}
+        current["properties"]["child"] = child
+        current = child
+    return root
+
+
+def _chained_ref_schema(depth: int) -> dict[str, Any]:
+    definitions: dict[str, Any] = {f"L{i}": {"$ref": f"#/$defs/L{i + 1}"} for i in range(depth)}
+    definitions[f"L{depth}"] = {"type": "string"}
+    return {
+        "$defs": definitions,
+        "type": "object",
+        "properties": {"value": {"$ref": "#/$defs/L0", "description": "value"}},
+    }
+
+
 def test_tool_namespace_copies_tools_with_metadata() -> None:
     tool = function_tool(argless_function)
 
@@ -1005,6 +1025,57 @@ def test_function_tool_does_not_mutate_params_json_schema() -> None:
     assert tool.params_json_schema is not schema
     assert tool.params_json_schema["additionalProperties"] is False
     assert tool.params_json_schema["required"] == ["x"]
+
+
+def test_function_tool_rejects_deep_schema_before_copying() -> None:
+    async def noop(ctx: ToolContext[Any], input: str) -> str:
+        return ""
+
+    schema = _nested_object_schema(1_000)
+
+    with pytest.raises(UserError, match="too deeply nested"):
+        FunctionTool(
+            name="strict_tool",
+            description="Uses a strict schema",
+            params_json_schema=schema,
+            on_invoke_tool=noop,
+        )
+
+    non_strict_tool = FunctionTool(
+        name="non_strict_tool",
+        description="Uses the original schema",
+        params_json_schema=schema,
+        on_invoke_tool=noop,
+        strict_json_schema=False,
+    )
+    assert non_strict_tool.params_json_schema is schema
+
+
+def test_function_tool_rejects_deeply_chained_refs_before_conversion() -> None:
+    async def noop(ctx: ToolContext[Any], input: str) -> str:
+        return ""
+
+    with pytest.raises(UserError, match="too deeply nested"):
+        FunctionTool(
+            name="strict_tool",
+            description="Uses a strict schema",
+            params_json_schema=_chained_ref_schema(1_000),
+            on_invoke_tool=noop,
+        )
+
+
+def test_function_tool_rejects_deep_output_schema_before_copying() -> None:
+    async def noop(ctx: ToolContext[Any], input: str) -> str:
+        return ""
+
+    with pytest.raises(UserError, match="too deeply nested"):
+        FunctionTool(
+            name="output_tool",
+            description="Uses a structured output schema",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=noop,
+            output_json_schema=_nested_object_schema(1_000),
+        )
 
 
 @pytest.mark.asyncio
