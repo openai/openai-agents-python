@@ -842,7 +842,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     @property
     def cached_tools(self) -> list[MCPTool] | None:
-        return self._tools_list
+        return list(self._tools_list) if self._tools_list is not None else None
 
     def __init__(
         self,
@@ -1444,7 +1444,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             filtered_tools = tools
             if self.tool_filter is not None:
                 filtered_tools = await self._apply_tool_filter(filtered_tools, run_context, agent)
-            return filtered_tools
+            return list(filtered_tools)
         except HTTP_STATUS_ERROR_TYPES as e:
             status_code = http_status_code(e)
             transport_error = UserError(

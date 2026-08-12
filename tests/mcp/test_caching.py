@@ -64,6 +64,36 @@ async def test_server_caching_works(
         assert result_tools == tools
 
 
+@pytest.mark.parametrize("result_source", ["list_tools", "cached_tools"])
+@pytest.mark.asyncio
+@patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
+@patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+@patch("mcp.client.session.ClientSession.list_tools")
+async def test_cached_tool_results_do_not_expose_the_shared_cache(
+    mock_list_tools: AsyncMock,
+    mock_initialize: AsyncMock,
+    mock_stdio_client,
+    result_source: str,
+) -> None:
+    tools = [
+        MCPTool(name="tool1", inputSchema={}),
+        MCPTool(name="tool2", inputSchema={}),
+    ]
+    mock_list_tools.return_value = ListToolsResult(tools=tools)
+    server = MCPServerStdio(params={"command": tee}, cache_tools_list=True)
+
+    async with server:
+        listed_tools = await server.list_tools()
+        exposed_tools = listed_tools if result_source == "list_tools" else server.cached_tools
+        assert exposed_tools is not None
+        exposed_tools.pop()
+
+        assert await server.list_tools() == tools
+        assert server.cached_tools == tools
+
+    assert mock_list_tools.call_count == 1
+
+
 @pytest.mark.asyncio
 @patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
 @patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
