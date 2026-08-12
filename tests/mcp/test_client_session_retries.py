@@ -747,3 +747,41 @@ async def test_streamable_http_backoff_matches_generic_schedule_on_isolated_retr
         await server.call_tool("tool", None)
 
     assert delays == [1.0, 2.0, 4.0]
+
+
+@pytest.mark.asyncio
+async def test_backoff_stops_doubling_with_unlimited_retries(monkeypatch):
+    delays: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+
+    session = DummySession(fail_call_tool=9)
+    server = DummyServer(session, retries=-1)
+    server.retry_backoff_seconds_base = 1.0
+
+    await server.call_tool("tool", None)
+
+    # Unlimited retries only keep running if the delay stops growing at some point.
+    assert delays == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 64.0, 64.0]
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_backoff_stops_doubling_with_unlimited_retries(monkeypatch):
+    delays: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+
+    shared_session = FlakyRuntimeErrorSession(failures=9)
+    server = DummyStreamableHttpServer(shared_session, TimeoutSession())
+    server.max_retry_attempts = -1
+    server.retry_backoff_seconds_base = 1.0
+
+    await server.call_tool("tool", None)
+
+    assert delays == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 64.0, 64.0]

@@ -515,6 +515,10 @@ class _UnsetType:
 
 _UNSET = _UnsetType()
 
+# Retry backoff stops doubling once this many backoffs have been taken, so the delay never
+# exceeds `retry_backoff_seconds_base` times 2**_MAX_RETRY_BACKOFF_EXPONENT.
+_MAX_RETRY_BACKOFF_EXPONENT = 6
+
 if TYPE_CHECKING:
     from ..agent import AgentBase
 
@@ -880,7 +884,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             max_retry_attempts: Number of times to retry failed list_tools/call_tool calls.
                 Defaults to no retries.
             retry_backoff_seconds_base: The base delay, in seconds, used for exponential
-                backoff between retries.
+                backoff between retries. The delay stops doubling once it reaches 64 times
+                this value.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
@@ -1187,6 +1192,17 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         assert transport_error is not None
         self._raise_mapped_transport_error(transport_error, None)
 
+    def _retry_backoff_seconds(self, backoffs_taken: int) -> float:
+        """Return the delay before the next retry, given how many backoffs already happened.
+
+        The multiplier stops doubling at `_MAX_RETRY_BACKOFF_EXPONENT`. Without that ceiling an
+        unlimited retry budget (`max_retry_attempts=-1`) stops retrying in practice, because the
+        delay keeps doubling past any usable duration. A finite budget bounds the exponent on its
+        own and reaches the ceiling only when it allows more retries than the ceiling permits.
+        """
+        multiplier: int = 2 ** min(backoffs_taken, _MAX_RETRY_BACKOFF_EXPONENT)
+        return self.retry_backoff_seconds_base * multiplier
+
     async def _run_with_retries(self, func: Callable[[], Awaitable[T]]) -> T:
         attempts = 0
         while True:
@@ -1196,8 +1212,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 attempts += 1
                 if self.max_retry_attempts != -1 and attempts > self.max_retry_attempts:
                     raise
-                backoff = self.retry_backoff_seconds_base * (2 ** (attempts - 1))
-                await asyncio.sleep(backoff)
+                await asyncio.sleep(self._retry_backoff_seconds(attempts - 1))
 
     @asynccontextmanager
     async def _client_session_context(self, read_timeout: timedelta | float | None):
@@ -1874,7 +1889,8 @@ class MCPServerStdio(_MCPServerWithClientSession):
             max_retry_attempts: Number of times to retry failed list_tools/call_tool calls.
                 Defaults to no retries.
             retry_backoff_seconds_base: The base delay, in seconds, for exponential
-                backoff between retries.
+                backoff between retries. The delay stops doubling once it reaches 64 times
+                this value.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
@@ -2005,7 +2021,8 @@ class MCPServerSse(_MCPServerWithClientSession):
             max_retry_attempts: Number of times to retry failed list_tools/call_tool calls.
                 Defaults to no retries.
             retry_backoff_seconds_base: The base delay, in seconds, for exponential
-                backoff between retries.
+                backoff between retries. The delay stops doubling once it reaches 64 times
+                this value.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
@@ -2163,7 +2180,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             max_retry_attempts: Number of times to retry failed list_tools/call_tool calls.
                 Defaults to no retries.
             retry_backoff_seconds_base: The base delay, in seconds, for exponential
-                backoff between retries.
+                backoff between retries. The delay stops doubling once it reaches 64 times
+                this value.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
@@ -2391,13 +2409,13 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                         if exc.__cause__ is not None:
                             raise exc.__cause__ from exc
                         raise
-                    backoff = self.retry_backoff_seconds_base * (2**backoffs_taken)
+                    backoff = self._retry_backoff_seconds(backoffs_taken)
                     backoffs_taken += 1
                     await asyncio.sleep(backoff)
                 except Exception:
                     if self.max_retry_attempts != -1 and retries_used >= self.max_retry_attempts:
                         raise
-                    backoff = self.retry_backoff_seconds_base * (2**backoffs_taken)
+                    backoff = self._retry_backoff_seconds(backoffs_taken)
                     backoffs_taken += 1
                     await asyncio.sleep(backoff)
                 first_attempt = False
