@@ -429,7 +429,7 @@ class RunloopExistingSecret(BaseModel):
     leaving the stored value untouched.
     """
 
-    model_config = {"frozen": True}
+    model_config = {"frozen": True, "extra": "forbid"}
 
 
 def _normalize_runloop_user_parameters(
