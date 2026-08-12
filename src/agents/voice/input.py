@@ -25,7 +25,10 @@ def _buffer_to_audio_file(
     if buffer.dtype not in (np.int16, np.float32):
         raise UserError("Buffer must be a numpy array of int16 or float32")
 
-    if channels > 0 and buffer.size % channels != 0:
+    if channels <= 0:
+        raise UserError("Channels must be greater than zero")
+
+    if buffer.size % channels != 0:
         raise UserError("Buffer must contain complete channel frames")
 
     if buffer.dtype == np.float32:
