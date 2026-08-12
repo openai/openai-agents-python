@@ -108,6 +108,23 @@ def _find_reasoning_input_item(
     return None
 
 
+class _DummyWSClient:
+    """Stand-in for `AsyncOpenAI` that the websocket model only reads connection settings from."""
+
+    def __init__(self) -> None:
+        self.base_url = httpx.URL("https://api.openai.com/v1/")
+        self.websocket_base_url = None
+        self.default_query: dict[str, Any] = {}
+        self.default_headers = {
+            "Authorization": "Bearer test-key",
+            "User-Agent": "AsyncOpenAI/Python test",
+        }
+        self.timeout: Any = None
+
+    async def _refresh_api_key(self) -> None:
+        return None
+
+
 def _ws_terminal_response_frame(event_type: str, response_id: str, sequence_number: int) -> str:
     response = get_response_obj([get_text_message("partial final")], response_id=response_id)
     return json.dumps(
@@ -612,22 +629,8 @@ async def test_streamed_run_rejects_failed_terminal_response_payload_events_from
             if self.close_code is None:
                 self.close_code = 1000
 
-    class DummyWSClient:
-        def __init__(self) -> None:
-            self.base_url = httpx.URL("https://api.openai.com/v1/")
-            self.websocket_base_url = None
-            self.default_query: dict[str, Any] = {}
-            self.default_headers = {
-                "Authorization": "Bearer test-key",
-                "User-Agent": "AsyncOpenAI/Python test",
-            }
-            self.timeout: Any = None
-
-        async def _refresh_api_key(self) -> None:
-            return None
-
     ws = DummyWSConnection([_ws_terminal_response_frame(terminal_event_type, "resp-ws", 1)])
-    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=DummyWSClient())  # type: ignore[arg-type]
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=_DummyWSClient())  # type: ignore[arg-type]
 
     async def fake_open(
         _ws_url: str,
@@ -652,6 +655,112 @@ async def test_streamed_run_rejects_failed_terminal_response_payload_events_from
     assert stream_events[1].data.type == terminal_event_type
     assert result.final_output is None
     assert result.raw_responses == []
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_ws_terminal_failure_frees_the_request_lock_for_a_waiting_run(monkeypatch) -> None:
+    """A terminal failure must hand the shared websocket back to a run already waiting for it.
+
+    Run A holds `_ws_request_lock` while run B blocks on it. A then fails terminally, and B has
+    to complete on the surviving connection, which only happens if A's cleanup actually ran.
+    """
+    release_run_a = asyncio.Event()
+    run_a_holds_lock = asyncio.Event()
+    run_b_waiting_on_lock = asyncio.Event()
+
+    class SharedWSConnection:
+        def __init__(self) -> None:
+            self.close_code: int | None = None
+            self.send_calls = 0
+            self.recv_calls = 0
+
+        async def send(self, payload: str) -> None:
+            self.send_calls += 1
+            if self.send_calls == 1:
+                run_a_holds_lock.set()
+            return None
+
+        async def recv(self) -> str:
+            self.recv_calls += 1
+            if self.recv_calls == 1:
+                # Keep run A in-flight until run B is queued behind the request lock.
+                await release_run_a.wait()
+                return _ws_terminal_response_frame("response.incomplete", "resp-a", 1)
+            return _ws_terminal_response_frame("response.completed", "resp-b", 1)
+
+        async def close(self) -> None:
+            if self.close_code is None:
+                self.close_code = 1000
+
+    ws = SharedWSConnection()
+    open_calls = 0
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=_DummyWSClient())  # type: ignore[arg-type]
+    request_lock = model._get_ws_request_lock()
+
+    async def fake_open(
+        _ws_url: str,
+        _headers: dict[str, str],
+        *,
+        connect_timeout: float | None = None,
+    ) -> SharedWSConnection:
+        nonlocal open_calls
+        open_calls += 1
+        return ws
+
+    monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
+    original_await_websocket_with_timeout = model._await_websocket_with_timeout
+
+    async def observed_await_websocket_with_timeout(
+        awaitable: Any,
+        timeout_seconds: float | None,
+        phase: str,
+    ) -> Any:
+        if phase == "request lock wait" and request_lock.locked():
+            run_b_waiting_on_lock.set()
+        return await original_await_websocket_with_timeout(awaitable, timeout_seconds, phase)
+
+    monkeypatch.setattr(
+        model, "_await_websocket_with_timeout", observed_await_websocket_with_timeout
+    )
+    agent = Agent(name="test", model=model)
+
+    async def run_a() -> None:
+        result = Runner.run_streamed(agent, input="a")
+        with pytest.raises(ModelBehaviorError, match="response.incomplete"):
+            async for _ in result.stream_events():
+                pass
+
+    async def run_b() -> tuple[Any, list[str | None]]:
+        result = Runner.run_streamed(agent, input="b")
+        async for _ in result.stream_events():
+            pass
+        return result.final_output, [response.response_id for response in result.raw_responses]
+
+    task_a = asyncio.create_task(run_a())
+    try:
+        await asyncio.wait_for(run_a_holds_lock.wait(), timeout=5)
+        assert request_lock.locked(), "run A released the request lock before run B started"
+
+        task_b = asyncio.create_task(run_b())
+        await asyncio.wait_for(run_b_waiting_on_lock.wait(), timeout=5)
+        assert not task_b.done(), "run B was expected to be waiting on the request lock"
+    finally:
+        release_run_a.set()
+
+    await task_a
+    try:
+        # Only a hang guard: run B needs event loop turns, not wall-clock time.
+        output, response_ids = await asyncio.wait_for(task_b, timeout=5)
+    except TimeoutError:
+        pytest.fail("run A's terminal failure left `_ws_request_lock` held, so run B never woke")
+
+    assert output == "partial final", "run B did not complete on the surviving connection"
+    assert response_ids == ["resp-b"], "run B did not receive its own response"
+    assert not request_lock.locked(), "the request lock was left held after both runs finished"
+    assert ws.close_code is None, "the shared connection should survive a terminal failure"
+    assert open_calls == 1, "run B should reuse the websocket connection opened by run A"
+    assert ws.send_calls == 2, "run B should complete on the existing websocket connection"
 
 
 def _terminal_failure_event(event_type: str) -> Any:
