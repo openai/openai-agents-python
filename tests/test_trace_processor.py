@@ -66,6 +66,14 @@ def mocked_exporter():
     return exporter
 
 
+@pytest.mark.parametrize("max_batch_size", [0, -1])
+def test_batch_trace_processor_rejects_non_positive_max_batch_size(
+    mocked_exporter: MagicMock, max_batch_size: int
+) -> None:
+    with pytest.raises(ValueError, match="max_batch_size must be greater than 0"):
+        BatchTraceProcessor(exporter=mocked_exporter, max_batch_size=max_batch_size)
+
+
 def test_batch_trace_processor_on_trace_start(mocked_exporter):
     processor = BatchTraceProcessor(exporter=mocked_exporter, schedule_delay=0.1)
     test_trace = get_trace(processor)
