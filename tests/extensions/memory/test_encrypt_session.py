@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import tempfile
 from pathlib import Path
 from typing import Any, cast
@@ -641,3 +642,97 @@ async def test_runner_with_session_settings_override(encryption_key: str):
     assert len(history_items) == 2
 
     underlying.close()
+
+
+# ============================================================================
+# Strict mode (allow_plaintext_passthrough=False) tests
+# ============================================================================
+
+
+async def test_encrypted_session_plaintext_passthrough_by_default(
+    encryption_key: str, underlying_session: SQLiteSession
+):
+    """Test that non-encrypted items pass through by default (migration support)."""
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying_session,
+        encryption_key=encryption_key,
+    )
+
+    await session.add_items([{"role": "user", "content": "encrypted"}])
+    await underlying_session.add_items([{"role": "user", "content": "plaintext"}])
+
+    items = await session.get_items()
+    assert [item.get("content") for item in items] == ["encrypted", "plaintext"]
+
+    underlying_session.close()
+
+
+async def test_encrypted_session_strict_mode_drops_plaintext_with_warning(
+    encryption_key: str, underlying_session: SQLiteSession, caplog: pytest.LogCaptureFixture
+):
+    """Test that strict mode drops non-encrypted items and logs a warning."""
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying_session,
+        encryption_key=encryption_key,
+        allow_plaintext_passthrough=False,
+    )
+
+    await session.add_items([{"role": "user", "content": "encrypted"}])
+    await underlying_session.add_items([{"role": "user", "content": "plaintext"}])
+
+    with caplog.at_level(logging.WARNING, logger="agents.extensions.memory.encrypt_session"):
+        items = await session.get_items()
+
+    assert [item.get("content") for item in items] == ["encrypted"]
+    assert "dropping non-encrypted item" in caplog.text
+
+    underlying_session.close()
+
+
+async def test_encrypted_session_strict_mode_reads_valid_envelopes(
+    encryption_key: str, underlying_session: SQLiteSession
+):
+    """Test that strict mode still returns valid encrypted items."""
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying_session,
+        encryption_key=encryption_key,
+        allow_plaintext_passthrough=False,
+    )
+
+    await session.add_items(
+        [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there!"},
+        ]
+    )
+
+    items = await session.get_items()
+    assert [item.get("content") for item in items] == ["Hello", "Hi there!"]
+
+    underlying_session.close()
+
+
+async def test_encrypted_session_strict_mode_pop_item_skips_plaintext(
+    encryption_key: str, underlying_session: SQLiteSession
+):
+    """Test that pop_item in strict mode skips non-encrypted items."""
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying_session,
+        encryption_key=encryption_key,
+        allow_plaintext_passthrough=False,
+    )
+
+    await session.add_items([{"role": "user", "content": "encrypted"}])
+    await underlying_session.add_items([{"role": "user", "content": "plaintext"}])
+
+    popped = await session.pop_item()
+    assert popped is not None
+    assert popped.get("content") == "encrypted"
+
+    assert await session.pop_item() is None
+
+    underlying_session.close()

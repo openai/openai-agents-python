@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from typing import Any, Literal, TypeGuard, cast
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -40,6 +41,8 @@ from ...items import TResponseInputItem
 from ...memory.session import SessionABC, _call_session_method, _get_session_wrapper
 from ...memory.session_settings import SessionSettings, resolve_session_limit
 from ...run_context import RunContextWrapper
+
+logger = logging.getLogger(__name__)
 
 
 class EncryptedEnvelope(TypedDict):
@@ -117,6 +120,7 @@ class EncryptedSession(SessionABC):
         underlying_session: SessionABC,
         encryption_key: str,
         ttl: int = 600,
+        allow_plaintext_passthrough: bool = True,
     ):
         """
         Args:
@@ -124,10 +128,15 @@ class EncryptedSession(SessionABC):
             underlying_session: The real session store (e.g. SQLiteSession, SQLAlchemySession)
             encryption_key: Master key (Fernet key or raw secret)
             ttl: Token time-to-live in seconds (default 10 min)
+            allow_plaintext_passthrough: When True (default), items without an encryption
+                envelope are returned verbatim, which supports migrating a plaintext store
+                to encrypted storage. When False, non-encrypted items are dropped with a
+                warning log so only authenticated ciphertext reaches the model.
         """
         self.session_id = session_id
         self.underlying_session = underlying_session
         self.ttl = ttl
+        self._allow_plaintext_passthrough = allow_plaintext_passthrough
 
         master = _ensure_fernet_key_bytes(encryption_key)
         self.cipher = _derive_session_fernet_key(master, session_id)
@@ -162,6 +171,12 @@ class EncryptedSession(SessionABC):
 
     def _unwrap(self, item: TResponseInputItem | EncryptedEnvelope) -> TResponseInputItem | None:
         if not _is_encrypted_envelope(item):
+            if not self._allow_plaintext_passthrough:
+                logger.warning(
+                    "EncryptedSession dropping non-encrypted item from session store "
+                    "(allow_plaintext_passthrough=False)."
+                )
+                return None
             return cast(TResponseInputItem, item)
 
         try:
