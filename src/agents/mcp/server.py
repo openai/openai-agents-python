@@ -161,6 +161,24 @@ def _client_session_read_timeout(timeout_seconds: float | None) -> timedelta | f
     return timeout_seconds if MCP_V2 else timeout
 
 
+def _validate_retry_backoff_seconds_max(value: float | None) -> None:
+    """Validate the optional maximum retry delay."""
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError("retry_backoff_seconds_max must be a number of seconds or None.")
+    try:
+        is_finite = math.isfinite(value)
+    except OverflowError as error:
+        raise ValueError(
+            "retry_backoff_seconds_max must be a non-negative finite number of seconds or None."
+        ) from error
+    if not is_finite or value < 0:
+        raise ValueError(
+            "retry_backoff_seconds_max must be a non-negative finite number of seconds or None."
+        )
+
+
 def _transport_error_urls_are_safe(
     http_error: Exception,
 ) -> bool:
@@ -857,6 +875,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
         custom_data_extractor: MCPToolCustomDataExtractor | None = None,
+        retry_backoff_seconds_max: float | None = None,
     ):
         """
         Args:
@@ -894,6 +913,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 tool calls. It is invoked by the Agents SDK before calling `call_tool`.
             custom_data_extractor: Optional callable that produces SDK-only custom data for
                 emitted MCP tool output items.
+            retry_backoff_seconds_max: The non-negative finite maximum delay, in seconds, between
+                retries. Defaults to `None`, which leaves exponential backoff uncapped.
         """
         super().__init__(
             use_structured_content=use_structured_content,
@@ -912,9 +933,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         # Validate during construction, then convert again when connecting in case callers mutate
         # the public timeout attribute before a later connection attempt.
         _client_session_read_timeout(client_session_timeout_seconds)
+        _validate_retry_backoff_seconds_max(retry_backoff_seconds_max)
         self.client_session_timeout_seconds = client_session_timeout_seconds
         self.max_retry_attempts = max_retry_attempts
         self.retry_backoff_seconds_base = retry_backoff_seconds_base
+        self.retry_backoff_seconds_max = retry_backoff_seconds_max
         self.message_handler = message_handler
 
         # The cache is always dirty at startup, so that we fetch tools at least once
@@ -1187,6 +1210,17 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         assert transport_error is not None
         self._raise_mapped_transport_error(transport_error, None)
 
+    def _retry_backoff_seconds(self, backoffs_taken: int) -> float:
+        """Return the configured exponential delay after the given number of backoffs."""
+        if self.retry_backoff_seconds_max is None:
+            return cast(float, self.retry_backoff_seconds_base * (2**backoffs_taken))
+
+        try:
+            backoff = math.ldexp(self.retry_backoff_seconds_base, backoffs_taken)
+        except OverflowError:
+            backoff = math.copysign(math.inf, self.retry_backoff_seconds_base)
+        return min(backoff, self.retry_backoff_seconds_max)
+
     async def _run_with_retries(self, func: Callable[[], Awaitable[T]]) -> T:
         attempts = 0
         while True:
@@ -1196,8 +1230,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 attempts += 1
                 if self.max_retry_attempts != -1 and attempts > self.max_retry_attempts:
                     raise
-                backoff = self.retry_backoff_seconds_base * (2 ** (attempts - 1))
-                await asyncio.sleep(backoff)
+                await asyncio.sleep(self._retry_backoff_seconds(attempts - 1))
 
     @asynccontextmanager
     async def _client_session_context(self, read_timeout: timedelta | float | None):
@@ -1845,6 +1878,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
         custom_data_extractor: MCPToolCustomDataExtractor | None = None,
+        retry_backoff_seconds_max: float | None = None,
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -1887,6 +1921,8 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 tool calls. It is invoked by the Agents SDK before calling `call_tool`.
             custom_data_extractor: Optional callable that produces SDK-only custom data for
                 emitted MCP tool output items.
+            retry_backoff_seconds_max: The non-negative finite maximum delay, in seconds, between
+                retries. Defaults to `None`, which leaves exponential backoff uncapped.
         """
         super().__init__(
             cache_tools_list=cache_tools_list,
@@ -1900,6 +1936,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
             failure_error_function=failure_error_function,
             tool_meta_resolver=tool_meta_resolver,
             custom_data_extractor=custom_data_extractor,
+            retry_backoff_seconds_max=retry_backoff_seconds_max,
         )
 
         self.params = StdioServerParameters(
@@ -1974,6 +2011,7 @@ class MCPServerSse(_MCPServerWithClientSession):
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
         custom_data_extractor: MCPToolCustomDataExtractor | None = None,
+        retry_backoff_seconds_max: float | None = None,
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -2018,6 +2056,8 @@ class MCPServerSse(_MCPServerWithClientSession):
                 tool calls. It is invoked by the Agents SDK before calling `call_tool`.
             custom_data_extractor: Optional callable that produces SDK-only custom data for
                 emitted MCP tool output items.
+            retry_backoff_seconds_max: The non-negative finite maximum delay, in seconds, between
+                retries. Defaults to `None`, which leaves exponential backoff uncapped.
         """
         super().__init__(
             cache_tools_list=cache_tools_list,
@@ -2031,6 +2071,7 @@ class MCPServerSse(_MCPServerWithClientSession):
             failure_error_function=failure_error_function,
             tool_meta_resolver=tool_meta_resolver,
             custom_data_extractor=custom_data_extractor,
+            retry_backoff_seconds_max=retry_backoff_seconds_max,
         )
 
         self.params = params
@@ -2131,6 +2172,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
         custom_data_extractor: MCPToolCustomDataExtractor | None = None,
+        retry_backoff_seconds_max: float | None = None,
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
@@ -2176,6 +2218,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 tool calls. It is invoked by the Agents SDK before calling `call_tool`.
             custom_data_extractor: Optional callable that produces SDK-only custom data for
                 emitted MCP tool output items.
+            retry_backoff_seconds_max: The non-negative finite maximum delay, in seconds, between
+                retries. Defaults to `None`, which leaves exponential backoff uncapped.
         """
         super().__init__(
             cache_tools_list=cache_tools_list,
@@ -2189,6 +2233,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             failure_error_function=failure_error_function,
             tool_meta_resolver=tool_meta_resolver,
             custom_data_extractor=custom_data_extractor,
+            retry_backoff_seconds_max=retry_backoff_seconds_max,
         )
 
         self.params = params
@@ -2391,13 +2436,13 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                         if exc.__cause__ is not None:
                             raise exc.__cause__ from exc
                         raise
-                    backoff = self.retry_backoff_seconds_base * (2**backoffs_taken)
+                    backoff = self._retry_backoff_seconds(backoffs_taken)
                     backoffs_taken += 1
                     await asyncio.sleep(backoff)
                 except Exception:
                     if self.max_retry_attempts != -1 and retries_used >= self.max_retry_attempts:
                         raise
-                    backoff = self.retry_backoff_seconds_base * (2**backoffs_taken)
+                    backoff = self._retry_backoff_seconds(backoffs_taken)
                     backoffs_taken += 1
                     await asyncio.sleep(backoff)
                 first_attempt = False

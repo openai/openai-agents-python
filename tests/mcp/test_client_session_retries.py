@@ -1,7 +1,7 @@
 import asyncio
 import sys
 from contextlib import asynccontextmanager
-from typing import cast
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -16,7 +16,12 @@ from mcp.types import (
 
 from agents.exceptions import UserError
 from agents.mcp._compat import mcp_request_timeout_code
-from agents.mcp.server import MCPServerStreamableHttp, _MCPServerWithClientSession
+from agents.mcp.server import (
+    MCPServerSse,
+    MCPServerStdio,
+    MCPServerStreamableHttp,
+    _MCPServerWithClientSession,
+)
 
 from .model_compat import ListPromptsResult, ListToolsResult, Tool as MCPTool, create_mcp_error
 
@@ -45,12 +50,21 @@ class DummySession:
 
 
 class DummyServer(_MCPServerWithClientSession):
-    def __init__(self, session: DummySession, retries: int, *, serialize_requests: bool = False):
+    def __init__(
+        self,
+        session: DummySession,
+        retries: int,
+        *,
+        retry_backoff_seconds_base: float = 0,
+        retry_backoff_seconds_max: float | None = None,
+        serialize_requests: bool = False,
+    ):
         super().__init__(
             cache_tools_list=False,
             client_session_timeout_seconds=None,
             max_retry_attempts=retries,
-            retry_backoff_seconds_base=0,
+            retry_backoff_seconds_base=retry_backoff_seconds_base,
+            retry_backoff_seconds_max=retry_backoff_seconds_max,
         )
         self.session = cast(ClientSession, session)
         self._serialize_session_requests = serialize_requests
@@ -376,12 +390,19 @@ class HangingSession:
 
 
 class DummyStreamableHttpServer(MCPServerStreamableHttp):
-    def __init__(self, shared_session: object, isolated_session: object):
+    def __init__(
+        self,
+        shared_session: object,
+        isolated_session: object,
+        *,
+        retry_backoff_seconds_max: float | None = None,
+    ):
         super().__init__(
             params={"url": "https://example.test/mcp"},
             client_session_timeout_seconds=None,
             max_retry_attempts=0,
             retry_backoff_seconds_base=0,
+            retry_backoff_seconds_max=retry_backoff_seconds_max,
         )
         self.session = cast(ClientSession, shared_session)
         self._isolated_session = cast(ClientSession, isolated_session)
@@ -747,3 +768,99 @@ async def test_streamable_http_backoff_matches_generic_schedule_on_isolated_retr
         await server.call_tool("tool", None)
 
     assert delays == [1.0, 2.0, 4.0]
+
+
+def test_retry_backoff_seconds_max_is_forwarded_by_public_servers():
+    servers = [
+        MCPServerStdio(params={"command": "test"}, retry_backoff_seconds_max=0.0),
+        MCPServerSse(params={"url": "https://example.test/sse"}, retry_backoff_seconds_max=0.0),
+        MCPServerStreamableHttp(
+            params={"url": "https://example.test/mcp"}, retry_backoff_seconds_max=0.0
+        ),
+    ]
+
+    assert [server.retry_backoff_seconds_max for server in servers] == [0.0, 0.0, 0.0]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [-1.0, float("-inf"), float("inf"), float("nan")],
+)
+def test_retry_backoff_seconds_max_rejects_negative_and_non_finite_values(value: float):
+    with pytest.raises(ValueError, match="non-negative finite"):
+        MCPServerStreamableHttp(
+            params={"url": "https://example.test/mcp"},
+            retry_backoff_seconds_max=value,
+        )
+
+
+@pytest.mark.parametrize("value", [True, "1"])
+def test_retry_backoff_seconds_max_rejects_non_numeric_values(value: object):
+    with pytest.raises(TypeError, match="must be a number of seconds or None"):
+        MCPServerStreamableHttp(
+            params={"url": "https://example.test/mcp"},
+            retry_backoff_seconds_max=cast(Any, value),
+        )
+
+
+@pytest.mark.parametrize("retries", [8, -1])
+@pytest.mark.asyncio
+async def test_generic_backoff_remains_uncapped_by_default(monkeypatch, retries: int):
+    delays: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+
+    session = DummySession(fail_call_tool=8)
+    server = DummyServer(session, retries, retry_backoff_seconds_base=1.0)
+
+    await server.call_tool("tool", None)
+
+    assert delays == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]
+
+
+@pytest.mark.asyncio
+async def test_generic_backoff_respects_configured_maximum(monkeypatch):
+    delays: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+
+    session = DummySession(fail_call_tool=9)
+    server = DummyServer(
+        session,
+        -1,
+        retry_backoff_seconds_base=1.0,
+        retry_backoff_seconds_max=64.0,
+    )
+
+    await server.call_tool("tool", None)
+
+    assert delays == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 64.0, 64.0]
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_backoff_respects_configured_maximum(monkeypatch):
+    delays: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+
+    shared_session = FlakyRuntimeErrorSession(failures=9)
+    server = DummyStreamableHttpServer(
+        shared_session,
+        TimeoutSession(),
+        retry_backoff_seconds_max=64.0,
+    )
+    server.max_retry_attempts = -1
+    server.retry_backoff_seconds_base = 1.0
+
+    await server.call_tool("tool", None)
+
+    assert delays == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 64.0, 64.0]
