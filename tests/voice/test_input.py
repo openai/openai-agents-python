@@ -116,6 +116,14 @@ def test_audio_input_rejects_non_positive_channels(channels):
         audio_input.to_audio_file()
 
 
+@pytest.mark.parametrize("frame_rate", [0, -8000])
+def test_audio_input_rejects_non_positive_frame_rate(frame_rate):
+    audio_input = AudioInput(buffer=np.zeros(4, dtype=np.int16), frame_rate=frame_rate)
+
+    with pytest.raises(UserError, match="Frame rate must be greater than zero"):
+        audio_input.to_audio_file()
+
+
 def test_buffer_to_audio_file_invalid_dtype():
     # Create a buffer with invalid dtype (float64)
     buffer = np.array([1.0, 2.0, 3.0], dtype=np.float64)

@@ -22,6 +22,9 @@ def _buffer_to_audio_file(
     if sample_width not in {1, 2, 3, 4}:
         raise UserError("Sample width must be between 1 and 4 bytes")
 
+    if frame_rate <= 0:
+        raise UserError("Frame rate must be greater than zero")
+
     if buffer.dtype not in (np.int16, np.float32):
         raise UserError("Buffer must be a numpy array of int16 or float32")
 
