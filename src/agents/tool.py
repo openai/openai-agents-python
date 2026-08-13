@@ -2588,8 +2588,11 @@ def function_tool(
         schema = function_schema(
             func=the_func,
             name_override=name_override,
-            description_override=description_override
-            or (callable_description if use_docstring_info else None),
+            description_override=(
+                description_override
+                if description_override is not None
+                else (callable_description if use_docstring_info else None)
+            ),
             docstring_style=docstring_style,
             use_docstring_info=use_docstring_info,
             strict_json_schema=strict_mode,

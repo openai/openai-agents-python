@@ -47,6 +47,12 @@ def test_realtime_handoff_with_custom_params():
     assert handoff_obj.is_enabled is False
 
 
+def test_realtime_handoff_preserves_empty_description_override():
+    handoff_obj = realtime_handoff(RealtimeAgent(name="delegate"), tool_description_override="")
+
+    assert handoff_obj.tool_description == ""
+
+
 @pytest.mark.asyncio
 async def test_collect_enabled_handoffs_cancels_sibling_checks_on_error() -> None:
     slow_started = asyncio.Event()

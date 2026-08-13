@@ -336,6 +336,15 @@ def test_function_config_overrides():
     assert tool.description == "custom description"
 
 
+def test_function_config_preserves_empty_description_override():
+    def documented_function() -> None:
+        """Description that the caller explicitly suppresses."""
+
+    tool = function_tool(documented_function, description_override="")
+
+    assert tool.description == ""
+
+
 def test_func_schema_is_strict():
     tool = function_tool(simple_function)
     assert tool.strict_json_schema, "Should be strict by default"

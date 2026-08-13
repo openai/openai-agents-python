@@ -183,7 +183,11 @@ def realtime_handoff(
         return agent
 
     tool_name = tool_name_override or Handoff.default_tool_name(agent)
-    tool_description = tool_description_override or Handoff.default_tool_description(agent)
+    tool_description = (
+        tool_description_override
+        if tool_description_override is not None
+        else Handoff.default_tool_description(agent)
+    )
 
     # Always ensure the input JSON schema is in strict mode
     # If there is a need, we can make this configurable in the future

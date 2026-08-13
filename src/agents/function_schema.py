@@ -477,7 +477,11 @@ def function_schema(
     return FuncSchema(
         name=func_name,
         # Ensure description_override takes precedence even if docstring info is disabled.
-        description=description_override or (doc_info.description if doc_info else None),
+        description=(
+            description_override
+            if description_override is not None
+            else (doc_info.description if doc_info else None)
+        ),
         params_pydantic_model=dynamic_model,
         params_json_schema=json_schema,
         signature=sig,

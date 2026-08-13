@@ -264,6 +264,12 @@ async def test_custom_handoff_setup():
     assert second_handoff.agent_name == agent_2.name
 
 
+def test_handoff_preserves_empty_description_override():
+    handoff_obj = handoff(Agent(name="delegate"), tool_description_override="")
+
+    assert handoff_obj.tool_description == ""
+
+
 class Foo(BaseModel):
     bar: str
 
