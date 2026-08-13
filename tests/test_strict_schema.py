@@ -701,9 +701,10 @@ def test_allOf_single_entry_cannot_overwrite_strict_object(additional_properties
         ensure_strict_json_schema(schema)
 
 
-def test_default_removal_on_non_object():
-    # Test that "default": None is stripped from schemas that are not objects.
-    schema = {"type": "string", "default": None}
+@pytest.mark.parametrize("default", [None, 0, False, "value"])
+def test_default_removal_on_non_object(default):
+    # Defaults are unsupported annotations in strict schemas, regardless of their value.
+    schema = {"type": "string", "default": default}
     result = ensure_strict_json_schema(schema)
     assert result["type"] == "string"
     assert "default" not in result
@@ -723,6 +724,21 @@ def test_ref_expansion():
     assert a_schema["type"] == "string"
     assert a_schema["description"] == "desc"
     assert "default" not in a_schema
+
+
+@pytest.mark.parametrize("reject_open_objects", [False, True])
+def test_ref_with_non_null_default_expands_before_default_removal(reject_open_objects):
+    schema = {
+        "$defs": {"refObj": {"type": "string"}},
+        "type": "object",
+        "properties": {
+            "a": {"$ref": "#/$defs/refObj", "default": "fallback"},
+        },
+    }
+
+    result = ensure_strict_json_schema(schema, _reject_open_objects=reject_open_objects)
+
+    assert result["properties"]["a"] == {"type": "string"}
 
 
 def test_ref_no_expansion_when_alone():

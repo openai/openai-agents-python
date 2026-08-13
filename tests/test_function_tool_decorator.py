@@ -9,6 +9,8 @@ import json
 import operator
 import sys
 from collections.abc import Callable
+from decimal import Decimal
+from enum import Enum
 from types import ModuleType
 from typing import Annotated, Any, Generic, TypeVar, cast
 
@@ -26,6 +28,16 @@ from agents.tool_context import ToolContext
 class DummyContext:
     def __init__(self):
         self.data = "something"
+
+
+class _StrictDefaultCurrency(str, Enum):
+    EUR = "EUR"
+    USD = "USD"
+
+
+class _StrictDefaultInvoice(BaseModel):
+    total: Decimal
+    currency: _StrictDefaultCurrency = _StrictDefaultCurrency.EUR
 
 
 def ctx_wrapper() -> ToolContext[DummyContext]:
@@ -406,6 +418,35 @@ async def test_extract_descriptions_from_docstring():
             "additionalProperties": False,
         }
     )
+
+
+def test_nested_model_non_null_default_is_removed_from_strict_schema() -> None:
+    @function_tool
+    def create_invoice(data: _StrictDefaultInvoice) -> str:
+        return data.currency.value
+
+    invoice_schema = create_invoice.params_json_schema["$defs"]["_StrictDefaultInvoice"]
+    currency_schema = invoice_schema["properties"]["currency"]
+    currency_definition = create_invoice.params_json_schema["$defs"]["_StrictDefaultCurrency"]
+    assert "default" not in currency_schema
+    assert currency_schema == currency_definition
+    assert currency_definition["enum"] == [
+        "EUR",
+        "USD",
+    ]
+    assert invoice_schema["required"] == [
+        "total",
+        "currency",
+    ]
+
+    @function_tool(strict_mode=False)
+    def create_invoice_non_strict(data: _StrictDefaultInvoice) -> str:
+        return data.currency.value
+
+    non_strict_invoice_schema = create_invoice_non_strict.params_json_schema["$defs"][
+        "_StrictDefaultInvoice"
+    ]
+    assert non_strict_invoice_schema["properties"]["currency"]["default"] == "EUR"
 
 
 @function_tool(

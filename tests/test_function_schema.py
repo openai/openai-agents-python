@@ -501,7 +501,7 @@ def test_function_with_field_optional_with_default():
     optional_schema = properties.get("optional_param", {})
     assert optional_schema.get("type") == "number"
     assert optional_schema.get("minimum") == 0.0  # ge=0.0
-    assert optional_schema.get("default") == 5.0
+    assert "default" not in optional_schema
 
     # Valid input with default
     valid_input = {"required_param": "test"}
@@ -520,6 +520,19 @@ def test_function_with_field_optional_with_default():
     # Invalid input: negative value (should violate ge=0.0)
     with pytest.raises(ValidationError):
         fs.params_pydantic_model(**{"required_param": "test", "optional_param": -1.0})
+
+
+def test_non_strict_function_schema_preserves_default():
+    def func_with_default(value: int = 5) -> int:
+        return value
+
+    fs = function_schema(
+        func_with_default,
+        use_docstring_info=False,
+        strict_json_schema=False,
+    )
+
+    assert fs.params_json_schema["properties"]["value"]["default"] == 5
 
 
 def test_function_uses_annotated_descriptions_without_docstring() -> None:
@@ -675,13 +688,13 @@ def test_function_with_field_multiple_constraints():
     assert name_schema.get("type") == "string"
     assert name_schema.get("minLength") == 1
     assert name_schema.get("maxLength") == 50
-    assert name_schema.get("default") == "Unknown"
+    assert "default" not in name_schema
 
     # Check factor field
     factor_schema = properties.get("factor", {})
     assert factor_schema.get("type") == "number"
     assert factor_schema.get("exclusiveMinimum") == 0.0
-    assert factor_schema.get("default") == 1.0
+    assert "default" not in factor_schema
     assert factor_schema.get("description") == "Positive multiplier"
 
     # Valid input with defaults
@@ -761,7 +774,7 @@ def test_function_with_annotated_field_optional_with_default():
     optional_schema = properties.get("optional_param", {})
     assert optional_schema.get("type") == "number"
     assert optional_schema.get("minimum") == 0.0  # ge=0.0
-    assert optional_schema.get("default") == 5.0
+    assert "default" not in optional_schema
 
     # Valid input with default
     valid_input = {"required_param": "test"}
@@ -854,13 +867,13 @@ def test_function_with_annotated_field_multiple_constraints():
     assert name_schema.get("type") == "string"
     assert name_schema.get("minLength") == 1
     assert name_schema.get("maxLength") == 50
-    assert name_schema.get("default") == "Unknown"
+    assert "default" not in name_schema
 
     # Check factor field
     factor_schema = properties.get("factor", {})
     assert factor_schema.get("type") == "number"
     assert factor_schema.get("exclusiveMinimum") == 0.0
-    assert factor_schema.get("default") == 1.0
+    assert "default" not in factor_schema
     assert factor_schema.get("description") == "Positive multiplier"
 
     # Valid input with defaults

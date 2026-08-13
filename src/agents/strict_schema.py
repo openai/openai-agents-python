@@ -361,9 +361,8 @@ def _ensure_strict_json_schema(
                 for i, entry in enumerate(all_of)
             ]
 
-    # strip `None` defaults as there's no meaningful distinction here
-    # the schema will still be `nullable` and the model will default
-    # to using `None` anyway
+    # Remove `None` defaults before reference handling, preserving the existing behavior
+    # where a `$ref` with no remaining siblings stays a reference.
     if json_schema.get("default", NOT_GIVEN) is None:
         json_schema.pop("default")
 
@@ -401,6 +400,10 @@ def _ensure_strict_json_schema(
 
     if budget.reject_open_objects and "$ref" in json_schema:
         raise UserError(_UNVALIDATED_REF_ERROR)
+
+    # Defaults are not supported in strict schemas. Non-null defaults must be removed
+    # after `$ref` expansion so they do not suppress validation of the referenced schema.
+    json_schema.pop("default", None)
 
     return json_schema
 
