@@ -1286,6 +1286,9 @@ async def start_streaming(
                 output_text = format_final_output_text(current_agent, validated_output)
                 synthesized_item = create_message_output_item(current_agent, output_text)
                 include_in_history = handler_result.include_in_history
+                store_setting = current_agent.model_settings.resolve(
+                    run_config.model_settings
+                ).store
                 if include_in_history:
                     streamed_result._model_input_items.append(synthesized_item)
                     streamed_result.new_items.append(synthesized_item)
@@ -1294,34 +1297,44 @@ async def start_streaming(
                         run_state._clear_generated_items_last_processed_marker()
                         run_state._session_items = list(streamed_result.new_items)
                     stream_step_items_to_queue([synthesized_item], streamed_result._event_queue)
-                    store_setting = current_agent.model_settings.resolve(
-                        run_config.model_settings
-                    ).store
-                    if is_resumed_state:
-                        await _save_resumed_items([synthesized_item], None, store_setting)
-                    else:
-                        await _save_stream_items_with_count([synthesized_item], None, store_setting)
 
                 await run_final_output_hooks(
                     current_agent, hooks, context_wrapper, validated_output
                 )
-                output_guardrail_results = await _run_output_guardrails_for_stream(
-                    agent=current_agent,
-                    run_config=run_config,
-                    output=validated_output,
-                    context_wrapper=context_wrapper,
-                    streamed_result=streamed_result,
-                )
-                streamed_result.output_guardrail_results = output_guardrail_results
-                streamed_result.final_output = validated_output
-                streamed_result.is_complete = True
+
+                async def _save_handler_items(
+                    items: list[RunItem],
+                    response_id: str | None,
+                    store: bool | None,
+                    _is_resumed_state: bool = is_resumed_state,
+                ) -> None:
+                    if _is_resumed_state:
+                        await _save_resumed_items(items, response_id, store)
+                    else:
+                        await _save_stream_items_with_count(items, response_id, store)
+
                 streamed_result._stored_exception = None
                 streamed_result._max_turns_handled = True
                 streamed_result.current_turn = max_turns
                 if run_state is not None:
                     run_state._current_turn = max_turns
                     run_state._current_step = None
-                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                # Persisted through the shared final-output pipeline so the handler's output
+                # follows the same output-guardrail session rules as any other final output:
+                # a tripwire excludes the rejected message, while a guardrail error leaves the
+                # verdict unknown and keeps the completed message replayable.
+                await _finalize_streamed_final_output(
+                    streamed_result=streamed_result,
+                    agent=current_agent,
+                    run_config=run_config,
+                    output=validated_output,
+                    context_wrapper=context_wrapper,
+                    save_items=_save_handler_items,
+                    items=[synthesized_item] if include_in_history else [],
+                    response_id=None,
+                    store_setting=store_setting,
+                    persist_before_output_guardrails=False,
+                )
                 break
 
             if current_turn == 1:

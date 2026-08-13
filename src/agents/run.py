@@ -1294,13 +1294,54 @@ class AgentRunner:
                             context_wrapper,
                             validated_output,
                         )
-                        await run_output_guardrails(
-                            current_agent.output_guardrails + (run_config.output_guardrails or []),
-                            current_agent,
-                            validated_output,
-                            context_wrapper,
-                            output_guardrail_results,
-                        )
+
+                        async def _persist_handler_output(
+                            _synthesized_item: RunItem = synthesized_item,
+                            _include_in_history: bool = include_in_history,
+                            _store_setting: bool | None = store_setting,
+                            _input_items: list[TResponseInputItem] | None = (
+                                session_input_items_for_persistence
+                            ),
+                        ) -> None:
+                            if not (session_persistence_enabled and _include_in_history):
+                                return
+                            handler_input_items_for_save: list[TResponseInputItem] = (
+                                _input_items if _input_items is not None else []
+                            )
+                            # The synthesized item is a fresh one-item list, not the
+                            # cumulative turn item list, so the run state's per-turn
+                            # persisted count must not be applied as a slice offset here.
+                            # Pass the reasoning item id policy explicitly instead, the same
+                            # way `save_resumed_turn_items` does.
+                            await save_result_to_session(
+                                session,
+                                handler_input_items_for_save,
+                                [_synthesized_item],
+                                None,
+                                response_id=None,
+                                reasoning_item_id_policy=resolved_reasoning_item_id_policy,
+                                store=_store_setting,
+                                wrapper=context_wrapper,
+                            )
+
+                        # Same output-guardrail session rules as any other final output: a
+                        # tripwire rejects the candidate message, so it must not be replayable,
+                        # while an ordinary guardrail error leaves the verdict unknown and the
+                        # completed message stays replayable.
+                        try:
+                            await run_output_guardrails(
+                                current_agent.output_guardrails
+                                + (run_config.output_guardrails or []),
+                                current_agent,
+                                validated_output,
+                                context_wrapper,
+                                output_guardrail_results,
+                            )
+                        except OutputGuardrailTripwireTriggered:
+                            raise
+                        except (Exception, asyncio.CancelledError):
+                            await _persist_handler_output()
+                            raise
                         current_step = getattr(run_state, "_current_step", None)
                         approvals_from_state = approvals_from_step(current_step)
                         result = RunResult(
@@ -1325,27 +1366,7 @@ class AgentRunner:
                         )
                         if run_state is not None:
                             result._trace_state = run_state._trace_state
-                        if session_persistence_enabled and include_in_history:
-                            handler_input_items_for_save: list[TResponseInputItem] = (
-                                session_input_items_for_persistence
-                                if session_input_items_for_persistence is not None
-                                else []
-                            )
-                            # The synthesized item is a fresh one-item list, not the
-                            # cumulative turn item list, so the run state's per-turn
-                            # persisted count must not be applied as a slice offset here.
-                            # Pass the reasoning item id policy explicitly instead, the same
-                            # way `save_resumed_turn_items` does.
-                            await save_result_to_session(
-                                session,
-                                handler_input_items_for_save,
-                                [synthesized_item],
-                                None,
-                                response_id=None,
-                                reasoning_item_id_policy=resolved_reasoning_item_id_policy,
-                                store=store_setting,
-                                wrapper=context_wrapper,
-                            )
+                        await _persist_handler_output()
                         result._original_input = copy_input_items(original_input)
                         return _finalize_result(result)
 

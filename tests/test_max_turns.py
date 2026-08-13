@@ -8,10 +8,13 @@ from typing_extensions import TypedDict
 
 from agents import (
     Agent,
+    GuardrailFunctionOutput,
     ItemHelpers,
     MaxTurnsExceeded,
     MessageOutputItem,
     ModelRefusalError,
+    OutputGuardrail,
+    OutputGuardrailTripwireTriggered,
     RunErrorHandlerResult,
     Runner,
     SQLiteSession,
@@ -543,5 +546,76 @@ async def test_non_streamed_max_turns_handler_persists_output_to_session():
 async def test_streamed_max_turns_handler_persists_output_to_session():
     """The streamed path already persists the synthesized output; keep both paths aligned."""
     item_types = await _run_max_turns_handler_with_session(streamed=True)
+
+    assert item_types == ["user", "function_call", "function_call_output", "message"]
+
+
+def _rejecting_output_guardrail(*, tripwire: bool) -> OutputGuardrail:
+    """A guardrail that either trips its wire or fails outright."""
+
+    def check_output(_context, _agent, _output):
+        if tripwire:
+            return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+        raise RuntimeError("output check failed")
+
+    return OutputGuardrail(guardrail_function=check_output)
+
+
+async def _run_max_turns_handler_with_guardrail(*, streamed: bool, tripwire: bool) -> list[str]:
+    """Run one tool turn, trip max turns, and have the output guardrail reject or fail."""
+    model = ScriptedModel()
+    agent = Agent(
+        name="test_1",
+        model=model,
+        tools=[get_function_tool("some_function", "result")],
+        output_guardrails=[_rejecting_output_guardrail(tripwire=tripwire)],
+    )
+    model.extend([[get_function_tool_call("some_function", json.dumps({"a": "b"}))]])
+    session = SQLiteSession(f"max-turns-guardrail-{streamed}-{tripwire}", ":memory:")
+    expected_error: type[Exception] = OutputGuardrailTripwireTriggered if tripwire else RuntimeError
+    try:
+        with pytest.raises(expected_error):
+            if streamed:
+                streamed_result = Runner.run_streamed(
+                    agent,
+                    input="user_message",
+                    max_turns=1,
+                    session=session,
+                    error_handlers={"max_turns": lambda data: "fallback answer"},
+                )
+                async for _ in streamed_result.stream_events():
+                    pass
+            else:
+                await Runner.run(
+                    agent,
+                    input="user_message",
+                    max_turns=1,
+                    session=session,
+                    error_handlers={"max_turns": lambda data: "fallback answer"},
+                )
+
+        return [str(item.get("type", item.get("role"))) for item in await session.get_items()]
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_max_turns_handler_output_excluded_when_guardrail_trips(streamed: bool):
+    """A tripwire judges the handler output undeliverable, so it must not be replayable.
+
+    The completed local tool turn is already persisted and stays that way: the next run has
+    to see that side effect rather than re-issue it.
+    """
+    item_types = await _run_max_turns_handler_with_guardrail(streamed=streamed, tripwire=True)
+
+    assert item_types == ["user", "function_call", "function_call_output"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_max_turns_handler_output_retained_when_guardrail_errors(streamed: bool):
+    """A guardrail error leaves the verdict unknown, so the handler output stays replayable."""
+    item_types = await _run_max_turns_handler_with_guardrail(streamed=streamed, tripwire=False)
 
     assert item_types == ["user", "function_call", "function_call_output", "message"]
