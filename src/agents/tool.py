@@ -2268,13 +2268,19 @@ def _validate_function_tool_output(
     """Validate a typed function output before it reaches hooks or serialization."""
     if output_type_adapter is None:
         return output
+    base_message = (
+        f"Function tool {tool_name} returned an output that does not match its declared output type"
+    )
     try:
         return output_type_adapter.validate_python(output)
     except ValidationError as error:
-        raise UserError(
-            f"Function tool {tool_name} returned an output that does not match its declared "
-            f"output type: {error}"
-        ) from error
+        if not _debug.DONT_LOG_TOOL_DATA:
+            raise UserError(f"{base_message}: {error}") from error
+    # Tool-data redaction is enabled: the ValidationError repr embeds the raw output value, so
+    # raise outside the ``except`` block. This keeps the payload-bearing ValidationError from
+    # being attached as the redacted error's ``__cause__``/``__context__`` (mirroring the tool
+    # argument validation path above).
+    raise UserError(base_message)
 
 
 def _validate_function_tool_callable_annotations(

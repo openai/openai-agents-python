@@ -883,6 +883,66 @@ async def test_agent_tool_validation_error_preserves_diagnostics_when_tool_data_
     assert isinstance(error.__cause__, ValidationError)
 
 
+_TOOL_OUTPUT_SECRET = "SECRET_TOOL_OUTPUT_123"
+
+
+class _IntegerOutput(BaseModel):
+    value: int
+
+
+def _returns_wrong_typed_output(ignored: str = "") -> Any:
+    # The declared output type expects an ``int`` for ``value``; returning the secret string
+    # instead triggers output validation, whose ValidationError repr embeds the raw output value.
+    return {"value": _TOOL_OUTPUT_SECRET}
+
+
+@pytest.mark.asyncio
+async def test_function_tool_output_validation_error_redacts_payload_when_tool_data_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+    tool = function_tool(
+        _returns_wrong_typed_output,
+        name_override="output_tool",
+        output_type=_IntegerOutput,
+        failure_error_function=None,
+    )
+
+    with pytest.raises(UserError) as exc_info:
+        await tool.on_invoke_tool(
+            ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments="{}"),
+            "{}",
+        )
+
+    error = exc_info.value
+    assert _TOOL_OUTPUT_SECRET not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_function_tool_output_validation_error_preserves_diagnostics_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    tool = function_tool(
+        _returns_wrong_typed_output,
+        name_override="output_tool",
+        output_type=_IntegerOutput,
+        failure_error_function=None,
+    )
+
+    with pytest.raises(UserError) as exc_info:
+        await tool.on_invoke_tool(
+            ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments="{}"),
+            "{}",
+        )
+
+    error = exc_info.value
+    assert _TOOL_OUTPUT_SECRET in str(error)
+    assert isinstance(error.__cause__, ValidationError)
+
+
 _MODEL_OUTPUT_SECRET = "SECRET_MODEL_OUTPUT_123"
 _SENSITIVE_SCHEMA_SECRET = "SENSITIVE_HANDOFF_SCHEMA_SECRET_4207"
 _SENSITIVE_OUTPUT_SCHEMA_SECRET = "SENSITIVE_OUTPUT_SCHEMA_SECRET_4207"
