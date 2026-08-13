@@ -21,6 +21,13 @@ class SpanProcessorForTests(TracingProcessor):
         self._spans: list[Span[Any]] = []
         self._traces: list[Trace] = []
         self._events: list[TestSpanProcessorEvent] = []
+        # Order in which spans were started. `started_at` alone is not enough to
+        # order them: it comes from `datetime.now()`, whose resolution on Windows
+        # before Python 3.13 is ~15ms, so a parent and its child routinely carry
+        # the identical timestamp. Sorting on the timestamp alone then falls back
+        # to insertion order, which is span *end* order, and a child ends before
+        # its parent -- the exact reverse of what consumers need.
+        self._start_order: dict[str, int] = {}
 
     def on_trace_start(self, trace: Trace) -> None:
         with self._lock:
@@ -36,6 +43,7 @@ class SpanProcessorForTests(TracingProcessor):
         with self._lock:
             # Purposely not appending the span here, we want to do that in on_span_end
             self._events.append("span_start")
+            self._start_order.setdefault(span.span_id, len(self._start_order))
 
     def on_span_end(self, span: Span[Any]) -> None:
         with self._lock:
@@ -45,7 +53,10 @@ class SpanProcessorForTests(TracingProcessor):
     def get_ordered_spans(self, including_empty: bool = False) -> list[Span[Any]]:
         with self._lock:
             spans = [x for x in self._spans if including_empty or x.export()]
-            return sorted(spans, key=lambda x: x.started_at or 0)
+            return sorted(
+                spans,
+                key=lambda x: (x.started_at or "", self._start_order.get(x.span_id, 0)),
+            )
 
     def get_traces(self, including_empty: bool = False) -> list[Trace]:
         with self._lock:
@@ -57,6 +68,7 @@ class SpanProcessorForTests(TracingProcessor):
             self._spans.clear()
             self._traces.clear()
             self._events.clear()
+            self._start_order.clear()
 
     def shutdown(self) -> None:
         pass
