@@ -2325,6 +2325,11 @@ def test_repository_release_policy_declares_v020_contract_surfaces() -> None:
             "module": "agents.sandbox.session.sandbox_session_state",
             "names": ["mount_authority_redacted", "mount_authority_rebound"],
         },
+        {
+            "class_name": "ScriptedSandboxSession",
+            "module": "agents.testing",
+            "names": ["calls", "remaining_steps"],
+        },
     )
 
 

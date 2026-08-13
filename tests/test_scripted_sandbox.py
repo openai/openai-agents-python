@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import inspect
 import io
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, cast, get_type_hints
 
 import pytest
+from typing_extensions import assert_type
 
 from agents import RunConfig, Runner
 from agents.sandbox import ExecResult, Manifest, SandboxAgent
@@ -18,12 +20,14 @@ from agents.testing import (
     SandboxCall,
     SandboxCallMatcherError,
     ScriptedModel,
+    ScriptedSandboxSession,
     UnconsumedSandboxSteps,
     UnexpectedSandboxCall,
     assistant_message,
     function_call,
     scripted_sandbox_session,
 )
+from agents.testing.sandbox import ScriptedSandboxSession as CanonicalScriptedSandboxSession
 
 
 class _CallableBytesIO(io.BytesIO):
@@ -34,6 +38,18 @@ class _CallableBytesIO(io.BytesIO):
 class _CallableBufferedReader(io.BufferedReader):
     def __call__(self) -> None:
         pass
+
+
+def test_scripted_sandbox_has_public_result_type() -> None:
+    session = scripted_sandbox_session()
+    assert_type(session, ScriptedSandboxSession)
+    base_session: BaseSandboxSession = session
+
+    assert ScriptedSandboxSession is CanonicalScriptedSandboxSession
+    assert get_type_hints(scripted_sandbox_session)["return"] is ScriptedSandboxSession
+    assert inspect.isabstract(ScriptedSandboxSession)
+    assert isinstance(session, ScriptedSandboxSession)
+    assert base_session is session
 
 
 def test_scripted_sandbox_exposes_only_configured_scriptable_methods() -> None:

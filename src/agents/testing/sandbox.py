@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import abc
 import copy
 import inspect
 import io
@@ -88,7 +89,7 @@ class UnexpectedSandboxCall(SandboxScriptError):
         super().__init__(message)
         self.call = call
         self.call_index = call_index
-        self.actual_method = call.method
+        self.actual_method: str = call.method
         self.expected_method = expected_method
         self.remaining_steps = remaining_steps
 
@@ -100,7 +101,7 @@ class SandboxCallMatcherError(SandboxScriptError):
         super().__init__(message)
         self.call = call
         self.call_index = call_index
-        self.method = call.method
+        self.method: str = call.method
 
 
 class UnconsumedSandboxSteps(SandboxScriptError):
@@ -297,9 +298,27 @@ def _normalize_step(input: object, input_index: int) -> _SandboxStep:
     )
 
 
-class _ScriptedSandboxSession(BaseSandboxSession):
+class ScriptedSandboxSession(BaseSandboxSession, abc.ABC):
+    """The typed result interface for ``scripted_sandbox_session``."""
+
+    @property
+    @abc.abstractmethod
+    def calls(self) -> tuple[SandboxCall, ...]:
+        """Return detached call-history snapshots in invocation order."""
+
+    @property
+    @abc.abstractmethod
+    def remaining_steps(self) -> int:
+        """Return the number of configured calls that remain."""
+
+    @abc.abstractmethod
+    def assert_complete(self) -> None:
+        """Raise when configured sandbox calls remain unconsumed."""
+
+
+class _ScriptedSandboxSession(ScriptedSandboxSession):
     def __init__(self, steps: Sequence[_SandboxStep], *, manifest: Manifest | None) -> None:
-        self.state = SandboxSessionState(
+        self.state: SandboxSessionState = SandboxSessionState(
             type="scripted",
             snapshot=NoopSnapshot(id="scripted"),
             manifest=copy.deepcopy(manifest) if manifest is not None else Manifest(),
@@ -555,7 +574,7 @@ def scripted_sandbox_session(
     steps: Iterable[SandboxStepSpec | Mapping[str, Any]] = (),
     *,
     manifest: Manifest | None = None,
-) -> _ScriptedSandboxSession:
+) -> ScriptedSandboxSession:
     """Create a deterministic provider-free sandbox session for agent workflow tests.
 
     Each FIFO step defines ``method`` plus exactly one of ``result``, ``responder``, or ``error``.
@@ -576,6 +595,7 @@ __all__ = [
     "SandboxCallMatcherError",
     "SandboxScriptError",
     "SandboxStepSpec",
+    "ScriptedSandboxSession",
     "UnconsumedSandboxSteps",
     "UnexpectedSandboxCall",
     "scripted_sandbox_session",

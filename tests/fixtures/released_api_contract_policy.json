@@ -86,6 +86,12 @@
     },
     {
       "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "ScriptedSandboxSession",
+      "module": "agents.testing",
+      "name": "ScriptedSandboxSession"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
       "canonical_name": "SandboxScriptError",
       "module": "agents.testing",
       "name": "SandboxScriptError"
@@ -357,6 +363,14 @@
       "names": [
         "mount_authority_redacted",
         "mount_authority_rebound"
+      ]
+    },
+    {
+      "class_name": "ScriptedSandboxSession",
+      "module": "agents.testing",
+      "names": [
+        "calls",
+        "remaining_steps"
       ]
     }
   ]
