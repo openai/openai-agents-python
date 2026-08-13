@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -8,11 +9,16 @@ from typing_extensions import TypedDict
 
 from agents import (
     Agent,
+    GuardrailFunctionOutput,
     ItemHelpers,
     MaxTurnsExceeded,
     MessageOutputItem,
     ModelRefusalError,
+    ModelSettings,
+    OutputGuardrail,
+    OutputGuardrailTripwireTriggered,
     RunErrorHandlerResult,
+    RunHooks,
     Runner,
     SQLiteSession,
     UserError,
@@ -26,6 +32,168 @@ from .test_responses import (
     get_refusal_message,
     get_text_message,
 )
+from .utils.simple_session import SimpleListSession
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("tripwire", [False, True], ids=["error", "tripwire"])
+async def test_max_turns_handler_output_follows_output_guardrail_session_semantics(
+    streamed: bool,
+    tripwire: bool,
+) -> None:
+    def check_handler_output(_context, _agent, _output):
+        if tripwire:
+            return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+        raise RuntimeError("output check failed")
+
+    model = ScriptedModel(
+        steps=[[get_function_tool_call("some_function", json.dumps({"a": "b"}), "call-1")]]
+    )
+    session = SimpleListSession(session_id=f"max-turns-{streamed}-{tripwire}")
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("some_function", "result")],
+        output_guardrails=[OutputGuardrail(guardrail_function=check_handler_output)],
+    )
+    expected_error = OutputGuardrailTripwireTriggered if tripwire else RuntimeError
+    result = None
+
+    with pytest.raises(expected_error):
+        if streamed:
+            result = Runner.run_streamed(
+                agent,
+                input="user_message",
+                max_turns=1,
+                session=session,
+                error_handlers={"max_turns": lambda _data: "handler output"},
+            )
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(
+                agent,
+                input="user_message",
+                max_turns=1,
+                session=session,
+                error_handlers={"max_turns": lambda _data: "handler output"},
+            )
+
+    if streamed and not tripwire:
+        assert result is not None
+        state = result.to_state()
+        assert ItemHelpers.text_message_outputs(state._generated_items).endswith("handler output")
+        assert ItemHelpers.text_message_outputs(state._session_items).endswith("handler output")
+
+    saved_items = await session.get_items()
+    saved_types = [
+        item.get("type") or item.get("role") for item in saved_items if isinstance(item, dict)
+    ]
+    expected_types = ["user"]
+    expected_types.extend(["function_call", "function_call_output"])
+    if not tripwire:
+        expected_types.append("message")
+    assert saved_types == expected_types
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_point",
+    ["validation", "hook", "guardrail"],
+)
+async def test_streamed_zero_turn_persists_input_before_terminal_callbacks(
+    failure_point: str,
+) -> None:
+    session = SimpleListSession(session_id=f"zero-turn-streamed-{failure_point}")
+
+    def check_handler_output(_context, _agent, _output):
+        if failure_point == "guardrail":
+            return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    class FailingFinalOutputHook(RunHooks):
+        async def on_agent_end(self, _context, _agent, _output):
+            if failure_point == "hook":
+                raise RuntimeError("final output hook failed")
+
+    agent = Agent(
+        name="test",
+        output_type=FooModel if failure_point == "validation" else None,
+        output_guardrails=[OutputGuardrail(guardrail_function=check_handler_output)],
+    )
+    expected_error = (
+        UserError
+        if failure_point == "validation"
+        else RuntimeError
+        if failure_point == "hook"
+        else OutputGuardrailTripwireTriggered
+    )
+
+    result = Runner.run_streamed(
+        agent,
+        input="user_message",
+        max_turns=0,
+        session=session,
+        hooks=FailingFinalOutputHook(),
+        error_handlers={
+            "max_turns": lambda _data: (
+                {"summary": 1} if failure_point == "validation" else "handler output"
+            )
+        },
+    )
+    if failure_point == "validation":
+        with pytest.warns(UserWarning, match="Pydantic serializer warnings"):
+            with pytest.raises(expected_error):
+                async for _ in result.stream_events():
+                    pass
+    else:
+        with pytest.raises(expected_error):
+            async for _ in result.stream_events():
+                pass
+
+    saved_items = await session.get_items()
+    assert [item.get("role") for item in saved_items] == ["user"]
+    assert all("handler output" not in json.dumps(item) for item in saved_items)
+    assert all("summary" not in json.dumps(item) for item in saved_items)
+
+
+@pytest.mark.asyncio
+async def test_streamed_zero_turn_tripwire_does_not_emit_handler_output() -> None:
+    session = SimpleListSession(session_id="zero-turn-streamed-tripwire-events")
+
+    def check_handler_output(_context, _agent, _output):
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    agent = Agent(
+        name="test",
+        output_guardrails=[OutputGuardrail(guardrail_function=check_handler_output)],
+    )
+
+    result = Runner.run_streamed(
+        agent,
+        input="user_message",
+        max_turns=0,
+        session=session,
+        error_handlers={"max_turns": lambda _data: "handler output"},
+    )
+    events = []
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        async for event in result.stream_events():
+            events.append(event)
+
+    run_item_events = [event for event in events if isinstance(event, RunItemStreamEvent)]
+    assert all(
+        not (
+            event.name == "message_output_created"
+            and isinstance(event.item, MessageOutputItem)
+            and ItemHelpers.text_message_output(event.item) == "handler output"
+        )
+        for event in run_item_events
+    )
+    saved_items = await session.get_items()
+    assert [item.get("role") for item in saved_items] == ["user"]
+    assert all("handler output" not in json.dumps(item) for item in saved_items)
 
 
 @pytest.mark.asyncio
@@ -384,6 +552,28 @@ async def test_non_streamed_max_turns_handler_skip_history():
 
 
 @pytest.mark.asyncio
+async def test_streamed_max_turns_handler_skip_history():
+    agent = Agent(name="test_1", model=ScriptedModel())
+
+    result = Runner.run_streamed(
+        agent,
+        input="user_message",
+        max_turns=0,
+        error_handlers={
+            "max_turns": lambda data: RunErrorHandlerResult(
+                final_output="summary",
+                include_in_history=False,
+            ),
+        },
+    )
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "summary"
+    assert result.new_items == []
+
+
+@pytest.mark.asyncio
 async def test_non_streamed_max_turns_handler_raw_output():
     model = ScriptedModel()
     agent = Agent(name="test_1", model=model)
@@ -435,6 +625,59 @@ async def test_streamed_max_turns_handler_returns_output():
     assert run_item_events[0].name == "message_output_created"
     assert isinstance(run_item_events[0].item, MessageOutputItem)
     assert ItemHelpers.text_message_output(run_item_events[0].item) == "summary"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_type", ["error", "cancel"])
+async def test_streamed_max_turns_session_save_failure_does_not_expose_output(
+    failure_type: str,
+) -> None:
+    class FailingFinalTurnSession(SimpleListSession):
+        async def add_items(self, items):
+            if "summary" in json.dumps(items):
+                if failure_type == "cancel":
+                    raise asyncio.CancelledError("session save cancelled")
+                raise RuntimeError("session save failed")
+            await super().add_items(items)
+
+    def check_handler_output(_context, _agent, _output):
+        return GuardrailFunctionOutput(output_info="checked", tripwire_triggered=False)
+
+    model = ScriptedModel()
+    agent = Agent(
+        name="test_1",
+        model=model,
+        model_settings=ModelSettings(store=True),
+        output_guardrails=[OutputGuardrail(guardrail_function=check_handler_output)],
+    )
+    session = FailingFinalTurnSession(session_id=f"max-turns-failed-final-save-{failure_type}")
+
+    result = Runner.run_streamed(
+        agent,
+        input="user_message",
+        max_turns=0,
+        session=session,
+        error_handlers={
+            "max_turns": lambda data: RunErrorHandlerResult(final_output="summary"),
+        },
+    )
+
+    async def consume_stream() -> None:
+        async for _ in result.stream_events():
+            pass
+
+    expected_error = asyncio.CancelledError if failure_type == "cancel" else RuntimeError
+    expected_message = (
+        "session save cancelled" if failure_type == "cancel" else "session save failed"
+    )
+    with pytest.raises(expected_error, match=expected_message):
+        await asyncio.wait_for(consume_stream(), timeout=1)
+
+    assert result.is_complete is True
+    assert result.final_output is None
+    assert len(result.output_guardrail_results) == 1
+    assert result.output_guardrail_results[0].output.output_info == "checked"
+    assert await session.get_items() == [{"content": "user_message", "role": "user"}]
 
 
 @pytest.mark.asyncio
@@ -537,6 +780,29 @@ async def test_non_streamed_max_turns_handler_persists_output_to_session():
     item_types = await _run_max_turns_handler_with_session(streamed=False)
 
     assert item_types == ["user", "function_call", "function_call_output", "message"]
+
+
+@pytest.mark.asyncio
+async def test_non_streamed_max_turns_handler_records_equal_output_occurrence():
+    model = ScriptedModel()
+    agent = Agent(
+        name="test_1",
+        model=model,
+        tools=[get_function_tool("some_function", "result")],
+    )
+    model.extend(
+        [[get_text_message("summary"), get_function_tool_call("some_function", json.dumps({}))]]
+    )
+
+    result = await Runner.run(
+        agent,
+        input="user_message",
+        max_turns=1,
+        error_handlers={"max_turns": lambda data: "summary"},
+    )
+
+    assert result.final_output == "summary"
+    assert ItemHelpers.text_message_outputs(result.new_items) == "summarysummary"
 
 
 @pytest.mark.asyncio

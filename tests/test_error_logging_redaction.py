@@ -1553,6 +1553,98 @@ async def test_streamed_session_hostile_error_after_redacted_output_guardrail_is
     _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
 
 
+@pytest.mark.parametrize(
+    ("persistence_failure", "expected_error_type"),
+    [
+        ("error", UserError),
+        ("cancelled", asyncio.CancelledError),
+        ("system_exit", SystemExit),
+        ("keyboard_interrupt", KeyboardInterrupt),
+        ("generator_exit", GeneratorExit),
+    ],
+)
+@pytest.mark.asyncio
+async def test_non_streamed_max_turns_session_error_after_redacted_guardrail_is_replaced(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    persistence_failure: Literal[
+        "error",
+        "cancelled",
+        "system_exit",
+        "keyboard_interrupt",
+        "generator_exit",
+    ],
+    expected_error_type: type[BaseException],
+) -> None:
+    persistence_secret = "MAX_TURNS_SESSION_FAILURE_SECRET"
+    handler_output_secret = "MAX_TURNS_HANDLER_OUTPUT_SECRET"
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    guardrail_failed = False
+    payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
+
+    class FailingFinalTurnSession(SimpleListSession):
+        async def add_items(self, items: list[Any]) -> None:
+            if guardrail_failed:
+                cause = RuntimeError(f"session save cause: {persistence_secret}")
+                if persistence_failure == "cancelled":
+                    raise asyncio.CancelledError(
+                        f"session save cancelled: {persistence_secret}"
+                    ) from cause
+                if persistence_failure == "system_exit":
+                    raise SystemExit(f"session save exited: {persistence_secret}") from cause
+                if persistence_failure == "keyboard_interrupt":
+                    raise KeyboardInterrupt(
+                        f"session save interrupted: {persistence_secret}"
+                    ) from cause
+                if persistence_failure == "generator_exit":
+                    raise GeneratorExit(f"session save closed: {persistence_secret}") from cause
+                raise LookupError(f"session save failed: {persistence_secret}") from cause
+            await super().add_items(items)
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _agent_output: Any,
+    ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_failed
+        guardrail_failed = True
+        AgentOutputSchema(_RequiredOutput).validate_json(payload)
+        raise AssertionError("validation should fail")  # pragma: no cover
+
+    agent = Agent(
+        name="A",
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    caplog.set_level(logging.ERROR, logger="openai.agents")
+
+    with pytest.raises(expected_error_type) as exc_info:
+        await Runner.run(
+            agent,
+            "go",
+            max_turns=0,
+            session=FailingFinalTurnSession(),
+            error_handlers={"max_turns": lambda _data: handler_output_secret},
+        )
+
+    error = exc_info.value
+    if isinstance(error, UserError | RuntimeError | asyncio.CancelledError):
+        assert str(error) == "Error details are redacted."
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert persistence_secret not in str(error)
+    assert _MODEL_OUTPUT_SECRET not in str(error)
+    assert handler_output_secret not in str(error)
+    _assert_secret_absent_from_agents_traceback(error, persistence_secret)
+    _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+    _assert_secret_absent_from_agents_traceback(error, handler_output_secret)
+    for record in caplog.records:
+        assert persistence_secret not in repr(record.__dict__)
+        assert _MODEL_OUTPUT_SECRET not in repr(record.__dict__)
+        assert handler_output_secret not in repr(record.__dict__)
+        assert record.exc_info is None
+
+
 @pytest.mark.asyncio
 async def test_streamed_input_guardrail_omits_run_data_from_redacted_error(
     monkeypatch: pytest.MonkeyPatch,
