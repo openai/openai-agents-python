@@ -51,6 +51,30 @@ custom_client = AsyncOpenAI(base_url="...", api_key="...")
 set_default_openai_client(custom_client)
 ```
 
+### Custom HTTP clients with `openai` v3
+
+Version 0.21.0 requires `openai>=3.0.0,<4`. The default OpenAI provider uses HTTPX2, so most applications do not need to configure an HTTP client directly. If your application passes `http_client=` to `AsyncOpenAI`, use HTTPX2 types for the custom client and its transport-facing options:
+
+```python
+import httpx2
+from openai import AsyncOpenAI, DefaultAsyncHttpx2Client
+
+from agents import set_default_openai_client
+
+http_client = DefaultAsyncHttpx2Client(
+    timeout=httpx2.Timeout(30.0, connect=5.0),
+)
+custom_client = AsyncOpenAI(
+    api_key="...",
+    http_client=http_client,
+)
+set_default_openai_client(custom_client)
+```
+
+The same migration applies to custom transports, authentication, event hooks, mock transports, URLs, requests, responses, and transport exception handling. Use their `httpx2` equivalents. The Agents SDK does not convert arbitrary legacy `httpx` objects to HTTPX2. The OpenAI Python SDK provides a temporary compatibility path for legacy clients when the application installs `httpx` explicitly, but new and migrated code should use HTTPX2.
+
+This OpenAI client boundary is separate from local MCP transport customization. MCP Python SDK v1 uses its own legacy `httpx` dependency, while MCP Python SDK v2 uses `httpx2`; see [MCP Python SDK v1 and v2](mcp.md#mcp-python-sdk-v1-and-v2).
+
 If you prefer environment-based endpoint configuration, the default OpenAI provider also reads `OPENAI_BASE_URL`. When you enable Responses websocket transport, it also reads `OPENAI_WEBSOCKET_BASE_URL` for the websocket `/responses` endpoint.
 
 ```bash

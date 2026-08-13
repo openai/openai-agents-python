@@ -19,6 +19,19 @@ We will increment `Z` for non-breaking changes:
 
 ## Breaking change changelog
 
+### 0.21.0
+
+Version 0.21.0 requires `openai` v3 and moves the Agents SDK's OpenAI HTTP integrations to HTTPX2. Applications that use the default OpenAI client do not need to change their client setup, but applications that customize the OpenAI HTTP layer may need to migrate transport-facing code.
+
+Highlights:
+
+-   The required OpenAI dependency is now `openai>=3.0.0,<4`. A clean core installation uses HTTPX2 and no longer installs legacy `httpx` as a direct dependency.
+-   The default OpenAI provider, Voice provider, Responses WebSocket support, tracing exporter, and provider retry normalization now use HTTPX2. Their existing Agents SDK public configuration and runtime behavior remain unchanged.
+-   Applications that pass `http_client=` to `AsyncOpenAI` should migrate custom clients, transports, authentication, event hooks, mock transports, timeout values, URLs, requests, responses, and transport exception handling from `httpx` to `httpx2`. Prefer the OpenAI Python SDK's `DefaultAsyncHttpx2Client` when the application needs the OpenAI client's defaults plus custom HTTP options. See [Custom HTTP clients with `openai` v3](config.md#custom-http-clients-with-openai-v3).
+-   The Agents SDK does not convert arbitrary legacy HTTPX objects to HTTPX2. The OpenAI Python SDK's temporary legacy-client compatibility path requires an explicit `httpx` installation and should be treated as a migration bridge.
+-   Local MCP HTTP customization continues to follow the installed MCP package: MCP Python SDK v1 supplies and uses legacy `httpx`, while MCP Python SDK v2 uses `httpx2`. Ordinary MCP connections do not need application changes. See [MCP Python SDK v1 and v2](mcp.md#mcp-python-sdk-v1-and-v2).
+-   Public provider-neutral testing utilities now cover Agent model, Sandbox session, Realtime session, and Voice pipeline workflows without provider or process dependencies. See [Testing](testing.md) for recipes and guidance on when to keep the real provider adapter or integration boundary.
+
 ### 0.20.0
 
 Version 0.20.0 includes a potentially breaking MCP dependency migration for applications that customize local MCP HTTP transports. It also updates the SDK default model used when an agent or run does not explicitly select one.
