@@ -105,11 +105,14 @@ class CodexExec:
             command_args.extend(["--config", f'approval_policy="{args.approval_policy}"'])
 
         if args.thread_id:
-            command_args.extend(["resume", args.thread_id])
+            command_args.append("resume")
 
         if args.images:
             for image in args.images:
                 command_args.extend(["--image", image])
+
+        if args.thread_id:
+            command_args.extend(["--", args.thread_id])
 
         # Codex CLI expects a prompt argument; "-" tells it to read from stdin.
         command_args.append("-")

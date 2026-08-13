@@ -340,9 +340,10 @@ async def test_codex_exec_run_builds_command_args_and_env(monkeypatch: pytest.Mo
         "--config",
         'approval_policy="on-request"',
         "resume",
-        "thread-123",
         "--image",
         "/tmp/img.png",
+        "--",
+        "thread-123",
         "-",
     ]
 
@@ -351,6 +352,33 @@ async def test_codex_exec_run_builds_command_args_and_env(monkeypatch: pytest.Mo
     assert env[exec_module._INTERNAL_ORIGINATOR_ENV] == exec_module._TYPESCRIPT_SDK_ORIGINATOR
     assert env["OPENAI_BASE_URL"] == "https://example.com"
     assert env["CODEX_API_KEY"] == "api-key"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("images", [None, ["/tmp/img.png"]], ids=["no-images", "with-image"])
+async def test_codex_exec_run_treats_option_like_thread_id_as_positional(
+    monkeypatch: pytest.MonkeyPatch, images: list[str] | None
+) -> None:
+    captured_args: tuple[Any, ...] = ()
+
+    async def fake_create_subprocess_exec(*args: Any, **_kwargs: Any) -> FakeProcess:
+        nonlocal captured_args
+        captured_args = args
+        return FakeProcess(stdout_lines=[])
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    exec_client = exec_module.CodexExec(executable_path="/bin/codex")
+    args = exec_module.CodexExecArgs(input="hello", thread_id="--thread-option", images=images)
+
+    _ = [line async for line in exec_client.run(args)]
+
+    expected_args = ["/bin/codex", "exec", "--experimental-json", "resume"]
+    if images:
+        expected_args.extend(["--image", images[0]])
+    expected_args.extend(["--", "--thread-option", "-"])
+
+    assert captured_args == tuple(expected_args)
 
 
 @pytest.mark.asyncio
