@@ -709,6 +709,32 @@ def test_default_removal_on_non_object():
     assert "default" not in result
 
 
+def test_non_null_default_removal():
+    # Non-null defaults must be stripped as well: every property is forced into
+    # "required", so a default never takes effect, and the OpenAI API rejects
+    # strict schemas that carry one ("'default' is not permitted within a
+    # property definition").
+    schema = {
+        "type": "object",
+        "properties": {
+            "currency": {"type": "string", "enum": ["EUR", "USD"], "default": "EUR"},
+            "count": {"type": "integer", "default": 1},
+        },
+    }
+    result = ensure_strict_json_schema(schema)
+    assert "default" not in result["properties"]["currency"]
+    assert "default" not in result["properties"]["count"]
+    assert result["required"] == ["currency", "count"]
+
+
+def test_non_null_default_removal_on_non_object():
+    # Non-null defaults are stripped from non-object schemas as well.
+    schema = {"type": "string", "default": "fallback"}
+    result = ensure_strict_json_schema(schema)
+    assert result["type"] == "string"
+    assert "default" not in result
+
+
 def test_ref_expansion():
     # Construct a schema with a definitions section and a property with a $ref.
     schema = {
@@ -723,6 +749,31 @@ def test_ref_expansion():
     assert a_schema["type"] == "string"
     assert a_schema["description"] == "desc"
     assert "default" not in a_schema
+
+
+def test_ref_expansion_with_non_null_default():
+    # A $ref whose only extra sibling is a non-null default must still be
+    # expanded, and the default must not survive into the expanded schema.
+    schema = {
+        "$defs": {"currency": {"type": "string"}},
+        "type": "object",
+        "properties": {"a": {"$ref": "#/$defs/currency", "default": "EUR"}},
+    }
+    result = ensure_strict_json_schema(schema)
+    assert result["properties"]["a"] == {"type": "string"}
+
+
+def test_ref_expansion_with_non_null_default_when_rejecting_open_objects():
+    # The non-null default sibling still triggers ref expansion in
+    # _reject_open_objects mode instead of leaving behind a pure $ref, which
+    # that mode rejects.
+    schema = {
+        "$defs": {"currency": {"type": "string"}},
+        "type": "object",
+        "properties": {"a": {"$ref": "#/$defs/currency", "default": "EUR"}},
+    }
+    result = ensure_strict_json_schema(schema, _reject_open_objects=True)
+    assert result["properties"]["a"] == {"type": "string"}
 
 
 def test_ref_no_expansion_when_alone():

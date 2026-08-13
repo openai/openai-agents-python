@@ -361,9 +361,8 @@ def _ensure_strict_json_schema(
                 for i, entry in enumerate(all_of)
             ]
 
-    # strip `None` defaults as there's no meaningful distinction here
-    # the schema will still be `nullable` and the model will default
-    # to using `None` anyway
+    # Strip `None` defaults before the `$ref` handling below so that a `$ref` whose only
+    # sibling is a `default: null` stays a pure `$ref` and is preserved instead of expanded.
     if json_schema.get("default", NOT_GIVEN) is None:
         json_schema.pop("default")
 
@@ -401,6 +400,14 @@ def _ensure_strict_json_schema(
 
     if budget.reject_open_objects and "$ref" in json_schema:
         raise UserError(_UNVALIDATED_REF_ERROR)
+
+    # Strip any remaining `default`, whatever its value: every property is forced into
+    # `required` above, so the model always emits an explicit value and a default never
+    # takes effect. The OpenAI API rejects strict schemas that carry a non-null `default`
+    # ("'default' is not permitted within a property definition"). This runs after the
+    # `$ref` handling so a `default` sibling still triggers the expansion above; the
+    # recursive pass then strips it from the expanded result.
+    json_schema.pop("default", None)
 
     return json_schema
 

@@ -501,7 +501,9 @@ def test_function_with_field_optional_with_default():
     optional_schema = properties.get("optional_param", {})
     assert optional_schema.get("type") == "number"
     assert optional_schema.get("minimum") == 0.0  # ge=0.0
-    assert optional_schema.get("default") == 5.0
+    # Strict mode strips "default" from the JSON schema; the runtime default
+    # below still applies.
+    assert "default" not in optional_schema
 
     # Valid input with default
     valid_input = {"required_param": "test"}
@@ -520,6 +522,36 @@ def test_function_with_field_optional_with_default():
     # Invalid input: negative value (should violate ge=0.0)
     with pytest.raises(ValidationError):
         fs.params_pydantic_model(**{"required_param": "test", "optional_param": -1.0})
+
+
+def test_strict_schema_strips_non_null_defaults():
+    """Non-null parameter defaults must not leak into a strict JSON schema.
+
+    The OpenAI API rejects strict schemas that carry a "default" key with
+    "'default' is not permitted within a property definition".
+    """
+
+    def func_with_non_null_default(query: str, limit: int = 10) -> str:
+        return f"{query}: {limit}"
+
+    fs = function_schema(func_with_non_null_default, use_docstring_info=False)
+
+    properties = fs.params_json_schema.get("properties", {})
+    assert "default" not in properties.get("limit", {})
+    # Every parameter is required in a strict schema.
+    assert fs.params_json_schema.get("required") == ["query", "limit"]
+
+    # The Python-level default still applies when the argument is omitted.
+    parsed = fs.params_pydantic_model(**{"query": "test"})
+    args, kwargs_dict = fs.to_call_args(parsed)
+    assert func_with_non_null_default(*args, **kwargs_dict) == "test: 10"
+
+    # Non-strict schemas keep the default annotation.
+    non_strict_fs = function_schema(
+        func_with_non_null_default, use_docstring_info=False, strict_json_schema=False
+    )
+    non_strict_properties = non_strict_fs.params_json_schema.get("properties", {})
+    assert non_strict_properties.get("limit", {}).get("default") == 10
 
 
 def test_function_uses_annotated_descriptions_without_docstring() -> None:
@@ -675,13 +707,15 @@ def test_function_with_field_multiple_constraints():
     assert name_schema.get("type") == "string"
     assert name_schema.get("minLength") == 1
     assert name_schema.get("maxLength") == 50
-    assert name_schema.get("default") == "Unknown"
+    # Strict mode strips "default" from the JSON schema; the runtime default
+    # below still applies.
+    assert "default" not in name_schema
 
     # Check factor field
     factor_schema = properties.get("factor", {})
     assert factor_schema.get("type") == "number"
     assert factor_schema.get("exclusiveMinimum") == 0.0
-    assert factor_schema.get("default") == 1.0
+    assert "default" not in factor_schema
     assert factor_schema.get("description") == "Positive multiplier"
 
     # Valid input with defaults
@@ -761,7 +795,9 @@ def test_function_with_annotated_field_optional_with_default():
     optional_schema = properties.get("optional_param", {})
     assert optional_schema.get("type") == "number"
     assert optional_schema.get("minimum") == 0.0  # ge=0.0
-    assert optional_schema.get("default") == 5.0
+    # Strict mode strips "default" from the JSON schema; the runtime default
+    # below still applies.
+    assert "default" not in optional_schema
 
     # Valid input with default
     valid_input = {"required_param": "test"}
@@ -854,13 +890,15 @@ def test_function_with_annotated_field_multiple_constraints():
     assert name_schema.get("type") == "string"
     assert name_schema.get("minLength") == 1
     assert name_schema.get("maxLength") == 50
-    assert name_schema.get("default") == "Unknown"
+    # Strict mode strips "default" from the JSON schema; the runtime default
+    # below still applies.
+    assert "default" not in name_schema
 
     # Check factor field
     factor_schema = properties.get("factor", {})
     assert factor_schema.get("type") == "number"
     assert factor_schema.get("exclusiveMinimum") == 0.0
-    assert factor_schema.get("default") == 1.0
+    assert "default" not in factor_schema
     assert factor_schema.get("description") == "Positive multiplier"
 
     # Valid input with defaults
