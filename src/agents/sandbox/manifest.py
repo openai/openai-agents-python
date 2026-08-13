@@ -1,5 +1,6 @@
 import abc
 import inspect
+import os
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath
@@ -145,6 +146,19 @@ class StrEnvValue(EnvValue):
 
     async def resolve(self) -> str:
         return self.value
+
+
+class OsEnvValue(EnvValue):
+    """Reads the value from the environment of the process creating the sandbox.
+
+    An unset variable resolves to the empty string.
+    """
+
+    type: Literal["os_env"] = "os_env"
+    name: str
+
+    async def resolve(self) -> str:
+        return os.environ.get(self.name, "")
 
 
 def _serialize_env_value_with_type(value: EnvValue, serialized: object) -> dict[str, Any]:

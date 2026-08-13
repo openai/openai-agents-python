@@ -16,7 +16,14 @@ from agents.sandbox.entries import (
     MountpointMountPattern,
 )
 from agents.sandbox.errors import InvalidManifestPathError
-from agents.sandbox.manifest import EnvEntry, Environment, EnvValue, Manifest, StrEnvValue
+from agents.sandbox.manifest import (
+    EnvEntry,
+    Environment,
+    EnvValue,
+    Manifest,
+    OsEnvValue,
+    StrEnvValue,
+)
 from agents.sandbox.manifest_render import _truncate_manifest_description
 
 
@@ -337,6 +344,62 @@ def test_manifest_round_trips_str_env_value() -> None:
     assert restored.environment.value == {
         "PLAIN": "plain",
         "TYPED": StrEnvValue(value="typed"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_os_env_value_resolves_from_the_process_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SANDBOX_TEST_OS_ENV_VALUE", "from-host")
+
+    assert await OsEnvValue(name="SANDBOX_TEST_OS_ENV_VALUE").resolve() == "from-host"
+
+
+@pytest.mark.asyncio
+async def test_os_env_value_resolves_unset_and_empty_variables_to_an_empty_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SANDBOX_TEST_OS_ENV_VALUE", raising=False)
+
+    assert await OsEnvValue(name="SANDBOX_TEST_OS_ENV_VALUE").resolve() == ""
+
+    monkeypatch.setenv("SANDBOX_TEST_OS_ENV_VALUE", "")
+
+    assert await OsEnvValue(name="SANDBOX_TEST_OS_ENV_VALUE").resolve() == ""
+
+
+def test_manifest_round_trips_os_env_value() -> None:
+    manifest = Manifest(
+        environment=Environment(value={"TOKEN": OsEnvValue(name="SANDBOX_TEST_OS_ENV_VALUE")})
+    )
+
+    payload = manifest.model_dump(mode="json")
+    restored = Manifest.model_validate(payload)
+
+    assert payload["environment"] == {
+        "value": {"TOKEN": {"type": "os_env", "name": "SANDBOX_TEST_OS_ENV_VALUE"}}
+    }
+    assert type(restored.environment.value["TOKEN"]) is OsEnvValue
+
+
+@pytest.mark.asyncio
+async def test_environment_resolves_os_env_values_alongside_literals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SANDBOX_TEST_OS_ENV_VALUE", "from-host")
+    environment = Environment(
+        value={
+            "PLAIN": "literal",
+            "DIRECT": OsEnvValue(name="SANDBOX_TEST_OS_ENV_VALUE"),
+            "ENTRY": EnvEntry(value=OsEnvValue(name="SANDBOX_TEST_OS_ENV_VALUE")),
+        }
+    )
+
+    assert await environment.resolve() == {
+        "PLAIN": "literal",
+        "DIRECT": "from-host",
+        "ENTRY": "from-host",
     }
 
 
