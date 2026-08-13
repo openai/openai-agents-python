@@ -74,6 +74,36 @@ async def test_instrumentation_per_op_policy_overrides_default(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_instrumentation_snapshots_per_op_policy_mapping(tmp_path: Path) -> None:
+    events: list[SandboxSessionEvent] = []
+    session = _build_session(tmp_path)
+    sink = CallbackSink(lambda event, _session: events.append(event), mode="sync")
+    sink.bind(session)
+    policies = {"exec": EventPayloadPolicy(include_exec_output=False)}
+    instrumentation = Instrumentation(
+        sinks=[sink],
+        payload_policy=EventPayloadPolicy(include_exec_output=True),
+        payload_policy_by_op=policies,
+    )
+    policies.clear()
+    event = SandboxSessionFinishEvent(
+        session_id=uuid.uuid4(),
+        seq=1,
+        op="exec",
+        span_id="span_exec",
+        ok=True,
+        duration_ms=0.0,
+        stdout_bytes=b"secret",
+    )
+
+    await instrumentation.emit(event)
+
+    assert isinstance(events[0], SandboxSessionFinishEvent)
+    assert events[0].stdout is None
+    assert events[0].stdout_bytes is None
+
+
+@pytest.mark.asyncio
 async def test_instrumentation_per_sink_policy_overrides_per_op(tmp_path: Path) -> None:
     first: list[SandboxSessionEvent] = []
     second: list[SandboxSessionEvent] = []
