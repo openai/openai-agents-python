@@ -11,7 +11,7 @@ from collections.abc import Callable
 from functools import cached_property
 from typing import Any, cast
 
-import httpx
+import httpx2
 
 from .. import _debug
 from ..logger import (
@@ -87,7 +87,7 @@ class BackendSpanExporter(TracingExporter):
         self._shutdown_event = threading.Event()
 
         # Keep a client open for connection pooling across multiple export calls
-        self._client = httpx.Client(timeout=httpx.Timeout(timeout=60, connect=5.0))
+        self._client = httpx2.Client(timeout=httpx2.Timeout(timeout=60, connect=5.0))
 
     def set_api_key(self, api_key: str):
         """Set the OpenAI API key for the exporter.
@@ -201,7 +201,7 @@ class BackendSpanExporter(TracingExporter):
                     logger.warning(
                         "[non-fatal] Tracing: server error %s, retrying.", response.status_code
                     )
-                except httpx.RequestError as exc:
+                except httpx2.RequestError as exc:
                     # Network or other I/O error, we'll retry
                     log_model_and_tool_action_warning(
                         logger, "[non-fatal] Tracing request failed", exc
@@ -220,7 +220,7 @@ class BackendSpanExporter(TracingExporter):
                     break
                 delay = min(delay * 2, self.max_delay)
 
-    def _timeout_for_deadline(self, deadline: float | None) -> httpx.Timeout | None:
+    def _timeout_for_deadline(self, deadline: float | None) -> httpx2.Timeout | None:
         if deadline is None:
             return None
 
@@ -229,7 +229,7 @@ class BackendSpanExporter(TracingExporter):
             return None
 
         connect_timeout = min(5.0, remaining)
-        return httpx.Timeout(remaining, connect=connect_timeout)
+        return httpx2.Timeout(remaining, connect=connect_timeout)
 
     def _sleep_before_retry(self, sleep_time: float, deadline: float | None) -> bool:
         if deadline is None:

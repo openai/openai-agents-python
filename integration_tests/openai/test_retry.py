@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from openai import APIConnectionError, AsyncOpenAI
 
@@ -37,7 +37,7 @@ async def test_retry_reaches_real_api_without_rewinding_session_input(
         if attempts == 1:
             raise APIConnectionError(
                 message="Controlled integration-test transport failure.",
-                request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+                request=httpx2.Request("POST", "https://api.openai.com/v1/responses"),
             )
         return await original_fetch(*args, **kwargs)
 

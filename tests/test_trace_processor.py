@@ -8,7 +8,7 @@ import time
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 
 import agents._debug as _debug
@@ -444,7 +444,7 @@ def mock_processor():
     return processor
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 def test_backend_span_exporter_no_items(mock_client):
     exporter = BackendSpanExporter(api_key="test_key")
     exporter.export([])
@@ -453,7 +453,7 @@ def test_backend_span_exporter_no_items(mock_client):
     exporter.close()
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 def test_backend_span_exporter_no_api_key(mock_client):
     # Ensure that os.environ is empty (sometimes devs have the openai api key set in their env)
 
@@ -466,7 +466,7 @@ def test_backend_span_exporter_no_api_key(mock_client):
         exporter.close()
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 def test_backend_span_exporter_2xx_success(mock_client):
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -480,7 +480,7 @@ def test_backend_span_exporter_2xx_success(mock_client):
     exporter.close()
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 @pytest.mark.parametrize("redacted", [True, False])
 def test_backend_span_exporter_4xx_client_error(mock_client, monkeypatch, caplog, redacted: bool):
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
@@ -509,7 +509,7 @@ def test_backend_span_exporter_4xx_client_error(mock_client, monkeypatch, caplog
     exporter.close()
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 def test_backend_span_exporter_5xx_retry(mock_client):
     mock_response = MagicMock()
     mock_response.status_code = 500
@@ -528,7 +528,7 @@ def test_backend_span_exporter_5xx_retry(mock_client):
     exporter.close()
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 def test_backend_span_exporter_deadline_stops_during_5xx_retry_backoff(mock_client):
     mock_response = MagicMock()
     mock_response.status_code = 504
@@ -547,7 +547,7 @@ def test_backend_span_exporter_deadline_stops_during_5xx_retry_backoff(mock_clie
     exporter.close()
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 def test_batch_trace_processor_shutdown_interrupts_exporter_retry_backoff(mock_client):
     post_called = threading.Event()
     mock_response = MagicMock()
@@ -588,7 +588,7 @@ def test_batch_trace_processor_shutdown_interrupts_exporter_retry_backoff(mock_c
     exporter.close()
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 def test_batch_trace_processor_shutdown_without_timeout_preserves_export_retries(mock_client):
     mock_response = MagicMock()
     mock_response.status_code = 504
@@ -645,7 +645,7 @@ def test_tracing_atexit_cleanup_timeout_preserves_process_exit_code_on_504() -> 
                 pass
 
         client = Always504Client()
-        with patch("agents.tracing.processors.httpx.Client", return_value=client):
+        with patch("agents.tracing.processors.httpx2.Client", return_value=client):
             exporter = BackendSpanExporter(
                 api_key="test_key",
                 max_retries=100,
@@ -702,10 +702,10 @@ def test_tracing_atexit_cleanup_timeout_preserves_process_exit_code_on_504() -> 
     assert float(shutdown_elapsed_lines[0][len(shutdown_elapsed_prefix) :]) < 0.5
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 def test_backend_span_exporter_request_error(mock_client):
     # Make post() raise a RequestError each time
-    mock_client.return_value.post.side_effect = httpx.RequestError("Network error")
+    mock_client.return_value.post.side_effect = httpx2.RequestError("Network error")
 
     exporter = BackendSpanExporter(api_key="test_key", max_retries=2, base_delay=0.1, max_delay=0.2)
     with patch.object(exporter._shutdown_event, "wait", return_value=False) as wait_for_retry:
@@ -718,7 +718,7 @@ def test_backend_span_exporter_request_error(mock_client):
     exporter.close()
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 def test_backend_span_exporter_close(mock_client):
     exporter = BackendSpanExporter(api_key="test_key")
     exporter.close()
@@ -727,7 +727,7 @@ def test_backend_span_exporter_close(mock_client):
     mock_client.return_value.close.assert_called_once()
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 def test_backend_span_exporter_sanitizes_generation_usage_for_openai_tracing(mock_client):
     """Unsupported usage keys should be stripped before POSTing to OpenAI tracing."""
 
@@ -782,7 +782,7 @@ def test_backend_span_exporter_sanitizes_generation_usage_for_openai_tracing(moc
     exporter.close()
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 def test_backend_span_exporter_truncates_large_input_for_openai_tracing(mock_client):
     class DummyItem:
         tracing_api_key = None
@@ -816,7 +816,7 @@ def test_backend_span_exporter_truncates_large_input_for_openai_tracing(mock_cli
     exporter.close()
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 def test_backend_span_exporter_truncates_large_structured_input_without_stringifying(mock_client):
     class NoStringifyDict(dict[str, Any]):
         def __str__(self) -> str:
@@ -856,7 +856,7 @@ def test_backend_span_exporter_truncates_large_structured_input_without_stringif
     exporter.close()
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 def test_backend_span_exporter_keeps_generation_usage_for_custom_endpoint(mock_client):
     class DummyItem:
         tracing_api_key = None
@@ -894,7 +894,7 @@ def test_backend_span_exporter_keeps_generation_usage_for_custom_endpoint(mock_c
     exporter.close()
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 def test_backend_span_exporter_drops_non_generation_usage_for_openai_endpoint(mock_client):
     class DummyItem:
         tracing_api_key = None
@@ -920,7 +920,7 @@ def test_backend_span_exporter_drops_non_generation_usage_for_openai_endpoint(mo
     exporter.close()
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 def test_backend_span_exporter_keeps_non_generation_usage_for_custom_endpoint(mock_client):
     class DummyItem:
         tracing_api_key = None
@@ -965,7 +965,7 @@ def test_sanitize_for_openai_tracing_api_keeps_allowed_generation_usage():
     exporter.close()
 
 
-@patch("httpx.Client")
+@patch("httpx2.Client")
 def test_backend_span_exporter_keeps_large_input_for_custom_endpoint(mock_client):
     class DummyItem:
         tracing_api_key = None

@@ -4,7 +4,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
-import httpx
+import httpx2
 import pytest
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, omit
 from openai._models import add_request_id
@@ -101,7 +101,7 @@ async def _run_chat_completions_model_with_custom_base_url(
     class DummyClient:
         def __init__(self, completions: DummyCompletions) -> None:
             self.chat = type("_Chat", (), {"completions": completions})()
-            self.base_url = httpx.URL("https://custom.example.test/v1/")
+            self.base_url = httpx2.URL("https://custom.example.test/v1/")
 
     completions = DummyCompletions()
     model = OpenAIChatCompletionsModel(
@@ -588,7 +588,7 @@ async def test_get_response_rejects_non_text_tool_output_in_strict_mode() -> Non
     class DummyClient:
         def __init__(self) -> None:
             self.chat = type("_Chat", (), {"completions": DummyCompletions()})()
-            self.base_url = httpx.URL("http://fake")
+            self.base_url = httpx2.URL("http://fake")
 
     model = OpenAIChatCompletionsModel(
         model="gpt-4",
@@ -639,7 +639,7 @@ async def test_get_response_warns_and_sends_placeholder_for_non_text_tool_output
         def __init__(self) -> None:
             self.completions = DummyCompletions()
             self.chat = type("_Chat", (), {"completions": self.completions})()
-            self.base_url = httpx.URL("http://fake")
+            self.base_url = httpx2.URL("http://fake")
 
     client = DummyClient()
     model = OpenAIChatCompletionsModel(
@@ -899,7 +899,7 @@ async def test_get_response_rejects_custom_tool_call_in_strict_mode(monkeypatch)
 def test_get_client_disables_provider_managed_retries_on_runner_retry() -> None:
     class DummyChatCompletionsClient:
         def __init__(self) -> None:
-            self.base_url = httpx.URL("https://api.openai.com/v1/")
+            self.base_url = httpx2.URL("https://api.openai.com/v1/")
             self.chat = type("ChatNamespace", (), {"completions": object()})()
             self.with_options_calls: list[dict[str, Any]] = []
 
@@ -974,7 +974,7 @@ async def test_fetch_response_non_stream(monkeypatch) -> None:
     class DummyClient:
         def __init__(self, completions: DummyCompletions) -> None:
             self.chat = type("_Chat", (), {"completions": completions})()
-            self.base_url = httpx.URL("http://fake")
+            self.base_url = httpx2.URL("http://fake")
 
     msg = ChatCompletionMessage(role="assistant", content="ignored")
     choice = Choice(index=0, finish_reason="stop", message=msg)
@@ -1163,7 +1163,7 @@ async def test_get_response_accepts_raw_chat_completions_image_content() -> None
     class DummyClient:
         def __init__(self, completions: DummyCompletions) -> None:
             self.chat = type("_Chat", (), {"completions": completions})()
-            self.base_url = httpx.URL("https://api.openai.com/v1/")
+            self.base_url = httpx2.URL("https://api.openai.com/v1/")
 
     msg = ChatCompletionMessage(role="assistant", content="ok")
     choice = Choice(index=0, finish_reason="stop", message=msg)
@@ -1251,7 +1251,7 @@ async def test_fetch_response_stream(monkeypatch) -> None:
     class DummyClient:
         def __init__(self, completions: DummyCompletions) -> None:
             self.chat = type("_Chat", (), {"completions": completions})()
-            self.base_url = httpx.URL("http://fake")
+            self.base_url = httpx2.URL("http://fake")
 
     completions = DummyCompletions()
     dummy_client = DummyClient(completions)
@@ -1313,8 +1313,8 @@ def test_clean_gemini_tool_call_id_removes_thought_suffix() -> None:
 
 
 def test_get_retry_advice_uses_openai_headers() -> None:
-    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
-    response = httpx.Response(
+    request = httpx2.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx2.Response(
         429,
         request=request,
         headers={
@@ -1351,7 +1351,7 @@ def test_get_retry_advice_keeps_stateful_transport_failures_ambiguous() -> None:
     model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=cast(Any, object()))
     error = APIConnectionError(
         message="connection error",
-        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+        request=httpx2.Request("POST", "https://api.openai.com/v1/chat/completions"),
     )
 
     advice = model.get_retry_advice(
@@ -1371,8 +1371,8 @@ def test_get_retry_advice_keeps_stateful_transport_failures_ambiguous() -> None:
 
 
 def test_get_retry_advice_marks_stateful_http_failures_replay_safe() -> None:
-    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
-    response = httpx.Response(
+    request = httpx2.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx2.Response(
         429,
         request=request,
         json={"error": {"code": "rate_limit"}},

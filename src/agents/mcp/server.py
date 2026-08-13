@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, Union, cast
 
 import anyio
-import httpx
 
 if sys.version_info < (3, 11):
     from exceptiongroup import BaseExceptionGroup  # pyright: ignore[reportMissingImports]
@@ -46,13 +45,8 @@ from ..logger import (
 from ..run_context import RunContextWrapper
 from ..tool import ToolErrorFunction
 from ..util._types import MaybeAwaitable
+from . import _compat as mcp_compat
 from ._compat import (
-    HTTP_CONNECT_ERROR_TYPES,
-    HTTP_ERROR_TYPES,
-    HTTP_INVALID_URL_TYPES,
-    HTTP_REQUEST_ERROR_TYPES,
-    HTTP_STATUS_ERROR_TYPES,
-    HTTP_TIMEOUT_ERROR_TYPES,
     MCP_HTTPX,
     MCP_V2,
     MCPError,
@@ -202,7 +196,7 @@ def _transport_error_urls_are_safe(
             if redirect_location is not None:
                 try:
                     request_urls.append(str(response_url.join(redirect_location)))
-                except HTTP_INVALID_URL_TYPES + (ValueError,):
+                except mcp_compat.HTTP_INVALID_URL_TYPES + (ValueError,):
                     return False
 
     return all(get_mcp_server_log_name(url) == url for url in request_urls)
@@ -325,7 +319,7 @@ def _create_default_streamable_http_client(
         kwargs["headers"] = headers
     if auth is not None:
         kwargs["auth"] = auth
-    return httpx.AsyncClient(**kwargs)
+    return MCP_HTTPX.AsyncClient(**kwargs)
 
 
 def _validate_v2_http_auth(auth: Any) -> None:
@@ -435,7 +429,7 @@ class _InitializedNotificationTolerantStreamableHTTPTransport(
 
         try:
             await super()._handle_post_request(ctx)
-        except HTTP_ERROR_TYPES as exc:
+        except mcp_compat.HTTP_ERROR_TYPES as exc:
             _log_transport_warning(
                 "Ignoring initialized notification HTTP failure",
                 exc,
@@ -453,7 +447,7 @@ async def _streamablehttp_client_with_transport(
     sse_read_timeout: float | timedelta = 60 * 5,
     terminate_on_close: bool = True,
     httpx_client_factory: HttpClientFactory = _create_default_streamable_http_client,
-    auth: httpx.Auth | None = None,
+    auth: Any = None,
     transport_factory: Callable[[str], Any] = StreamableHTTPTransport,
 ) -> AsyncGenerator[MCPStreamTransport, None]:
     timeout_seconds = timeout.total_seconds() if isinstance(timeout, timedelta) else timeout
@@ -465,7 +459,7 @@ async def _streamablehttp_client_with_transport(
 
     client = httpx_client_factory(
         headers=headers,
-        timeout=httpx.Timeout(timeout_seconds, read=sse_read_timeout_seconds),
+        timeout=MCP_HTTPX.Timeout(timeout_seconds, read=sse_read_timeout_seconds),
         auth=auth,
     )
     transport = transport_factory(url)
@@ -916,6 +910,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             retry_backoff_seconds_max: The non-negative finite maximum delay, in seconds, between
                 retries. Defaults to `None`, which leaves exponential backoff uncapped.
         """
+        mcp_compat.enable_legacy_httpx_compat()
         super().__init__(
             use_structured_content=use_structured_content,
             require_approval=require_approval,
@@ -1104,9 +1099,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         candidates = error.exceptions if isinstance(error, BaseExceptionGroup) else (error,)
         for error_types in (
-            HTTP_STATUS_ERROR_TYPES,
-            HTTP_CONNECT_ERROR_TYPES,
-            HTTP_TIMEOUT_ERROR_TYPES,
+            mcp_compat.HTTP_STATUS_ERROR_TYPES,
+            mcp_compat.HTTP_CONNECT_ERROR_TYPES,
+            mcp_compat.HTTP_TIMEOUT_ERROR_TYPES,
         ):
             selected_http_error = next(
                 (
@@ -1179,7 +1174,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         base_error_group: BaseExceptionGroup | None = None
         try:
             return await func()
-        except HTTP_STATUS_ERROR_TYPES + HTTP_REQUEST_ERROR_TYPES as http_error:
+        except (
+            mcp_compat.HTTP_STATUS_ERROR_TYPES + mcp_compat.HTTP_REQUEST_ERROR_TYPES
+        ) as http_error:
             transport_error = self._user_error_for_request_operation(operation, http_error)
         except BaseExceptionGroup as error_group:
             http_errors = self._extract_http_errors_from_exception(error_group)
@@ -1478,14 +1475,14 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             if self.tool_filter is not None:
                 filtered_tools = await self._apply_tool_filter(filtered_tools, run_context, agent)
             return filtered_tools
-        except HTTP_STATUS_ERROR_TYPES as e:
+        except mcp_compat.HTTP_STATUS_ERROR_TYPES as e:
             status_code = http_status_code(e)
             transport_error = UserError(
                 f"Failed to list tools from MCP server '{self._error_name}': "
                 f"HTTP error {status_code}"
             )
             transport_cause = _safe_transport_cause(e)
-        except HTTP_REQUEST_ERROR_TYPES as e:
+        except mcp_compat.HTTP_REQUEST_ERROR_TYPES as e:
             transport_cause = _safe_transport_cause(e)
             if transport_cause is not None and not is_http_connect_error(e):
                 raise
@@ -1534,14 +1531,14 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     lambda: cast(Any, session).call_tool(tool_name, arguments, meta=meta)
                 )
             )
-        except HTTP_STATUS_ERROR_TYPES as e:
+        except mcp_compat.HTTP_STATUS_ERROR_TYPES as e:
             status_code = http_status_code(e)
             transport_error = UserError(
                 f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
                 f"HTTP error {status_code}"
             )
             transport_cause = _safe_transport_cause(e)
-        except HTTP_REQUEST_ERROR_TYPES as e:
+        except mcp_compat.HTTP_REQUEST_ERROR_TYPES as e:
             transport_cause = _safe_transport_cause(e)
             if transport_cause is not None and not is_http_connect_error(e):
                 raise
@@ -1746,8 +1743,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 raise
             except (  # type: ignore[misc]
                 BaseExceptionGroup,
-                *HTTP_STATUS_ERROR_TYPES,
-                *HTTP_REQUEST_ERROR_TYPES,
+                *mcp_compat.HTTP_STATUS_ERROR_TYPES,
+                *mcp_compat.HTTP_REQUEST_ERROR_TYPES,
             ) as e:
                 selected_http_error = self._select_cleanup_transport_error(e)
                 if selected_http_error is not None:
@@ -2446,14 +2443,14 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                     backoffs_taken += 1
                     await asyncio.sleep(backoff)
                 first_attempt = False
-        except HTTP_STATUS_ERROR_TYPES as e:
+        except mcp_compat.HTTP_STATUS_ERROR_TYPES as e:
             status_code = http_status_code(e)
             transport_error = UserError(
                 f"Failed to call tool '{tool_name}' on MCP server '{self._error_name}': "
                 f"HTTP error {status_code}"
             )
             transport_cause = _safe_transport_cause(e)
-        except HTTP_REQUEST_ERROR_TYPES as e:
+        except mcp_compat.HTTP_REQUEST_ERROR_TYPES as e:
             transport_cause = _safe_transport_cause(e)
             if transport_cause is not None and not is_http_connect_error(e):
                 raise

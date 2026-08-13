@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
-from openai import AsyncOpenAI, DefaultAsyncHttpxClient
+import httpx2
+from openai import AsyncOpenAI, DefaultAsyncHttpx2Client
 
 from ...exceptions import UserError
 from ...models import _openai_shared
@@ -16,15 +16,15 @@ from ..model import STTModel, TTSModel, VoiceModelProvider
 from .openai_stt import OpenAISTTModel
 from .openai_tts import OpenAITTSModel
 
-_http_client: httpx.AsyncClient | None = None
+_http_client: httpx2.AsyncClient | None = None
 
 
-# If we create a new httpx client for each request, that would mean no sharing of connection pools,
+# If we create a new HTTP client for each request, that would mean no sharing of connection pools,
 # which would mean worse latency and resource usage. So, we share the client across requests.
-def shared_http_client() -> httpx.AsyncClient:
+def shared_http_client() -> httpx2.AsyncClient:
     global _http_client
     if _http_client is None:
-        _http_client = DefaultAsyncHttpxClient()
+        _http_client = DefaultAsyncHttpx2Client()
     return _http_client
 
 

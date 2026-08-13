@@ -40,17 +40,17 @@ def test_import_agents_has_no_tracing_side_effects() -> None:
     payload = _run_python(
         """
 import json
-import httpx
+import httpx2
 
 client_init_calls = 0
-original_client_init = httpx.Client.__init__
+original_client_init = httpx2.Client.__init__
 
 def tracking_client_init(self, *args, **kwargs):
     global client_init_calls
     client_init_calls += 1
     original_client_init(self, *args, **kwargs)
 
-httpx.Client.__init__ = tracking_client_init
+httpx2.Client.__init__ = tracking_client_init
 
 import agents  # noqa: F401
 from agents.tracing import processors as tracing_processors
@@ -75,6 +75,55 @@ print(
     assert payload["exporter_initialized"] is False
     assert payload["processor_initialized"] is False
     assert payload["shutdown_handler_registered"] is False
+
+
+def test_core_imports_do_not_require_legacy_httpx() -> None:
+    payload = _run_python(
+        """
+import importlib.abc
+import json
+import sys
+
+class BlockLegacyHttpx(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == "httpx" or fullname.startswith("httpx."):
+            raise ModuleNotFoundError(
+                f"blocked undeclared core dependency: {fullname}",
+                name=fullname,
+            )
+        return None
+
+sys.meta_path.insert(0, BlockLegacyHttpx())
+
+import httpx2
+import agents
+from agents.mcp import MCPServerStreamableHttp
+from agents.run_internal.model_retry import _normalize_retry_error
+
+request = httpx2.Request("GET", "https://example.com")
+error = httpx2.ReadError("connection dropped", request=request)
+normalized = _normalize_retry_error(error, None)
+generic = _normalize_retry_error(ValueError("not a transport error"), None)
+
+print(
+    json.dumps(
+        {
+            "agents_name": agents.__name__,
+            "mcp_server_name": MCPServerStreamableHttp.__name__,
+            "legacy_httpx_loaded": "httpx" in sys.modules,
+            "network_error": normalized.is_network_error,
+            "generic_network_error": generic.is_network_error,
+        }
+    )
+)
+"""
+    )
+
+    assert payload["agents_name"] == "agents"
+    assert payload["mcp_server_name"] == "MCPServerStreamableHttp"
+    assert payload["legacy_httpx_loaded"] is False
+    assert payload["network_error"] is True
+    assert payload["generic_network_error"] is False
 
 
 def test_import_agents_does_not_require_sqlite3() -> None:

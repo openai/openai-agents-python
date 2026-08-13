@@ -5,7 +5,7 @@ import json
 from types import SimpleNamespace
 from typing import Any, cast
 
-import httpx
+import httpx2
 import pytest
 from openai import NOT_GIVEN, APIConnectionError, AsyncOpenAI, RateLimitError, omit
 from openai.types.responses import ResponseCompletedEvent, ResponseErrorEvent
@@ -59,7 +59,7 @@ async def _run_responses_model_with_custom_base_url(
     class DummyResponsesClient:
         def __init__(self, responses: DummyResponses) -> None:
             self.responses = responses
-            self.base_url = httpx.URL("https://custom.example.test/v1/")
+            self.base_url = httpx2.URL("https://custom.example.test/v1/")
 
     responses = DummyResponses()
     model = OpenAIResponsesModel(
@@ -75,19 +75,19 @@ async def _run_responses_model_with_custom_base_url(
 
 async def _run_responses_model_with_official_client(
     model_settings: ModelSettings | None = None,
-) -> list[httpx.Request]:
-    requests: list[httpx.Request] = []
+) -> list[httpx2.Request]:
+    requests: list[httpx2.Request] = []
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         requests.append(request)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             content=get_response_obj([]).model_dump_json(),
             headers={"content-type": "application/json"},
             request=request,
         )
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         client = AsyncOpenAI(
             api_key="test-key",
@@ -134,7 +134,7 @@ class DummyWSConnection:
 
 class DummyWSClient:
     def __init__(self):
-        self.base_url = httpx.URL("https://api.openai.com/v1/")
+        self.base_url = httpx2.URL("https://api.openai.com/v1/")
         self.websocket_base_url = None
         self.default_query: dict[str, Any] = {}
         self.auth_headers = {"Authorization": "Bearer test-key"}
@@ -2913,7 +2913,7 @@ async def test_websocket_model_does_not_retry_after_client_initiated_close(monke
 @pytest.mark.allow_call_model_methods
 def test_websocket_model_prepare_websocket_url_preserves_non_tls_scheme_mapping():
     client = DummyWSClient()
-    client.base_url = httpx.URL("http://127.0.0.1:8080/v1/")
+    client.base_url = httpx2.URL("http://127.0.0.1:8080/v1/")
     model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
 
     ws_url = model._prepare_websocket_url(extra_query=None)
@@ -2928,8 +2928,24 @@ def test_websocket_model_prepare_websocket_url_appends_path_with_existing_query(
     model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
 
     ws_url = model._prepare_websocket_url(extra_query={"route": "team-a"})
-    parsed = httpx.URL(ws_url)
+    parsed = httpx2.URL(ws_url)
 
+    assert parsed.path == "/v1/responses"
+    assert dict(parsed.params) == {"token": "abc", "route": "team-a"}
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_model_prepare_websocket_url_accepts_legacy_httpx_url():
+    import httpx
+
+    client = DummyWSClient()
+    client.websocket_base_url = httpx.URL("https://proxy.example.test/v1?token=abc")
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    ws_url = model._prepare_websocket_url(extra_query={"route": "team-a"})
+    parsed = httpx2.URL(ws_url)
+
+    assert parsed.scheme == "wss"
     assert parsed.path == "/v1/responses"
     assert dict(parsed.params) == {"token": "abc", "route": "team-a"}
 
@@ -2950,7 +2966,7 @@ def test_websocket_model_prepare_websocket_url_normalizes_explicit_http_schemes(
     model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
 
     ws_url = model._prepare_websocket_url(extra_query={"route": "team-a"})
-    parsed = httpx.URL(ws_url)
+    parsed = httpx2.URL(ws_url)
 
     assert parsed.scheme == expected_scheme
     assert parsed.path == "/v1/responses"
@@ -2967,7 +2983,7 @@ def test_websocket_model_prepare_websocket_url_treats_top_level_omit_sentinels_a
     model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
 
     ws_url = model._prepare_websocket_url(extra_query=extra_query)
-    parsed = httpx.URL(ws_url)
+    parsed = httpx2.URL(ws_url)
 
     assert parsed.path == "/v1/responses"
     assert dict(parsed.params) == {"token": "abc"}
@@ -2981,7 +2997,7 @@ def test_websocket_model_prepare_websocket_url_skips_not_given_query_values():
     model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
 
     ws_url = model._prepare_websocket_url(extra_query={"tenant": NOT_GIVEN, "region": "us"})
-    parsed = httpx.URL(ws_url)
+    parsed = httpx2.URL(ws_url)
 
     assert parsed.path == "/v1/responses"
     assert dict(parsed.params) == {"token": "abc", "route": "team-a", "region": "us"}
@@ -3264,7 +3280,7 @@ async def test_websocket_model_get_response_allows_zero_pool_timeout_when_lock_u
     monkeypatch,
 ):
     client = DummyWSClient()
-    client.timeout = httpx.Timeout(connect=1.0, read=1.0, write=1.0, pool=0.0)
+    client.timeout = httpx2.Timeout(connect=1.0, read=1.0, write=1.0, pool=0.0)
     model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
     ws = DummyWSConnection([_response_completed_frame("resp-zero-pool", 1)])
 
@@ -3287,6 +3303,23 @@ async def test_websocket_model_get_response_allows_zero_pool_timeout_when_lock_u
 
     assert response.response_id == "resp-zero-pool"
     assert len(ws.sent_messages) == 1
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_model_request_timeouts_accept_legacy_httpx_timeout():
+    import httpx
+
+    client = DummyWSClient()
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    timeouts = model._get_websocket_request_timeouts(
+        httpx.Timeout(connect=1.0, read=2.0, write=3.0, pool=4.0)
+    )
+
+    assert timeouts.lock == 4.0
+    assert timeouts.connect == 1.0
+    assert timeouts.send == 3.0
+    assert timeouts.recv == 2.0
 
 
 @pytest.mark.allow_call_model_methods
@@ -3325,7 +3358,7 @@ async def test_websocket_model_get_response_uses_client_default_timeout_when_no_
     monkeypatch,
 ):
     client = DummyWSClient()
-    client.timeout = httpx.Timeout(connect=1.0, read=0.01, write=1.0, pool=1.0)
+    client.timeout = httpx2.Timeout(connect=1.0, read=0.01, write=1.0, pool=1.0)
     model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
 
     class SlowRecvWSConnection(DummyWSConnection):
@@ -3362,7 +3395,7 @@ async def test_websocket_model_get_response_uses_client_default_timeout_when_ove
     monkeypatch,
 ):
     client = DummyWSClient()
-    client.timeout = httpx.Timeout(connect=1.0, read=0.01, write=1.0, pool=1.0)
+    client.timeout = httpx2.Timeout(connect=1.0, read=0.01, write=1.0, pool=1.0)
     model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
 
     class SlowRecvWSConnection(DummyWSConnection):
@@ -3505,7 +3538,7 @@ def test_websocket_model_prepare_websocket_url_includes_client_default_query():
     ws_url = model._prepare_websocket_url(
         extra_query={"route": "team-a", "api-version": "2026-01-01-preview"}
     )
-    parsed = httpx.URL(ws_url)
+    parsed = httpx2.URL(ws_url)
 
     assert parsed.path == "/v1/responses"
     assert dict(parsed.params) == {
@@ -3523,7 +3556,7 @@ def test_websocket_model_prepare_websocket_url_omit_removes_inherited_query_para
     model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
 
     ws_url = model._prepare_websocket_url(extra_query={"token": omit, "route": omit, "keep": "1"})
-    parsed = httpx.URL(ws_url)
+    parsed = httpx2.URL(ws_url)
 
     assert parsed.path == "/v1/responses"
     assert dict(parsed.params) == {"region": "us", "keep": "1"}
@@ -3685,8 +3718,8 @@ async def test_websocket_model_open_websocket_connection_honors_connect_timeout(
 
 @pytest.mark.allow_call_model_methods
 def test_get_retry_advice_uses_openai_headers() -> None:
-    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
-    response = httpx.Response(
+    request = httpx2.Request("POST", "https://api.openai.com/v1/responses")
+    response = httpx2.Response(
         429,
         request=request,
         headers={
@@ -3724,7 +3757,7 @@ def test_get_retry_advice_keeps_stateful_transport_failures_ambiguous() -> None:
     model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, object()))
     error = APIConnectionError(
         message="connection error",
-        request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+        request=httpx2.Request("POST", "https://api.openai.com/v1/responses"),
     )
 
     advice = model.get_retry_advice(
@@ -3745,8 +3778,8 @@ def test_get_retry_advice_keeps_stateful_transport_failures_ambiguous() -> None:
 
 @pytest.mark.allow_call_model_methods
 def test_get_retry_advice_marks_stateful_http_failures_replay_safe() -> None:
-    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
-    response = httpx.Response(
+    request = httpx2.Request("POST", "https://api.openai.com/v1/responses")
+    response = httpx2.Response(
         429,
         request=request,
         json={"error": {"code": "rate_limit"}},
@@ -3777,7 +3810,7 @@ def test_get_retry_advice_keeps_stateless_transport_failures_retryable() -> None
     model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, object()))
     error = APIConnectionError(
         message="connection error",
-        request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+        request=httpx2.Request("POST", "https://api.openai.com/v1/responses"),
     )
 
     advice = model.get_retry_advice(

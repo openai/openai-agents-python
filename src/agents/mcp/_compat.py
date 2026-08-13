@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from functools import cache
 from importlib import import_module
 from importlib.metadata import version
-from types import ModuleType
 from typing import Any, cast
 
-import httpx
 from pydantic import AnyUrl
+
+from .._httpx_compat import legacy_httpx_types, require_legacy_httpx
 
 
 def _major_version(distribution: str) -> int:
@@ -26,26 +27,41 @@ MCPError = cast(
     vars(_mcp_exceptions).get("MCPError") or vars(_mcp_exceptions)["McpError"],
 )
 
-MCP_HTTPX: ModuleType = import_module("httpx2") if MCP_V2 else httpx
 
-HTTP_STATUS_ERROR_TYPES: tuple[type[Exception], ...] = tuple(
-    dict.fromkeys((httpx.HTTPStatusError, cast(type[Exception], MCP_HTTPX.HTTPStatusError)))
-)
-HTTP_REQUEST_ERROR_TYPES: tuple[type[Exception], ...] = tuple(
-    dict.fromkeys((httpx.RequestError, cast(type[Exception], MCP_HTTPX.RequestError)))
-)
-HTTP_CONNECT_ERROR_TYPES: tuple[type[Exception], ...] = tuple(
-    dict.fromkeys((httpx.ConnectError, cast(type[Exception], MCP_HTTPX.ConnectError)))
-)
-HTTP_TIMEOUT_ERROR_TYPES: tuple[type[Exception], ...] = tuple(
-    dict.fromkeys((httpx.TimeoutException, cast(type[Exception], MCP_HTTPX.TimeoutException)))
-)
-HTTP_ERROR_TYPES: tuple[type[Exception], ...] = tuple(
-    dict.fromkeys((httpx.HTTPError, cast(type[Exception], MCP_HTTPX.HTTPError)))
-)
-HTTP_INVALID_URL_TYPES: tuple[type[Exception], ...] = tuple(
-    dict.fromkeys((httpx.InvalidURL, cast(type[Exception], MCP_HTTPX.InvalidURL)))
-)
+MCP_HTTPX = import_module("httpx2") if MCP_V2 else require_legacy_httpx()
+
+
+def _http_error_types(name: str) -> tuple[type[Exception], ...]:
+    return (cast(type[Exception], getattr(MCP_HTTPX, name)),)
+
+
+HTTP_STATUS_ERROR_TYPES = _http_error_types("HTTPStatusError")
+HTTP_REQUEST_ERROR_TYPES = _http_error_types("RequestError")
+HTTP_CONNECT_ERROR_TYPES = _http_error_types("ConnectError")
+HTTP_TIMEOUT_ERROR_TYPES = _http_error_types("TimeoutException")
+HTTP_ERROR_TYPES = _http_error_types("HTTPError")
+HTTP_INVALID_URL_TYPES = _http_error_types("InvalidURL")
+
+
+@cache
+def enable_legacy_httpx_compat() -> None:
+    global HTTP_STATUS_ERROR_TYPES
+    global HTTP_REQUEST_ERROR_TYPES
+    global HTTP_CONNECT_ERROR_TYPES
+    global HTTP_TIMEOUT_ERROR_TYPES
+    global HTTP_ERROR_TYPES
+    global HTTP_INVALID_URL_TYPES
+
+    def with_legacy(current: tuple[type[Exception], ...], name: str) -> tuple[type[Exception], ...]:
+        legacy = cast(tuple[type[Exception], ...], legacy_httpx_types(name))
+        return tuple(dict.fromkeys((*current, *legacy)))
+
+    HTTP_STATUS_ERROR_TYPES = with_legacy(HTTP_STATUS_ERROR_TYPES, "HTTPStatusError")
+    HTTP_REQUEST_ERROR_TYPES = with_legacy(HTTP_REQUEST_ERROR_TYPES, "RequestError")
+    HTTP_CONNECT_ERROR_TYPES = with_legacy(HTTP_CONNECT_ERROR_TYPES, "ConnectError")
+    HTTP_TIMEOUT_ERROR_TYPES = with_legacy(HTTP_TIMEOUT_ERROR_TYPES, "TimeoutException")
+    HTTP_ERROR_TYPES = with_legacy(HTTP_ERROR_TYPES, "HTTPError")
+    HTTP_INVALID_URL_TYPES = with_legacy(HTTP_INVALID_URL_TYPES, "InvalidURL")
 
 
 def create_v2_client(
@@ -133,7 +149,7 @@ def mcp_error_message(error: BaseException) -> str:
 
 
 def mcp_request_timeout_code() -> int:
-    return -32001 if MCP_V2 else int(httpx.codes.REQUEST_TIMEOUT)
+    return -32001 if MCP_V2 else int(MCP_HTTPX.codes.REQUEST_TIMEOUT)
 
 
 def is_mcp_timeout_error(error: BaseException) -> bool:

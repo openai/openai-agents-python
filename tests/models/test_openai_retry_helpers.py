@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 
 import httpx
+import httpx2
 
 from agents.models._openai_retry import get_openai_retry_advice
 from agents.models._retry_runtime import (
@@ -49,6 +50,11 @@ def test_header_lookup_httpx_headers() -> None:
     headers = httpx.Headers({"retry-after": "7"})
     assert _header_lookup(headers, "retry-after") == "7"
     assert _header_lookup(None, "retry-after") is None
+
+
+def test_header_lookup_httpx2_headers() -> None:
+    headers = httpx2.Headers({"retry-after": "7"})
+    assert _header_lookup(headers, "retry-after") == "7"
 
 
 def test_get_header_value_reads_response_headers_attr() -> None:
@@ -130,6 +136,15 @@ def test_provider_and_runner_retry_normalization_share_metadata() -> None:
     assert advice.normalized.request_id == runner_normalized.request_id
     assert advice.normalized.retry_after == runner_normalized.retry_after
     assert runner_normalized.retry_after == 1.5
+
+
+def test_runner_normalizes_both_http_transport_families_as_network_errors() -> None:
+    errors = (
+        httpx.ReadError("legacy", request=httpx.Request("GET", "https://example.com")),
+        httpx2.ReadError("native", request=httpx2.Request("GET", "https://example.com")),
+    )
+
+    assert all(_normalize_retry_error(error, None).is_network_error for error in errors)
 
 
 def test_advice_unsafe_to_replay() -> None:

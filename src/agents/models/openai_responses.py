@@ -19,7 +19,7 @@ from typing import (
     overload,
 )
 
-import httpx
+import httpx2
 from openai import AsyncOpenAI, NotGiven, Omit, omit
 from openai.types import ChatModel
 from openai.types.responses import (
@@ -41,6 +41,7 @@ from openai.types.responses.tool_param import LocalShell
 from typing_extensions import NotRequired
 
 from .. import _debug
+from .._httpx_compat import is_legacy_httpx_instance
 from .._tool_identity import (
     get_explicit_function_tool_namespace,
     get_function_tool_namespace_description,
@@ -1356,7 +1357,7 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
         if timeout is None or _is_openai_omitted_value(timeout):
             return _WebsocketRequestTimeouts(lock=None, connect=None, send=None, recv=None)
 
-        if isinstance(timeout, httpx.Timeout):
+        if isinstance(timeout, httpx2.Timeout) or is_legacy_httpx_instance(timeout, "Timeout"):
             return _WebsocketRequestTimeouts(
                 lock=None if timeout.pool is None else float(timeout.pool),
                 connect=None if timeout.connect is None else float(timeout.connect),
@@ -1478,7 +1479,10 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
 
     def _prepare_websocket_url(self, extra_query: Any) -> str:
         if self._client.websocket_base_url is not None:
-            base_url = httpx.URL(self._client.websocket_base_url)
+            websocket_base_url = self._client.websocket_base_url
+            if is_legacy_httpx_instance(websocket_base_url, "URL"):
+                websocket_base_url = str(websocket_base_url)
+            base_url = httpx2.URL(websocket_base_url)
             ws_scheme = {"http": "ws", "https": "wss"}.get(base_url.scheme, base_url.scheme)
             base_url = base_url.copy_with(scheme=ws_scheme)
         else:

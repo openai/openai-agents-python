@@ -6,9 +6,10 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, 
 from inspect import isawaitable
 from typing import Any
 
-import httpx
+import httpx2
 from openai import APIConnectionError, APITimeoutError, BadRequestError
 
+from .._httpx_compat import is_legacy_httpx_instance
 from ..items import ModelResponse, TResponseStreamEvent
 from ..logger import log_model_action_debug, logger
 from ..models._retry_runtime import (
@@ -45,6 +46,20 @@ DEFAULT_BACKOFF_MULTIPLIER = 2.0
 DEFAULT_BACKOFF_JITTER = True
 COMPATIBILITY_CONVERSATION_LOCKED_RETRIES = 3
 _RETRY_SAFE_STREAM_EVENT_TYPES = frozenset({"response.created", "response.in_progress"})
+_NETWORK_ERROR_TYPES = (
+    httpx2.ConnectError,
+    httpx2.ReadError,
+    httpx2.RemoteProtocolError,
+    httpx2.TimeoutException,
+    httpx2.WriteError,
+)
+_LEGACY_NETWORK_ERROR_TYPE_NAMES = (
+    "ConnectError",
+    "ReadError",
+    "RemoteProtocolError",
+    "TimeoutException",
+    "WriteError",
+)
 
 
 def _is_conversation_locked_error(error: Exception) -> bool:
@@ -70,18 +85,13 @@ def _is_network_like_error(error: Exception) -> bool:
     if isinstance(error, APIConnectionError | APITimeoutError | TimeoutError):
         return True
 
-    network_error_types = (
-        httpx.ConnectError,
-        httpx.ReadError,
-        httpx.RemoteProtocolError,
-        httpx.TimeoutException,
-        httpx.WriteError,
-    )
-    if isinstance(error, network_error_types):
+    if isinstance(error, _NETWORK_ERROR_TYPES):
         return True
 
     for candidate in _iter_error_chain(error):
-        if isinstance(candidate, network_error_types):
+        if isinstance(candidate, _NETWORK_ERROR_TYPES):
+            return True
+        if is_legacy_httpx_instance(candidate, *_LEGACY_NETWORK_ERROR_TYPE_NAMES):
             return True
         if candidate.__class__.__module__.startswith(
             "websockets"

@@ -5,10 +5,12 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, cast
 
-import httpx
+import httpx2
 from openai import APIStatusError
+
+from .._httpx_compat import is_legacy_httpx_instance
 
 
 def iter_error_chain(error: Exception) -> Iterator[Exception]:
@@ -23,7 +25,7 @@ def iter_error_chain(error: Exception) -> Iterator[Exception]:
 
 def header_lookup(headers: Any, key: str) -> str | None:
     normalized_key = key.lower()
-    if isinstance(headers, httpx.Headers):
+    if isinstance(headers, httpx2.Headers):
         value = headers.get(key)
         return value if isinstance(value, str) else None
     if isinstance(headers, Mapping):
@@ -35,8 +37,8 @@ def header_lookup(headers: Any, key: str) -> str | None:
 
 def _get_candidate_header(candidate: Exception, key: str) -> str | None:
     response = getattr(candidate, "response", None)
-    if isinstance(response, httpx.Response):
-        header_value = header_lookup(response.headers, key)
+    if isinstance(response, httpx2.Response) or is_legacy_httpx_instance(response, "Response"):
+        header_value = header_lookup(cast(Any, response).headers, key)
         if header_value is not None:
             return header_value
 

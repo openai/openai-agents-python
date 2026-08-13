@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
-import httpx
+import httpx2
 import pytest
 from openai import APIConnectionError, APIStatusError, BadRequestError
 from pydantic import ValidationError
@@ -80,13 +80,13 @@ def test_retry_capabilities_preserve_falsey_policy() -> None:
 def _connection_error(message: str = "connection error") -> APIConnectionError:
     return APIConnectionError(
         message=message,
-        request=httpx.Request("POST", "https://example.com"),
+        request=httpx2.Request("POST", "https://example.com"),
     )
 
 
 def _conversation_locked_error() -> BadRequestError:
-    request = httpx.Request("POST", "https://example.com")
-    response = httpx.Response(
+    request = httpx2.Request("POST", "https://example.com")
+    response = httpx2.Response(
         400,
         request=request,
         json={"error": {"code": "conversation_locked", "message": "locked"}},
@@ -101,8 +101,8 @@ def _conversation_locked_error() -> BadRequestError:
 
 
 def _status_error(status_code: int, code: str = "server_error") -> APIStatusError:
-    request = httpx.Request("POST", "https://example.com")
-    response = httpx.Response(
+    request = httpx2.Request("POST", "https://example.com")
+    response = httpx2.Response(
         status_code,
         request=request,
         json={"error": {"code": code, "message": code}},
@@ -117,8 +117,8 @@ def _status_error(status_code: int, code: str = "server_error") -> APIStatusErro
 
 
 def _status_error_without_code(status_code: int, body_code: str = "server_error") -> APIStatusError:
-    request = httpx.Request("POST", "https://example.com")
-    response = httpx.Response(
+    request = httpx2.Request("POST", "https://example.com")
+    response = httpx2.Response(
         status_code,
         request=request,
         json={"error": {"code": body_code, "message": body_code}},
@@ -778,8 +778,8 @@ async def test_get_response_with_retry_honors_explicit_none_retry_after_override
     async def get_response() -> ModelResponse:
         nonlocal calls
         calls += 1
-        request = httpx.Request("POST", "https://example.com")
-        response = httpx.Response(
+        request = httpx2.Request("POST", "https://example.com")
+        response = httpx2.Response(
             429,
             request=request,
             headers={"retry-after-ms": "1250"},

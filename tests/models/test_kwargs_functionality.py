@@ -1,6 +1,6 @@
 from typing import Any
 
-import httpx
+import httpx2
 import litellm
 import pytest
 from httpx import Headers, Response
@@ -441,7 +441,7 @@ def test_litellm_get_retry_advice_keeps_stateful_transport_failures_ambiguous() 
     model = LitellmModel(model="test-model")
     error = APIConnectionError(
         message="connection error",
-        request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+        request=httpx2.Request("POST", "https://api.openai.com/v1/responses"),
     )
 
     advice = model.get_retry_advice(

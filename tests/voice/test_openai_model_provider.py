@@ -2,12 +2,13 @@
 
 from typing import Any, cast
 
+import httpx2
 import openai
 import pytest
 
 from agents.exceptions import UserError
 from agents.models import _openai_shared
-from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider
+from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider, shared_http_client
 
 
 @pytest.mark.parametrize(
@@ -30,6 +31,10 @@ def test_voice_provider_accepts_client_without_conflicting_args():
     client = openai.AsyncOpenAI(api_key="test_key")
     provider = OpenAIVoiceModelProvider(openai_client=client)
     assert provider._get_client() is client
+
+
+def test_voice_provider_shared_http_client_uses_httpx2() -> None:
+    assert isinstance(shared_http_client(), httpx2.AsyncClient)
 
 
 def test_voice_provider_preserves_falsy_default_client(monkeypatch):

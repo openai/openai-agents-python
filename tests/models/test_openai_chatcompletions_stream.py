@@ -3,7 +3,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
-import httpx
+import httpx2
 import pytest
 from openai.types.chat.chat_completion import ChatCompletion, Choice as ChatCompletionChoice
 from openai.types.chat.chat_completion_chunk import (
@@ -178,7 +178,7 @@ async def test_stream_response_forwards_dictionary_agent_model_settings(
     class DummyClient:
         def __init__(self, completions: DummyCompletions) -> None:
             self.chat = type("_Chat", (), {"completions": completions})()
-            self.base_url = httpx.URL("https://api.openai.com/v1/")
+            self.base_url = httpx2.URL("https://api.openai.com/v1/")
 
     completions = DummyCompletions()
     model = OpenAIChatCompletionsModel(
@@ -3713,10 +3713,10 @@ async def test_stream_response_propagates_request_id(monkeypatch) -> None:
         """Mimics `openai.AsyncStream`, which exposes the raw HTTP response."""
 
         def __init__(self) -> None:
-            self.response = httpx.Response(
+            self.response = httpx2.Response(
                 200,
                 headers={"x-request-id": "req_streamed_456"},
-                request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+                request=httpx2.Request("POST", "https://api.openai.com/v1/chat/completions"),
             )
 
         def __aiter__(self) -> AsyncIterator[ChatCompletionChunk]:

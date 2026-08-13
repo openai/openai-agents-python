@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import httpx
 import pytest
 
 from agents.mcp import MCPServerSse, MCPServerStdio, MCPServerStreamableHttp
@@ -57,6 +56,8 @@ def test_packaged_client_uses_mcp_v1_sse_transport() -> None:
 
 
 def test_packaged_client_uses_mcp_v1_streamable_http_auth_and_factory() -> None:
+    import httpx
+
     auth = httpx.BasicAuth("user", "pass")
 
     def factory(headers=None, timeout=None, auth=None):
